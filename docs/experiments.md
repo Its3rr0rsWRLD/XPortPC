@@ -70,6 +70,13 @@ The first host dependency appears during IAT binding, before any guest instructi
 
 The PE entry points to a [startup wrapper](../tests/cpu/exe_startup.asm). It calls the same return-based body in both cases. After it returns, the I/O DLL compares the fixture's mapped base with the main process module. A native process exits with the body's DWORD via `ExitProcess`. A host mapping returns that DWORD to `pe_map_run`. The regression starts a worker that signals readiness and stays alive. It checks process termination, both pipe EOFs and exact output and exit status for both selectors and empty input. A separate marker proves that the host gets control back after running the exact same image. A temporary copy with its startup RVA set directly to the body is the negative control, whose live worker and open pipes are sampled before cleanup. [Issue #281](https://github.com/R0Y00/Xbox2Windows/issues/281)
 
+`cpu_native_exe_two_providers` exercises two ordinary named imports from the same internal caller. The caller feeds the result from `cpu_import_provider.dll!mix_args` into `cpu_exe_second_provider.dll!accumulate_args`. The translator accepts the second provider through an explicit `--provider DLL SYMBOL` binding and verifies each used import against the corresponding DLL. Both calls use two integer arguments and the same three-word trace ABI. Windows, `pe_map`, and AOT are compared against independent expected arguments, output bytes, and exit status for both selectors. Removing the second mapping binding stops before entry, and the translator reports the missing import when its binding is omitted or names the wrong DLL.
+
+```powershell
+cmake --build --preset dev --target cpu_exe_two_providers_lifted pe_map
+ctest --preset dev --no-tests=error -R '^cpu_native_exe_two_providers$' -V
+```
+
 ```powershell
 cmake --build --preset dev --target pe_map cpu_exe_original_lifted
 ctest --preset dev --no-tests=error -R '^cpu_native_exe_(chain|termination)$' -V

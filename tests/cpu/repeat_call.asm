@@ -4,6 +4,9 @@
 IFDEF IMPORT_MIX
 EXTERN __imp_mix_args:QWORD
 ENDIF
+IFDEF IMPORT_ACCUMULATE
+EXTERN __imp_accumulate_args:QWORD
+ENDIF
 .code
 IFNDEF IMPORT_MIX
 mix_args PROC FRAME
@@ -57,7 +60,9 @@ ENDIF
 IFNDEF DROP_RELOAD
     mov r8, rsi
 ENDIF
-IFDEF IMPORT_MIX
+IFDEF IMPORT_ACCUMULATE
+    call QWORD PTR [__imp_accumulate_args]
+ELSEIFDEF IMPORT_MIX
     call QWORD PTR [__imp_mix_args]
 ELSE
     call mix_args

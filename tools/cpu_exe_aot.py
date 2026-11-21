@@ -18,7 +18,7 @@ def require_local_pointer(previous, register, call, jump_targets):
         raise ValueError(f"expected aligned local trace pointer before call at {call.ip:#x}")
 
 
-def lift_internal_calls(pe, names, entry_interval, mix_provider):
+def lift_internal_calls(pe, names, entry_interval, bind_import):
     pending = list(names)
     intervals = [entry_interval]
     functions = {}
@@ -30,9 +30,6 @@ def lift_internal_calls(pe, names, entry_interval, mix_provider):
             pending.append(address)
         return names[address]
 
-    def bind_import(slot):
-        return resolve_import(pe, slot, mix_provider, "mix_args")
-
     for address in pending:
         native = bounded_code(pe, address)
         end = address + len(native)
@@ -40,7 +37,8 @@ def lift_internal_calls(pe, names, entry_interval, mix_provider):
             raise ValueError(f"overlapping internal call target at {address:#x}")
         intervals.append((address, end))
         source, edge = lift_body(address, native, caller=True, name=names[address],
-                                 bind_import=bind_import, bind_direct=bind_direct)
+                                 bind_import=bind_import, bind_direct=bind_direct,
+                                 allow_distinct_imports=True)
         functions[address] = source
         if edge[0] == "direct":
             graph.add(address, *edge[1])
@@ -53,7 +51,14 @@ def lift_internal_calls(pe, names, entry_interval, mix_provider):
         raise ValueError("recursive internal calls are outside the entry profile") from exc
 
 
-def translate(image, io_provider, mix_provider, *, entry_export=None, frame_selector=False):
+def translate(image, io_provider, mix_provider, extra_providers=(), *, entry_export=None,
+              frame_selector=False):
+    providers = {"mix_args": mix_provider}
+    for provider, symbol in extra_providers:
+        if symbol in providers or symbol in ("read_selector", "emit_trace", "lifted", "main"):
+            raise ValueError(f"duplicate or reserved import symbol {symbol}")
+        providers[symbol] = provider
+    bound_symbols = {}
     with pefile.PE(str(image), fast_load=True) as pe:
         if (pe.FILE_HEADER.Machine != 0x8664 or pe.OPTIONAL_HEADER.Magic != 0x20b
                 or not pe.FILE_HEADER.Characteristics & 2
@@ -77,8 +82,23 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
         if ret.mnemonic != M.RET or ret.op_count:
             raise ValueError("expected return from process entry")
         pe.parse_data_directories(directories=[1])
-        imports = {imp.address - pe.OPTIONAL_HEADER.ImageBase: imp.name
+        imports = {imp.address - pe.OPTIONAL_HEADER.ImageBase: (module.dll, imp)
                    for module in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []) for imp in module.imports}
+
+        def bind_provider(slot):
+            item = imports.get(slot)
+            if item is None:
+                raise ValueError(f"no ordinary import at IAT slot RVA {slot:#x}")
+            dll, imp = item
+            if imp.import_by_ordinal:
+                raise ValueError(f"unbound import {dll.decode('ascii')}!#{imp.ordinal}")
+            symbol = imp.name.decode("ascii")
+            provider = providers.get(symbol)
+            if provider is None:
+                raise ValueError(f"unbound import {dll.decode('ascii')}!{symbol}")
+            bound_symbols[symbol] = resolve_import(pe, slot, provider, symbol)
+            return bound_symbols[symbol]
+
         io_calls = {b"read_selector": "rax = read_selector();",
                     b"emit_trace": "rax = emit_trace(reinterpret_cast<const word*>(rcx));"}
         bindings = {}
@@ -100,7 +120,8 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
                     bindings[ins.ip] = f"rax = {name}(rcx, rdx, reinterpret_cast<word*>(r8));"
                 elif ins.is_ip_rel_memory_operand:
                     slot = ins.ip_rel_memory_address
-                    name = imports.get(slot)
+                    item = imports.get(slot)
+                    name = item[1].name if item is not None else None
                     if name not in io_calls:
                         raise ValueError("unsupported entry import")
                     if name == b"emit_trace":
@@ -124,14 +145,17 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
             raise ValueError("expected an internal call in the entry profile")
         if frame_selector and not saw_selector:
             raise ValueError("expected a direct call to the frame selector")
-        callees = lift_internal_calls(pe, names, (entry, ret.next_ip), mix_provider)
+        callees = lift_internal_calls(pe, names, (entry, ret.next_ip), bind_provider)
+        if "mix_args" not in bound_symbols:
+            raise ValueError("internal callee must reach the named provider")
         code = lower(body, [], {}, bindings, {}, host_ops={prologue.ip: ";", epilogue.ip: ";"})
+    declarations = "".join(f'extern "C" __declspec(dllimport) word {symbol}(word, word, word*);\n'
+                           for symbol in bound_symbols)
     selector_decl = 'extern "C" word lifted_call_bare(word, word, word);\n' if frame_selector else ""
     return INTEGER_HEADER + selector_decl + """
 extern "C" __declspec(dllimport) uint32_t read_selector();
 extern "C" __declspec(dllimport) uint32_t emit_trace(const word*);
-extern "C" __declspec(dllimport) word mix_args(word, word, word*);
-""" + callees + '\nint main() {\n' + code + '\n}\n'
+""" + declarations + callees + '\nint main() {\n' + code + '\n}\n'
 
 
 if __name__ == "__main__":
@@ -141,9 +165,12 @@ if __name__ == "__main__":
     parser.add_argument("--entry-export", help="translate this return-based export instead of the PE startup")
     parser.add_argument("--frame-selector", action="store_true",
                         help="bind the fixture's call_bare export to its separately translated definition")
+    parser.add_argument("--provider", action="append", nargs=2, default=[], metavar=("DLL", "SYMBOL"),
+                        help="authorize an additional named import with the same trace ABI")
     args = parser.parse_args()
     if args.output.suffix.lower() != ".cpp":
         parser.error("choose a .cpp output")
-    source = translate(args.image, args.io_provider, args.mix_provider, entry_export=args.entry_export,
-                       frame_selector=args.frame_selector)
+    providers = [(Path(path), symbol) for path, symbol in args.provider]
+    source = translate(args.image, args.io_provider, args.mix_provider, providers,
+                       entry_export=args.entry_export, frame_selector=args.frame_selector)
     args.output.write_text(source, encoding="ascii")
