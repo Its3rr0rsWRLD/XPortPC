@@ -725,6 +725,15 @@ The `v_ceil_f32` fixture checks rounding toward positive infinity in e32 and e64
 
 `v_cvt_f32_f16` widens the binary16 in the low 16 bits of S0. The lowering builds the binary32 encoding from those bits, so a subnormal half stays exact as m × 2^-24 whatever the desktop denormal mode, and applies `abs` and `neg` modifiers after widening. The draw converts 1.0 with junk in the high half, -|-5.0|, the largest finite half 65504 and the smallest subnormal half 2^-24, which a multiply by the literal 2^24 turns into 1.0. References that read the high half, drop the negation, use a wrong exponent or expect the subnormal flushed must report a mismatch. NaN and infinite halves are not drawn; whether Scarlett quiets a signaling NaN when widening is not measured, and the lowering keeps the payload. SDWA selections of the high half are refused.
 
+`v_cvt_f16_f32` narrows S0 to binary16, rounding to nearest even. The lowering builds the encoding in integer arithmetic, so desktop conversion and denormal handling cannot change it. Overflow, including the 65520 tie, gives infinity. A binary16 subnormal result is kept, and a binary32 subnormal input gives a signed zero. On GFX10, a 16-bit result replaces only the low half of the destination and keeps the high half (LLVM `GCNSubtarget::zeroesHigh16BitsOfDest`). The lowering merges into the destination's tracked value, or into zero when it has none. One draw reads the whole word by narrowing into a register that holds 1.0, then splitting `(v - 1) × 2^23` into the two bytes of the encoding. It also widens `-|S0|` and a scaled subnormal back to binary32. Four constant sets cover:
+
+- ties to even at 1 + 2^-11, 1 + 3 × 2^-11, 1.5 × 2^-24 and 2^-25;
+- the largest value below overflow and the overflow tie;
+- the carry from the largest subnormal into 2^-14;
+- negative subnormals, -0 and a binary32 subnormal input.
+
+Wrong references must each report a mismatch: round-half-up, truncation, early or saturating overflow, a missing carry, and a lost sign or negation. NaN inputs are not drawn; the lowering sets the quiet bit and keeps the top payload bits. Whether Scarlett titles run with binary16 denormals enabled, as the lowering assumes, is not measured. `clamp` and SDWA forms are refused.
+
 To supply a reference for another arithmetic program, run `offscreen_check.exe hardware --check-pixel-case shader.cso reference.case`. The case contains 256 bytes of constants followed by 64 expected RGBA colors in row-major little-endian binary32, one for each texel of the test texture. Generate the expected colors after round-toward-zero half export and widening back to float.
 
 `v_fmaak_f32` computes S0 × S1 + K and `v_fmamk_f32` computes S0 × K + S1, where K is the 32-bit literal that LLVM prints in that position. Both use the `v_fma_f32` lowering; the translator refuses a register where the literal belongs. The draw computes each instruction twice with inputs 1.5, 2.5, -3.0 and 0.75 and the literals 0.25, 3.0, -0.5 and 0.5. Every product and sum is exact in binary32, so the reference does not depend on fusion. A reference that swaps the literal with S1 must report a mismatch in each channel.

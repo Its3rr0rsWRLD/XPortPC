@@ -180,6 +180,31 @@ float widen16(uint word) {
     uint wide = exponent == 0x1fu ? 0xffu : exponent + 112u;
     return asfloat(sign | (wide << 23) | (mantissa << 13));
 }
+// v_cvt_f16_f32: binary32 to the binary16 encoding, rounding to nearest even in integer arithmetic so that
+// desktop conversion and denormal handling cannot change it. Overflow gives infinity, a binary16 subnormal
+// result is kept, and a NaN keeps its sign and top payload bits with the quiet bit set.
+uint narrow16(float value) {
+    uint bits = asuint(value);
+    uint sign = (bits >> 16) & 0x8000u;
+    uint exponent = (bits >> 23) & 0xffu;
+    uint mantissa = bits & 0x7fffffu;
+    if (exponent == 0xffu) {
+        return sign | 0x7c00u | (mantissa != 0u ? 0x200u | (mantissa >> 13) : 0u);
+    }
+    if (exponent < 102u) {
+        return sign;
+    }
+    uint full = mantissa | 0x800000u;
+    if (exponent < 113u) {
+        uint shift = 126u - exponent;
+        return sign | ((full + (1u << (shift - 1u)) - 1u + ((full >> shift) & 1u)) >> shift);
+    }
+    if (exponent > 142u) {
+        return sign | 0x7c00u;
+    }
+    uint rounded = (full + 0xfffu + ((full >> 13) & 1u)) >> 13;
+    return sign | min(((exponent - 113u) << 10) + rounded, 0x7c00u);
+}
 float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"""
 
 
@@ -677,6 +702,22 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 expression = f"saturate({expression})"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(r"v_cvt_f16_f32(?:_e32|_e64)? (v\d+), ([^,\s]+)"):
+            # GFX10 16-bit results replace only the low half; the high half of the destination is kept
+            # (LLVM GCNSubtarget::zeroesHigh16BitsOfDest). A destination with no tracked value contributes zero.
+            dst, src = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid conversion")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            old = vector.get(dst)
+            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+                raise ValueError("Unsupported conversion destination")
+            # fp_operand reads modifiers and inline constants, so -1 stays the bit pattern 0xffffffff.
+            value = fp_operand(src, scalar, vector, pending, sample_pending)
+            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({high} | narrow16({value}));")
         elif m := match(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), (v\d+), (v\d+)"):
             dst, lo, hi = m.groups()
             pair = (vector[lo], vector[hi])
