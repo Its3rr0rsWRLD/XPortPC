@@ -398,6 +398,40 @@ def fp_operand(token, scalar, vector, pending, sample_pending):
     raise ValueError(f"Unsupported arithmetic operand {token}")
 
 
+# SDWA selections: (bit offset, width). A source selection is zero-extended, or sign-extended with sext();
+# a destination selection writes the low bits of the result into that field. Following the equivalences in
+# LLVM's SIPeepholeSDWA, UNUSED_PAD zeroes the other bits and UNUSED_PRESERVE keeps them from the destination.
+SDWA_SEL = {"BYTE_0": (0, 8), "BYTE_1": (8, 8), "BYTE_2": (16, 8), "BYTE_3": (24, 8),
+            "WORD_0": (0, 16), "WORD_1": (16, 16), "DWORD": (0, 32)}
+# Exact arithmetic with SDWA forms on gfx1013 (docs/coverage/gfx1013.tsv).
+SDWA_ALU = ("add", "sub", "subrev", "mul", "mul_legacy", "max", "min", "floor", "ceil", "fract", "trunc")
+
+
+def sdwa_source(word, sel, sext):
+    offset, width = SDWA_SEL[sel]
+    if width == 32:
+        return word
+    if sext:
+        return f"asuint(asint({word} << {32 - offset - width}u) >> {32 - width}u)"
+    return f"(({word} >> {offset}u) & {(1 << width) - 1:#x}u)"
+
+
+def sdwa_dest(result, sel, unused, old):
+    offset, width = SDWA_SEL[sel]
+    if width == 32:
+        return result
+    if unused == "UNUSED_SEXT":
+        raise ValueError("UNUSED_SEXT is not lowered")
+    field = f"(({result} & {(1 << width) - 1:#x}u) << {offset}u)"
+    if unused == "UNUSED_PAD":
+        return field
+    # The kept bits must come from a tracked numeric value; hardware would keep whatever an untracked register holds.
+    if not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+        raise ValueError("UNUSED_PRESERVE needs a tracked numeric destination")
+    keep = ~(((1 << width) - 1) << offset) & 0xffffffff
+    return f"((asuint({old}) & {keep:#x}u) | {field})"
+
+
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None):
     """Track descriptor provenance, interpolation and packed exports through register writes."""
     if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
@@ -621,6 +655,50 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             values = [fp_operand(t, scalar, vector, pending, sample_pending) for t in tokens]
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {ALU['fma'][1].format(*values)};")
+        elif m := match(r"v_mov_b32_sdwa (v\d+), (sext\()?([vs]\d+|-?\d+(?:\.\d+)?)(\))? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_SEXT|UNUSED_PRESERVE) src0_sel:(BYTE_[0-3]|WORD_[01]|DWORD)"):
+            dst, sext, src, close, dst_sel, unused, src_sel = m.groups()
+            if mask != "entry" or bool(sext) != bool(close):
+                raise ValueError("Invalid register move")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            word = f"asuint({fp_operand(src, scalar, vector, pending, sample_pending)})"
+            result = sdwa_dest(sdwa_source(word, src_sel, bool(sext)), dst_sel, unused, vector.get(dst))
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({result});")
+        elif m := match(r"v_cvt_f32_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||([vs]\d+))( clamp)? dst_sel:DWORD dst_unused:UNUSED_(?:PAD|PRESERVE) src0_sel:(WORD_[01])"):
+            # The SDWA form widens the selected half; modifiers apply after widening, as in the e64 form.
+            dst, negate, bars, plain, clamp, src_sel = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid conversion")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            word = f"asuint({fp_operand(bars or plain, scalar, vector, pending, sample_pending)})"
+            expression = f"widen16({sdwa_source(word, src_sel, False)})"
+            if bars:
+                expression = f"abs({expression})"
+            if negate:
+                expression = f"(-{expression})"
+            if clamp:
+                expression = f"saturate({expression})"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(rf"v_({'|'.join(SDWA_ALU)})_f32_sdwa (v\d+), (.+?)( clamp)? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_SEXT|UNUSED_PRESERVE) src0_sel:DWORD( src1_sel:DWORD)?"):
+            # SDWA forms of exact arithmetic take whole-dword sources, so the binary32 denormal mode never applies
+            # to a zero-extended field; the result is placed like an SDWA move.
+            op, dst, operands, clamp, dst_sel, unused, src1_sel = m.groups()
+            tokens = operands.split(", ")
+            arity, template = ALU[op]
+            if mask != "entry" or len(tokens) != arity or bool(src1_sel) != (arity == 2):
+                raise ValueError("Invalid arithmetic operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            expression = template.format(*[fp_operand(t, scalar, vector, pending, sample_pending) for t in tokens])
+            if clamp:
+                expression = f"saturate({expression})"
+            if dst_sel != "DWORD":
+                expression = f"asfloat({sdwa_dest(f'asuint({expression})', dst_sel, unused, vector.get(dst))})"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = {expression};")
         elif m := match(r"v_mov_b32(?:_e32|_e64)? (v\d+), (-?\d+(?:\.\d+)?|0x[0-9a-f]{1,8}|[vs]\d+)"):
             # A bit copy of a numeric value; integer inline constants are bit patterns.
             dst, src = m.groups()

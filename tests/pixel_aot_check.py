@@ -1107,6 +1107,168 @@ def scalar64_case(directory, values):
     return path
 
 
+# SDWA moves and half widening. In SDWA_PRESERVE_BODY each move writes a 16-bit field into WORD_0 of a register
+# holding 1.0 and keeps its high half, so the word is 1 + f * 2^-23; (v - 1) * 2^23 is split into the low and high
+# bytes of f. Channels 0 and 1 read WORD_1 of S0; channels 2 and 3 read BYTE_2 of S1 sign-extended to 16 bits.
+# SDWA_PAD_BODY writes BYTE_0 of S0 to BYTE_3 and WORD_0 of S2 to WORD_1 with zero padding, and widens each half
+# of S1, the low one through -|x|. Each constant set has wrong references (channel, value) for one selection.
+def sdwa_readback(value, high):
+    return [line.format(r=value, h=high) for line in SDWA_READBACK]
+
+
+SDWA_READBACK = ["v_subrev_f32_e32 {r}, 1.0, {r}", "v_mul_f32_e32 {r}, 0x4b000000, {r}", "v_mul_f32_e32 {h}, 0x3b800000, {r}", "v_floor_f32_e32 {h}, {h}", "v_fmac_f32_e32 {r}, 0xc3800000, {h}"]
+SDWA_PRESERVE_BODY = [
+    "v_mov_b32_e32 v12, 1.0",
+    "v_mov_b32_sdwa v12, s44 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1",
+    *sdwa_readback("v12", "v13"),
+    "v_mov_b32_e32 v14, 1.0",
+    "v_mov_b32_sdwa v14, sext(s45) dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:BYTE_2",
+    *sdwa_readback("v14", "v15"),
+]
+SDWA_PAD_BODY = [
+    "v_mov_b32_sdwa v12, s44 dst_sel:BYTE_3 dst_unused:UNUSED_PAD src0_sel:BYTE_0",
+    "v_cvt_f32_f16_sdwa v13, s45 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1",
+    "v_cvt_f32_f16_sdwa v14, -|s45| dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0",
+    "v_mov_b32_sdwa v15, s46 dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:WORD_0",
+]
+SDWA_SETS = (
+    # A wrong WORD_0 selection; a zero-extended byte.
+    (SDWA_PRESERVE_BODY, (0x12345678, 0x00c00000, 0), [52.0, 18.0, 192.0, 255.0], ((0, 120.0), (1, 86.0), (3, 0.0))),
+    (SDWA_PRESERVE_BODY, (0xfedc0000, 0x007f0000, 0), [220.0, 254.0, 127.0, 0.0], ((0, 0.0), (3, 255.0))),
+    # BYTE_1 instead of BYTE_0; the other half of S1 in channels 1 and 2; WORD_1 instead of WORD_0 of S2.
+    (SDWA_PAD_BODY, (0x0000c340, 0xc5003c00, 0x3f80c0a0), [2.0, -5.0, -1.0, -5.0], ((0, -128.0), (1, 1.0), (2, -5.0), (3, 1.0))),
+    (SDWA_PAD_BODY, (0x000047c0, 0x38004900, 0x00004120), [-2.0, 0.5, -10.0, 10.0], ((0, 32768.0), (1, 10.0), (2, -0.5), (3, 0.0))),
+)
+
+
+def sdwa_reference(body, words):
+    """Selections and widening on the integer words, independent of the lowering."""
+    x, y, z = words
+    if body is SDWA_PRESERVE_BODY:
+        first = x >> 16
+        byte = (y >> 16) & 0xff
+        second = (byte - 0x100 if byte & 0x80 else byte) & 0xffff
+        return [float(first & 0xff), float(first >> 8), float(second & 0xff), float(second >> 8)]
+    as_float = lambda w: struct.unpack("<f", struct.pack("<I", w))[0]
+    return [as_float((x & 0xff) << 24), half_value(y >> 16), -abs(half_value(y)), as_float((z & 0xffff) << 16)]
+
+
+def check_sdwa_draw(directory, compiler, renderer, backend):
+    for name, body in (("sdwa_preserve", SDWA_PRESERVE_BODY), ("sdwa_pad", SDWA_PAD_BODY)):
+        source = directory / f"{name}.hlsl"
+        shader = directory / f"{name}.cso"
+        source.write_text(translate(with_constants(body)), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+    case = directory / "sdwa.case"
+    for body, words, expected, wrongs in SDWA_SETS:
+        assert sdwa_reference(body, words) == expected, (words, expected)
+        shader = directory / ("sdwa_preserve.cso" if body is SDWA_PRESERVE_BODY else "sdwa_pad.cso")
+        constants = bytearray(256)
+        struct.pack_into("<3I", constants, 12, *words)
+        for x in (*expected, *(value for _, value in wrongs)):
+            assert half_rtz(x) == x, x
+        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
+        subprocess.run(draw, check=True)
+        for channel, value in wrongs:
+            assert value != expected[channel]
+            wrong_values = list(expected)
+            wrong_values[channel] = value
+            case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
+            result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                raise AssertionError(f"A wrong SDWA selection escaped detection for {words} in channel {channel}")
+
+
+# SDWA forms of exact arithmetic with whole-dword sources. Programs 0 to 2 draw each operation once with source
+# modifiers, an inline constant, clamp and the legacy zero rule; program 2 also places the low byte of a sum into
+# BYTE_3. Program 3 keeps WORD_0 and BYTE_2 results inside 1.0 (UNUSED_PRESERVE) and pads the low word of a
+# result into WORD_1; a reference that moves the high word there instead must fail.
+# Every result is exact in binary32 and after the half export. Each program has wrong references (channel, value).
+def sdwa_arith(op, dst, operands, dst_sel="DWORD", unused="UNUSED_PAD", clamp=False):
+    sels = " src0_sel:DWORD src1_sel:DWORD" if len(operands) == 2 else " src0_sel:DWORD"
+    return (f"v_{op}_f32_sdwa {dst}, {', '.join(operands)}{' clamp' if clamp else ''}"
+            f" dst_sel:{dst_sel} dst_unused:{unused}{sels}")
+
+
+SDWA_ARITH = (
+    ([
+        "v_mov_b32_e32 v18, s45",
+        sdwa_arith("add", "v12", ["s44", "v18"]),
+        sdwa_arith("sub", "v13", ["-s44", "v18"]),
+        sdwa_arith("subrev", "v14", ["s46", "v18"], clamp=True),
+        sdwa_arith("mul", "v15", ["-|s46|", "v18"]),
+    ], (1.5, 2.25, -3.0, 0.0), [3.75, -3.75, 1.0, -6.75], ((0, 0.75), (1, -0.75), (2, 5.25), (3, 6.75))),
+    ([
+        "v_mov_b32_e32 v18, s45",
+        "v_mov_b32_e32 v19, s47",
+        sdwa_arith("max", "v12", ["s44", "v18"]),
+        sdwa_arith("min", "v13", ["0.5", "v18"]),
+        sdwa_arith("mul_legacy", "v14", ["s46", "v19"]),
+        sdwa_arith("floor", "v15", ["-s45"]),
+    ], (-0.75, 2.5, 0.0, math.inf), [2.5, 0.5, 0.0, -3.0], ((0, -0.75), (1, 2.5), (2, -0.0), (3, -2.0))),
+    ([
+        sdwa_arith("ceil", "v12", ["s44"]),
+        sdwa_arith("fract", "v13", ["-s45"]),
+        sdwa_arith("trunc", "v14", ["|s46|"]),
+        "v_mov_b32_e32 v19, 0",
+        sdwa_arith("add", "v15", ["s47", "v19"], dst_sel="BYTE_3"),
+    ], (-1.25, 2.75, -2.5, 0x3f800040), [-1.0, 0.25, 2.0, 2.0], ((0, -2.0), (1, 0.75), (2, -2.0), (3, 1.0))),
+    ([
+        "v_mov_b32_e32 v18, s45",
+        "v_mov_b32_e32 v12, 1.0",
+        sdwa_arith("mul", "v12", ["s44", "v18"], "WORD_0", "UNUSED_PRESERVE"),
+        *sdwa_readback("v12", "v13"),
+        "v_mov_b32_e32 v14, 1.0",
+        sdwa_arith("floor", "v14", ["s46"], "BYTE_2", "UNUSED_PRESERVE"),
+        sdwa_arith("mul", "v15", ["s47", "v18"], "WORD_1"),
+    ], (0x3f801234, 1.0, 8388613.0, 0xc0a03fff), [52.0, 18.0, 0.51953125, 1.9921875],
+     ((0, 128.0), (1, 63.0), (2, 1.0), (3, -5.0))),
+)
+
+
+def sdwa_arith_reference(index, inputs):
+    """Python binary32 arithmetic on the constant words, independent of the lowering."""
+    as_float = lambda w: struct.unpack("<f", struct.pack("<I", w))[0]
+    bits = lambda x: struct.unpack("<I", struct.pack("<f", x))[0]
+    x, y, z, w = (as_float(v) if isinstance(v, int) else v for v in inputs)
+    if index == 0:
+        return [x + y, -x - y, min(max(y - z, 0.0), 1.0), -abs(z) * y]
+    if index == 1:
+        return [max(x, y), min(0.5, y), 0.0 if z == 0 or w == 0 else z * w, float(math.floor(-y))]
+    if index == 2:
+        return [float(math.ceil(x)), -y - math.floor(-y), float(math.trunc(abs(z))), as_float((bits(w + 0.0) & 0xff) << 24)]
+    product = bits(x * y) & 0xffff
+    return [float(product & 0xff), float(product >> 8),
+            as_float((0x3f800000 & ~0xff0000) | ((bits(float(math.floor(z))) & 0xff) << 16)), as_float((bits(w * y) & 0xffff) << 16)]
+
+
+def check_sdwa_arith_draws(directory, compiler, renderer, backend):
+    case = directory / "sdwa_arith.case"
+    for index, (body, inputs, expected, wrongs) in enumerate(SDWA_ARITH):
+        assert sdwa_arith_reference(index, inputs) == expected, (index, sdwa_arith_reference(index, inputs))
+        source = directory / f"sdwa_arith{index}.hlsl"
+        shader = directory / f"sdwa_arith{index}.cso"
+        source.write_text(translate(with_constants(body)), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+        words = [v if isinstance(v, int) else struct.unpack("<I", struct.pack("<f", v))[0] for v in inputs]
+        constants = bytearray(256)
+        struct.pack_into("<4I", constants, 12, *words)
+        for x in (*expected, *(value for _, value in wrongs)):
+            assert half_rtz(x) == x, x
+        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
+        subprocess.run(draw, check=True)
+        for channel, value in wrongs:
+            assert struct.pack("<f", value) != struct.pack("<f", expected[channel])
+            wrong_values = list(expected)
+            wrong_values[channel] = value
+            case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
+            result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                raise AssertionError(f"A wrong SDWA arithmetic result escaped detection in program {index}, channel {channel}")
+
+
 def check_constant_descriptor_bounds() -> None:
     for offset in (0, 28, 32):
         program = [line.replace("s[20:21], 0x40", f"s[20:21], {offset:#x}")
@@ -1259,6 +1421,29 @@ def check_controls(directory):
     body = translate(with_constants(CUBE_BODY)).split("float4 main", 1)[1]
     assert body.count("precise float3 cube") == 4 and body.count("* 2.0f)") == 1, body
     must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", "v_cubeid_f32 v12, s44, v18"]))
+    # SDWA moves select and place fields; UNUSED_SEXT, byte selections for half widening and
+    # non-canonical SDWA text are refused.
+    body = translate(with_constants(SDWA_PRESERVE_BODY + SDWA_PAD_BODY)).split("float4 main", 1)[1]
+    assert body.count("& 0xffff0000u) | ") == 2 and body.count("asint(") == 1 and body.count("widen16(") == 2, body
+    must_reject(translate, with_constants(["v_mov_b32_sdwa v12, s44 dst_sel:BYTE_0 dst_unused:UNUSED_SEXT src0_sel:WORD_1"]))
+    must_reject(translate, with_constants(["v_cvt_f32_f16_sdwa v12, s44 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:BYTE_1"]))
+    must_reject(translate, with_constants(["v_mov_b32_sdwa v12, s44 src0_sel:WORD_1"]))
+    # UNUSED_PRESERVE keeps bits only from a tracked numeric value; DWORD and padded writes may replace anything.
+    for register in ("v0", "v1", "v8", "v9", "v20"):
+        must_reject(translate, with_constants([f"v_mov_b32_sdwa {register}, s44 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_1"]))
+    body = translate(with_constants(["v_mov_b32_sdwa v12, -0.5 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:DWORD",
+                                     "v_mov_b32_sdwa v20, s44 dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:WORD_0",
+                                     "v_mov_b32_sdwa v13, v20 dst_sel:DWORD dst_unused:UNUSED_PRESERVE src0_sel:DWORD"])).split("float4 main", 1)[1]
+    assert "asuint((-0.5f))" in body, body
+    # SDWA arithmetic takes whole-dword sources only and refuses output modifiers and a src1_sel on a unary op.
+    body = translate(with_constants(SDWA_ARITH[3][0])).split("float4 main", 1)[1]
+    assert body.count("& 0xffff0000u) | ") == 1 and body.count("& 0xff00ffffu) | ") == 1, body
+    must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", sdwa_arith("add", "v12", ["s44", "v18 mul:2"])]))
+    must_reject(translate, with_constants([sdwa_arith("add", "v12", ["s44", "v13"]).replace("src0_sel:DWORD", "src0_sel:WORD_1")]))
+    must_reject(translate, with_constants([sdwa_arith("floor", "v12", ["s44"]) + " src1_sel:DWORD"]))
+    # A partial UNUSED_PRESERVE result needs a tracked numeric destination, as for SDWA moves.
+    for register in ("v0", "v8", "v20"):
+        must_reject(translate, with_constants([sdwa_arith("floor", register, ["s44"], "BYTE_2", "UNUSED_PRESERVE")]))
 
     program = assembly(False)
     for old, new in (("s_mov_b32 s21, 0", "s_mov_b32 s21, 1"),
@@ -1455,6 +1640,8 @@ def check_binary(directory, assembler, objcopy, library):
     fixtures.append((with_constants(NARROW_BODY), translate))
     fixtures.append((dual_program(swap_weights=True), translate_dual))
     fixtures.append((with_constants(LITERAL_FMA_BODY), translate))
+    fixtures.extend((with_constants(body), translate) for body in (SDWA_PRESERVE_BODY, SDWA_PAD_BODY))
+    fixtures.extend((with_constants(body), translate) for body, *_ in SDWA_ARITH)
     for index, (instructions, lower_fixture) in enumerate(fixtures):
         source = directory / "fixture.s"
         obj = directory / "fixture.o"
@@ -1630,6 +1817,8 @@ def check_render(directory, compiler, renderer, backend):
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Swapped blend weights escaped detection")
     check_cube_draw(directory, compiler, renderer, backend)
+    check_sdwa_draw(directory, compiler, renderer, backend)
+    check_sdwa_arith_draws(directory, compiler, renderer, backend)
     check_fract_draw(directory, compiler, renderer, backend)
 
     program = scalar64()
