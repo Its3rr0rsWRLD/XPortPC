@@ -138,6 +138,16 @@ float fract32(float value) {
     float f = frac(value);
     return f >= 1.0f ? asfloat(0x3f7fffffu) : f;
 }
+// v_mad_f32 and v_mac_f32 round the product before the add and do not support binary32 denormals.
+// Flush each operand, the product and the sum to signed zero; NaN fails the comparison and propagates.
+float ftz32(float value) {
+    return abs(value) < asfloat(0x00800000u) ? asfloat(asuint(value) & 0x80000000u) : value;
+}
+float mad32(float a, float b, float c) {
+    precise float product = ftz32(ftz32(a) * ftz32(b));
+    precise float sum = product + ftz32(c);
+    return ftz32(sum);
+}
 // Finite binary32 to binary16, round toward zero, then widen for the float target.
 float export16(float value) {
     uint h = f32tof16(value);
@@ -178,6 +188,7 @@ ALU = {
     "subrev": (2, "({1} - {0})"),
     "mul_legacy": (2, "(({0} == 0 || {1} == 0) ? 0.0f : {0} * {1})"),
     "fma": (3, "mad({0}, {1}, {2})"), "fmac": (3, "mad({0}, {1}, {2})"),
+    "mad": (3, "mad32({0}, {1}, {2})"), "mac": (3, "mad32({0}, {1}, {2})"),
 }
 # N-prefixed predicates include unordered operands. Keep NLG's NaN case explicit in DXIL.
 COMPARE = {
@@ -583,10 +594,10 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             value = fp_operand(src, scalar, vector, pending, sample_pending)
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {value};")
-        elif m := match(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac)_f32(?:_e32|_e64)? (v\d+), (.+?)( clamp)?"):
+        elif m := match(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac)_f32(?:_e32|_e64)? (v\d+), (.+?)( clamp)?"):
             op, dst, operands, clamp = m.groups()
             tokens = operands.split(", ")
-            if op == "fmac":
+            if op in ("fmac", "mac"):
                 tokens.append(dst)
             arity, template = ALU[op]
             if mask != "entry" or len(tokens) != arity:
