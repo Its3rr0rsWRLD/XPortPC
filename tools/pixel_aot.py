@@ -132,6 +132,18 @@ def disassemble(code, library, *, cpu=b"gfx1013", offsets=False):
 
 PREAMBLE = """Texture2D<float4> tex : register(t0);
 SamplerState samp : register(s0);
+// v_cmp_class_f32: the ten binary32 classes of LLVM SIInstrFlags::ClassFlags, from the raw encoding:
+// signaling NaN, quiet NaN, -inf, -normal, -denormal, -0, +0, +denormal, +normal, +inf.
+uint class32(float value) {
+    uint bits = asuint(value);
+    uint magnitude = bits & 0x7fffffffu;
+    bool negative = bits >= 0x80000000u;
+    if (magnitude > 0x7f800000u) return (bits & 0x00400000u) != 0u ? 0x2u : 0x1u;
+    if (magnitude == 0x7f800000u) return negative ? 0x4u : 0x200u;
+    if (magnitude >= 0x00800000u) return negative ? 0x8u : 0x100u;
+    if (magnitude != 0u) return negative ? 0x10u : 0x80u;
+    return negative ? 0x20u : 0x40u;
+}
 // v_fract_f32: x - floor(x) clamped to 0x3f7fffff, so a tiny negative input cannot round up to 1.0.
 // D3D frac has no clamp and differs between adapters. NaN fails the comparison and propagates.
 float fract32(float value) {
@@ -599,6 +611,21 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 expression = f"saturate({expression})"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(rf"v_cmp_class_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)"):
+            dst, value, classes = m.groups()
+            regs = lane_mask(dst)
+            if mask != "entry" or pending.intersection(regs):
+                raise ValueError("Invalid comparison")
+            if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
+                bits = f"{int(classes, 0) & 0xffffffff}u"
+            elif re.fullmatch(r"[vs]\d+", classes):
+                bits = f"asuint({fp_operand(classes, scalar, vector, pending, sample_pending)})"
+            else:
+                raise ValueError("Unsupported class mask")
+            operand = fp_operand(value, scalar, vector, pending, sample_pending)
+            for j, reg in enumerate(regs):
+                scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+            lines.append(f"    bool cmp{i} = (class32({operand}) & {bits}) != 0u;")
         elif m := match(rf"v_cmp_({'|'.join(COMPARE)})_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)"):
             op, dst, *tokens = m.groups()
             regs = lane_mask(dst)

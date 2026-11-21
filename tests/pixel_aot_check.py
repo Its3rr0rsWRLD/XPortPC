@@ -322,6 +322,47 @@ def predicate_group(first):
     return with_constants(body)
 
 
+# v_cmp_class_f32 is true when the class of S0 is in the mask S1 (LLVM SIInstrFlags::ClassFlags).
+# Each channel tests one property: +inf against its own bit, a quiet NaN against both NaN bits,
+# -0 against the +0 bit and a positive denormal against its bit, so neither the sign of zero
+# nor a denormal flushed to zero can pass.
+CLASS_BITS = (0x7f800000, 0x7fc00000, 0x80000000, 0x00000001)
+CLASS_BODY = [
+    "v_mov_b32_e32 v19, 1.0",
+    "v_cmp_class_f32_e64 vcc_lo, s44, 0x200",
+    "v_cndmask_b32_e32 v12, 0, v19, vcc_lo",
+    "v_cmp_class_f32_e64 vcc_lo, s45, 3",
+    "v_cndmask_b32_e32 v13, 0, v19, vcc_lo",
+    "v_mov_b32_e32 v18, 64",
+    "v_cmp_class_f32_e32 vcc_lo, s46, v18",
+    "v_cndmask_b32_e32 v14, 0, v19, vcc_lo",
+    "v_cmp_class_f32_e64 s0, s47, 0x80",
+    "v_cndmask_b32_e64 v15, 0, v19, s0",
+]
+
+
+def check_class_draw(directory, compiler, renderer, backend):
+    source = directory / "class.hlsl"
+    shader = directory / "class.cso"
+    case = directory / "class.case"
+    source.write_text(translate(with_constants(CLASS_BODY)), encoding="ascii")
+    subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+    constants = bytearray(256)
+    struct.pack_into("<4I", constants, 12, *CLASS_BITS)
+    expected = [1.0, 1.0, 0.0, 1.0]
+    draw = [renderer, backend, "--check-pixel-case", shader, case]
+    case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
+    subprocess.run(draw, check=True)
+    # A wrong class in any channel flips its result; the renderer must report each flip.
+    for k in range(4):
+        wrong_values = list(expected)
+        wrong_values[k] = 1.0 - wrong_values[k]
+        case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
+        wrong = subprocess.run(draw, capture_output=True, text=True)
+        if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
+            raise AssertionError(f"A wrong class result escaped detection in channel {k}")
+
+
 # v_fract_f32 clamps x - floor(x) to 0x3f7fffff. For -2**-30 the unclamped difference rounds to 1.0;
 # the other inputs are exact and stay below the clamp.
 FRACT_INPUTS = (-2.0 ** -30, -0.25, 2.75, -2.0 ** -23)
@@ -1050,6 +1091,12 @@ def check_controls(directory):
     program.insert(wait, "v_trunc_f32_e32 v13, s45")
     must_reject(translate, program)
 
+    # v_cmp_class_f32 classifies the raw encoding; a mask with modifiers or a non-numeric operand is refused.
+    body = translate(with_constants(CLASS_BODY)).split("float4 main", 1)[1]
+    assert body.count("class32(") == 4 and "& 512u" in body and "asuint(alu" in body, body
+    must_reject(translate, with_constants(["v_cmp_class_f32_e64 vcc_lo, s44, -s45"]))
+    must_reject(translate, with_constants(["v_cmp_class_f32_e64 vcc_lo, s44"]))
+
     program = absolute_value()
     alternate = [line.replace("|v12|", "abs(v12)") for line in program]
     assert translate(program) == translate(alternate)
@@ -1137,7 +1184,7 @@ def check_controls(directory):
         pos = program.index(f"v_cndmask_b32_e64 v13, v13, s46, {mask}")
         must_reject(translate, program[:pos] + ["s_mov_b32 s52, 0"] + program[pos:])
         for old, new in ((f"s46, {mask}", "s46, s[53:54]" if wave64 else "s46, s50"),
-                         ("v_cmp_eq_f32_e32", "v_cmp_class_f32_e32"),
+                         ("v_cmp_eq_f32_e32", "v_cmp_eq_f64_e32"),
                          ("v_cmp_ge_f32_e64", "v_cmpx_ge_f32_e64"),
                          (f"v_cmp_ge_f32_e64 {mask}", "v_cmp_ge_f32_e64 " + ("s[56:57]" if wave64 else "s56")),
                          ("v13, s45", "v13, |v12"),
@@ -1238,6 +1285,7 @@ def check_binary(directory, assembler, objcopy, library):
     fixtures = [(assembly(False), translate), (assembly(True), translate), (curve(), translate), (shaping(), translate), (select(), translate), (absolute_value(), translate),
                 (arithmetic(), translate), (with_scalar_constant_reads(), translate), (truncate_values(), translate),
                 (ceiling(), translate), (scalar64(), translate)]
+    fixtures.append((with_constants(CLASS_BODY), translate))
     fixtures.extend((predicate_group(first), translate) for first in range(0, 16, 4))
     fixtures.append((with_constants(CUBE_BODY), translate))
     fixtures.extend((dual_program(case), translate_dual) for case in DUAL_CASES)
@@ -1399,6 +1447,7 @@ def check_render(directory, compiler, renderer, backend):
     case = directory / "signed-export.case"
     case.write_bytes(constants + struct.pack("<4f", *map(half_rtz, values)) * 64)
     subprocess.run([renderer, backend, "--check-pixel-case", shader, case], check=True)
+    check_class_draw(directory, compiler, renderer, backend)
     check_predicate_draws(directory, compiler, renderer, backend)
     check_literal_fma_draw(directory, compiler, renderer, backend)
     capture = directory / "blend.rgba"
