@@ -33,7 +33,7 @@ def callee_name(index):
     return "lifted_callee" if index == 0 else f"lifted_callee{index + 1}"
 
 
-def lift_body(start, code, *, caller, bind_import=None, name=None):
+def lift_body(start, code, *, caller, bind_import=None, bind_direct=None, name=None):
     # In this profile only RBX/RSI survive the call. The host compiler owns
     # physical register allocation and emits its own ABI frame for each function.
     frame = 40 if caller else 8
@@ -82,7 +82,7 @@ def lift_body(start, code, *, caller, bind_import=None, name=None):
                     target = ("direct", [])
                 if address not in target[1]:
                     target[1].append(address)
-                callee = callee_name(target[1].index(address))
+                callee = bind_direct(address) if bind_direct else callee_name(target[1].index(address))
             reads = {"rcx", "rdx", "r8"}
             statement = f"rax = {callee}(rcx, rdx, r8);"
             write = "rax"

@@ -48,6 +48,13 @@ ctest --preset dev --no-tests=error -R '^cpu_aot_exe_(entry|call_targets)$' -V
 
 The two-target fixture gives each branch its own direct call site. One caller adds seven to the first import argument and the other adds nine. Swapping the targets while keeping the selector and incoming arguments fixed changes the imported arguments, output bytes and process status for each input. Both native and translated variants are checked against these expected observations.
 
+The [nested-call fixture](../tests/cpu/exe_nested.asm) sends the same inputs through an extra internal caller before reaching `call_mix` and its DLL import. The translator follows direct dependencies by RVA and emits each function before its callers. Internal functions use the same two integer arguments, trace pointer and return value as the original fixture. Recursive calls are rejected. The control bypasses `call_mix` and calls the import directly, changing the import arguments, output bytes and exit status for both inputs.
+
+```powershell
+cmake --build --preset dev --target cpu_exe_nested_lifted cpu_exe_nested_bypass_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_exe_nested_calls$' -V
+```
+
 ### Running the same EXE under pe_map
 
 `cpu_native_exe_chain` gives the original EXE and its AOT build the same selector byte as above. A third child maps that exact original EXE, binds its ordinary imports to the two source-built Windows DLLs and calls `pe_map_run`. The child passes the guest's returned DWORD back as its process exit code. All three paths produce the same 16 argument bytes, eight output bytes and exit codes in the table.

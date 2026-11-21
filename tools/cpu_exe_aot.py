@@ -1,5 +1,6 @@
 """Lower the CRT-free x64 comparison EXE from its PE entry point (bounded fixture ABI)."""
 import argparse
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
 import pefile
@@ -15,6 +16,41 @@ def require_local_pointer(previous, register, call, jump_targets):
     if (previous.mnemonic != M.LEA or previous.op0_register != register
             or call.ip in jump_targets or previous.memory_displacement % 8):
         raise ValueError(f"expected aligned local trace pointer before call at {call.ip:#x}")
+
+
+def lift_internal_calls(pe, names, entry_interval, mix_provider):
+    pending = list(names)
+    intervals = [entry_interval]
+    functions = {}
+    graph = TopologicalSorter()
+
+    def bind_direct(address):
+        if address not in names:
+            names[address] = f"lifted_{address:x}"
+            pending.append(address)
+        return names[address]
+
+    def bind_import(slot):
+        return resolve_import(pe, slot, mix_provider, "mix_args")
+
+    for address in pending:
+        native = bounded_code(pe, address)
+        end = address + len(native)
+        if any(address < stop and begin < end for begin, stop in intervals):
+            raise ValueError(f"overlapping internal call target at {address:#x}")
+        intervals.append((address, end))
+        source, edge = lift_body(address, native, caller=True, name=names[address],
+                                 bind_import=bind_import, bind_direct=bind_direct)
+        functions[address] = source
+        if edge[0] == "direct":
+            graph.add(address, *edge[1])
+        else:
+            graph.add(address)
+
+    try:
+        return "\n".join(functions[address] for address in graph.static_order())
+    except CycleError as exc:
+        raise ValueError("recursive internal calls are outside the entry profile") from exc
 
 
 def translate(image, io_provider, mix_provider, *, entry_export=None, frame_selector=False):
@@ -46,10 +82,9 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
         io_calls = {b"read_selector": "rax = read_selector();",
                     b"emit_trace": "rax = emit_trace(reinterpret_cast<const word*>(rcx));"}
         bindings = {}
-        callees = {}
+        names = {}
         selector_rva = export_rva(pe, "call_bare") if frame_selector else None
         saw_selector = False
-        intervals = [(entry, ret.next_ip)]
         jump_targets = {ins.near_branch_target for ins in body if ins.op0_kind == K.NEAR_BRANCH64
                         and ins.mnemonic != M.CALL}
         for index, ins in enumerate(body[1:-2], start=1):
@@ -61,20 +96,7 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
                         bindings[ins.ip] = "rax = lifted_call_bare(rcx, rdx, r8);"
                         saw_selector = True
                         continue
-                    if target not in callees:
-                        native = bounded_code(pe, target)
-                        end = target + len(native)
-                        if any(target < stop and begin < end for begin, stop in intervals):
-                            raise ValueError(f"overlapping internal call target at {target:#x}")
-                        name = "lifted" if not callees else f"lifted_{target:x}"
-                        source, edge = lift_body(target, native, caller=True, name=name,
-                                                 bind_import=lambda slot: resolve_import(
-                                                     pe, slot, mix_provider, "mix_args"))
-                        if edge[0] != "import" or edge[-1] != "mix_args":
-                            raise ValueError("internal callee must reach the named provider")
-                        callees[target] = (name, source)
-                        intervals.append((target, end))
-                    name = callees[target][0]
+                    name = names.setdefault(target, f"lifted_{target:x}" if names else "lifted")
                     bindings[ins.ip] = f"rax = {name}(rcx, rdx, reinterpret_cast<word*>(r8));"
                 elif ins.is_ip_rel_memory_operand:
                     slot = ins.ip_rel_memory_address
@@ -98,17 +120,18 @@ def translate(image, io_provider, mix_provider, *, entry_export=None, frame_sele
                 if (ins.memory_base != R.RSP or ins.memory_index != R.NONE
                         or offset < 32 or offset + width > 72):
                     raise ValueError("entry operand outside local frame")
-        if not callees:
+        if not names:
             raise ValueError("expected an internal call in the entry profile")
         if frame_selector and not saw_selector:
             raise ValueError("expected a direct call to the frame selector")
+        callees = lift_internal_calls(pe, names, (entry, ret.next_ip), mix_provider)
         code = lower(body, [], {}, bindings, {}, host_ops={prologue.ip: ";", epilogue.ip: ";"})
     selector_decl = 'extern "C" word lifted_call_bare(word, word, word);\n' if frame_selector else ""
     return INTEGER_HEADER + selector_decl + """
 extern "C" __declspec(dllimport) uint32_t read_selector();
 extern "C" __declspec(dllimport) uint32_t emit_trace(const word*);
 extern "C" __declspec(dllimport) word mix_args(word, word, word*);
-""" + "\n".join(source for _, source in callees.values()) + '\nint main() {\n' + code + '\n}\n'
+""" + callees + '\nint main() {\n' + code + '\n}\n'
 
 
 if __name__ == "__main__":
