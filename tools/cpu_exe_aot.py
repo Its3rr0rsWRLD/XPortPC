@@ -2,6 +2,7 @@
 import argparse
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
+import re
 
 import pefile
 from iced_x86 import MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
@@ -9,6 +10,35 @@ from iced_x86 import MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, R
 from cpu_call_aot import lift_body, resolve_import
 from cpu_leaf_aot import bounded_code, export_rva
 from ffx_version_query import INTEGER_HEADER, lower, region
+
+
+CPP_KEYWORDS = frozenset("""
+alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t char32_t
+class compl concept const const_cast consteval constexpr constinit continue co_await co_return co_yield
+decltype default delete do double dynamic_cast else enum explicit export extern false float for friend
+goto if inline int long mutable namespace new noexcept not not_eq nullptr operator or or_eq private
+protected public register reinterpret_cast requires return short signed sizeof static static_assert
+static_cast struct switch template this thread_local throw true try typedef typeid typename union
+unsigned using virtual void volatile wchar_t while xor xor_eq import module final override
+""".split())
+GENERATED_NAMES = frozenset("""
+read_selector emit_trace lifted main word load store memcpy memset std
+""".split())
+HEADER_NAMES = re.compile(
+    r"(?:u?int(?:8|16|32|64|ptr|max|_least\d+|_fast\d+)_t|"
+    r"(?:U?INT|PTRDIFF|SIZE|WCHAR|WINT|SIG_ATOMIC)[A-Z0-9_]*|"
+    r"size_t|ptrdiff_t|NULL|offsetof|"
+    r"memchr|memcmp|memmove|strcat|strchr|strcmp|strcoll|strcpy|strcspn|strerror|strlen|"
+    r"strncat|strncmp|strncpy|strpbrk|strrchr|strspn|strstr|strtok|strxfrm)"
+)
+
+
+def validate_provider_symbol(symbol, providers):
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", symbol) or "__" in symbol:
+        raise ValueError(f"unsupported C++ import symbol {symbol!r}")
+    if (symbol in providers or symbol in CPP_KEYWORDS or symbol in GENERATED_NAMES
+            or symbol.startswith("lifted_") or HEADER_NAMES.fullmatch(symbol)):
+        raise ValueError(f"duplicate or reserved import symbol {symbol!r}")
 
 
 def require_local_pointer(previous, register, call, jump_targets):
@@ -55,8 +85,7 @@ def translate(image, io_provider, mix_provider, extra_providers=(), *, entry_exp
               frame_selector=False):
     providers = {"mix_args": mix_provider}
     for provider, symbol in extra_providers:
-        if symbol in providers or symbol in ("read_selector", "emit_trace", "lifted", "main"):
-            raise ValueError(f"duplicate or reserved import symbol {symbol}")
+        validate_provider_symbol(symbol, providers)
         providers[symbol] = provider
     bound_symbols = {}
     with pefile.PE(str(image), fast_load=True) as pe:

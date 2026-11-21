@@ -89,6 +89,18 @@ def compare_two_providers(mapper_path, native, lifted, io, mix, second):
             raise AssertionError("translated without the correct second provider")
     print(f"before entry: {diagnostic}")
 
+    invalid_symbols = ("trace-value", "3trace", "_Reserved", "trace__value", "class", "and",
+                       "lifted", "lifted_callee2", "word", "store", "uint64_t", "mix_args")
+    for invalid in invalid_symbols:
+        try:
+            translate(native, io, mix, ((second, invalid),))
+        except ValueError as exc:
+            if "import symbol" not in str(exc) or repr(invalid) not in str(exc):
+                raise
+        else:
+            raise AssertionError(f"accepted invalid import spelling {invalid!r}")
+    print(f"rejected {len(invalid_symbols)} invalid, reserved, and duplicate import symbols before emission")
+
     for selector, (x, y) in enumerate(((0x1000002fc, 0x100000000), (41, 9))):
         first_args = (x + 7, y - 3)
         first_result = first_args[0] - first_args[1] + 11
