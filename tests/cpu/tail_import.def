@@ -1,0 +1,5 @@
+EXPORTS
+    tail_mix
+    tail_choose
+    tail_pass4
+    tail_guest_arg

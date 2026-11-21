@@ -411,7 +411,11 @@ if(EXISTS "${INTAKE_PYTHON}")
         target_link_options(${image} PRIVATE /NOENTRY /NODEFAULTLIB /INCREMENTAL:NO)
     endfunction()
     function(cpu_translation image translator entry)
-        cmake_parse_arguments(BIND "FFX_DESTROY" "PROVIDER;SYMBOL;LINK_NAME;CALLBACK_OFFSET;RANGES" "" ${ARGN})
+        cmake_parse_arguments(BIND "FFX_DESTROY"
+            "PROVIDER;SYMBOL;LINK_NAME;CALLBACK_OFFSET;RANGES;IMPORT_ARGUMENTS;RETURN_BYTES;NAME" "" ${ARGN})
+        if(NOT BIND_NAME)
+            set(BIND_NAME ${image}_lifted)
+        endif()
         set(binding)
         if(BIND_FFX_DESTROY)
             list(APPEND binding --ffx-destroy)
@@ -427,15 +431,19 @@ if(EXISTS "${INTAKE_PYTHON}")
             if(BIND_LINK_NAME)
                 list(APPEND binding --link-name "${BIND_LINK_NAME}")
             endif()
+            if(DEFINED BIND_IMPORT_ARGUMENTS)
+                list(APPEND binding --import-arguments "${BIND_IMPORT_ARGUMENTS}" --return-bytes "${BIND_RETURN_BYTES}")
+            endif()
         endif()
-        set(lifted "${CMAKE_CURRENT_BINARY_DIR}/${image}_lifted.cpp")
+        set(lifted "${CMAKE_CURRENT_BINARY_DIR}/${BIND_NAME}.cpp")
         add_custom_command(OUTPUT "${lifted}"
             COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tools/${translator}.py"
                 "$<TARGET_FILE:${image}>" ${entry} "${lifted}" ${binding}
-            DEPENDS ${image} ${BIND_PROVIDER} ${BIND_RANGES} tools/${translator}.py tools/cpu_leaf_aot.py tools/cpu_ranges.py VERBATIM)
-        add_library(${image}_lifted SHARED "${lifted}")
+            DEPENDS ${image} ${BIND_PROVIDER} ${BIND_RANGES} tools/${translator}.py tools/cpu_leaf_aot.py tools/cpu_ranges.py
+                tools/cpu_call_aot.py VERBATIM)
+        add_library(${BIND_NAME} SHARED "${lifted}")
         if(BIND_PROVIDER)
-            target_link_libraries(${image}_lifted PRIVATE ${BIND_PROVIDER})
+            target_link_libraries(${BIND_NAME} PRIVATE ${BIND_PROVIDER})
         endif()
     endfunction()
     foreach(variant IN ITEMS original inverted)
@@ -677,6 +685,34 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_avx_move_regs_original>"
         "$<TARGET_FILE:cpu_avx_move_regs_original_lifted>"
         "$<TARGET_FILE:cpu_avx_move_regs_altered_lifted>")
+    # Import tail jumps: one caller per provider (named, altered return, ordinal-only), each translated twice:
+    # tail_mix (three arguments) bound to mix3 with three, tail_choose (three) and tail_pass4 (four) to mix4 with four.
+    set(tail_files)
+    foreach(variant IN ITEMS named altered ordinal)
+        set(provider cpu_tail_${variant}_provider)
+        if(variant STREQUAL "ordinal")
+            add_library(${provider} SHARED tests/cpu/tail_provider.cpp tests/cpu/tail_ordinal.def)
+            set(mix3 SYMBOL "#3" LINK_NAME mix3)
+            set(mix4 SYMBOL "#4" LINK_NAME mix4)
+        else()
+            add_library(${provider} SHARED tests/cpu/tail_provider.cpp tests/cpu/tail_provider.def)
+            set(mix3 SYMBOL mix3)
+            set(mix4 SYMBOL mix4)
+        endif()
+        cpu_asm_fixture(cpu_tail_${variant} tail_import)
+        target_link_libraries(cpu_tail_${variant} PRIVATE ${provider})
+        cpu_translation(cpu_tail_${variant} cpu_switch_aot tail_mix NAME cpu_tail_${variant}_mix3
+            PROVIDER ${provider} ${mix3} IMPORT_ARGUMENTS 3 RETURN_BYTES 8)
+        cpu_translation(cpu_tail_${variant} cpu_switch_aot tail_choose,tail_pass4:4 NAME cpu_tail_${variant}_mix4
+            PROVIDER ${provider} ${mix4} IMPORT_ARGUMENTS 4 RETURN_BYTES 8)
+        list(APPEND tail_files "$<TARGET_FILE:cpu_tail_${variant}>"
+            "$<TARGET_FILE:cpu_tail_${variant}_mix3>" "${CMAKE_CURRENT_BINARY_DIR}/cpu_tail_${variant}_mix3.cpp"
+            "$<TARGET_FILE:cpu_tail_${variant}_mix4>" "${CMAKE_CURRENT_BINARY_DIR}/cpu_tail_${variant}_mix4.cpp"
+            "$<TARGET_FILE:${provider}>")
+    endforeach()
+    target_compile_definitions(cpu_tail_altered_provider PRIVATE ALTER_RETURN)
+    add_test(NAME cpu_aot_import_tail_jump COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/tail_import_check.py" "$<TARGET_FILE:cpu_register_probe>" ${tail_files})
     cpu_asm_fixture(cpu_chained chained)
     cpu_translation(cpu_chained cpu_chained_aot choose_value)
     cpu_asm_fixture(cpu_chained_jne chained)
