@@ -43,8 +43,6 @@ INTEGER_HEADER = """#include <array>
 #include <intrin.h>
 #include <type_traits>
 #include <emmintrin.h>
-#include <pmmintrin.h>
-#include <smmintrin.h>
 #include <immintrin.h>
 using std::memcpy;
 using std::memset;
@@ -503,14 +501,6 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2", R.XMM3: "wide3"}
         wide_any = {**wide, **wide_xmm}
     has_wide |= any(i.mnemonic in fma_packed for i in body)
-    sse34_fp_ops = {
-        M.ADDSUBPS, M.ADDSUBPD, M.HADDPS, M.HADDPD, M.HSUBPS, M.HSUBPD,
-        M.MOVDDUP, M.MOVSLDUP, M.MOVSHDUP, M.LDDQU,
-        M.ROUNDPS, M.ROUNDPD, M.ROUNDSS, M.ROUNDSD,
-        M.DPPS, M.DPPD, M.BLENDPS, M.BLENDPD, M.BLENDVPS, M.BLENDVPD,
-        M.INSERTPS, M.EXTRACTPS,
-    }
-    has_wide |= any(i.mnemonic in sse34_fp_ops for i in body)
     if any(i.code in STRING_OPS or i.mnemonic in (M.CLD, M.STD) for i in body):
         # The x64 software conventions expect DF clear on function exit and before calls, so it starts clear.
         lines.append("bool direction=false;")
@@ -1629,116 +1619,6 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     f"{write('crc')} }}")
         elif op == M.MOVNTDQA:
             raise ValueError(f"unsupported MOVNTDQA memory contract at {i.ip:#x}: {i}")
-        elif op == M.EXTRACTPS and i.encoding == EncodingKind.LEGACY and has_wide and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
-            if i.op0_kind == K.MEMORY:
-                if MemorySizeExt.size(i.memory_size) != 4:
-                    raise ValueError(f"unsupported EXTRACTPS destination at {i.ip:#x}: {i}")
-            elif i.op0_kind == K.REGISTER:
-                if RegisterExt.size(i.op0_register) not in (4, 8):
-                    raise ValueError(f"unsupported EXTRACTPS destination at {i.ip:#x}: {i}")
-            else:
-                raise ValueError(f"unsupported EXTRACTPS destination at {i.ip:#x}: {i}")
-            lane = i.immediate(2) & 3
-            src = wide_xmm[i.op1_register]
-            stmt = f"{{ uint32_t v; memcpy(&v, {src}.data() + {lane * 4}, 4); {write('v')} }}"
-        elif op in sse34_fp_ops and op != M.EXTRACTPS and i.encoding == EncodingKind.LEGACY and i.op0_kind == K.REGISTER and i.op0_register in wide_xmm and has_wide:
-            dst = wide_xmm[i.op0_register]
-            if op == M.LDDQU:
-                if i.op1_kind != K.MEMORY:
-                    raise ValueError(f"unsupported LDDQU source at {i.ip:#x}: {i}")
-                stmt = f"memcpy({dst}.data(), reinterpret_cast<const void*>({address()}), 16);"
-            elif op == M.MOVDDUP:
-                if i.op1_kind == K.MEMORY:
-                    s_init = f"uint8_t s[8]; memcpy(s, reinterpret_cast<const void*>({address()}), 8);"
-                elif i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
-                    s_init = f"uint8_t s[8]; memcpy(s, {wide_xmm[i.op1_register]}.data(), 8);"
-                else:
-                    raise ValueError(f"unsupported SSE3/4.1 FP source at {i.ip:#x}: {i}")
-                stmt = f"{{ {s_init} memcpy({dst}.data(), s, 8); memcpy({dst}.data() + 8, s, 8); }}"
-            elif op == M.INSERTPS:
-                imm = i.immediate(2) & 0xff
-                count_s = (imm >> 6) & 3
-                count_d = (imm >> 4) & 3
-                zmask = imm & 0x0f
-                if i.op1_kind == K.MEMORY:
-                    s_init = f"const uint32_t s = load<uint32_t>({address()});"
-                elif i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
-                    s_init = f"uint32_t s; memcpy(&s, {wide_xmm[i.op1_register]}.data() + {count_s * 4}, 4);"
-                else:
-                    raise ValueError(f"unsupported SSE3/4.1 FP source at {i.ip:#x}: {i}")
-                stmt = (f"{{ {s_init} memcpy({dst}.data() + {count_d * 4}, &s, 4); "
-                        f"for (size_t k = 0; k < 4; ++k) {{ if (({zmask}u >> k) & 1u) memset({dst}.data() + k * 4, 0, 4); }} }}")
-            elif op in (M.ROUNDSS, M.ROUNDSD):
-                is_sd = op == M.ROUNDSD
-                ftype, elem_sz, count, load_fn, store_fn, round_fn = (
-                    ("double", 8, 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_round_sd") if is_sd
-                    else ("float", 4, 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_round_ss")
-                )
-                imm = i.immediate(2) & 0x0f
-                if i.op1_kind == K.MEMORY:
-                    b_init = f"{ftype} b[{count}]{{}}; memcpy(b, reinterpret_cast<const void*>({address()}), {elem_sz});"
-                elif i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
-                    b_init = f"{ftype} b[{count}]; memcpy(b, {wide_xmm[i.op1_register]}.data(), 16);"
-                else:
-                    raise ValueError(f"unsupported SSE3/4.1 FP source at {i.ip:#x}: {i}")
-                stmt = (f"{{ {ftype} a[{count}], r[{count}]; memcpy(a, {dst}.data(), 16); {b_init} "
-                        f"{store_fn}(r, {round_fn}({load_fn}(a), {load_fn}(b), {imm})); memcpy({dst}.data(), r, 16); }}")
-            else:
-                if i.op1_kind == K.MEMORY:
-                    s2_bytes = f"const auto in2 = load<std::array<uint8_t,16>>({address()});"
-                elif i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
-                    s2_bytes = f"const auto in2 = load<std::array<uint8_t,16>>(reinterpret_cast<word>({wide_xmm[i.op1_register]}.data()));"
-                else:
-                    raise ValueError(f"unsupported SSE3/4.1 FP source at {i.ip:#x}: {i}")
-                if op == M.MOVSLDUP:
-                    stmt = (f"{{ {s2_bytes} memcpy({dst}.data(), in2.data(), 4); memcpy({dst}.data() + 4, in2.data(), 4); "
-                            f"memcpy({dst}.data() + 8, in2.data() + 8, 4); memcpy({dst}.data() + 12, in2.data() + 8, 4); }}")
-                elif op == M.MOVSHDUP:
-                    stmt = (f"{{ {s2_bytes} memcpy({dst}.data(), in2.data() + 4, 4); memcpy({dst}.data() + 4, in2.data() + 4, 4); "
-                            f"memcpy({dst}.data() + 8, in2.data() + 12, 4); memcpy({dst}.data() + 12, in2.data() + 12, 4); }}")
-                elif op in (M.BLENDPS, M.BLENDPD):
-                    lanes, sz = (4, 4) if op == M.BLENDPS else (2, 8)
-                    imm = i.immediate(2) & ((1 << lanes) - 1)
-                    stmt = (f"{{ const auto in1 = {dst}; {s2_bytes} for (size_t k = 0; k < {lanes}; ++k) {{ "
-                            f"const uint8_t* src = (({imm}u >> k) & 1u) ? in2.data() : in1.data(); "
-                            f"memcpy({dst}.data() + k * {sz}, src + k * {sz}, {sz}); }} }}")
-                elif op in (M.BLENDVPS, M.BLENDVPD):
-                    lanes, sz = (4, 4) if op == M.BLENDVPS else (2, 8)
-                    stmt = (f"{{ const auto in1 = {dst}, m = wide0; {s2_bytes} for (size_t k = 0; k < {lanes}; ++k) {{ "
-                            f"const uint8_t* src = (m[k * {sz} + {sz - 1}] & 0x80u) ? in2.data() : in1.data(); "
-                            f"memcpy({dst}.data() + k * {sz}, src + k * {sz}, {sz}); }} }}")
-                elif op in (M.ROUNDPS, M.ROUNDPD):
-                    is_pd = op == M.ROUNDPD
-                    ftype, count, load_fn, store_fn, round_fn = (
-                        ("double", 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_round_pd") if is_pd
-                        else ("float", 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_round_ps")
-                    )
-                    imm = i.immediate(2) & 0x0f
-                    stmt = (f"{{ {s2_bytes} {ftype} b[{count}], r[{count}]; memcpy(b, in2.data(), 16); "
-                            f"{store_fn}(r, {round_fn}({load_fn}(b), {imm})); memcpy({dst}.data(), r, 16); }}")
-                elif op in (M.DPPS, M.DPPD):
-                    is_pd = op == M.DPPD
-                    ftype, count, load_fn, store_fn, dp_fn = (
-                        ("double", 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_dp_pd") if is_pd
-                        else ("float", 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_dp_ps")
-                    )
-                    imm = i.immediate(2) & 0xff
-                    stmt = (f"{{ {s2_bytes} {ftype} a[{count}], b[{count}], r[{count}]; "
-                            f"memcpy(a, {dst}.data(), 16); memcpy(b, in2.data(), 16); "
-                            f"{store_fn}(r, {dp_fn}({load_fn}(a), {load_fn}(b), {imm})); memcpy({dst}.data(), r, 16); }}")
-                else:
-                    intr = {
-                        M.ADDSUBPS: ("float", 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_addsub_ps"),
-                        M.ADDSUBPD: ("double", 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_addsub_pd"),
-                        M.HADDPS: ("float", 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_hadd_ps"),
-                        M.HADDPD: ("double", 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_hadd_pd"),
-                        M.HSUBPS: ("float", 4, "_mm_loadu_ps", "_mm_storeu_ps", "_mm_hsub_ps"),
-                        M.HSUBPD: ("double", 2, "_mm_loadu_pd", "_mm_storeu_pd", "_mm_hsub_pd"),
-                    }[op]
-                    ftype, count, load_fn, store_fn, op_fn = intr
-                    stmt = (f"{{ {s2_bytes} {ftype} a[{count}], b[{count}], r[{count}]; "
-                            f"memcpy(a, {dst}.data(), 16); memcpy(b, in2.data(), 16); "
-                            f"{store_fn}(r, {op_fn}({load_fn}(a), {load_fn}(b))); memcpy({dst}.data(), r, 16); }}")
         elif op in (M.PEXTRB, M.PEXTRW, M.PEXTRD, M.PEXTRQ) and i.encoding == EncodingKind.LEGACY and has_wide and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
             lane_size = {M.PEXTRB: 1, M.PEXTRW: 2, M.PEXTRD: 4, M.PEXTRQ: 8}[op]
             lane = i.immediate(2) & ((16 // lane_size) - 1)
