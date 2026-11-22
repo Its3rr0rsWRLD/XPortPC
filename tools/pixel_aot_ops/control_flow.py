@@ -163,7 +163,7 @@ def program(st, blocks, labels, latch_of):
     def snapshot():
         return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc,
                 "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "vm_issued": st.vm_issued,
-                "sample_dest": dict(st.sample_dest), "exported": st.exported, "ended": st.ended}
+                "sample_dest": dict(st.sample_dest), "exports": st.exports, "exported": st.exported, "ended": st.ended}
 
     def restore(state):
         st.scalar.clear(), st.vector.clear(), st.pending.clear(), st.sample_dest.clear()
@@ -171,12 +171,13 @@ def program(st, blocks, labels, latch_of):
         st.pending.update(state["pending"]), st.sample_dest.update(state["sample_dest"])
         st.scc, st.ex, st.wqm, st.samples = state["scc"], state["ex"], state["wqm"], state["samples"]
         st.vm_issued, st.exported, st.ended = state["vm_issued"], state["exported"], state["ended"]
+        st.exports = state["exports"]
 
     def forget_scc():
         st.scc = None
 
     def same_provenance(first, second, where):
-        for key in ("ex", "wqm", "pending", "sample_dest"):
+        for key in ("ex", "wqm", "pending", "sample_dest", "exports"):
             if first[key] != second[key]:
                 raise ValueError(f"Execution or load state differs at {where}")
         if first["sample_dest"] and first["vm_issued"] != second["vm_issued"]:

@@ -82,6 +82,10 @@ def check_binary(directory, assembler, objcopy, library):
         if instructions == selector:
             check_container_selector(directory, native, library)
             selector = None
+    # Checks of a family that need the assembler beyond a round trip (exports: patched EN bits).
+    for module in MODULES:
+        if hasattr(module, "binary_checks"):
+            module.binary_checks(directory, assembler, objcopy, library)
 
 
 def check_render(directory, compiler, renderer, backend, families=None):

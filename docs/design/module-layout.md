@@ -57,6 +57,8 @@ Each draw family is the module of that name (`class_.py` for `class`): it define
   (the `pixel_aot_controls` test);
 - `binary_fixtures()`: `(program, translator)` pairs that `pixel_aot_check.py binary` assembles with llvm-mc,
   disassembles and lowers again.
+- `binary_checks(directory, assembler, objcopy, library)`: binary-mode checks that need more than that round trip
+  (`exports.py` patches the EN bits of an assembled export).
 
 A module without `draw` contributes only controls or fixtures (`hints.py`, `container.py`). `common.py` holds what
 several families share: the recording `lower()` (which also feeds the form-coverage record), `translate`,

@@ -62,6 +62,17 @@ struct PixelInput {
     std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
 };
 
+// The outputs of a --check-pixel-outputs draw: R32G32B32A32_FLOAT targets 0..N-1, each cleared to -1 and drawn with
+// its own write mask (D3D12_COLOR_WRITE_ENABLE bits, R = 1 .. A = 8, as the export's component mask), and optionally
+// a D32_FLOAT depth target cleared to 1 and written with the depth test always passing. Every target and the depth
+// are read back and compared bit-exactly with one reference per texel.
+struct PixelOutputs {
+    std::vector<UINT> masks;
+    std::vector<std::vector<Color>> expected;
+    bool depth = false;
+    std::vector<float> expectedDepth;
+};
+
 struct MipDraw {
     UINT sampledLevel;
     UINT scale;
@@ -78,8 +89,12 @@ struct Extent {
 };
 
 void draw_verified(ID3D12Device* device, const char* path, const std::vector<PixelInput>& levels,
-                   Extent base, UINT firstResident, const std::vector<MipDraw>& draws, const char* capture)
+                   Extent base, UINT firstResident, const std::vector<MipDraw>& draws, const char* capture,
+                   const PixelOutputs* outputs = nullptr)
 {
+    constexpr DXGI_FORMAT targetFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    const UINT targetCount = outputs ? static_cast<UINT>(outputs->masks.size()) : 1;
+    const bool depth = outputs && outputs->depth;
     const auto& input = levels.front();
     auto cb = upload(device, input.constants);
     // Title memory is always bound. Without a memory section the range buffer holds one zeroed range
@@ -113,17 +128,28 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.RasterizerState.DepthClipEnable = TRUE;
-    auto& blend = desc.BlendState.RenderTarget[0];
-    blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
-    blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
-    blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
-    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    desc.BlendState.IndependentBlendEnable = outputs != nullptr;
+    for (UINT t = 0; t < targetCount; ++t) {
+        auto& blend = desc.BlendState.RenderTarget[t];
+        blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend.RenderTargetWriteMask = static_cast<UINT8>(outputs ? outputs->masks[t] : D3D12_COLOR_WRITE_ENABLE_ALL);
+        desc.RTVFormats[t] = targetFormat;
+    }
     desc.SampleMask = UINT_MAX;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    desc.NumRenderTargets = desc.SampleDesc.Count = 1;
-    desc.RTVFormats[0] = input.integerRT ? DXGI_FORMAT_R32G32B32A32_UINT
-                                         : DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.NumRenderTargets = targetCount;
+    desc.SampleDesc.Count = 1;
+    // The integer-export cases (the 'X2WF' flags word) return uint4 from main, so the pipeline's target is R32G32B32A32_UINT.
+    if (!outputs && input.integerRT) desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_UINT;
+    if (depth) {
+        desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        desc.DepthStencilState.DepthEnable = TRUE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    }
     ComPtr<ID3D12PipelineState> pso;
     check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)), "Translated pixel pipeline");
 
@@ -133,7 +159,9 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     const UINT residentCount = static_cast<UINT>(levels.size());
     srcDesc.MipLevels = static_cast<UINT16>(firstResident + residentCount);
     auto texture = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
-    const D3D12_CLEAR_VALUE clear{desc.RTVFormats[0], {-1, -1, -1, -1}};
+    const D3D12_CLEAR_VALUE clear{targetFormat, {-1, -1, -1, -1}};
+    D3D12_CLEAR_VALUE depthClear{DXGI_FORMAT_D32_FLOAT};
+    depthClear.DepthStencil.Depth = 1;
     std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(residentCount);
     UINT64 sourceBytes = 0;
     std::vector<UINT> rows(residentCount);
@@ -160,10 +188,16 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         secondTexture = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     }
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-    heapDesc.NumDescriptors = 1;
+    heapDesc.NumDescriptors = (std::max)(targetCount, 1u);
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    ComPtr<ID3D12DescriptorHeap> rtvs, srvs;
+    ComPtr<ID3D12DescriptorHeap> rtvs, srvs, dsvs;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvs)), "Pixel target heap");
+    const UINT rtvIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    if (depth) {
+        heapDesc.NumDescriptors = 1;
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvs)), "Pixel depth heap");
+    }
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heapDesc.NumDescriptors = 2 + 8;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -202,13 +236,30 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             partialTriangle = upload(device, std::vector<Word>{3, 4, 5});
         const auto [width, height] = req.isTailDraw ? base.mip(req.requestedMip)
                                                    : Extent{sampled.width * req.scale, sampled.height * req.scale};
-        auto dstDesc = texture_desc(width, height, desc.RTVFormats[0], D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-        auto target = resource(device, dstDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RENDER_TARGET, &clear);
+        auto dstDesc = texture_desc(width, height, targetFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT resultLayout{};
         UINT64 resultBytes = 0;
         device->GetCopyableFootprints(&dstDesc, 0, 1, 0, &resultLayout, nullptr, nullptr, &resultBytes);
-        auto back = make_buffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-        device->CreateRenderTargetView(target.Get(), nullptr, rtv);
+        std::vector<ComPtr<ID3D12Resource>> targets(targetCount), backs(targetCount);
+        for (UINT t = 0; t < targetCount; ++t) {
+            targets[t] = resource(device, dstDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RENDER_TARGET, &clear);
+            backs[t] = make_buffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+            auto handle = rtv;
+            handle.ptr += size_t(t) * rtvIncrement;
+            device->CreateRenderTargetView(targets[t].Get(), nullptr, handle);
+        }
+        auto depthDesc = texture_desc(width, height, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT depthLayout{};
+        UINT64 depthBytes = 0;
+        ComPtr<ID3D12Resource> depthTarget, depthBack;
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+        if (depth) {
+            device->GetCopyableFootprints(&depthDesc, 0, 1, 0, &depthLayout, nullptr, nullptr, &depthBytes);
+            depthTarget = resource(device, depthDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_DEPTH_WRITE, &depthClear);
+            depthBack = make_buffer(device, depthBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+            dsv = dsvs->GetCPUDescriptorHandleForHeapStart();
+            device->CreateDepthStencilView(depthTarget.Get(), nullptr, dsv);
+        }
         ComputeCommands cmd(device, pso.Get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
         auto* list = cmd.list.Get();
         D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
@@ -256,8 +307,14 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         const D3D12_RECT scissor{0,0,LONG(width),LONG(height)};
         list->RSSetViewports(1, &viewport);
         list->RSSetScissorRects(1, &scissor);
-        list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
+        // The descriptors of the targets are consecutive in the heap, so one handle names them all.
+        list->OMSetRenderTargets(targetCount, targetCount ? &rtv : nullptr, TRUE, depth ? &dsv : nullptr);
+        for (UINT t = 0; t < targetCount; ++t) {
+            auto handle = rtv;
+            handle.ptr += size_t(t) * rtvIncrement;
+            list->ClearRenderTargetView(handle, clear.Color, 0, nullptr);
+        }
+        if (depth) list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, depthClear.DepthStencil.Depth, 0, 0, nullptr);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         if (partialTriangle) {
             const D3D12_INDEX_BUFFER_VIEW indices{partialTriangle->GetGPUVirtualAddress(),
@@ -267,16 +324,64 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         } else {
             list->DrawInstanced(3,1,0,0);
         }
-        transition(list, target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        src.pResource = target.Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.SubresourceIndex = 0;
-        dst.pResource = back.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint = resultLayout;
-        list->CopyTextureRegion(&dst, 0,0,0, &src, nullptr);
+        for (UINT t = 0; t < targetCount; ++t) {
+            transition(list, targets[t].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            src.pResource = targets[t].Get();
+            dst.pResource = backs[t].Get();
+            dst.PlacedFootprint = resultLayout;
+            list->CopyTextureRegion(&dst, 0,0,0, &src, nullptr);
+        }
+        if (depth) {
+            transition(list, depthTarget.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            src.pResource = depthTarget.Get();
+            dst.pResource = depthBack.Get();
+            dst.PlacedFootprint = depthLayout;
+            list->CopyTextureRegion(&dst, 0,0,0, &src, nullptr);
+        }
         cmd.submit_and_wait(device);
-        auto words = read(back.Get(), resultBytes/4);
+        if (outputs) {
+            // One reference per texel for every target and the depth; nothing but the exact bits is admitted.
+            // Init-captures: C++17 cannot capture the structured bindings width and height themselves.
+            const auto texel = [&sampled, w = width, h = height](UINT x, UINT y) {
+                return ((2 * y + 1) * sampled.height / (2 * h)) * sampled.width + (2 * x + 1) * sampled.width / (2 * w);
+            };
+            for (UINT t = 0; t < targetCount; ++t) {
+                const auto data = read(backs[t].Get(), resultBytes / 4);
+                for (UINT y = 0; y < height; ++y) {
+                    for (UINT x = 0; x < width; ++x) {
+                        const auto& expected = outputs->expected[t].at(texel(x, y));
+                        Color actual;
+                        std::memcpy(actual.data(), data.data() + y * resultLayout.Footprint.RowPitch / 4 + x * 4, sizeof(actual));
+                        if (std::memcmp(actual.data(), expected.data(), sizeof(actual))) {
+                            std::fprintf(stderr, "pixel_mismatch x=%u y=%u target=%u\n", x, y, t);
+                            for (size_t c = 0; c < actual.size(); ++c)
+                                std::fprintf(stderr, "channel=%zu expected=%a actual=%a\n", c, expected[c], actual[c]);
+                            throw std::runtime_error("AOT color export differs from CPU reference");
+                        }
+                    }
+                }
+            }
+            if (depth) {
+                const auto data = read(depthBack.Get(), depthBytes / 4);
+                for (UINT y = 0; y < height; ++y) {
+                    for (UINT x = 0; x < width; ++x) {
+                        const float expected = outputs->expectedDepth.at(texel(x, y));
+                        float actual;
+                        std::memcpy(&actual, data.data() + y * depthLayout.Footprint.RowPitch / 4 + x, sizeof(actual));
+                        if (std::memcmp(&actual, &expected, sizeof(actual))) {
+                            std::fprintf(stderr, "pixel_mismatch x=%u y=%u depth expected=%a actual=%a\n", x, y, expected, actual);
+                            throw std::runtime_error("AOT depth export differs from CPU reference");
+                        }
+                    }
+                }
+            }
+            std::printf("pixels=%u targets=%u depth=%u max_absolute_error=0\n", width * height, targetCount, depth ? 1u : 0u);
+            continue;
+        }
+        auto words = read(backs[0].Get(), resultBytes/4);
         std::vector<BYTE> image;
         if (capture) image.reserve(size_t(width) * height * 4);
         for (UINT y = 0; y < height; ++y) {
@@ -430,7 +535,9 @@ TitleMemory parse_memory_section(const char* data, size_t size)
 }
 }
 
-void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference)
+namespace {
+// The 8x8 test texture: texel (x, y) holds (ramp[x], ramp[y], 128, 255), drawn one texel per 8x8 pixels.
+PixelInput ramp_input(bool swapRB)
 {
     PixelInput input{8, 8, 8, DXGI_FORMAT_R8G8B8A8_UNORM};
     for (auto g : ramp) {
@@ -441,6 +548,13 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
             input.expected.push_back(expected);
         }
     }
+    return input;
+}
+}
+
+void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference)
+{
+    PixelInput input = ramp_input(swapRB);
     if (reference) {
         std::ifstream file(reference, std::ios::binary);
         const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
@@ -522,6 +636,46 @@ void check_pixel_quad_lod(ID3D12Device* device, const char* shader)
     MipDraw draw{0, 1};
     draw.partialQuad = true;
     draw_verified(device, shader, {std::move(top), std::move(next)}, {8, 8}, 0, {draw}, nullptr);
+}
+
+// The outputs case: 256 bytes of constants, then magic 'X2WO', the target count N (0..8), a depth flag (0 or 1) and a
+// zero word, N write masks (one word each, 0..15), N x 64 float4 references (target by target, texel by texel in
+// row-major order), and with the depth flag 64 binary32 depth references. N = 0 binds no render target, so a pixel
+// shader without outputs is drawn into the depth target alone; a case with neither is refused.
+void check_pixel_outputs(ID3D12Device* device, const char* path, const char* reference)
+{
+    PixelInput input = ramp_input(false);
+    std::ifstream file(reference, std::ios::binary);
+    const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
+    constexpr size_t header = 64 * sizeof(Word) + 4 * sizeof(UINT);
+    if (file.bad() || bytes.size() < header) throw BadCase("Expected 256 bytes of constants and an outputs header");
+    std::memcpy(input.constants.data(), bytes.data(), input.constants.size() * sizeof(Word));
+    std::array<UINT, 4> head;
+    std::memcpy(head.data(), bytes.data() + 64 * sizeof(Word), sizeof(head));
+    const auto [magic, count, depth, reserved] = head;
+    if (magic != 0x4f573258u || count > 8 || depth > 1 || reserved || (!count && !depth))
+        throw BadCase("Outputs header needs magic X2WO, at most 8 targets, a depth flag of 0 or 1 and a zero word");
+    const size_t texels = input.expected.size();
+    if (bytes.size() != header + count * (sizeof(UINT) + texels * sizeof(Color)) + depth * texels * sizeof(float))
+        throw BadCase("Outputs case size does not match its header");
+    PixelOutputs outputs;
+    outputs.masks.resize(count);
+    std::memcpy(outputs.masks.data(), bytes.data() + header, count * sizeof(UINT));
+    if (std::any_of(outputs.masks.begin(), outputs.masks.end(), [](UINT mask) { return mask > 15; }))
+        throw BadCase("A target write mask is not 0..15");
+    const char* at = bytes.data() + header + count * sizeof(UINT);
+    for (UINT t = 0; t < count; ++t, at += texels * sizeof(Color)) {
+        outputs.expected.emplace_back(texels);
+        std::memcpy(outputs.expected.back().data(), at, texels * sizeof(Color));
+    }
+    outputs.depth = depth != 0;
+    if (outputs.depth) {
+        outputs.expectedDepth.resize(texels);
+        std::memcpy(outputs.expectedDepth.data(), at, texels * sizeof(float));
+    }
+    std::vector<PixelInput> levels;
+    levels.push_back(std::move(input));
+    draw_verified(device, path, levels, {8, 8}, 0, {{0, levels.front().scale}}, nullptr, &outputs);
 }
 
 void check_dual_pixel(ID3D12Device* device, const char* shader, const char* capture, bool swap)

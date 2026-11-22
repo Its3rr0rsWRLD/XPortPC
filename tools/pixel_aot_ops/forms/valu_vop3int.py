@@ -114,7 +114,7 @@ def pair_destination(token, st):
     if not pair:
         raise ValueError(f"Expected a 64-bit vector register pair, got {token}")
     names = [f"v{n}" for n in registers(pair[1], pair[2], 2)]
-    if st.sample_dest.intersection(names):
+    if st.sample_dest.keys() & set(names):
         raise ValueError("Write overlaps an outstanding sample")
     return names
 

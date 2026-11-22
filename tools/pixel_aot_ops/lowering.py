@@ -9,7 +9,8 @@ from . import forms  # noqa: F401  (registers every form)
 
 class Lowering:
     """The state of one lower() call. Forms read and write it as `st`; the control-flow walk snapshots and restores
-    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_dest, vm_issued, exported, ended)."""
+    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_dest, vm_issued, exports, exported,
+    ended)."""
 
     def __init__(self, scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words):
         self.scalar = scalar  # SGPR name (and "m0", "vcc") -> tracked value, see registers.py
@@ -39,7 +40,10 @@ class Lowering:
         self.vm_issued = 0  # vector memory loads and samples issued on the path so far (the vmcnt issue order)
         self.flat_attrs = set()  # attributes read without interpolation
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
-        self.exported = False  # the color export has been emitted
+        self.exports = ()  # exports before the done export on this path: (output name, width, mask, HLSL local)
+        self.exported = False  # the done export has been emitted
+        self.layout = None  # the outputs the done export returns, the same on every path (forms/exp.py)
+        self.signature = None  # (return type, declaration) of main when it is not the preamble's float4 SV_Target0
         self.ended = False  # s_endpgm after the export
 
     @property
@@ -143,6 +147,8 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             raise ValueError("Instruction follows program end")
         if st.exported and line != "s_endpgm":
             raise ValueError("Unexpected instruction after color export")
+        if st.exports and not line.startswith("exp "):
+            raise ValueError("Only exports may follow an export that is not done")
         if st.ex == "true":
             dispatch(st, i, line)
         else:
@@ -165,6 +171,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
         st.lines[pos] = (note
                          + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
+    if st.signature:
+        returns, declaration = st.signature
+        pos = st.lines.index(next(line for line in st.lines if "main(" in line and "SV_Target0 {" in line))
+        st.lines[pos] = st.lines[pos].replace("float4 main(", f"{returns} main(", 1).replace(") : SV_Target0 {", ") {", 1)
+        if declaration:
+            st.lines.insert(pos, declaration)
     text = "\n".join([*st.lines, "}",""])
     if integer_export:
         if "return uint4(" not in text:
