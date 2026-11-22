@@ -400,6 +400,26 @@ def fp_operand(token, scalar, vector, pending, sample_pending):
     raise ValueError(f"Unsupported arithmetic operand {token}")
 
 
+def vector_u32(token, scalar, vector, pending, sample_pending):
+    """Read a 32-bit operand of an integer vector instruction as an unsigned HLSL expression."""
+    if re.fullmatch(r"v\d+", token):
+        if token in pending:
+            raise ValueError("Constant read before load completion")
+        value = vector.get(token)
+        if value is None:
+            raise ValueError(f"Read of unset vector register {token}")
+        if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
+            return value[1]
+        if not isinstance(value, str) or not value.startswith(("sample", "alu", "params[")):
+            raise ValueError(f"Expected a numeric register: {token}")
+        if sample_pending and value.startswith("sample"):
+            raise ValueError("Sample used before vmcnt wait")
+        return f"asuint({value})"
+    if re.fullmatch(r"s\d+", token) and token not in scalar:
+        raise ValueError(f"Read of unset scalar register {token}")
+    return scalar_u32(token, scalar, pending)
+
+
 # SDWA selections: (bit offset, width). A source selection is zero-extended, or sign-extended with sext();
 # a destination selection writes the low bits of the result into that field. Following the equivalences in
 # LLVM's SIPeepholeSDWA, UNUSED_PAD zeroes the other bits and UNUSED_PRESERVE keeps them from the destination.
@@ -673,6 +693,45 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             result = sdwa_dest(sdwa_source(word, src_sel, bool(sext)), dst_sel, unused, vector.get(dst))
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({result});")
+        elif m := match(r"v_cvt_f32_ubyte([0-3])(_e32|_e64)? (v\d+), ([^,\s]+)( clamp)?"):
+            # D.f32 = float((S0 >> 8N) & 0xff); clamp exists only in the e64 encoding.
+            byte, suffix, dst, src, clamp = m.groups()
+            if mask != "entry" or (clamp and suffix != "_e64"):
+                raise ValueError("Invalid conversion")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            word = vector_u32(src, scalar, vector, pending, sample_pending)
+            expression = f"float(({word} >> {8 * int(byte)}u) & 255u)"
+            if clamp:
+                expression = f"saturate({expression})"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = {expression};")
+        elif m := match(r"v_(and|or|xor|xnor|lshlrev|lshrrev|ashrrev)_(?:b32|i32)(?:_e32|_e64)? (v\d+), ([^,\s]+), ([^,\s]+)"):
+            # Bitwise operations and shifts. The shift forms take the count in the first source and mask it to
+            # five bits; the arithmetic shift replicates the sign of the second source.
+            op, dst, first, second = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid integer operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            a = vector_u32(first, scalar, vector, pending, sample_pending)
+            b = vector_u32(second, scalar, vector, pending, sample_pending)
+            expression = {
+                "and": f"({a} & {b})", "or": f"({a} | {b})", "xor": f"({a} ^ {b})", "xnor": f"(~({a} ^ {b}))",
+                "lshlrev": f"({b} << ({a} & 31u))", "lshrrev": f"({b} >> ({a} & 31u))",
+                "ashrrev": f"asuint(asint({b}) >> ({a} & 31u))",
+            }[op]
+            lines.append(f"    uint valu{i} = {expression};")
+            vector[dst] = ("uint", f"valu{i}")
+        elif m := match(r"v_(not|bfrev)_b32(?:_e32|_e64)? (v\d+), ([^,\s]+)"):
+            op, dst, src = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid integer operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            word = vector_u32(src, scalar, vector, pending, sample_pending)
+            lines.append(f"    uint valu{i} = {'~' if op == 'not' else 'reversebits'}({word});")
+            vector[dst] = ("uint", f"valu{i}")
         elif m := match(r"v_cvt_f32_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||([vs]\d+))( clamp)? dst_sel:DWORD dst_unused:UNUSED_(?:PAD|PRESERVE) src0_sel:(WORD_[01])"):
             # The SDWA form widens the selected half; modifiers apply after widening, as in the e64 form.
             dst, negate, bars, plain, clamp, src_sel = m.groups()
