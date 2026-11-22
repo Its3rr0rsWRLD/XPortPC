@@ -107,6 +107,7 @@ CPU_FIXTURES = {
     "avx_int_minmax_mul": "cpu_aot_avx_int_minmax_mul",
     "avx_cvt_cmp_test": "cpu_aot_avx_cvt_cmp_test",
     "avx_int_shifts_pack": "cpu_aot_avx_int_shifts_pack",
+    "vex_words": "cpu_aot_vex_words",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

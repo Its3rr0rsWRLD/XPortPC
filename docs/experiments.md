@@ -767,6 +767,51 @@ ctest --preset dev --no-tests=error -R '^cpu_native_reloc_free$' -V
 ctest --preset dev --no-tests=error -R '^cpu_native_mutation$' -V
 ```
 
+## VEX.128 16-bit packed-integer leaf functions
+
+The [translator](../tools/cpu_vex_aot.py) lifts Windows x64 leaf functions that use VEX.128 word forms. It supports:
+- `vpaddw`, `vpsubw`, `vpmaxsw`, `vpminsw`, `vpmulhw` and `vpavgw`;
+- `vpsraw`, `vpsllw` and `vpsrlw` with an immediate count;
+- `vpunpcklbw`, `vpunpckhbw`, `vpunpcklwd` and `vpunpckhwd`;
+- `vpackuswb`;
+- the 16-byte moves `vmovdqu` and `vmovdqa`, the logic ops `vpxor`, `vpand` and `vpor`, and `vzeroupper`.
+
+The ABI belongs to this profile: RCX and RDX hold the addresses of two 16-byte inputs, R8 the address of a 16-byte output, and no return bits are defined. Each XMM register becomes a 16-byte value and each form an explicit per-lane loop, so the generated C++ states the wraparound, the unsigned saturation of signed words in `vpackuswb`, the shift-count limits and the `vpavgw` rounding instead of using intrinsics. Memory operands must be exactly `[RCX]`, `[RDX]` or `[R8]` with a 16-byte access, and stores go only to `[R8]`. Only VEX encodings and the volatile XMM0-XMM5 are accepted. Any other instruction, an EVEX form such as a masked `vpaddw`, a legacy SSE encoding, XMM6-XMM15, a VEX.256 operand or another operand shape is rejected with its RVA. Decoding uses iced-x86, and function bounds come from `cpu_leaf_aot.bounded_code`.
+
+```powershell
+cmake --build --preset dev --target cpu_vex_words_original_lifted cpu_vex_words_altered_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_vex_words$' -V
+```
+
+The [fixture](../tests/cpu/vex_words.asm) has five functions. The test runs each through the native and lifted DLLs on the same 4096 input pairs:
+- every pairing of eight edge words, including 0x7fff, 0x8000, 0xffff and 0x00ff, broadcast to all lanes;
+- the edge words rotated across lanes;
+- seeded random lanes.
+
+Each call runs in one 16-byte-aligned arena in which the two inputs and the output are separated by 0xcc guard zones. The whole arena must match bit for bit, and the native call must leave everything outside its output unchanged.
+
+**Alignment.** `vmovdqu` accepts any address, and the four functions that use only `vmovdqu` also match on buffers 8 bytes off alignment. `vmovdqa` requires 16-byte alignment. `aligned_ops` is called only with aligned buffers, because the generated C++ does not check the precondition that the native instruction would fault on.
+
+**Aliases.** The output may alias either input exactly. Reads and the store then happen in program order, each as one 16-byte copy. With the output aliasing A and then B, and with RCX equal to RDX, all five functions match on 512 pairs. `store_reload` stores, reads the inputs again and stores a second result; with the output aliasing an input, its result differs from the non-aliased one in 955 of these cases, so the order is observed. Partial overlaps are not tested.
+
+**Controls.** A second fixture build replaces one `vpsraw` with `vpsrlw` in `shift_edges`. Its lifted DLL matches its own native build and differs from the original in 4044 of 4096 outputs, while the other functions are unchanged. Translation rejects three patched copies: a VEX.256 load, a VEX.256 store, which uses a three-byte VEX prefix because of R8, and a `vpaddw` turned into `vpaddd`. It also rejects eight hand-encoded bodies, each first checked against its iced disassembly: an EVEX `vpaddw xmm0{k1}`, a legacy `paddw`, `xmm6` as destination and as source, `[rcx+10h]`, `[rax]`, a store to `[rcx]` and `vpsraw` with an XMM count.
+
+Sixteen mutations of the translator each fail the test:
+- `vpavgw` without rounding;
+- `vpmulhw` keeping bit 15;
+- `vpsraw` counts above 15 not clamped;
+- `vpsllw` and `vpsrlw` counts above 15 not cleared;
+- `vpackuswb` without saturation;
+- `vpunpckhbw` and `vpunpckhwd` reading the low half;
+- `vpmaxsw` comparing unsigned;
+- either YMM check removed;
+- the VEX-encoding check removed;
+- either nonvolatile-register check removed;
+- stores deferred to the end of the function;
+- input reads cached.
+
+Only the alias checks catch the last two.
+
 ## Switch dispatch through jump tables
 
 Compilers lower a dense `switch` to a bounds check and an indirect `JMP` through a table of 32-bit entries. The [jump-table translator](../tools/cpu_switch_aot.py) recognizes the two x64 layouts in common use. MSVC stores image-relative entries and loads them through a register holding `__ImageBase`. LLVM stores signed offsets from the table and adds the table address. The translator reads the table from the PE, then emits a C++ `switch` whose cases jump to labels at the decoded targets. The host compiler builds its own dispatch from that switch.
