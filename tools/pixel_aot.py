@@ -811,6 +811,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     samples = 0
     sample_pending = False
     sample_dest = set()
+    flat_attrs = set()
     exported = False
     ended = False
     for i, line in enumerate(instructions):
@@ -1384,6 +1385,50 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             if mask != "entry" or sample_pending or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair):
                 raise ValueError("Unsupported pack operand")
             vector[dst] = tuple(pair)
+        elif m := match(r"v_cvt_pkrtz_f16_f32_e64 (v\d+), ([^, ]+), ([^, ]+?)( clamp)?"):
+            # The VOP3 form of the pack above, with the same operand rules: numeric sources only, entry mask, no pending
+            # sample. A source may also be an SGPR holding a numeric word, an inline constant or a literal, and carries
+            # neg and abs, which act on the binary32 value before the conversion (the packed halves are not modified).
+            # clamp is refused: the only evidence of its effect is LLVM issue 60591, which says the hardware ignores
+            # clamp and omod on this instruction on GFX10.3, a single report not measured on gfx1013 and not in the
+            # ISA text. omod and op_sel do not match this grammar. https://github.com/llvm/llvm-project/issues/60591
+            dst, *tokens, clamp = m.groups()
+            if clamp:
+                raise ValueError("clamp on v_cvt_pkrtz_f16_f32_e64 is refused: its hardware behaviour is unverified "
+                                 "(LLVM issue 60591 reports it is ignored on GFX10.3)")
+            if mask != "entry" or sample_pending or dst in sample_dest:
+                raise ValueError("Unsupported pack operand")
+            pair = []
+            for n, token in enumerate(tokens):
+                for register in re.findall(r"[vs]\d+", token):
+                    if tracked_word((vector if register.startswith("v") else scalar).get(register)) is None:
+                        raise ValueError(f"Unsupported pack operand {register}")
+                lines.append(f"    precise float alu{i}_{n} = {fp_operand(token, scalar, vector, pending, sample_pending)};")
+                pair.append(f"alu{i}_{n}")
+            vector[dst] = tuple(pair)
+        elif m := match(r"v_interp_mov_f32(?:_e32|_e64)? (v\d+), p(10|20|0), attr(\d+)\.([xyzw])"):
+            # Copies one attribute channel without interpolation. The parameter is P0 (the first vertex's value), P10 =
+            # P1 - P0 or P20 = P2 - P0, the terms of P0 + I * P10 + J * P20 that v_interp_p1 and p2 evaluate, selected by
+            # p0, p10 and p20, and read from the attribute slot that m0 addresses, so m0 must hold the interpolation
+            # base as for those. Parameter selection: LLVM AMDGPU gfx1030 operand table ("Interpolation parameter to
+            # read"); semantics: CLRX GCN VINTRP page, V_INTERP_MOV_F32 ("Move parameter value into VDST").
+            # A flat attribute is an input declared nointerpolation; GetAttributeAtVertex (shader model 6.1) reads its
+            # three vertex values. Attribute N is TEXCOORDN. Attribute 0 is the interpolated TEXCOORD0 read by
+            # v_interp_p1 and p2 and cannot also be flat.
+            dst, param, attr, channel = m.groups()
+            if mask != "quad" or scalar.get("m0") != "interp_base":
+                raise ValueError("Unknown interpolation context")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            if not 1 <= int(attr) <= 31:
+                raise ValueError("Only attributes 1 to 31 can be read without interpolation")
+
+            def vertex(k):
+                return f"GetAttributeAtVertex(attr{attr}, {k}).{channel}"
+            value = {"0": vertex(0), "10": f"({vertex(1)} - {vertex(0)})", "20": f"({vertex(2)} - {vertex(0)})"}[param]
+            flat_attrs.add(int(attr))
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = {value};")
         elif m := match(r"exp mrt0,? (v\d+), \1, (v\d+), \2 done compr vm"):
             pairs = [vector[v] for v in m.groups()]
             if mask != "entry" or exported or not all(isinstance(p, tuple) and len(p)==2 and
@@ -1501,6 +1546,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if uses_memory:
         pos = lines.index(PREAMBLE)
         lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS]
+    if flat_attrs:
+        pos = lines.index(PREAMBLE)
+        # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.
+        inputs = "".join(f", nointerpolation float4 attr{n} : TEXCOORD{n}" for n in sorted(flat_attrs))
+        lines[pos] = ("// Shader model 6.1 or later: GetAttributeAtVertex.\n"
+                      + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
     return "\n".join([*lines, "}",""])
 
 
