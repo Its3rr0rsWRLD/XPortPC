@@ -290,4 +290,33 @@ cmov_read PROC
     cmovne eax, DWORD PTR [r8]
     ret
 cmov_read ENDP
+
+; JAE bounds three aliases of a far relative target. The default precedes the guard.
+select_rel_edges PROC FRAME
+    .endprolog
+    jmp edges_guard
+edges_default:
+    not edx
+    mov eax, edx
+    mov DWORD PTR [r8], eax
+    ret
+edges_guard:
+    cmp ecx, 3
+    jae edges_default
+    mov ecx, ecx
+    lea r11, edges_table           ; Alternate load base for the rejection control.
+    lea r9, edges_table
+    movsxd rcx, DWORD PTR [r9+rcx*4]
+    add rcx, r9
+    jmp rcx
+edges_case:
+    mov eax, edx
+    mov DWORD PTR [r8], eax
+    ret
+    DB 8000h DUP (0CCh)
+    ALIGN 4
+edges_table:
+    DD edges_case - edges_table, edges_case - edges_table, edges_case - edges_table
+    DD 0                          ; An erroneous fourth entry targets the claimed table.
+select_rel_edges ENDP
 END
