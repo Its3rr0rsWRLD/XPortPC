@@ -48,7 +48,7 @@ def require_local_pointer(previous, register, call, jump_targets):
         raise ValueError(f"expected aligned local trace pointer before call at {call.ip:#x}")
 
 
-def lift_internal_calls(pe, names, entry_interval, bind_import):
+def lift_internal_calls(pe, names, entry_interval, bind_provider):
     pending = list(names)
     intervals = [entry_interval]
     functions = {}
@@ -67,8 +67,7 @@ def lift_internal_calls(pe, names, entry_interval, bind_import):
             raise ValueError(f"overlapping internal call target at {address:#x}")
         intervals.append((address, end))
         source, edge = lift_body(address, native, caller=True, name=names[address],
-                                 bind_import=bind_import, bind_direct=bind_direct,
-                                 allow_distinct_imports=True)
+                                 bind_import=bind_provider, allow_distinct_imports=True, bind_direct=bind_direct)
         functions[address] = source
         if edge[0] == "direct":
             graph.add(address, *edge[1])
@@ -81,8 +80,7 @@ def lift_internal_calls(pe, names, entry_interval, bind_import):
         raise ValueError("recursive internal calls are outside the entry profile") from exc
 
 
-def translate(image, io_provider, mix_provider, extra_providers=(), *, entry_export=None,
-              frame_selector=False):
+def translate(image, io_provider, mix_provider, extra_providers=(), *, entry_export=None, frame_selector=False):
     providers = {"mix_args": mix_provider}
     for provider, symbol in extra_providers:
         validate_provider_symbol(symbol, providers)
@@ -200,6 +198,6 @@ if __name__ == "__main__":
     if args.output.suffix.lower() != ".cpp":
         parser.error("choose a .cpp output")
     providers = [(Path(path), symbol) for path, symbol in args.provider]
-    source = translate(args.image, args.io_provider, args.mix_provider, providers,
-                       entry_export=args.entry_export, frame_selector=args.frame_selector)
+    source = translate(args.image, args.io_provider, args.mix_provider, providers, entry_export=args.entry_export,
+                       frame_selector=args.frame_selector)
     args.output.write_text(source, encoding="ascii")

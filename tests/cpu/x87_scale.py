@@ -53,7 +53,7 @@ CONTROLS = {
     # The result rounds to 53 significand bits, as if the precision control applied.
     "pc53": (re.compile(r"x87_scale_format\{64, "), "x87_scale_format{53, "),
     # A result below the normal range rounds toward zero.
-    "chop": (re.compile(r"x87_scale_format, x87_rc\);  // scale round"), "x87_scale_format, 3);  // scale round"),
+    "chop": (re.compile(r"x87_scale_format, x87_rounding\(cw\)\);  // scale round"), "x87_scale_format, 3);  // scale round"),
     # A negative non-integer scale rounds toward negative infinity instead of toward zero.
     "floor": (re.compile(r"n = x87_sign\(b\) \? -magnitude : magnitude;  // scale truncate"),
               "n = x87_sign(b) ? -magnitude - (y.e < 63 && (y.e < 0 || (y.sig << (y.e + 1)) != 0)) : magnitude;"
@@ -64,7 +64,8 @@ CONTROLS = {
     # A zero scaled by +inf stays zero instead of giving the indefinite.
     "zeroinf": (re.compile(r"return x87_is_zero\(a\) \? x87_indefinite : "), "return x87_is_zero(a) ? a : "),
     # The operands are exchanged: ST(1) scaled by ST(0).
-    "swap": (re.compile(r"x87_scale\(x87_slot\[(\d)\], x87_slot\[(\d)\]\)"), r"x87_scale(x87_slot[\2], x87_slot[\1])"),
+    "swap": (re.compile(r"x87_scale\(x87_slot\[(\d)\], x87_slot\[(\d)\], x87_cw\)"),
+             r"x87_scale(x87_slot[\2], x87_slot[\1], x87_cw)"),
 }
 
 

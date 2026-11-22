@@ -54,7 +54,7 @@ CONTROLS = {
     # The product rounds in the binary64 exponent range, as host double arithmetic would.
     "double": (base.ARITH, "x87_arith{53, 1023, 0x7fe}"),
     # The low 64 bits of the 128-bit product are dropped before rounding.
-    "nolow": (re.compile(r"x87_round\(sign, e, hi, lo, x87_arith"), "x87_round(sign, e, hi, 0, x87_arith"),
+    "nolow": (re.compile(r"x87_round\(sign, e, hi, lo, x87_format"), "x87_round(sign, e, hi, 0, x87_format"),
     # The product takes the sign of the first operand.
     "sign": (re.compile(r"const bool sign = x87_sign\(a\) != x87_sign\(b\);"), "const bool sign = x87_sign(a);"),
     # Infinity times zero gives infinity instead of the indefinite.
@@ -331,7 +331,7 @@ def check_rejections():
         "fmulp with one value": (attempt(f"{fld} de c9 {fstp} c3"), "x87 stack underflow"),
         "fldenv": (attempt(f"{fld} d9 21 {fstp} c3"), "unsupported x87 operation"),
         "fdecstp": (attempt(f"{fld} d9 f6 {fstp} c3"), "unsupported x87 operation"),
-        "fcomp st(1)": (attempt(f"{fld} {fld} d8 d9 {fstp} c3"), "unsupported x87 operation"),
+        "fprem1": (attempt(f"{fld} {fld} d9 f5 {fstp} {fstp} c3"), "unsupported x87 operation"),
         "fincstp": (attempt(f"{fld} d9 f7 {fstp} c3"), "unsupported x87 operation"),
     }
     for case, (message, needle) in rejected.items():

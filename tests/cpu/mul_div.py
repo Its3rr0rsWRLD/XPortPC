@@ -186,13 +186,16 @@ def check(native_path, lifted_path):
         ("idiv64_op", 0x8000000000000000, 0xffffffffffffffff, 0xffffffffffffffff),
     )
     for name, lo_u, hi_u, den_u in de_cases:
+        exceptions = []
         for lib, label in ((native, "native"), (lifted, "lifted")):
             try:
                 getattr(lib, name)(lo_u, hi_u, den_u, ctypes.byref(out1))
-            except OSError:
-                pass
+            except OSError as error:
+                exceptions.append(error.args)
             else:
                 raise AssertionError(f"{label} {name}({lo_u:#x}, {hi_u:#x}, {den_u:#x}) failed to raise #DE")
+        if exceptions[0] != exceptions[1]:
+            raise AssertionError(f"{name}: native and lifted divide errors differ: {exceptions}")
         cases += 1
 
     print(f"{cases} MUL, DIV, IDIV, XADD, and CMPXCHG cases (including xadd [rcx],rcx and #DE faults) matched native and translated DLLs")

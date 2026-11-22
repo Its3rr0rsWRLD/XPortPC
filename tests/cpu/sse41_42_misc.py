@@ -1,5 +1,6 @@
 """Differential check for SSSE3/SSE4.1/SSE4.2 integer, insert/extract, ptest, and crc32 lowering."""
 import ctypes
+import struct
 import sys
 from pathlib import Path
 
@@ -16,13 +17,13 @@ ALL_EXPORTS = (
     "pextrb_op", "pextrw_op", "pextrd_op", "pextrq_op",
     "pinsrb_op", "pinsrw_op", "pinsrd_op", "pinsrq_op",
     "pmaddubsw_op", "pmulhrsw_op", "phminposuw_op", "ptest_op",
-    "mpsadbw_op", "movntdqa_op", "pcmpgtq_op",
+    "mpsadbw_op", "pcmpgtq_op",
     "crc32_8_op", "crc32_32_op", "crc32_64_op",
 )
 VEC_EXPORTS = (
     "pinsrb_op", "pinsrw_op", "pinsrd_op", "pinsrq_op",
     "pmaddubsw_op", "pmulhrsw_op", "phminposuw_op",
-    "mpsadbw_op", "movntdqa_op", "pcmpgtq_op",
+    "mpsadbw_op", "pcmpgtq_op",
 )
 
 CPUID_HELPER = """#include <intrin.h>
@@ -48,7 +49,18 @@ def emit(native_dll: Path, output_cpp: Path) -> None:
     output_cpp.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
-def check_controls() -> None:
+def check_controls(native_dll: Path) -> None:
+    with pefile.PE(str(native_dll), fast_load=True) as pe:
+        ranges = function_ranges(pe, export_rva(pe, "movntdqa_op"))
+        movntdqa = [ins for lo, hi in ranges for ins in region(pe, lo, hi)]
+    try:
+        lower(movntdqa, [], {}, {}, {})
+    except ValueError as error:
+        if "unsupported MOVNTDQA memory contract" not in str(error):
+            raise
+    else:
+        raise AssertionError("expected MOVNTDQA memory form to be rejected")
+
     # 64-bit MMX pmulhrsw mm0, mm1 (0F 38 0B C1) followed by ret must be rejected.
     mmx = list(Decoder(64, b"\x0f\x38\x0b\xc1\xc3", ip=0x1000))
     try:
@@ -60,7 +72,7 @@ def check_controls() -> None:
 
 
 def check(native_dll: Path, lifted_dll: Path) -> None:
-    check_controls()
+    check_controls(native_dll)
     lifted = ctypes.CDLL(str(lifted_dll))
     lifted.host_has_sse42.restype = ctypes.c_uint32
     if not lifted.host_has_sse42():
@@ -86,6 +98,13 @@ def check(native_dll: Path, lifted_dll: Path) -> None:
     b_ptr = ctypes.addressof(b_buf)
     out_n = (ctypes.c_ubyte * 16)()
     out_l = (ctypes.c_ubyte * 16)()
+
+    # Keep the authored aligned native control while translation rejects this form.
+    native.movntdqa_op.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64]
+    native.movntdqa_op.restype = ctypes.c_uint64
+    native.movntdqa_op(a_ptr, 0, ctypes.addressof(out_n))
+    if bytes(out_n) != a_bytes:
+        raise AssertionError("native aligned MOVNTDQA did not copy all 16 bytes")
 
     cases = 0
     for name in VEC_EXPORTS:

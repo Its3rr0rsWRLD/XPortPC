@@ -10,3 +10,4 @@ EXPORTS
     fcomi_m64
     fucomi_m32
     two_compares
+    add_fcomi_of

@@ -6,3 +6,7 @@ EXPORTS
     classify_ss
     classify_sd
     round_trip
+    zero_xorps
+    zero_pxor
+    zero_xorpd
+    probe_ss

@@ -14,7 +14,7 @@ from ffx_version_query import INTEGER_HEADER, lower, region
 
 U64 = ctypes.c_uint64
 TWO_ARG = ("bcast_i128", "extract_i128_hi", "permq256", "permpd256")
-THREE_ARG = ("insert_i128_hi", "pblendd256", "perm2i128_hi", "perm2i128_zero", "permd256", "permps256")
+THREE_ARG = ("insert_i128_hi", "pblendd256", "pblendd256_mem", "pblendd256_mem_zero", "perm2i128_hi", "perm2i128_zero", "permd256", "permps256")
 
 
 def emit(image, output):
@@ -100,6 +100,42 @@ def check(native_path, lifted_path):
     b_d = struct.unpack("<8I", b_bytes)
     want_blend = struct.pack("<8I", *(b_d[i] if (0xa5 >> i) & 1 else a_d[i] for i in range(8)))
     run3("pblendd256", a_buf, b_buf, want_blend)
+
+    want_mem_blend = struct.pack("<8I", *(b_d[i] if (0x05 >> i) & 1 else a_d[i] for i in range(8)))
+    run3("pblendd256_mem", a_buf, b_buf, want_mem_blend)
+    run3("pblendd256_mem_zero", a_buf, b_buf, a_bytes)
+
+    # Both selected lanes are in the readable half. The full operand still crosses the page.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.VirtualAlloc.restype = ctypes.c_void_p
+    kernel32.VirtualProtect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_void_p]
+    kernel32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+    page = 4096  # Windows x64 fixture page size
+    base = kernel32.VirtualAlloc(None, 2 * page, 0x3000, 0x04)
+    if not base:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        old = ctypes.c_uint32()
+        if not kernel32.VirtualProtect(base + page, page, 0x01, ctypes.byref(old)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        pointer = base + page - 16
+        ctypes.memmove(pointer, b_bytes, 16)
+        for name, source in (("pblendd256_mem", pointer), ("pblendd256_mem_zero", base + page)):
+            for lib, label in ((native, "native"), (lifted, "lifted")):
+                ctypes.memset(dst_buf, 0xaa, 32)
+                try:
+                    getattr(lib, name)(a_buf, source, dst_buf)
+                except OSError as exc:
+                    if "access violation reading" not in str(exc):
+                        raise
+                else:
+                    raise AssertionError(f"{label} {name} failed to read masked-off memory")
+                if bytes(dst_buf) != bytes([0xaa]) * 32:
+                    raise AssertionError(f"{label} {name} wrote output before the fault")
+    finally:
+        if not kernel32.VirtualFree(base, 0, 0x8000):
+            raise ctypes.WinError(ctypes.get_last_error())
 
     run3("perm2i128_hi", a_buf, b_buf, a_bytes[16:32] + b_bytes[16:32])
     run3("perm2i128_zero", a_buf, b_buf, b_bytes[:16] + b"\x00" * 16)

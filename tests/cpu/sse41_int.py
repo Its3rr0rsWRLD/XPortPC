@@ -5,6 +5,7 @@ import struct
 import sys
 
 import pefile
+from iced_x86 import Decoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_leaf_aot import export_rva
@@ -40,6 +41,18 @@ def emit(image, output):
         code = lower(body, ["rcx = a; rdx = b; r8 = mask; r9 = dst;"], {}, {}, {})
         parts.append(f'extern "C" __declspec(dllexport) word pblendvb_op(word a, word b, word mask, word dst) {{\n{code}\n}}\n')
     output.write_text("".join(parts), encoding="ascii")
+
+
+def check_untracked_source():
+    # pminsd xmm0, xmm3; ret. The profile only tracks xmm0 through xmm2.
+    body = list(Decoder(64, bytes.fromhex("66 0f 38 39 c3 c3"), ip=0x1000))
+    try:
+        lower(body, [], {}, {}, {})
+    except ValueError as exc:
+        if "unsupported query operation at 0x1000" not in str(exc):
+            raise AssertionError(f"unexpected SSE4.1 rejection: {exc}") from exc
+    else:
+        raise AssertionError("accepted an untracked XMM source")
 
 
 def load_lib(path):
@@ -107,6 +120,7 @@ if __name__ == "__main__":
     if mode == "emit":
         emit(Path(native), Path(other))
     elif mode == "check":
+        check_untracked_source()
         check(native, other)
     else:
         raise ValueError(mode)

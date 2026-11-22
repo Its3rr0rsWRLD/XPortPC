@@ -224,7 +224,7 @@ def fixture_status(results, tests):
     return "skip" if "skip" in states else "fail" if "fail" in states else "absent"
 
 
-def summarize(reference, fixtures, select):
+def summarize(reference, fixtures, select, *, include_gaps=False):
     """fixtures: {name: (mnemonics, status)}. Returns covered/known counts and per-group detail."""
     covered = set().union(set(), *(select(m, reference) for m, s in fixtures.values() if s == "pass"))
     skipped = set().union(set(), *(select(m, reference) for m, s in fixtures.values() if s == "skip")) - covered
@@ -236,19 +236,30 @@ def summarize(reference, fixtures, select):
         g["covered"] += (group, form) in covered
     unmatched = sorted(m for m in set().union(set(), *(m for m, _ in fixtures.values()))
                        if not select({m}, reference))
-    return {"covered": len(covered), "total": len(reference), "known_in_fixtures": len(known),
+    result = {"covered": len(covered), "total": len(reference), "known_in_fixtures": len(known),
             "blocked_by_skip": sorted(f"{g} {f}" for g, f in skipped), "groups": groups,
             "fixture_forms_not_in_reference": unmatched}
+    if include_gaps:
+        gaps = []
+        for form in sorted(reference - covered):
+            evidence = "unobserved"
+            if form in skipped:
+                evidence = "skipped"
+            elif form in known:
+                evidence = "observed_without_pass"
+            gaps.append((*form, evidence))
+        result["gaps"] = gaps
+    return result
 
 
-def measure(results, root=ROOT, records=None):
+def measure(results, root=ROOT, records=None, *, gaps_for=None):
     """results: {test: status}. root: the repository whose tests/cpu is scanned (the check passes a
     temporary one). records: {test: accepted gfx mnemonics} from read_records."""
     records = records or {}
     cpu, cpu_tests = x64_fixtures(results, root, records)
     shaders = {test: (forms, fixture_status(results, [test]))
                for test, forms in records.items() if test not in cpu_tests}
-    return _measure(results, cpu, shaders)
+    return _measure(results, cpu, shaders, gaps_for=gaps_for)
 
 
 def x64_fixtures(results, root=ROOT, records=None):
@@ -277,7 +288,7 @@ def x64_fixtures(results, root=ROOT, records=None):
     return cpu, cpu_tests
 
 
-def _measure(results, cpu, shaders):
+def _measure(results, cpu, shaders, *, gaps_for=None):
     x64 = load_reference("x64_zen2.tsv")
     fixtures = {name: status for name, (_, status) in {**cpu, **shaders}.items()}
     return {
@@ -286,9 +297,9 @@ def _measure(results, cpu, shaders):
         "fixtures": fixtures,
         "unclassified": sorted(name for name, status in fixtures.items() if status == "unclassified"),
         "shader_records": sorted(shaders),
-        "x64_zen2": summarize(x64, cpu, x64_forms),
-        "gfx1013": summarize(load_reference("gfx1013.tsv"), shaders, gfx_forms),
-        "gfx1030": summarize(load_reference("rdna2.tsv"), shaders, gfx_forms),
+        "x64_zen2": summarize(x64, cpu, x64_forms, include_gaps=gaps_for == "x64_zen2"),
+        "gfx1013": summarize(load_reference("gfx1013.tsv"), shaders, gfx_forms, include_gaps=gaps_for == "gfx1013"),
+        "gfx1030": summarize(load_reference("rdna2.tsv"), shaders, gfx_forms, include_gaps=gaps_for == "gfx1030"),
     }
 
 
@@ -315,13 +326,22 @@ def main(argv):
     parser.add_argument("--json", type=Path, help="also write the full result, per group, as JSON")
     parser.add_argument("--rerun", type=Path, action="append", default=[],
                         help="JUnit of a `ctest --rerun-failed` after the main run; repeatable, later wins")
+    parser.add_argument("--gaps", choices=("x64_zen2", "gfx1013", "gfx1030"),
+                        help="print uncovered forms for one architecture as tab-separated group, form and evidence")
     args = parser.parse_args(argv)
     results, window = merge_reruns(*read_results(args.junit), args.rerun)
-    m = measure(results, records=read_records(args.records, window))
+    m = measure(results, records=read_records(args.records, window), gaps_for=args.gaps)
+    if args.gaps:
+        gaps = m[args.gaps].pop("gaps")
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(m, indent=1) + "\n", encoding="utf-8")
-    print(report(m))
+    if args.gaps:
+        print("group\tform\tevidence")
+        for row in gaps:
+            print("\t".join(row))
+    else:
+        print(report(m))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_crypto_aes_pclmul
 ; Source-owned differential fixture for 14 legacy and 128-bit VEX AES-NI and PCLMULQDQ instructions.
 .code
 

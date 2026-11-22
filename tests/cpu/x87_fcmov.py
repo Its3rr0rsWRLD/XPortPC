@@ -380,9 +380,11 @@ def check_rejections():
     fld, fstp, cmp = "db 29", "db 3a", "8b 41 30 3b 41 34"  # fld/fstp tbyte ptr [rcx]/[rdx]; mov/cmp eax
     two, out = f"{fld} {fld}", f"{fstp} {fstp} c3"
     undefined = "which no instruction defines on every path"
+    parity = "reads PF, which the integer lowering models only after"
     rejected = {
-        "fcmovu st, st(1)": (attempt(f"{two} {cmp} da d9 {out}"), "unsupported x87 operation"),
-        "fcmovnu st, st(1)": (attempt(f"{two} {cmp} db d9 {out}"), "unsupported x87 operation"),
+        # CMP writes PF last, and the integer lowering does not model its PF.
+        "fcmovu st, st(1) after cmp": (attempt(f"{two} {cmp} da d9 {out}"), parity),
+        "fcmovnu st, st(1) after cmp": (attempt(f"{two} {cmp} db d9 {out}"), parity),
         "fcmovb st, st(1) with one value": (attempt(f"{fld} {cmp} da c1 {fstp} c3"), "x87 stack underflow"),
         "fcmove st, st(2) with two values": (attempt(f"{two} {cmp} da ca {out}"), "x87 stack underflow"),
         "fcmovnbe on an empty stack": (attempt(f"{cmp} db d1 c3"), "x87 stack underflow"),

@@ -377,15 +377,25 @@ int main(int argc, char** argv)
 {
     if (argc < 3) return 2;
     const std::string_view operation = argv[2];
-    if (operation == "--check-pixel-quad-lod") {
+    if (operation == "--check-pixel-batch") {
+        if (argc < 5) return 2;
+    } else if (operation == "--compute-to-pixel") {
+        if (argc != 6 && argc != 7) return 2;
+    } else if (operation == "--check-pixel-quad-lod") {
         if (argc != 4) return 2;
-    } else if (operation == "--mesh-entry" || operation == "--mesh-indexed") {
+    } else if (operation == "--mesh-entry" || operation == "--mesh-indexed" || operation == "--mesh-textured") {
+        if (argc != 6 && !(operation == "--mesh-entry" && argc == 7 &&
+            (std::string_view(argv[6]) == "ab" || std::string_view(argv[6]) == "ba"))) return 2;
+    } else if (operation == "--mesh-entry-table") {
+        if (argc != 6 && (argc != 7 || std::string_view(argv[6]) != "--swap")) return 2;
+    } else if (operation == "--mesh-depth-pair") {
         if (argc != 6) return 2;
     } else if (operation == "--check-bc7-tail") {
         if (argc < 6) return 2;
     } else if ((operation == "--depth-mask" || operation == "--depth-mask-swapped")) {
         if (argc != 6) return 2;
-    } else if ((operation == "--compute-root-file" || operation == "--ffx-immediate-conversion")) {
+    } else if (operation == "--compute-root-file" || operation == "--ffx-immediate-conversion" ||
+               operation == "--spirv-address-window") {
         if (argc != 4) return 2;
     } else {
         if (argc != 3 && argc != 5 && argc != 6) return 2;
@@ -433,9 +443,44 @@ int main(int argc, char** argv)
             std::puts("driver=unavailable via DXGI");
         }
         if (debug) check(device.As(&messages), "Read debug queue");
+        if (operation == "--check-pixel-batch") {
+            bool failed = false;
+            for (int i = 4; i < argc; ++i) {
+                const char* status = "pass";
+                std::fprintf(stderr, "case=%d path=%s\n", i - 4, argv[i]);
+                try {
+                    check(device->GetDeviceRemovedReason(), "Pixel batch device");
+                    check_translated_pixel(device.Get(), argv[3], false, argv[i]);
+                } catch (const PixelMismatch& e) {
+                    std::fprintf(stderr, "%s\n", e.what());
+                    status = "mismatch";
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "%s\n", e.what());
+                    status = "error";
+                }
+                if (report_debug_errors(messages.Get()) || FAILED(device->GetDeviceRemovedReason()))
+                    status = "error";
+                if (messages) messages->ClearStoredMessages();
+                std::printf("case=%d status=%s\n", i - 4, status);
+                failed |= std::string_view(status) != "pass";
+            }
+            return failed ? 1 : 0;
+        }
         if (argc == 3 && needs_cs_6_5(operation) && !supports_cs_6_5(device.Get())) return 77;
         if (argc == 3 && (operation == "--compute-root" || operation == "--compute-tables")) {
             check_compute(device.Get(), operation == "--compute-tables");
+        } else if (operation == "--spirv-address-window") {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS1 options{};
+            check(check_feature(device.Get(), D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options)),
+                  "Query 64-bit shader integer support");
+            D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_6};
+            auto model_hr = check_feature(device.Get(), D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
+            if (model_hr != E_INVALIDARG) check(model_hr, "Query address-window shader model");
+            if (!options.Int64ShaderOps || model_hr == E_INVALIDARG || model.HighestShaderModel < D3D_SHADER_MODEL_6_6) {
+                std::puts("skip: address window fixture requires SM 6.6 and 64-bit shader integer operations");
+                return 77;
+            }
+            check_spirv_window(device.Get(), argv[3]);
         } else if (argc == 4 && (operation == "--compute-root-file" || operation == "--ffx-immediate-conversion")) {
             check_compute_file(device.Get(), argv[3], operation == "--ffx-immediate-conversion");
         } else if (argc == 5 && operation == "--compute-store-case") {
@@ -460,6 +505,8 @@ int main(int argc, char** argv)
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
         } else if (argc == 5 && operation == "--check-compute-case") {
             check_translated_compute(device.Get(), argv[3], argv[4]);
+        } else if (operation == "--compute-to-pixel") {
+            check_compute_to_pixel(device.Get(), argv[3], argv[4], argv[5], argc == 7 ? argv[6] : nullptr);
         } else if (argc == 5 && operation == "--check-pixel-case-rg") {
             check_translated_pixel(device.Get(), argv[3], false, argv[4],
                                    D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN);
@@ -488,14 +535,27 @@ int main(int argc, char** argv)
             check_texture_mips(device.Get());
         } else if (argc == 3 && operation == "--bvh-root-roundtrip") {
             check_bvh_root_roundtrip(device.Get());
-        } else if (argc == 3 && operation == "--bvh-differential") {
-            if (!check_bvh_differential(device.Get())) return 77;
+        } else if (argc == 3 && (operation == "--bvh-differential" || operation == "--bvh-differential-pipeline")) {
+            if (!check_bvh_differential(device.Get(), operation == "--bvh-differential-pipeline")) return 77;
         } else if (argc == 3 && operation == "--bvh-hits") {
             check_bvh_hits(device.Get());
         } else if (argc == 3 && operation == "--dxr-update") {
             if (!check_dxr_update(device.Get())) return 77;
         } else if (operation == "--mesh-entry" || operation == "--mesh-indexed") {
-            if (!check_mesh_entry_draw(device.Get(), argv[3], argv[4], argv[5], operation == "--mesh-indexed")) return 77;
+            auto binding = MeshConstantBinding::root;
+            if (argc == 7)
+                binding = argv[6][0] == 'b' ? MeshConstantBinding::swapped_root_pair : MeshConstantBinding::root_pair;
+            if (!check_mesh_entry_draw(device.Get(), argv[3], argv[4], argv[5],
+                                       operation == "--mesh-indexed", binding)) return 77;
+        } else if (operation == "--mesh-entry-table") {
+            const auto binding = argc == 7 ? MeshConstantBinding::swapped_table : MeshConstantBinding::table;
+            if (!check_mesh_entry_draw(device.Get(), argv[3], argv[4], argv[5], false, binding)) return 77;
+        } else if (operation == "--mesh-textured") {
+            if (!check_mesh_entry_draw(device.Get(), argv[3], argv[4], argv[5],
+                                       true, MeshConstantBinding::root, MeshDrawMode::textured)) return 77;
+        } else if (operation == "--mesh-depth-pair") {
+            if (!check_mesh_entry_draw(device.Get(), argv[3], argv[4], argv[5],
+                                       true, MeshConstantBinding::root, MeshDrawMode::depth_pair)) return 77;
         } else if (argc == 3 && operation == "--dxr-facing") {
             if (!check_dxr_facing(device.Get())) return 77;
         } else if (argc == 3 && operation == "--dxr-opacity") {
@@ -520,8 +580,8 @@ int main(int argc, char** argv)
             if (!check_gpu_alias_registry(device.Get())) return 77;
         } else if (argc == 3 && operation == "--buffer-ops") {
             check_buffer_ops(device.Get());
-        } else if (argc == 3 && operation == "--ray-query") {
-            if (!check_ray_query(device.Get())) return 77;
+        } else if (argc == 3 && (operation == "--ray-query" || operation == "--dxr-pipeline")) {
+            if (!check_dxr_rays(device.Get(), operation == "--dxr-pipeline")) return 77;
         } else if (argc == 3 && operation == "--wave-shuffle") {
             if (!check_wave_shuffle(device.Get())) return 77;
         } else if (operation.substr(0, 2) == "--") {

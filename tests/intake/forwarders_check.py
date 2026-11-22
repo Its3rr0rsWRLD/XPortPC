@@ -23,6 +23,7 @@ TARGETS = {
     "forwarded_missing": "intake_provider.absent_value",
     "forwarded_loop": "intake_forward.forwarded_loop",
     "forwarded_absent": "intake_absent.absent_value",
+    "forwarded_upper": "INTAKE_PROVIDER.named_value",
 }
 
 
@@ -93,6 +94,7 @@ def check(root, caller, forward, provider):
         return rows[symbol]["package_resolution"]["status"], [(s["provider"], s["symbol"]) for s in chain]
 
     assert hops("forwarded_value") == ("export_present", [(FORWARD, "forwarded_value"), (PROVIDER, "named_value")])
+    assert hops("forwarded_upper") == ("export_present", [(FORWARD, "forwarded_upper"), (PROVIDER, "named_value")])
     assert hops("forwarded_ordinal") == ("export_present", [(FORWARD, "forwarded_ordinal"), (PROVIDER, "#77")])
     assert hops("forwarded_chain") == ("export_present", [
         (FORWARD, "forwarded_chain"), (FORWARD, "forwarded_value"), (PROVIDER, "named_value")])

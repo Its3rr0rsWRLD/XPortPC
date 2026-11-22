@@ -155,6 +155,9 @@ def check_salu32_draws(directory, compiler, renderer, backend):
 
 
 def controls(directory):
+    # Every drawn program translates here too, so the forms they use are recorded by the controls run.
+    for body, *_ in SALU32_PROGRAMS:
+        translate(with_constants(body))
     source = translate(with_constants(SALU32_PROGRAMS[2][0])).split("float4 main", 1)[1]
     assert "asuint(asint(" in source and "& 31u)" in source and "36u & 31u" in source, source
     assert "asfloat(" not in source, source  # scalar words never take a float type

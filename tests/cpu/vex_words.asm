@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_vex_words
 ; VEX.128 16-bit packed-integer leaf functions. Each takes RCX and RDX, the addresses of two
 ; 16-byte inputs, and R8, the address of a 16-byte output, and returns nothing.
 .code
@@ -89,4 +90,20 @@ aligned_ops PROC FRAME
     vmovdqa xmmword ptr [r8], xmm3
     ret
 aligned_ops ENDP
+
+; Pack signed words made from both inputs, then reload the packed bytes from the output.
+byte_pack_reload PROC FRAME
+    .endprolog
+    vmovdqu xmm0, xmmword ptr [rcx]
+    vmovdqu xmm1, xmmword ptr [rdx]
+    vpunpcklbw xmm2, xmm0, xmm1
+    vpunpckhbw xmm3, xmm0, xmm1
+    vpsraw xmm3, xmm3, 1
+    vpackuswb xmm2, xmm2, xmm3
+    vmovdqu xmmword ptr [r8], xmm2
+    vpsrlw xmm0, xmm0, 32
+    vpxor xmm0, xmm0, xmmword ptr [r8]
+    vmovdqu xmmword ptr [r8], xmm0
+    ret
+byte_pack_reload ENDP
 END

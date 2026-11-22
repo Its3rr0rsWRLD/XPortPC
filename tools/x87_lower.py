@@ -6,31 +6,62 @@ The profile accepts:
 - FXTRACT, which replaces ST(0) by its exponent and pushes its significand, and FSCALE;
 - the constant loads FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2 and FLDLN2;
 - FILD, FISTP and FISTTP with an m16, m32 or m64 integer operand, and FIST with m16 or m32;
-- FCOMI, FCOMIP, FUCOMI and FUCOMIP ST(0), ST(i), which set ZF and CF for the integer lowering (PF is
-  not modelled, and the integer lowering rejects every instruction that reads it);
-- FCMOVB, FCMOVE, FCMOVBE, FCMOVNB, FCMOVNE and FCMOVNBE ST(0), ST(i), which read ZF and CF (FCMOVU
-  and FCMOVNU read PF and stay outside the profile). In a function with a move, each status flag that any
-  instruction reads must be written by an earlier instruction on every path from the entry: the caller's
-  flags are not an input of the lowered function, a call leaves them undefined, and ADC, SBB, RCL, RCR
-  and CMC carry an undefined CF on into the flags and registers they write;
+- FCOMI, FCOMIP, FUCOMI and FUCOMIP ST(0), ST(i), which set ZF and CF and clear OF for the integer
+  lowering, and PF in a function with a JP, JNP, FCMOVU or FCMOVNU;
+- FCMOVB, FCMOVE, FCMOVBE, FCMOVNB, FCMOVNE, FCMOVNBE, FCMOVU and FCMOVNU ST(0), ST(i), which read ZF,
+  CF and PF;
+- FCOM and FCOMP with ST(i) or an m32 or m64 operand, FCOMPP, FUCOM and FUCOMP ST(i) and FUCOMPP, which
+  set C0, C2 and C3 of the status word, and FNSTSW AX, which copies the status word to AX (see below);
 - FADD, FSUB, FSUBR, FMUL, FDIV and FDIVR with an m32 or m64 operand, with ST(0), ST(i) and with
   ST(i), ST(0), and their popping forms FADDP, FSUBP, FSUBRP, FMULP, FDIVP and FDIVRP ST(i), ST(0) for
   i from 1 to 7;
 - FIADD, FISUB, FISUBR, FIMUL, FIDIV and FIDIVR with an m16 or m32 integer operand, which is converted
-  exactly, as FILD converts it, before the arithmetic.
+  exactly, as FILD converts it, before the arithmetic;
+- FNSTCW m16, which stores the profile's control word 0x027F, and WAIT, which does nothing because
+  every exception is masked, so none can be pending (FSTCW m16 decodes as WAIT and FNSTCW).
 A function starts with control word 0x027F, TOP 0, eight empty registers and a clear status word, and
 must return with the stack empty. The stack depth before every instruction is fixed at translation
 time, so each register maps to a C++ slot and no TOP is needed at run time. Translation rejects any x87
-instruction outside the profile (including control-word and status-word access, a popping form with
-ST(0) as the destination, and the undocumented FSTP and FXCH alias encodings), a stack overflow or
-underflow, a depth that differs where control flow joins, an x87 instruction it cannot reach from the entry through direct edges, an undefined flag read in a function with a conditional move, and x87 state that is
-live at a call, a return, an indirect branch or an external edge. The helpers are in tools/x87_soft.h,
-which the generated source must include before the lowered functions (X87_HEADER).
+instruction outside the profile (including FLDCW, FNSTSW with a memory operand, environment access, a
+popping form with ST(0) as the destination, and the undocumented FSTP, FXCH, FCOM and FCOMP alias
+encodings), a stack overflow or underflow, a depth that differs where control flow joins, an x87
+instruction it cannot reach from the entry through direct edges, and x87 state that is live at a call, a
+return, an indirect branch or an external edge. The helpers are in tools/x87_soft.h, which the generated
+source must include before the lowered functions (X87_HEADER).
+
+Flags and the status word. In a function with an FCMOV, FNSTSW, SAHF, JP or JNP, each status flag that
+any instruction reads must be defined on every path from the entry: the caller's flags are not an input
+of the lowered function, a call leaves them undefined, and ADC, SBB, RCL, RCR and CMC carry an undefined
+CF on into the flags and registers they write. The integer lowering models PF only after SAHF, the FCOMI
+family and an 8-bit TEST or AND, so a reader of PF that another instruction may have written last is
+rejected. SAHF,
+JP and JNP are accepted only in such a function. C0, C2 and C3 are known after a comparison into the
+status word and unknown at the entry. FCOMI, FCOMIP, FUCOMI and FUCOMIP leave them as they were, and
+every other x87 instruction leaves them undefined, as the SDM states, including WAIT (so FSTSW AX, which
+is WAIT and FNSTSW AX, sees none of them), FNSTCW and FNSTSW itself; a call does too. TOP is the depth
+before FNSTSW subtracted from 8, modulo 8. C1, the exception flags, the stack fault and the busy bit are
+never known. FNSTSW AX leaves AX with only the known bits known. Any reader of AL, AH, AX, EAX or RAX that
+sees an unknown bit is rejected, and so are a return, a call, an indirect branch and an external edge
+while AX holds one, except:
+- SAHF copies C0 to CF, C2 to PF, C3 to ZF and the busy bit to SF, each defined only when its bit is
+  known (AF, from bit 1 of TOP, is left undefined);
+- TEST AH, imm8 and AND AH, imm8 leave ZF, PF and SF undefined when the immediate selects an unknown bit,
+  and AND makes the bits it clears known.
+The flag rule then rejects a reader of a flag that an unknown bit left undefined.
+
+The checked entry, lower(..., x87=Checked(reject)), also accepts FLDCW m16. The control word becomes a
+local of the lowered function, and every rounding helper, FNSTCW and the constant loads follow it. FLDCW
+accepts a word with all six exceptions masked and precision control 00, 10 or 11. It keeps the word as
+FNSTCW reads it back: bits 6 and 7 and 13 to 15 are reserved, bit 6 reads as 1 and the others as 0, and
+bit 12 (the obsolete infinity control) is kept. Any other word, and a return with a control word other
+than 0x027F, leaves the function through reject(status), the caller's statement, with a status from
+STATUS. Guest stores before that point stay done. A function that loads the control word must not
+contain a call, an indirect branch or an external edge, because the word may be live there.
 """
 from pathlib import Path
 
 from iced_x86 import Code as C, FlowControl, MemorySize as S, MemorySizeExt, Mnemonic as M, OpKind as K, Register as R
-from iced_x86 import RegisterExt, RflagsBits as F
+from iced_x86 import InstructionInfoFactory, OpAccess, RegisterExt, RflagsBits as F
 
 X87_HEADER = Path(__file__).with_name("x87_soft.h").read_text(encoding="ascii")
 # Arithmetic with an m16 or m32 integer operand: mnemonic -> helper, with ST(0) as the destination.
@@ -38,12 +69,57 @@ IARITHMETIC = {M.FIADD: "x87_add", M.FISUB: "x87_sub", M.FISUBR: "x87_subr", M.F
                M.FIDIV: "x87_div", M.FIDIVR: "x87_divr"}
 # Conditional register moves and the C++ condition each reads from the integer lowering's flags.
 FCMOV = {M.FCMOVB: "carry", M.FCMOVE: "zero", M.FCMOVBE: "carry || zero", M.FCMOVNB: "!carry",
-         M.FCMOVNE: "!zero", M.FCMOVNBE: "!carry && !zero"}
+         M.FCMOVNE: "!zero", M.FCMOVNBE: "!carry && !zero", M.FCMOVU: "parity", M.FCMOVNU: "!parity"}
 X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FSQRT, M.FRNDINT, M.FLD1, M.FLDZ, M.FLDPI, M.FLDL2T, M.FLDL2E,
                      M.FLDLG2, M.FLDLN2, M.FILD, M.FIST, M.FISTP, M.FISTTP, M.FXTRACT, M.FSCALE, *FCMOV, M.FCOMI,
                      M.FCOMIP, M.FUCOMI, M.FUCOMIP, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
-                     M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP, *IARITHMETIC})
-DECLARATION = "X87Value x87_slot[8]{};"
+                     M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP, *IARITHMETIC, M.FNSTCW, M.WAIT, M.FLDCW, M.FCOM,
+                     M.FCOMP, M.FCOMPP, M.FUCOM, M.FUCOMP, M.FUCOMPP, M.FNSTSW})
+# Comparisons into C0, C2 and C3 of the status word; FCOMPP and FUCOMPP pop twice, the other P forms once.
+STATUS_COMPARES = frozenset({M.FCOM, M.FCOMP, M.FCOMPP, M.FUCOM, M.FUCOMP, M.FUCOMPP})
+STATUS_POPS = {M.FCOM: 0, M.FCOMP: 1, M.FCOMPP: 2, M.FUCOM: 0, M.FUCOMP: 1, M.FUCOMPP: 2}
+# Status-word bits: C0, C2 and C3 (the comparison result), and TOP.
+C_BITS = 0x4500
+TOP_BITS = 0x3800
+# The slots and the control word, which the fixed profile keeps at 0x027F.
+DECLARATION = "X87Value x87_slot[8]{}; const uint16_t x87_cw = 0x027f; (void)x87_cw;"
+# The checked entry's control word, which FLDCW changes.
+CHECKED_DECLARATION = "X87Value x87_slot[8]{}; uint16_t x87_cw = 0x027f;"
+# Profile-rejection statuses of the checked entry: an FLDCW operand with an exception unmasked, an FLDCW
+# operand with the reserved precision control 01, and a return with a control word other than 0x027F.
+STATUS = {"unmasked": 1, "precision": 2, "unrestored": 3}
+
+
+def declaration(body, checked=None):
+    """The x87 locals of a lowered function: the slots, the control word and, in a function that compares
+    into the status word or stores it, C0, C2 and C3 of the status word."""
+    text = DECLARATION if checked is None else CHECKED_DECLARATION
+    if any(i.mnemonic in STATUS_COMPARES or i.mnemonic == M.FNSTSW for i in body):
+        text += " uint16_t x87_sw = 0; (void)x87_sw;"
+    return text
+
+
+# PF of the integer lowering: even parity of the low byte of v.
+def parity_statement(v):
+    return f"parity = ((0x6996u >> ((static_cast<unsigned>(static_cast<uint8_t>({v})) ^ " \
+           f"(static_cast<unsigned>(static_cast<uint8_t>({v})) >> 4)) & 0xfu)) & 1u) == 0;"
+
+
+class Checked:
+    """The checked entry's error channel. reject is a format string with a {status} field: C++ that leaves
+    the lowered function and hands the status to the caller, for example by setting a variable the
+    enclosing entry declares and returning."""
+
+    def __init__(self, reject):
+        self.reject = reject
+
+    def leave(self, name):
+        return self.reject.format(status=STATUS[name])
+
+
+def return_statement(checked):
+    """A RET of the checked entry: the function must return with the profile's control word."""
+    return f"if (x87_cw != 0x027f) {checked.leave('unrestored')} return rax;"
 
 LOADS = {S.FLOAT32: "x87_from_f32(load<uint32_t>(a))", S.FLOAT64: "x87_from_f64(load<uint64_t>(a))",
          S.FLOAT80: "x87_from_m80(load<uint64_t>(a), load<uint16_t>(a + 8))"}
@@ -62,14 +138,22 @@ POPPING = frozenset({M.FADDP, M.FSUBP, M.FSUBRP, M.FMULP, M.FDIVP, M.FDIVRP})
 CONSTANTS = {M.FLD1: (0x8000000000000000, 0x3FFF), M.FLDZ: (0, 0), M.FLDPI: (0xC90FDAA22168C235, 0x4000),
              M.FLDL2T: (0xD49A784BCD1B8AFE, 0x4000), M.FLDL2E: (0xB8AA3B295C17F0BC, 0x3FFF),
              M.FLDLG2: (0x9A209A84FBCFF799, 0x3FFD), M.FLDLN2: (0xB17217F7D1CF79AC, 0x3FFE)}
+# The checked entry rounds the five inexact constants under its rounding control. All are positive, so
+# toward negative infinity and toward zero give the significand below the exact value and toward positive
+# infinity the one above; to nearest gives the CONSTANTS entry, which is one of the two. Measured on the
+# AMD Ryzen 7 7700 under every precision and rounding control; the precision control has no effect.
+BELOW = {M.FLDPI: 0xC90FDAA22168C234, M.FLDL2T: 0xD49A784BCD1B8AFE, M.FLDL2E: 0xB8AA3B295C17F0BB,
+         M.FLDLG2: 0x9A209A84FBCFF798, M.FLDLN2: 0xB17217F7D1CF79AB}
 # Integer memory operands: (signed type, unsigned type, bits).
 INTEGERS = {S.INT16: ("int16_t", "uint16_t", 16), S.INT32: ("int32_t", "uint32_t", 32),
             S.INT64: ("int64_t", "uint64_t", 64)}
 # Comparisons into EFLAGS; the P forms pop after comparing.
 COMPARES = frozenset({M.FCOMI, M.FCOMIP, M.FUCOMI, M.FUCOMIP})
-# Undocumented aliases of FSTP ST(i) (DF D0+i, DF D8+i) and FXCH ST(i) (DD C8+i, DF C8+i). Assemblers do
-# not emit them and the fixtures do not measure them, so they stay outside the profile.
-ALIASES = frozenset({C.FSTP_STI_DFD0, C.FSTP_STI_DFD8, C.FXCH_ST0_STI_DDC8, C.FXCH_ST0_STI_DFC8})
+# Undocumented aliases of FSTP ST(i) (DF D0+i, DF D8+i), FXCH ST(i) (DD C8+i, DF C8+i), FCOM ST(i)
+# (DC D0+i) and FCOMP ST(i) (DC D8+i, DE D0+i). Assemblers do not emit them and the fixtures do not measure
+# them, so they stay outside the profile.
+ALIASES = frozenset({C.FSTP_STI_DFD0, C.FSTP_STI_DFD8, C.FXCH_ST0_STI_DDC8, C.FXCH_ST0_STI_DFC8,
+                     C.FCOM_ST0_STI_DCD0, C.FCOMP_ST0_STI_DCD8, C.FCOMP_ST0_STI_DED0})
 
 
 # Every x87 mnemonic in iced starts with F (including FXSAVE/FXRSTOR, which store the x87 state, and
@@ -81,11 +165,13 @@ def is_x87(i):
     return i.mnemonic in X87_STATE_OPS
 
 
-def _effect(i, depth):
+def _effect(i, depth, checked=None):
     """Stack depth after i, or a ValueError for an instruction or operand outside the profile."""
     op = i.mnemonic
     if i.code in ALIASES:
         raise ValueError(f"unsupported x87 encoding at {i.ip:#x}: {i}")
+    if op in (M.FNSTCW, M.WAIT) or (op == M.FLDCW and checked is not None):  # no register stack access
+        return depth
     if op in (M.FLD, M.FST, M.FSTP) and i.op0_kind == K.REGISTER:  # ST(i) copies
         if depth <= i.op0_register - R.ST0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
@@ -108,6 +194,24 @@ def _effect(i, depth):
         if depth <= i.op1_register - R.ST0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth - 1 if op in (M.FCOMIP, M.FUCOMIP) else depth
+    if op == M.FNSTSW:
+        if i.op0_kind != K.REGISTER or i.op0_register != R.AX:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        return depth
+    if op in STATUS_COMPARES:
+        if i.op_count == 0:  # FCOMPP and FUCOMPP compare ST(0) with ST(1)
+            needed = 2
+        elif i.op_count == 1:  # FCOM and FCOMP m32/m64
+            if i.op0_kind != K.MEMORY or i.memory_size not in OPERANDS:
+                raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+            needed = 1
+        elif i.op0_register == R.ST0:
+            needed = i.op1_register - R.ST0 + 1
+        else:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        if depth < max(needed, STATUS_POPS[op]):
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth - STATUS_POPS[op]
     if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
         if i.op0_kind != K.MEMORY or i.memory_size not in INTEGERS:
             raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
@@ -175,16 +279,20 @@ def _effect(i, depth):
     raise ValueError(f"unsupported x87 operation at {i.ip:#x}: {i}")
 
 
-def depths(body, exits):
-    """The x87 stack depth before each instruction of body, from an empty stack at body[0]."""
+def depths(body, exits, checked=None):
+    """The x87 stack depth before each instruction of body, from an empty stack at body[0]. checked is the
+    Checked entry's error channel, or None for the fixed control word."""
     index = {i.ip: i for i in body}
     depth = {body[0].ip: 0}
     work = [body[0].ip]
+    loads_cw = checked is not None and any(i.mnemonic == M.FLDCW for i in body)
     while work:
         i = index[work.pop()]
         before = depth[i.ip]
-        after = _effect(i, before) if is_x87(i) else before
+        after = _effect(i, before, checked) if is_x87(i) else before
         flow = i.flow_control
+        if loads_cw and flow in (FlowControl.CALL, FlowControl.INDIRECT_CALL, FlowControl.INDIRECT_BRANCH):
+            raise ValueError(f"x87 control word may be live at {i} at {i.ip:#x}")
         if flow == FlowControl.RETURN and before:
             raise ValueError(f"x87 stack not empty at return {i.ip:#x}")
         if flow in (FlowControl.CALL, FlowControl.INDIRECT_CALL) and before:
@@ -205,23 +313,18 @@ def depths(body, exits):
                     raise ValueError(f"x87 stack depth {depth[target]} and {after} meet at {target:#x}")
             elif target in exits and after:
                 raise ValueError(f"x87 state live at the external edge {i.ip:#x} -> {target:#x}")
+            elif target in exits and loads_cw:
+                raise ValueError(f"x87 control word may be live at the external edge {i.ip:#x} -> {target:#x}")
     for i in body:
         if i.ip not in depth and is_x87(i):
             raise ValueError(f"unknown x87 stack depth at {i.ip:#x}: {i}")
-    if any(i.mnemonic in FCMOV for i in body):
-        # Every reader counts, not only the moves: ADC, SBB, RCL, RCR and CMC pass an undefined CF on into
-        # the flags and registers they write, and a later writer of ZF or CF can carry it to a move. The
-        # same holds for a reader of any other status flag (SETO into a register, then TEST).
-        defined = defined_flags(body)
-        for i in body:
-            if i.ip not in defined:
-                continue  # not reachable from the entry
-            missing = i.rflags_read & STATUS_FLAGS & ~defined[i.ip]
-            if missing:
-                names = " and ".join(name for name, bit in FLAG_NAMES if missing & bit)
-                raise ValueError(f"{i} at {i.ip:#x} reads {names}, which no instruction defines on every path "
-                                 "from the entry")
+    if any(i.mnemonic in GATED for i in body):
+        check_flags(body, exits)
     return depth
+
+
+# Instructions that put a function under the flag and status-word rules.
+GATED = frozenset({*FCMOV, M.FNSTSW, M.SAHF, M.JP, M.JNP})
 
 
 # The six status flags. FCMOV reads ZF and CF; DF is not tracked, because the Windows x64 calling
@@ -263,36 +366,190 @@ def _flags_after(i, before):
     return (before & ~undefined) | defines
 
 
-def defined_flags(body):
-    """The status flags defined on entry to each reachable instruction of body: those that an earlier
-    instruction writes on every path from body[0]. The integer lowering starts its flags as false, which is
-    not what a native caller passes in, so a reader of an undefined flag would see that initializer."""
+# The bits of AX that each part of RAX covers.
+AX_PARTS = {R.AL: 0x00FF, R.AH: 0xFF00, R.AX: 0xFFFF, R.EAX: 0xFFFF, R.RAX: 0xFFFF}
+# SAHF loads SF, ZF, AF, PF and CF from bits 7, 6, 4, 2 and 0 of AH. AF (bit 1 of TOP) is left undefined.
+SAHF_BITS = ((F.CF, 0x0100), (F.PF, 0x0400), (F.ZF, 0x4000), (F.SF, 0x8000))
+SAHF_FLAGS = F.CF | F.PF | F.AF | F.ZF | F.SF
+# The flags of TEST and AND that depend on the bits the immediate selects.
+RESULT_FLAGS = F.ZF | F.PF | F.SF
+_INFO = InstructionInfoFactory()
+
+
+def assigns_parity(i):
+    """Whether the integer lowering sets PF for i: SAHF, the FCOMI family, and TEST and AND with an 8-bit
+    destination."""
+    if i.mnemonic == M.SAHF or i.mnemonic in COMPARES:
+        return True
+    if i.mnemonic not in (M.TEST, M.AND):
+        return False
+    size = MemorySizeExt.size(i.memory_size) if i.op0_kind == K.MEMORY else RegisterExt.size(i.op0_register)
+    return size == 1
+
+
+def _ah_immediate(i):
+    """The immediate of TEST AH, imm8 or AND AH, imm8 as AX bits, or None for any other instruction."""
+    if i.mnemonic in (M.TEST, M.AND) and i.op0_kind == K.REGISTER and i.op0_register == R.AH \
+            and i.op1_kind == K.IMMEDIATE8:
+        return (i.immediate8 & 0xFF) << 8
+    return None
+
+
+class _State:
+    """What is known before an instruction: the defined status flags, the flags left undefined by unknown
+    status-word bits (for the diagnostic), whether the integer lowering models PF, the known C0, C2 and C3
+    bits of the status word, and the known bits of AX."""
+    __slots__ = ("flags", "tainted", "parity", "c", "ax")
+
+    def __init__(self, flags, tainted, parity, c, ax):
+        self.flags, self.tainted, self.parity, self.c, self.ax = flags, tainted, parity, c, ax
+
+    def key(self):
+        return self.flags, self.tainted, self.parity, self.c, self.ax
+
+    def join(self, other):
+        return _State(self.flags & other.flags, self.tainted | other.tainted, self.parity and other.parity,
+                      self.c & other.c, self.ax & other.ax)
+
+
+def _ax_access(i):
+    """The AX bits i reads and the AX bits it writes."""
+    read = written = 0
+    for used in _INFO.info(i).used_registers():
+        bits = AX_PARTS.get(used.register, 0)
+        if used.access in (OpAccess.READ, OpAccess.COND_READ, OpAccess.READ_WRITE, OpAccess.READ_COND_WRITE):
+            read |= bits
+        if used.access in (OpAccess.WRITE, OpAccess.READ_WRITE):
+            written |= bits
+    return read, written
+
+
+def _after(i, s):
+    """The state after i (the conditions it may raise are checked separately, in check_flags)."""
+    op = i.mnemonic
+    call = i.flow_control in (FlowControl.CALL, FlowControl.INDIRECT_CALL)
+    flags = _flags_after(i, s.flags)
+    modified = i.rflags_modified & STATUS_FLAGS
+    tainted = 0 if call else s.tainted & ~modified
+    parity = assigns_parity(i) if modified & F.PF else s.parity and not call
+    ax = s.ax
+    immediate = _ah_immediate(i)
+    if op == M.SAHF:
+        flags = s.flags & ~SAHF_FLAGS
+        for flag, bit in SAHF_BITS:
+            if s.ax & bit == bit:
+                flags |= flag
+            else:
+                tainted |= flag
+    elif immediate is not None:
+        if immediate & ~s.ax:
+            flags &= ~RESULT_FLAGS
+            tainted |= RESULT_FLAGS
+        if op == M.AND:  # a cleared bit is known to be 0
+            ax |= 0xFF00 & ~immediate
+    elif op == M.FNSTSW:
+        ax = s.c | TOP_BITS
+    elif call:
+        ax = 0xFFFF  # the return value
+    else:
+        ax |= _ax_access(i)[1]
+    if op in STATUS_COMPARES:
+        c = C_BITS
+    elif op in COMPARES or not (is_x87(i) or call):  # FCOMI and integer instructions leave C0, C2 and C3
+        c = s.c
+    else:
+        c = 0
+    return _State(flags, tainted, parity, c, ax)
+
+
+def _successors(i):
+    flow = i.flow_control
+    successors = []
+    if flow not in (FlowControl.RETURN, FlowControl.UNCONDITIONAL_BRANCH, FlowControl.INDIRECT_BRANCH):
+        successors.append(i.next_ip)
+    if flow in (FlowControl.CONDITIONAL_BRANCH, FlowControl.UNCONDITIONAL_BRANCH):
+        successors.append(i.near_branch_target)
+    return successors
+
+
+def states(body):
+    """The _State before each reachable instruction of body, from body[0], where no flag, PF model or
+    condition bit is known and AX holds no status word. The integer lowering starts its flags as false,
+    which is not what a native caller passes in, so a reader of an undefined flag would see that
+    initializer. The meet over joining paths keeps only what is known on all of them."""
     index = {i.ip: i for i in body}
-    defined = {body[0].ip: 0}
+    known = {body[0].ip: _State(0, 0, True, 0, 0xFFFF)}
     work = [body[0].ip]
     while work:
         i = index[work.pop()]
-        after = _flags_after(i, defined[i.ip])
-        flow = i.flow_control
-        successors = []
-        if flow not in (FlowControl.RETURN, FlowControl.UNCONDITIONAL_BRANCH, FlowControl.INDIRECT_BRANCH):
-            successors.append(i.next_ip)
-        if flow in (FlowControl.CONDITIONAL_BRANCH, FlowControl.UNCONDITIONAL_BRANCH):
-            successors.append(i.near_branch_target)
-        for target in successors:
+        after = _after(i, known[i.ip])
+        for target in _successors(i):
             if target in index:
-                joined = after if target not in defined else defined[target] & after
-                if target not in defined or joined != defined[target]:
-                    defined[target] = joined
+                joined = after if target not in known else known[target].join(after)
+                if target not in known or joined.key() != known[target].key():
+                    known[target] = joined
                     work.append(target)
-    return defined
+    return known
 
 
-def statement(i, depth, address):
-    """C++ for one profile instruction at a known stack depth; address() gives the memory operand."""
+def _bits(mask):
+    return f"{mask:#06x}"
+
+
+def check_flags(body, exits):
+    """Reject a read of an undefined status flag, a read of PF that the integer lowering does not model, and
+    a reader of AX, or a point where RAX leaves the function, that sees a status-word bit not known."""
+    known = states(body)
+    for i in body:
+        s = known.get(i.ip)
+        if s is None:
+            continue  # not reachable from the entry
+        missing = i.rflags_read & STATUS_FLAGS & ~s.flags
+        if missing:
+            names = " and ".join(name for name, bit in FLAG_NAMES if missing & bit)
+            if missing & s.tainted == missing:
+                raise ValueError(f"{i} at {i.ip:#x} reads {names}, which depends on a status-word bit that is not "
+                                 "known on every path from the entry")
+            raise ValueError(f"{i} at {i.ip:#x} reads {names}, which no instruction defines on every path from "
+                             "the entry")
+        if i.rflags_read & F.PF and not s.parity:
+            raise ValueError(f"{i} at {i.ip:#x} reads PF, which the integer lowering models only after SAHF, "
+                             "FCOMI, FCOMIP, FUCOMI, FUCOMIP and an 8-bit TEST or AND")
+        unknown = 0xFFFF & ~s.ax
+        if not unknown:
+            continue
+        immediate = _ah_immediate(i)
+        if i.mnemonic != M.SAHF and immediate is None:
+            read = _ax_access(i)[0] & unknown
+            if read:
+                raise ValueError(f"{i} at {i.ip:#x} reads AX bits {_bits(read)}, which FNSTSW AX leaves unknown "
+                                 "on some path from the entry")
+        flow = i.flow_control
+        if flow in (FlowControl.RETURN, FlowControl.CALL, FlowControl.INDIRECT_CALL, FlowControl.INDIRECT_BRANCH):
+            raise ValueError(f"RAX holds unknown status-word bits {_bits(unknown)} at {i} at {i.ip:#x}")
+        for target in _successors(i):
+            if target in exits:
+                raise ValueError(f"RAX holds unknown status-word bits {_bits(unknown)} at the external edge "
+                                 f"{i.ip:#x} -> {target:#x}")
+
+
+def statement(i, depth, address, checked=None, parity=False):
+    """C++ for one profile instruction at a known stack depth; address() gives the memory operand. checked
+    is the Checked entry's error channel, or None for the fixed control word. parity is whether the function
+    declares the integer lowering's PF, which the FCOMI family then sets."""
     op = i.mnemonic
-    _effect(i, depth)
+    _effect(i, depth, checked)
     top = depth - 1  # ST(k) is x87_slot[top - k]
+    if op == M.FNSTCW:  # the fixed profile's control word is 0x027F
+        word = "0x027f" if checked is None else "x87_cw"
+        return f"{{ const word a = {address()}; store<uint16_t>(a, {word}); }}  // fnstcw"
+    if op == M.FLDCW:  # only the checked entry reaches this
+        return (f"{{ const word a = {address()}; const uint16_t w = load<uint16_t>(a); "
+                f"if ((w & 0x3f) != 0x3f) {checked.leave('unmasked')} "
+                f"if ((w & 0x300) == 0x100) {checked.leave('precision')} "
+                "x87_cw = static_cast<uint16_t>((w & 0x1f3f) | 0x40); }  // fldcw")
+    if op == M.WAIT:  # every exception is masked, so none is pending
+        return ";  // wait"
     if op in (M.FLD, M.FST, M.FSTP) and i.op0_kind == K.REGISTER:
         k = i.op0_register - R.ST0
         if op == M.FLD:  # push a copy of ST(k): every encoding is copied as it is
@@ -305,10 +562,25 @@ def statement(i, depth, address):
         k = i.op1_register - R.ST0
         name = next(n for n, v in vars(M).items() if v == op).lower()
         return f"if ({FCMOV[op]}) x87_slot[{top}] = x87_slot[{top - k}];  // {name} st({k})"
+    if op == M.FNSTSW:  # C0, C2 and C3 of the last comparison, and TOP; the other bits read as 0
+        stack_top = (8 - depth) & 7
+        return (f"rax = (rax & ~0xffffull) | static_cast<uint16_t>(x87_sw | {stack_top << 11:#06x});  "
+                f"// fnstsw ax, top {stack_top}")
+    if op in STATUS_COMPARES:  # C3, C2 and C0: 0 0 1 less, 1 0 0 equal, 0 0 0 greater, 1 1 1 unordered
+        name = next(n for n, v in vars(M).items() if v == op).lower()
+        if i.op_count == 1:
+            prefix, other = f"const word a = {address()}; ", OPERANDS[i.memory_size]
+        else:
+            k = 1 if i.op_count == 0 else i.op1_register - R.ST0
+            prefix, other = "", f"x87_slot[{top - k}]"
+        return (f"{{ {prefix}const int r = x87_compare(x87_slot[{top}], {other}); "
+                "x87_sw = static_cast<uint16_t>(r == 0 ? 0x0100 : r == 1 ? 0x4000 : r == 3 ? 0x4500 : 0); }  "
+                f"// {name}")
     if op in COMPARES:  # ZF and CF: 1 and 0 for equal, 0 and 1 for less, 0 and 0 for greater, 1 and 1 unordered
-        k = top - (i.op1_register - R.ST0)
+        k = top - (i.op1_register - R.ST0)  # OF is always cleared, and PF is 1 only for unordered
         return (f"{{ const int r = x87_compare(x87_slot[{top}], x87_slot[{k}]); "
-                f"zero = r == 1 || r == 3; carry = r == 0 || r == 3; }}")
+                f"{'parity = r == 3; ' if parity else ''}zero = r == 1 || r == 3; carry = r == 0 || r == 3; "
+                "overflow = false; }")
     if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
         signed, unsigned, bits = INTEGERS[i.memory_size]
         if op == M.FILD:
@@ -316,35 +588,40 @@ def statement(i, depth, address):
                     f"x87_slot[{depth}] = x87_from_integer(static_cast<{signed}>(load<{unsigned}>(a))); }}")
         chop = "true" if op == M.FISTTP else "false"
         return (f"{{ const word a = {address()}; "
-                f"store<{unsigned}>(a, static_cast<{unsigned}>(x87_to_integer(x87_slot[{top}], {bits}, {chop}))); }}")
+                f"store<{unsigned}>(a, static_cast<{unsigned}>(x87_to_integer(x87_slot[{top}], {bits}, {chop}, x87_cw))); }}")
     if op in IARITHMETIC:  # ST(0) = ST(0) op integer, the integer converted exactly as for FILD
         signed, unsigned, bits = INTEGERS[i.memory_size]
         name = next(n for n, v in vars(M).items() if v == op).lower()
         return (f"{{ const word a = {address()}; x87_slot[{top}] = {IARITHMETIC[op]}(x87_slot[{top}], "
-                f"x87_from_integer(static_cast<{signed}>(load<{unsigned}>(a)))); }}  // {name} m{bits}")
+                f"x87_from_integer(static_cast<{signed}>(load<{unsigned}>(a))), x87_cw); }}  // {name} m{bits}")
     if op == M.FSCALE:
-        return f"x87_slot[{top}] = x87_scale(x87_slot[{top}], x87_slot[{top - 1}]);"
+        return f"x87_slot[{top}] = x87_scale(x87_slot[{top}], x87_slot[{top - 1}], x87_cw);"
     if op == M.FXTRACT:  # ST(1) becomes the exponent and the pushed ST(0) the significand
         return (f"{{ X87Value e; const X87Value s = x87_xtract(x87_slot[{top}], e); "
                 f"x87_slot[{top}] = e; x87_slot[{depth}] = s; }}  // fxtract")
     if op in CONSTANTS:
         sig, se = CONSTANTS[op]
         name = next(n for n, v in vars(M).items() if v == op).lower()
+        if checked is not None and op in BELOW:  # up for toward +inf, CONSTANTS for nearest, else BELOW
+            below = BELOW[op]
+            return (f"x87_slot[{depth}] = X87Value{{x87_rounding(x87_cw) == 2 ? {below + 1:#018x}ull : "
+                    f"x87_rounding(x87_cw) == 0 ? {sig:#018x}ull : {below:#018x}ull, {se:#06x}}};  // {name}")
         return f"x87_slot[{depth}] = X87Value{{{sig:#018x}ull, {se:#06x}}};  // {name}"
     if op in (M.FSQRT, M.FRNDINT):
-        return f"x87_slot[{top}] = {'x87_sqrt' if op == M.FSQRT else 'x87_rndint'}(x87_slot[{top}]);"
+        return f"x87_slot[{top}] = {'x87_sqrt' if op == M.FSQRT else 'x87_rndint'}(x87_slot[{top}], x87_cw);"
     if op in (M.FCHS, M.FABS):
         return f"x87_slot[{top}] = {'x87_chs' if op == M.FCHS else 'x87_abs'}(x87_slot[{top}]);"
     if op == M.FLD:
         return f"{{ const word a = {address()}; x87_slot[{depth}] = {LOADS[i.memory_size]}; }}"
     if op in (M.FST, M.FSTP):  # FST m32/m64 stores without popping
         v = f"x87_slot[{top}]"
-        store = {S.FLOAT32: f"store<uint32_t>(a, x87_to_f32({v}));", S.FLOAT64: f"store<uint64_t>(a, x87_to_f64({v}));",
+        store = {S.FLOAT32: f"store<uint32_t>(a, x87_to_f32({v}, x87_cw));",
+                 S.FLOAT64: f"store<uint64_t>(a, x87_to_f64({v}, x87_cw));",
                  S.FLOAT80: f"store<uint64_t>(a, {v}.sig); store<uint16_t>(a + 8, {v}.se);"}[i.memory_size]
         return f"{{ const word a = {address()}; {store} }}" + ("  // fst m" if op == M.FST else "")
     if i.op_count == 1:  # arithmetic with an m32/m64 operand: ST(0) = ST(0) op operand
         return (f"{{ const word a = {address()}; "
-                f"x87_slot[{top}] = {ARITHMETIC[op]}(x87_slot[{top}], {OPERANDS[i.memory_size]}); }}")
+                f"x87_slot[{top}] = {ARITHMETIC[op]}(x87_slot[{top}], {OPERANDS[i.memory_size]}, x87_cw); }}")
     # The destination is the first operand: ST(i) for FMUL ST(i), ST(0) and the P forms, ST(0) otherwise.
     destination, source = (top - (i.op0_register - R.ST0), top - (i.op1_register - R.ST0))
-    return f"x87_slot[{destination}] = {ARITHMETIC[op]}(x87_slot[{destination}], x87_slot[{source}]);"
+    return f"x87_slot[{destination}] = {ARITHMETIC[op]}(x87_slot[{destination}], x87_slot[{source}], x87_cw);"

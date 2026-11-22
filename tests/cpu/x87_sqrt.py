@@ -48,11 +48,13 @@ SEQUENCES = {
 
 CONTROLS = {
     # The root rounds to 64 significand bits.
-    "pc64": (re.compile(r"x87_arith, x87_rc\);  // sqrt round"), "X87Format{64, 16383, 0x7ffe}, x87_rc);  // sqrt round"),
+    "pc64": (re.compile(r"x87_format\(cw\), x87_rounding\(cw\)\);  // sqrt round"),
+             "X87Format{64, 16383, 0x7ffe}, x87_rounding(cw));  // sqrt round"),
     # The root rounds in the binary64 exponent range.
-    "double": (re.compile(r"x87_arith, x87_rc\);  // sqrt round"), "x87_f64, x87_rc);  // sqrt round"),
+    "double": (re.compile(r"x87_format\(cw\), x87_rounding\(cw\)\);  // sqrt round"),
+               "x87_f64, x87_rounding(cw));  // sqrt round"),
     # The remainder is ignored.
-    "nosticky": (re.compile(r"const uint64_t sticky = sq_hi != r_hi \|\| sq_lo != r_lo;"), "const uint64_t sticky = 0;"),
+    "nosticky": (re.compile(r"const uint64_t sticky = [^;]*;  // sqrt sticky"), "const uint64_t sticky = 0;  // sqrt sticky"),
     # sqrt(-0) gives +0.
     "negzero": (re.compile(r"if \(x87_is_zero\(a\)\) return a;\r?\n    if \(x87_sign\(a\)\)"),
                 "if (x87_is_zero(a)) return {0, 0};\n    if (x87_sign(a))"),

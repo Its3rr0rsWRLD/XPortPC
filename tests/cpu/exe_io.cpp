@@ -11,22 +11,37 @@ static DWORD WINAPI hold_worker(void* ready)
     return result;
 }
 
-static bool start_test_worker()
+static DWORD WINAPI timed_worker(void* ready)
 {
-    // Used only by the process lifetime regression. Wait for the worker to
-    // signal that it started, or report an error if it exits first.
+    // Signals readiness, outlives the entry body by about two seconds, then ends on its own with code 0.
+    // If nothing terminates the process first, that code becomes the process exit status.
+    if (!SetEvent(ready))
+        return 1;
+    Sleep(2000);
+    return 0;
+}
+
+static bool start_worker(LPTHREAD_START_ROUTINE routine, DWORD timeout_ms)
+{
+    // Wait for the worker to signal that it started, or report an error if it exits first.
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ready)
         return false;
-    HANDLE worker = CreateThread(nullptr, 0, hold_worker, ready, 0, nullptr);
+    HANDLE worker = CreateThread(nullptr, 0, routine, ready, 0, nullptr);
     bool started = false;
     if (worker) {
         HANDLE handles[] = {ready, worker};
-        started = WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0;
+        started = WaitForMultipleObjects(2, handles, FALSE, timeout_ms) == WAIT_OBJECT_0;
         CloseHandle(worker);
     }
     CloseHandle(ready);
     return started;
+}
+
+static bool start_test_worker()
+{
+    // Used only by the process lifetime regression.
+    return start_worker(hold_worker, INFINITE);
 }
 
 static bool prepare_test_worker(const wchar_t* flag)
@@ -34,6 +49,12 @@ static bool prepare_test_worker(const wchar_t* flag)
     wchar_t value[2];
     return GetEnvironmentVariableW(flag, value, 2) != 1 ||
         value[0] != L'1' || start_test_worker();
+}
+
+extern "C" __declspec(dllexport) std::uint32_t start_live_worker()
+{
+    // Called by the live-worker provider variant. The worker is ready on return and ends by itself later.
+    return start_worker(timed_worker, 10000);
 }
 
 extern "C" __declspec(dllexport) std::uint32_t read_selector()
@@ -63,6 +84,10 @@ extern "C" __declspec(dllexport) std::uint32_t emit_trace(const std::uint64_t* w
 
 extern "C" __declspec(dllexport) DWORD finish_exe(const void* image_base, DWORD code)
 {
+#ifdef FINISH_HANG
+    // Only the cpu_exe_io_hang build: finish_exe never terminates, which simulates a stuck termination path.
+    Sleep(INFINITE);
+#endif
     // The console fixture uses UCRT stdin rather than read_selector.
     if (!prepare_test_worker(L"CPU_CRC_TEST_LIVE_WORKER"))
         code = 3;

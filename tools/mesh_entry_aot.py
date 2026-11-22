@@ -47,6 +47,7 @@ class Wave:
         self.barriers = []
         self.counts = []
         self.positions = {}
+        self.attributes = {}
         self.indices = {}
         self.m0 = None
 
@@ -408,9 +409,11 @@ class Wave:
                         self.v[lane][int(match[1][1:])] = self.geometry[addr // 4]
                         self.pending_v.add((lane, match[1]))
             elif op == "exp":
-                m = re.fullmatch(r"(prim|pos0),? (.+) done", tail)
+                m = re.fullmatch(r"(prim|pos0|param0),? (.+?)( done)?", tail)
                 if not m:
                     raise ValueError("Unsupported mesh export")
+                if not m[3] and m[1] != "param0":
+                    raise ValueError("Expected completed primitive or position export")
                 operands = m[2].split(", ")
                 for lane in range(64):
                     if not self.exec & (1 << lane):
@@ -427,6 +430,10 @@ class Wave:
                         if i in self.positions:
                             raise ValueError("Duplicate position")
                         self.positions[i] = [self.lane_value(t, lane) for t in operands]
+                    elif m[1] == "param0" and len(operands) == 4 and all(re.fullmatch(r"v\d+", t) for t in operands):
+                        if i in self.attributes:
+                            raise ValueError("Duplicate vertex attribute")
+                        self.attributes[i] = [self.lane_value(t, lane) for t in operands]
                     else:
                         raise ValueError("Unsupported live export")
             elif op.startswith("s_"):
@@ -461,6 +468,9 @@ def lower(decoded, geometry, limits, vertex_header=None):
         raise ValueError("Inconsistent mesh synchronization or allocation")
     nv, np = waves[0].counts[0]
     pos = waves[0].positions | waves[1].positions
+    attributes = waves[0].attributes | waves[1].attributes
+    if attributes and attributes.keys() != pos.keys():
+        raise ValueError("Incomplete vertex attribute")
     idx = waves[0].indices | waves[1].indices
     if (nv, np) != (3, 1):
         raise ValueError("Expected a single three-vertex triangle")
@@ -478,7 +488,7 @@ def lower(decoded, geometry, limits, vertex_header=None):
         "#ifdef TRACE_EXPORTS",
         "RWByteAddressBuffer trace : register(u0);",
         "#endif",
-        "struct Vertex {float4 position:SV_Position;};",
+        "struct Vertex {float4 position:SV_Position;" + ("float4 attr:TEXCOORD0;" if attributes else "") + "};",
         '[outputtopology("triangle")]',
         f"[numthreads(128,1,1)] void main(uint id:SV_GroupIndex, out vertices Vertex v[{nv}], out indices uint3 p[{np}]) {{",
         f"  SetMeshOutputCounts({nv},{np});",
@@ -500,6 +510,9 @@ def lower(decoded, geometry, limits, vertex_header=None):
                 "  }",
             ]
         )
+        if attributes:
+            components = ", ".join(v if isinstance(v, str) else f"asfloat(0x{v:08x}u)" for v in attributes[i])
+            lines.append(f"  if(id=={i}) v[{i}].attr=float4({components});")
     for i, tri in idx.items():
         lines.extend(
             [

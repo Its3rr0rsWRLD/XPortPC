@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_leaf_aot import export_rva  # noqa: E402
 from cpu_vex_aot import lift, translate  # noqa: E402
 
-FUNCTIONS = ("widen_mix", "word_ops", "shift_edges", "store_reload", "aligned_ops")
-UNALIGNED = ("widen_mix", "word_ops", "shift_edges", "store_reload")  # vmovdqu-only functions
+FUNCTIONS = ("widen_mix", "word_ops", "shift_edges", "store_reload", "aligned_ops", "byte_pack_reload")
+UNALIGNED = ("widen_mix", "word_ops", "shift_edges", "store_reload",
+             "byte_pack_reload")  # vmovdqu-only functions
 # Arena: guard | A | guard | B | guard | OUT | guard, each 16 bytes, starting 16-byte aligned.
 ZONES = {"a": 16, "b": 48, "out": 80}
 ARENA = 112
@@ -101,6 +102,7 @@ def code_offsets(image, name):
 # Hand-encoded leaf bodies that the profile excludes, each with the disassembly iced must report
 # (checked first, so a wrong encoding fails the test instead of passing vacuously) and the reason.
 REJECTED = (
+    ("C5 F1 FD C2", "vpaddw xmm0,xmm1,xmm2", "undefined XMM source"),
     ("62 F1 75 09 FD C2", "vpaddw xmm0{k1},xmm1,xmm2", "non-VEX encoding"),
     ("66 0F FD C1", "paddw xmm0,xmm1", "non-VEX encoding"),
     ("C5 F9 FD F1", "vpaddw xmm6,xmm0,xmm1", "nonvolatile XMM register"),
@@ -129,11 +131,37 @@ def check_rejected_encodings():
     print(f"rejected {len(REJECTED)} excluded encodings, including an EVEX masked vpaddw")
 
 
+def check_byte_pack_reload(functions):
+    a = bytes((5, 7, 9, 0, 0, 0, 0, 0, 254, 6)) + bytes(6)
+    b = bytes((0, 1, 0, 0, 0, 0, 0, 0, 255)) + bytes(7)
+    out = slice(ZONES["out"], ZONES["out"] + 16)
+    cases = ((a, b, 0), (a, b, 1), (bytes(16), bytes(16), 1))
+    for left, right, misalign in cases:
+        words = [int.from_bytes(bytes(pair), "little", signed=True)
+                 for pair in zip(left, right)]
+        # Only the upper eight words are halved. The logical shift by 32 contributes zero.
+        words[8:] = [word // 2 for word in words[8:]]
+        expected = bytes(max(0, min(word, 255)) for word in words)
+        pristine = call(lambda *args: None, left, right, misalign=misalign)
+        for variant, exports in functions:
+            arena = call(exports["byte_pack_reload"], left, right, misalign=misalign)
+            if arena[out] != expected:
+                raise AssertionError(f"{variant} byte_pack_reload at offset {misalign}: "
+                                     f"{arena[out].hex()} != {expected.hex()}")
+            if outside_output(arena) != outside_output(pristine):
+                raise AssertionError(f"{variant} byte_pack_reload wrote outside its output")
+    print(f"byte_pack_reload: {len(cases)} reference cases match in all four builds")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("original", "original_lifted", "altered", "altered_lifted"):
         parser.add_argument(name, type=Path)
     args = parser.parse_args()
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(39):  # PF_AVX_INSTRUCTIONS_AVAILABLE
+        check_rejected_encodings()
+        print("Native VEX differential requires OS-enabled AVX")
+        sys.exit(77)
     pairs = inputs()
     _, native = bind(args.original)
     _, lifted = bind(args.original_lifted)
@@ -195,11 +223,16 @@ def main():
         differing += reference != call(native["shift_edges"], a, b)
     if not differing:
         raise AssertionError("replacing vpsraw with vpsrlw changed no output")
-    for name in ("widen_mix", "word_ops", "store_reload", "aligned_ops"):
+    for name in ("widen_mix", "word_ops", "store_reload", "aligned_ops", "byte_pack_reload"):
         for a, b in pairs[:256]:
             if call(altered[name], a, b) != call(native[name], a, b):
                 raise AssertionError(f"altered fixture changed {name}")
     print(f"vpsraw replaced by vpsrlw: {differing} of {len(pairs)} shift_edges outputs differ")
+
+    check_byte_pack_reload((
+        ("original", native), ("original lifted", lifted),
+        ("altered", altered), ("altered lifted", altered_lifted),
+    ))
 
     # Translation rejects a VEX.256 form and an unsupported mnemonic in patched copies.
     start = code_offsets(args.original, "widen_mix")

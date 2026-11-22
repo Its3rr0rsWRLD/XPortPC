@@ -6,3 +6,4 @@ EXPORTS
     forwarded_missing = named_value
     forwarded_loop = named_value
     forwarded_absent = named_value
+    forwarded_upper = named_value

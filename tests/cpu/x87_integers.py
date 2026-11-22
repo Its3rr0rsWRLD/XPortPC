@@ -48,9 +48,9 @@ SEQUENCES = {
 
 CONTROLS = {
     # FIST and FISTP truncate like FISTTP.
-    "chopall": (re.compile(r", (16|32|64), false\)"), r", \1, true)"),
+    "chopall": (re.compile(r", (16|32|64), false, x87_cw\)"), r", \1, true, x87_cw)"),
     # FISTTP rounds to nearest like FIST.
-    "roundtt": (re.compile(r", (16|32|64), true\)"), r", \1, false)"),
+    "roundtt": (re.compile(r", (16|32|64), true, x87_cw\)"), r", \1, false, x87_cw)"),
     # An out-of-range value saturates instead of giving the integer indefinite.
     "saturate": (re.compile(r"if \(magnitude > indefinite - \(x87_sign\(v\) \? 0 : 1\)\) return indefinite;"),
                  "if (magnitude > indefinite - (x87_sign(v) ? 0 : 1)) return x87_sign(v) ? indefinite : indefinite - 1;"),

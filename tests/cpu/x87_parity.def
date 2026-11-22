@@ -1,0 +1,17 @@
+EXPORTS
+    fcomi_record
+    fcomip_record
+    fucomi_record
+    fucomip_record
+    fucomi_fcmovu
+    fcomi_fcmovnu
+    fucomip_fcmovnu
+    fcomip_fcmovu
+    fucomi_st7
+    equal_branch
+    classify
+    sahf_fucomi
+    fucomi_sahf
+    fucomi_test
+    byte_sahf
+    joined

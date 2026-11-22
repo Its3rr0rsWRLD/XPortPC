@@ -79,16 +79,29 @@ ANCHORS_3 = (
 )
 
 
+def _mode_entry(mode):
+    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode < len(MODES):
+        raise ValueError("Expected a mode from 0 to 7")
+    return MODES[mode]
+
+
+def _check_partition(mode, partition):
+    entry = _mode_entry(mode)
+    if isinstance(partition, bool) or not isinstance(partition, int) or not 0 <= partition < (1 << entry[1]):
+        raise ValueError("Partition is out of range for this mode")
+    return entry
+
+
 def subsets(mode, partition):
     """Return the subset of each of the sixteen texels."""
-    count = MODES[mode][0]
+    count = _check_partition(mode, partition)[0]
     if count == 1:
         return (0,) * 16
     return tuple(map(int, (PARTITIONS_2 if count == 2 else PARTITIONS_3)[partition]))
 
 
 def anchors(mode, partition):
-    count = MODES[mode][0]
+    count = _check_partition(mode, partition)[0]
     if count == 1:
         return (0,)
     if count == 2:
@@ -99,9 +112,7 @@ def anchors(mode, partition):
 def layout(mode, partition=0):
     """List (name, first bit, width) for every field. Bit 0 is the low bit of the first byte."""
     count, partition_bits, rotation_bits, selection_bits, colour, alpha, endpoint_p, subset_p, \
-        index_bits, index2_bits = MODES[mode]
-    if not 0 <= partition < 1 << partition_bits:
-        raise ValueError("Partition is out of range for this mode")
+        index_bits, index2_bits = _check_partition(mode, partition)
     widths = [("mode", mode + 1)]
     if partition_bits:
         widths.append(("partition", partition_bits))
@@ -142,8 +153,7 @@ def unpack(block):
 def pack(fields):
     """Build the 16-byte block for a complete set of in-range field values."""
     mode = fields["mode"]
-    if mode not in range(8):
-        raise ValueError("Expected a mode from 0 to 7")
+    _mode_entry(mode)
     spans = layout(mode, fields.get("partition", 0))
     if set(fields) != {name for name, _, _ in spans}:
         raise ValueError("Field names do not match the mode")
@@ -200,7 +210,7 @@ def decode(block):
 
 def fixture_fields(mode, case):
     """Return reproducible field values. Cases 0 to 63 cover every partition and rotation of a mode."""
-    partition = case % (1 << MODES[mode][1])
+    partition = case % (1 << _mode_entry(mode)[1])
     fields = {"mode": mode}
     for name, _, width in layout(mode, partition)[1:]:
         digest = hashlib.sha256(f"bc7 fixture {mode} {case} {name}".encode()).digest()

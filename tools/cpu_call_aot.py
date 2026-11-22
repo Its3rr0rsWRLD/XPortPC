@@ -33,8 +33,8 @@ def callee_name(index):
     return "lifted_callee" if index == 0 else f"lifted_callee{index + 1}"
 
 
-def lift_body(start, code, *, caller, bind_import=None, bind_direct=None, name=None,
-              allow_distinct_imports=False):
+def lift_body(start, code, *, caller, bind_import=None, name=None,
+              allow_distinct_imports=False, bind_direct=None):
     # In this profile only RBX/RSI survive the call. The host compiler owns
     # physical register allocation and emits its own ABI frame for each function.
     frame = 40 if caller else 8

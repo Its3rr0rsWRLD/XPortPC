@@ -104,15 +104,20 @@ def check(native_path, lifted_path):
 
 
 def check_rejections():
-    # 64-bit MMX pabsb mm0, mm1 (0f 38 1c c1) must be rejected (only 128-bit XMM is lowered).
-    insns = list(Decoder(64, bytes.fromhex("0f 38 1c c1 c3"), ip=0x1000))
-    try:
-        lower(insns, [], {}, {}, {})
-    except ValueError as exc:
-        if not str(exc).startswith("unsupported query operation at 0x1000"):
-            raise AssertionError(f"unexpected diagnostic {exc}") from exc
-    else:
-        raise AssertionError("accepted MMX pabsb")
+    controls = (
+        ("MMX pabsb", "0f 38 1c c1 c3", "unsupported query operation"),
+        ("pabsb with untracked XMM3", "66 0f 38 1c c3 c3", "unsupported SSSE3 source"),
+        ("pabsb with memory source", "66 0f 38 1c 01 c3", "unsupported SSSE3 source"),
+    )
+    for label, code, diagnostic in controls:
+        insns = list(Decoder(64, bytes.fromhex(code), ip=0x1000))
+        try:
+            lower(insns, [], {}, {}, {})
+        except ValueError as exc:
+            if not str(exc).startswith(f"{diagnostic} at 0x1000"):
+                raise AssertionError(f"{label}: unexpected diagnostic {exc}") from exc
+        else:
+            raise AssertionError(f"accepted {label}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_avx2_shifts
 ; Source-owned differential fixture for AVX2 broadcasts and variable per-lane shifts:
 ; VPBROADCASTB, VPBROADCASTW, VPBROADCASTD, VPBROADCASTQ,
 ; VPSLLVD, VPSRLVD, VPSRAVD, VPSLLVQ, VPSRLVQ.

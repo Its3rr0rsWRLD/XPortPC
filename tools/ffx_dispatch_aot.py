@@ -88,11 +88,27 @@ FLOAT = {
 def packed_op(op, dest, inputs, mods):
     if op == "pk_fmac_f16":
         inputs = [*inputs, dest]
-    opts = {k: list(map(int, v.split(","))) for k, v in re.findall(r"(\w+):\[([0-1,]+)\]", mods)}
+    opts = {}
+    clamped = False
+    for token in mods.split():
+        if token == "clamp":
+            if clamped:
+                raise ValueError(f"Duplicate packed modifier: {token}")
+            clamped = True
+        elif match := re.fullmatch(r"(op_sel|op_sel_hi|neg_lo|neg_hi):\[([01](?:,[01])*)\]", token):
+            key, raw = match.groups()
+            values = [int(v) for v in raw.split(",")]
+            if key in opts or len(values) != len(inputs):
+                raise ValueError(f"Unsupported packed modifier: {token}")
+            opts[key] = values
+        else:
+            raise ValueError(f"Unsupported packed modifier: {token}")
     operations = {"add": "{0}+{1}", "sub": "{0}-{1}", "min": "min({0},{1})",
                   "max": "max({0},{1})", "mul": "{0}*{1}", "fma": "mad({0},{1},{2})",
                   "fmac": "mad({0},{1},{2})"}
     _, operation, kind = op.split("_")
+    if clamped and kind != "f16":
+        raise ValueError(f"Unsupported clamp modifier on {op}")
     result = []
     for lane in (0, 1):
         args = []
@@ -104,7 +120,7 @@ def packed_op(op, dest, inputs, mods):
                 arg = f"f16tof32({arg})"
             args.append(("-" if neg else "") + arg)
         expr = operations[operation].format(*args)
-        if "clamp" in mods:
+        if clamped:
             expr = f"saturate({expr})"
         result.append(f"f32tof16({expr})" if kind == "f16" else f"(({expr})&65535u)")
     return f"{dest} = {result[0]} | ({result[1]}<<16);"
@@ -157,10 +173,14 @@ def alu(mn, tokens, mods):
     if op in ("bfe_u32", "bfe_i32"):
         args = [args[0], args[1], f"(({args[1]}>>16)&127u)" if mn.startswith("s_") else f"({args[2]}&31u)"]
     if op in FLOAT:
+        if mods not in ("", "mul:2"):
+            raise ValueError(f"Unsupported float modifier for {mn}: {mods}")
         expr = FLOAT[op].format(*[f"asfloat({a})" for a in args], d=f"asfloat({dest})")
         if mods == "mul:2":
             expr = f"2.0*({expr})"
         return f"{dest} = asuint({expr});"
+    if mods and op != "dot4_i32_i8":
+        raise ValueError(f"Unsupported modifier for {mn}: {mods}")
     if mn.startswith("s_") and op in SALU_SCC:
         return f"{dest} = {SALU_SCC[op].format(*args, d=dest)};"
     stmt = f"{dest} = {OPS[op].format(*args, d=dest)};"
@@ -224,7 +244,7 @@ def predecessor(name, instructions, initializer):
              "uint scc=0,vcc_lo=0,exec_lo=1; v0=lane; s14=group.x; s15=group.y;"]
     for pc, instruction in instructions:
         mn, _, rest = instruction.partition(" ")
-        pieces = re.split(r" (?=\w+:)", rest, maxsplit=1)
+        pieces = re.split(r" (?=\w+:|clamp(?: |$))", rest, maxsplit=1)
         args = pieces[0].split(", ")
         mods = pieces[1] if len(pieces) == 2 else ""
         if mn in ("s_endpgm", "s_inst_prefetch", "s_clause", "s_waitcnt") or mn.startswith("s_load_dword"):
@@ -288,7 +308,7 @@ def translate(name, instructions, machine_code):
         mn, _, rest = instruction.partition(" ")
         # Bracketed image coordinates contain a comma and a space.
         rest = re.sub(r"\[(v\d+), (v\d+)\]", r"[\1,\2]", rest.strip())
-        pieces = re.split(r" (?=\w+:|clamp$)", rest, maxsplit=1)
+        pieces = re.split(r" (?=\w+:|clamp(?: |$))", rest, maxsplit=1)
         tokens = pieces[0].split(", ")
         mods = pieces[1] if len(pieces) == 2 else ""
         if mn.startswith("v_pk_") and not mn.startswith("v_pk_fmac_"):

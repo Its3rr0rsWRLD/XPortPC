@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_cmov_setcc
 ; Source-owned differential fixture for unsigned/equality CMOVcc and SETcc:
 ; CMOVA, CMOVAE, CMOVB, CMOVE (32-bit and 64-bit) and SETA, SETAE, SETB, SETBE, SETNE.
 ; 32-bit CMOVcc initializes RAX with upper-half noise to verify unconditional zero-extension;

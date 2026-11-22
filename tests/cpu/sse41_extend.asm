@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse41_extend
 ; Source-owned differential fixture for all 12 SSE4.1 pmovsx/pmovzx instructions.
 .code
 

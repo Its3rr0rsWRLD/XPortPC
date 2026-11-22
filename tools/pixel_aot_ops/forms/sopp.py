@@ -11,6 +11,13 @@ def no_op(st, i, m):
     pass
 
 
+# The VOP1 no-op (from R0Y00/Xbox2Windows#565 by Rachel Amber) takes no operands and changes no state, so it lowers to
+# nothing like s_nop. It is a VALU instruction, so it may not sit between the color export and s_endpgm.
+@form(r"v_nop")
+def vector_no_op(st, i, m):
+    pass
+
+
 # Scheduling hints with no effect on results. Each operand is limited to the width
 # of its RDNA 2 field: clause length minus one, wave priority and sleep duration.
 @form(r"(s_clause|s_setprio|s_sleep) (0x[0-9a-f]+|\d+)")

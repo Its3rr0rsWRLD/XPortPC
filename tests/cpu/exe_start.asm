@@ -4,11 +4,15 @@
 ;   digit 2       entry point
 ; The entry point then calls the named import mix_args(5, 3, out), which returns 5 - 3 + 11, and returns
 ;   (log << 8) | (mix_args result & 0xff)
-; as its exit code. Defining NO_TLS drops the TLS directory, the negative control for the callback.
+; as its exit code, and also stores it in the exported DWORD body_status, which stays 0FEEDFACEh until the body
+; has returned. Defining NO_TLS drops the TLS directory, the negative control for the callback.
 EXTERN __imp_mix_args:QWORD
+
+PUBLIC body_status
 
 .data
 log_digits  DD 0
+body_status DD 0FEEDFACEh          ; exported; the body stores its return value here (sentinel until then)
 IFNDEF NO_TLS
 tlscb SEGMENT READ ALIAS(".tlscb") 'DATA'
 callbacks   DQ tls_callback, 0
@@ -44,7 +48,7 @@ tls_done:
 tls_callback ENDP
 ENDIF
 
-exe_entry PROC FRAME
+native_entry PROC FRAME
     sub rsp, 38h                    ; 20h shadow space, 18h for mix_args' three-word output
     .allocstack 38h
     .endprolog
@@ -60,7 +64,8 @@ exe_entry PROC FRAME
     mov ecx, log_digits
     shl ecx, 8
     or eax, ecx
+    mov body_status, eax
     add rsp, 38h
     ret
-exe_entry ENDP
+native_entry ENDP
 END

@@ -57,7 +57,7 @@ CONTROLS = {
     "double": (ARITH, "x87_arith{53, 1023, 0x7fe}"),
     # m80 loads go through binary64, as a register model of host doubles would.
     "m80double": (re.compile(r"(x87_from_m80\(uint64_t sig, uint16_t se\) \{ )return \{sig, se\};"),
-                  r"\1return x87_from_f64(x87_to_f64({sig, se}));"),
+                  r"\1return x87_from_f64(x87_to_f64({sig, se}, 0x027f));"),
     # Bits shifted out when aligning the smaller addend are dropped instead of kept as a sticky bit.
     "nosticky": (re.compile(r"lo \|= sticky;|lo = \(hi \| lo\) != 0;"),
                  lambda m: ";" if m.group(0).startswith("lo |=") else "lo = 0;"),
@@ -65,7 +65,7 @@ CONTROLS = {
     "nanorder": (re.compile(r"\*out = b\.sig > a\.sig \|\| \(b\.sig == a\.sig && !x87_sign\(b\)\) \? b : a;"),
                  "*out = a;"),
     # An exact zero sum of nonzero addends is -0.
-    "signedzero": (re.compile(r"return \{0, 0\};  // x \+ \(-x\)"), "return {0, 0x8000};  // x + (-x)"),
+    "signedzero": (re.compile(r"return \{0, zero_sign\};  // x \+ \(-x\)"), "return {0, 0x8000};  // x + (-x)"),
 }
 
 
@@ -484,11 +484,11 @@ def check_rejections():
     rejected = {
         "the profile off (default)": (attempt(f"{fld} {fstp} c3", x87=False), "unsupported query operation"),
         "fbld m80": (attempt(f"{fld} df 21 de c1 {fstp} c3"), "unsupported x87 operation"),
-        "fcom st(1)": (attempt(f"{fld} {fld} d8 d1 de c1 {fstp} c3"), "fcom"),
-        "fnstsw ax": (attempt(f"{fld} df e0 {fstp} c3"), "unsupported x87 operation"),
+        "ftst": (attempt(f"{fld} d9 e4 {fstp} c3"), "unsupported x87 operation"),
+        "fnstsw m16": (attempt(f"{fld} dd 3a {fstp} c3"), "unsupported x87 operand"),
         "fldcw": (attempt(f"d9 29 {fld} {fstp} c3"), "fldcw"),
         "fninit": (attempt(f"{fld} db e3 {fstp} c3"), "unsupported x87 operation"),
-        "wait": (attempt(f"{fld} 9b {fstp} c3"), "unsupported x87 operation"),
+        "ffree st(1)": (attempt(f"{fld} dd c1 {fstp} c3"), "unsupported x87 operation"),
         "a ninth push": (attempt(f"{fld} " * 9 + f"{fstp} " * 9 + "c3"), "x87 stack overflow"),
         "fstp on an empty stack": (attempt(f"{fstp} c3"), "x87 stack underflow"),
         "faddp with one value": (attempt(f"{fld} de c1 {fstp} c3"), "x87 stack underflow"),

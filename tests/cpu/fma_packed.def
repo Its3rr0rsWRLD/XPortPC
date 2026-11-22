@@ -35,3 +35,5 @@ EXPORTS
     vfmsubadd213pd_op
     vfmsubadd231ps_op
     vfmsubadd231pd_op
+    vfmadd132ps_xmm_op
+    vfmsub213ps_mem_op

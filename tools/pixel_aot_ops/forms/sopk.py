@@ -1,4 +1,5 @@
-"""SOPK scalar arithmetic: s_addk_i32 and s_mulk_i32, the s_cmpk_* comparisons and s_cmovk_i32. (s_movk_i32 is in sop1.)
+"""SOPK scalar arithmetic: s_addk_i32 and s_mulk_i32, the s_cmpk_* comparisons and s_cmovk_i32 (s_movk_i32 is in sop1),
+and the two hardware register writes of s_setreg_imm32_b32 whose effect on a lowered program is known.
 
 Semantics: AMD RDNA 2 ISA guide, SOPK pseudocode. The 16-bit immediate is sign-extended and the operation reads and
 writes the same SGPR: s_addk_i32 gives D + simm16 modulo 2^32 and sets SCC when the signed 32-bit add overflows,
@@ -10,7 +11,9 @@ Ported from R0Y00/Xbox2Windows#333 by wh1skrzzz (the two operations and the sign
 ("uint", expr) register model: a params[] constant is read as the word it is, and a pending load, an unset register
 and a vector destination are refused.
 """
-from ..dispatch import form
+import re
+
+from ..dispatch import GUARDS, form
 from ..registers import scalar_u32, sgpr_name
 
 
@@ -75,3 +78,48 @@ def sopk_cmov(st, i, m):
     old = scalar_u32(dst, st.scalar, st.pending)
     st.lines.append(f"    uint sopk{i} = {st.scc} ? {simm16(token)}u : {old};")
     st.scalar[dst] = ("uint", f"sopk{i}")
+
+
+# s_setreg_imm32_b32 (from R0Y00/Xbox2Windows#640 by rasptum) is state, not a hint: it is accepted only where its effect on
+# the lowered program is known, and every other register, field or value is refused.
+# FLAT_SCR_LO and FLAT_SCR_HI hold the scratch base address. Only scratch_* and flat_* memory instructions and s_getreg_b32
+# can observe it, and none of them is lowered, so a whole-register write of any 32-bit immediate changes no result.
+# MODE[3:2] is the rounding mode shared by binary16 and binary64 results (LLVM SIDefines.h, FP_ROUND_MODE_DP): 0 is round to
+# nearest even, which the binary16 lowerings assume and shader entry is taken to hold, and 3 is round toward zero. The
+# directed modes 1 and 2 are refused. The mode is held in the pseudo-register MODE_KEY of st.scalar, so that branches and
+# joins carry it: paths that leave different modes join to a poisoned value, which is not nearest even.
+FLAT_SCRATCH = ("HW_REG_FLAT_SCR_LO", "HW_REG_FLAT_SCR_HI")
+HALF_ROUNDING = {"0": "nearest even", "3": "toward zero"}
+MODE_KEY = "mode_round"
+# Under any mode but nearest even no rounding binary16 or binary64 form has a lowering. These two do not depend on the
+# mode: the widening is exact and the pack always truncates.
+HALF_ROUNDING_EXEMPT = ("v_cvt_f32_f16", "v_cvt_pkrtz_f16_f32")
+
+
+def half_rounding_guard(st, i, line):
+    if not getattr(st, "mode_tracked", False):
+        st.mode_tracked = True  # the first instruction of the walk: shader entry holds nearest even
+        st.scalar[MODE_KEY] = HALF_ROUNDING["0"]
+    mode = st.scalar.get(MODE_KEY)
+    if (mode != HALF_ROUNDING["0"] and re.match(r"v_\w*_f(?:16|64)", line)
+            and not line.startswith(HALF_ROUNDING_EXEMPT)):
+        name = mode if isinstance(mode, str) else "not known on every path"
+        raise ValueError(f"Unsupported binary16 or binary64 operation under round {name}: {line.split()[0]}")
+
+
+GUARDS.append(half_rounding_guard)
+
+
+@form(r"s_setreg_imm32_b32 hwreg\((\w+)(?:, (\d+), (\d+))?\), (\S+)")
+def set_hardware_register(st, i, m):
+    register, offset, size, value = m.groups()
+    if register in FLAT_SCRATCH and offset is None:
+        if re.fullmatch(r"0x[0-9a-f]{1,8}", value):
+            return
+        if re.fullmatch(r"-?[0-9]{1,10}", value) and -0x80000000 <= int(value) <= 0xffffffff:
+            return
+    if (register, offset, size) != ("HW_REG_MODE", "2", "2"):
+        raise ValueError(f"Unsupported hardware register write: {m[0]}")
+    if value not in HALF_ROUNDING:
+        raise ValueError(f"Unsupported binary16 rounding mode: {m[0]}")
+    st.scalar[MODE_KEY] = HALF_ROUNDING[value]

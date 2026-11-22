@@ -12,10 +12,19 @@ from pe_inventory import import_tables, resolve_desktop
 
 
 def check_desktop_forwarders():
+    very_long_digits = "9" * 10000
+    very_long_zeros = "0" * 10000
     tables = {
         "front.dll": {"Begin": "api-ms-fixture-l1-1-0.#77", "Broken": "middle.Missing",
-                      "Loop": "MIDDLE.dll.Loop", "Bad": "missing_separator"},
-        "middle.dll": {"#77": "last.Value", "Loop": "front.Loop"},
+                      "Loop": "MIDDLE.dll.Loop", "Bad": "missing_separator",
+                      "OrdMin": "middle.#1", "OrdMax": "middle.#65535",
+                      "OrdZero": "middle.#0", "OrdEmpty": "middle.#",
+                      "OrdOverflow": "middle.#65536", "OrdSuffix": "middle.#12abc",
+                      "OrdNeg": "middle.#-1", "OrdNonAscii": "middle.#\u0661",
+                      "OrdLong": f"middle.#{very_long_digits}",
+                      "OrdLongZero": f"middle.#{very_long_zeros}"},
+        "middle.dll": {"#1": "last.Value", "#77": "last.Value", "#65535": "last.Value",
+                       "#0": "last.Value", "Loop": "front.Loop"},
         "last.dll": {"Value": None},
     }
     contracts = {"api-ms-fixture-l1-1": {"": "absent.dll", "front.dll": "middle.dll"}}
@@ -30,6 +39,16 @@ def check_desktop_forwarders():
     assert resolve("api-ms-fixture-l1-1-0.dll", "#77")["status"] == "provider_not_found"
     assert resolve("front.dll", "Loop")["status"] == "forwarder_cycle"
     assert resolve("front.dll", "Bad")["status"] == "invalid_forwarder"
+    for sym, expected_ord in (("OrdMin", "#1"), ("OrdMax", "#65535")):
+        res = resolve("front.dll", sym)
+        assert res["status"] == "export_present", (sym, res)
+        assert [(s["provider"], s["symbol"]) for s in res["chain"]] == [
+            ("front.dll", sym), ("middle.dll", expected_ord), ("last.dll", "Value")], (sym, res)
+    for bad_sym in ("OrdZero", "OrdEmpty", "OrdOverflow", "OrdSuffix",
+                    "OrdNeg", "OrdNonAscii", "OrdLong", "OrdLongZero"):
+        res = resolve("front.dll", bad_sym)
+        assert res["status"] == "invalid_forwarder", (bad_sym, res)
+        assert res["chain"][-1]["forwarder"] == tables["front.dll"][bad_sym], (bad_sym, res)
     broken = resolve("front.dll", "Broken")
     assert broken["status"] == "export_not_found" and broken["chain"][-1]["symbol"] == "Missing"
 

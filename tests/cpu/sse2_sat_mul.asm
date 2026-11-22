@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse2_sat_mul
 ; Source-owned differential fixture for 20 baseline 128-bit SSE2 packed saturating, multiply, min/max, avg, and sad instructions.
 .code
 

@@ -56,11 +56,12 @@ def check(native_path, lifted_path):
     out_n = (ctypes.c_uint8 * 32)()
     out_l = (ctypes.c_uint8 * 32)()
 
-    # Include raw-bit qNaN/sNaN cases in each operand position to verify x86 NaN sign/payload propagation.
-    qnan32 = struct.unpack("<f", struct.pack("<I", 0x7fc12345))[0]
-    snan32 = struct.unpack("<f", struct.pack("<I", 0x7f812345))[0]
-    qnan64 = struct.unpack("<d", struct.pack("<Q", 0x7ff8000012345678))[0]
-    snan64 = struct.unpack("<d", struct.pack("<Q", 0x7ff0000012345678))[0]
+    # Pack the NaN test words without converting through a Python float,
+    # which can quiet a binary32 signaling NaN.
+    qnan32 = struct.pack("<I", 0xffc12345)
+    snan32 = struct.pack("<I", 0x7f812345)
+    qnan64 = struct.pack("<Q", 0xfff8000012345678)
+    snan64 = struct.pack("<Q", 0x7ff0000012345678)
     f32_triples = (
         (1.0 + 2.0**-23, 1.0 - 2.0**-23, -1.0),
         (1.5, -2.25, 3.75),
@@ -90,9 +91,9 @@ def check(native_path, lifted_path):
         is_f64 = name.endswith("sd_op")
         fmt, width, triples = ("<d", 8, f64_triples) if is_f64 else ("<f", 4, f32_triples)
         for v0, v1, v2 in triples:
-            buf_a = ctypes.create_string_buffer(struct.pack(fmt, v0) + pad_a[width:], 32)
-            buf_b = ctypes.create_string_buffer(struct.pack(fmt, v1) + pad_b[width:], 32)
-            buf_c = ctypes.create_string_buffer(struct.pack(fmt, v2) + pad_c[width:], 32)
+            buf_a = ctypes.create_string_buffer(operand_bytes(v0, fmt) + pad_a[width:], 32)
+            buf_b = ctypes.create_string_buffer(operand_bytes(v1, fmt) + pad_b[width:], 32)
+            buf_c = ctypes.create_string_buffer(operand_bytes(v2, fmt) + pad_c[width:], 32)
             ctypes.memset(out_n, 0xaa, 32)
             ctypes.memset(out_l, 0x55, 32)
             getattr(native, name)(buf_a, buf_b, buf_c, out_n)
@@ -106,6 +107,10 @@ def check(native_path, lifted_path):
             cases += 1
 
     print(f"{cases} scalar FMA3 cases across all 24 ss/sd forms matched native and translated DLLs bit-for-bit")
+
+
+def operand_bytes(value, fmt):
+    return value if isinstance(value, bytes) else struct.pack(fmt, value)
 
 
 def check_rejections():

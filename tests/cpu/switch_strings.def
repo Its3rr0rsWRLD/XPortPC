@@ -1,0 +1,7 @@
+EXPORTS
+    rep_movsb_forward
+    rep_movsw_forward
+    rep_movsd_forward
+    rep_movsq_forward
+    loop_copy
+    call_copy

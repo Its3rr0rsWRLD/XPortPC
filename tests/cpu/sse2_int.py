@@ -71,6 +71,16 @@ def check_rejections():
     else:
         raise AssertionError("accepted MMX paddb")
 
+    # The legacy XMM memory form has an alignment requirement this profile does not model.
+    memory = list(Decoder(64, bytes.fromhex("66 0f fc 02 c3"), ip=0x1000))
+    try:
+        lower(memory, [], {}, {}, {})
+    except ValueError as exc:
+        if not str(exc).startswith("unsupported SSE2 integer source at 0x1000"):
+            raise AssertionError(f"unexpected diagnostic {exc}") from exc
+    else:
+        raise AssertionError("accepted an SSE2 memory operand without an alignment contract")
+
 
 if __name__ == "__main__":
     mode, native, other = sys.argv[1:]

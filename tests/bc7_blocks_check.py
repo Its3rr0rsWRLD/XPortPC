@@ -69,6 +69,12 @@ class BlockChecks(unittest.TestCase):
                                  [sum(width for _, _, width in spans[:index]) for index in range(len(spans))])
         with self.assertRaises(ValueError):
             layout(0, 16)
+        for bad_mode in (-1, 8, True):
+            with self.assertRaises(ValueError):
+                layout(bad_mode)
+        for bad_mode, bad_partition in ((1, -1), (6, 1)):
+            with self.assertRaises(ValueError):
+                layout(bad_mode, bad_partition)
 
     def test_partition_tables(self):
         for table, count in ((PARTITIONS_2, 2), (PARTITIONS_3, 3)):
@@ -83,6 +89,12 @@ class BlockChecks(unittest.TestCase):
             self.assertEqual(len(set(anchors(2, partition))), 3)
         self.assertEqual(subsets(6, 0), (0,) * 16)
         self.assertEqual(subsets(1, 13), (0,) * 8 + (1,) * 8)
+        for bad_mode, bad_partition in ((-1, 0), (8, 0), (1, -1), (1, 64), (6, 1)):
+            with self.assertRaises(ValueError):
+                subsets(bad_mode, bad_partition)
+        for bad_mode, bad_partition in ((-1, 0), (8, 0), (2, -1), (2, 64), (6, 1)):
+            with self.assertRaises(ValueError):
+                anchors(bad_mode, bad_partition)
 
     def test_hand_derived_blocks(self):
         # Mode 1, partition 13: rows 0-1 use subset 0 and rows 2-3 use subset 1.
@@ -135,9 +147,13 @@ class BlockChecks(unittest.TestCase):
                 self.assertEqual(pack(fields), data)
             self.assertEqual(len(seen), 1 << MODES[mode][1])
         fields = fixture_fields(1, 13)
-        for change in ({"index0": 4}, {"index15": 4}, {"r0": 64}, {"mode": 8}, {"partition": 64}, {"a0": 0}):
+        for change in ({"index0": 4}, {"index15": 4}, {"r0": 64}, {"mode": -1}, {"mode": 8}, {"mode": True},
+                       {"partition": 64}, {"a0": 0}):
             with self.assertRaises(ValueError):
                 pack({**fields, **change})
+        for bad_mode in (-1, 8, True):
+            with self.assertRaises(ValueError):
+                fixture_fields(bad_mode, 0)
         with self.assertRaises(ValueError):
             pack({name: value for name, value in fields.items() if name != "p1"})
         for data in (bytes(16), bytes(15)):
