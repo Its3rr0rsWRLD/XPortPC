@@ -56,12 +56,26 @@ add_library(xmem_shim SHARED src/xmem_shim.cpp src/xmem_shim.def src/era_heap.cp
 set_target_properties(xmem_shim PROPERTIES OUTPUT_NAME xmem)
 target_include_directories(xmem_shim PRIVATE src)
 target_compile_features(xmem_shim PRIVATE cxx_std_20)
+target_compile_definitions(xmem_shim PRIVATE X2W_TITLE_GPU_EXPORTS)
 add_executable(xmem_shim_check tests/xmem_shim_check.cpp)
 target_link_libraries(xmem_shim_check PRIVATE xmem_shim)
 target_compile_features(xmem_shim_check PRIVATE cxx_std_17)
 foreach(scenario IN ITEMS exports allocation query working_set)
     add_test(NAME xmem_shim_${scenario} COMMAND xmem_shim_check ${scenario})
 endforeach()
+
+add_library(xmem_gpu_client SHARED tests/xmem_gpu_client.cpp tests/xmem_gpu_client.def)
+target_include_directories(xmem_gpu_client PRIVATE src)
+target_compile_features(xmem_gpu_client PRIVATE cxx_std_20)
+target_link_libraries(xmem_gpu_client PRIVATE xmem_shim d3d12)
+
+add_executable(xmem_gpu_cross_dll_check tests/xmem_gpu_cross_dll_check.cpp)
+target_compile_features(xmem_gpu_cross_dll_check PRIVATE cxx_std_17)
+target_link_libraries(xmem_gpu_cross_dll_check PRIVATE dxgi d3d12)
+target_include_directories(xmem_gpu_cross_dll_check PRIVATE src)
+
+add_test(NAME xmem_gpu_cross_dll_warp COMMAND xmem_gpu_cross_dll_check "$<TARGET_FILE:xmem_gpu_client>")
+set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 
 # Desktop d3d12_xs.dll for the package DLLs' two named d3d12_xs root-signature imports.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_shim.def)

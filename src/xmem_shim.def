@@ -4,3 +4,8 @@ EXPORTS
     XMemFree
     XMemVirtualQuery
     XMemGetWorkingSetStatistics
+    X2WTitleGpuAttach
+    X2WTitleGpuDetach
+    X2WTitleGpuTranslate
+    X2WTitleGpuLocate
+    X2WTitleGpuGetShaderView
