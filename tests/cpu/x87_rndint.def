@@ -1,0 +1,9 @@
+EXPORTS
+    rndint_m80
+    rndint_to_m64
+    rndint_to_m32
+    rndint_f64
+    rndint_f32
+    fraction
+    rndint_fistp
+    rndint_depth8

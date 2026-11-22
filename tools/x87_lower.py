@@ -2,7 +2,7 @@
 
 The profile accepts:
 - FLD and FSTP with an m32, m64 or m80 operand, and FST with an m32 or m64 operand;
-- FLD, FST, FSTP and FXCH with ST(i), FCHS and FABS, and FSQRT;
+- FLD, FST, FSTP and FXCH with ST(i), FCHS and FABS, FSQRT and FRNDINT;
 - the constant loads FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2 and FLDLN2;
 - FILD, FISTP and FISTTP with an m16, m32 or m64 integer operand, and FIST with m16 or m32;
 - FCOMI, FCOMIP, FUCOMI and FUCOMIP ST(0), ST(i), which set ZF and CF for the integer lowering (PF is
@@ -24,7 +24,7 @@ from pathlib import Path
 from iced_x86 import Code as C, FlowControl, MemorySize as S, Mnemonic as M, OpKind as K, Register as R
 
 X87_HEADER = Path(__file__).with_name("x87_soft.h").read_text(encoding="ascii")
-X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FSQRT, M.FLD1, M.FLDZ, M.FLDPI, M.FLDL2T, M.FLDL2E,
+X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FSQRT, M.FRNDINT, M.FLD1, M.FLDZ, M.FLDPI, M.FLDL2T, M.FLDL2E,
                      M.FLDLG2, M.FLDLN2, M.FILD, M.FIST, M.FISTP, M.FISTTP, M.FCOMI,
                      M.FCOMIP, M.FUCOMI, M.FUCOMIP, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
                      M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP})
@@ -101,7 +101,7 @@ def _effect(i, depth):
         if depth == 8:
             raise ValueError(f"x87 stack overflow at {i.ip:#x}: {i}")
         return depth + 1
-    if op in (M.FCHS, M.FABS, M.FSQRT):
+    if op in (M.FCHS, M.FABS, M.FSQRT, M.FRNDINT):
         if depth == 0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth
@@ -203,8 +203,8 @@ def statement(i, depth, address):
         sig, se = CONSTANTS[op]
         name = next(n for n, v in vars(M).items() if v == op).lower()
         return f"x87_slot[{depth}] = X87Value{{{sig:#018x}ull, {se:#06x}}};  // {name}"
-    if op == M.FSQRT:
-        return f"x87_slot[{top}] = x87_sqrt(x87_slot[{top}]);"
+    if op in (M.FSQRT, M.FRNDINT):
+        return f"x87_slot[{top}] = {'x87_sqrt' if op == M.FSQRT else 'x87_rndint'}(x87_slot[{top}]);"
     if op in (M.FCHS, M.FABS):
         return f"x87_slot[{top}] = {'x87_chs' if op == M.FCHS else 'x87_abs'}(x87_slot[{top}]);"
     if op == M.FLD:

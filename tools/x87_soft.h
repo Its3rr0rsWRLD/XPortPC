@@ -348,3 +348,24 @@ static inline X87Value x87_sqrt(X87Value a) {
     const X87Rounded r = x87_round(false, (x.e - 63 - t) / 2 + 63, q, sticky, x87_arith, x87_rc);  // sqrt round
     return {r.sig, static_cast<uint16_t>(r.biased)};
 }
+
+// FRNDINT: ST(0) rounded to an integral value to nearest-even, kept in the extended format. The precision
+// control does not apply. Zeros, infinities and values of 2^63 and above are already integral; a value
+// that rounds to zero keeps its sign; a NaN is quieted and an unsupported encoding gives the indefinite.
+static inline X87Value x87_rndint(X87Value v) {
+    if (x87_unsupported(v)) return x87_indefinite;
+    if (x87_is_nan(v)) return x87_quiet(v);
+    if (x87_exp(v) == 0x7fff || v.sig == 0) return v;
+    const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
+    if (shift <= 0) return v;
+    uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
+    if (shift <= 64) {  // a value below one half (shift > 64) rounds to 0
+        const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
+        const uint64_t half = 1ull << (shift - 1);
+        if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;  // rndint round
+    }
+    const uint16_t sign = v.se & 0x8000;
+    if (magnitude == 0) return {0, sign};
+    const int lead = x87_clz(magnitude);
+    return {magnitude << lead, static_cast<uint16_t>(sign | (16383 + 63 - lead))};
+}
