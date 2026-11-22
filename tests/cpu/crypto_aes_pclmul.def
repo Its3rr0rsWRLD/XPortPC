@@ -1,0 +1,16 @@
+EXPORTS
+    aesenc_op
+    aesenclast_op
+    aesdec_op
+    aesdeclast_op
+    aesimc_op
+    aeskeygenassist_op
+    pclmulqdq_00_op
+    pclmulqdq_11_op
+    vaesenc_op
+    vaesenclast_op
+    vaesdec_op
+    vaesdeclast_op
+    vaesimc_op
+    vaeskeygenassist_op
+    vpclmulqdq_01_op
