@@ -3,7 +3,8 @@ import re
 
 from ..control_flow import implies
 from ..dispatch import form
-from ..registers import fp_operand, tracked_word, vector_u32
+from ..hlsl import SALU_HELPERS
+from ..registers import PackedPair, fp_operand, tracked_word, vector_u32
 
 
 def packed_under(st, i, dst):
@@ -21,6 +22,31 @@ def discard_dead_lane(st):
     st.lines.append("    discard;" if st.ex == "false" else f"    if (!{st.ex}) discard;")
 
 
+# The pack as a word, for any reader but the compressed export (ported from R0Y00/Xbox2Windows#528 by Vonsek): each
+# half is converted to binary16 rounding toward zero in integer arithmetic, so desktop conversion and denormal handling
+# cannot change it. A finite value past the range gives the largest finite half, as LLVM folds llvm.amdgcn.cvt.pkrtz
+# with rmTowardZero; a binary16 subnormal result is kept; a NaN keeps its sign and top payload bits, quieted.
+SALU_HELPERS["pack16_rtz"] = (
+    "// v_cvt_pkrtz_f16_f32: binary32 to binary16 rounding toward zero.\n"
+    "uint pack16_rtz(float value) {\n"
+    "    uint bits = asuint(value);\n"
+    "    uint sign = (bits >> 16) & 0x8000u;\n"
+    "    uint abs_bits = bits & 0x7fffffffu;\n"
+    "    if (abs_bits > 0x7f800000u) return sign | 0x7e00u | ((abs_bits >> 13) & 0x3ffu);\n"
+    "    if (abs_bits == 0x7f800000u) return sign | 0x7c00u;\n"
+    "    if (abs_bits >= 0x47800000u) return sign | 0x7bffu;\n"
+    "    if (abs_bits >= 0x38800000u) return sign | ((abs_bits - 0x38000000u) >> 13);\n"
+    "    if (abs_bits < 0x33800000u) return sign;\n"
+    "    return sign | ((0x00800000u | (abs_bits & 0x007fffffu)) >> (126u - (abs_bits >> 23)));\n"
+    "}")
+
+
+def pair_of(st, dst, halves):
+    pair = PackedPair(halves)
+    pair.helpers = st.helpers
+    st.vector[dst] = pair
+
+
 @form(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), (v\d+), (v\d+)")
 def pack_e32(st, i, m):
     dst, lo, hi = m.groups()
@@ -36,8 +62,14 @@ def pack_e32(st, i, m):
     if (lo in st.sample_dest or hi in st.sample_dest or dst in st.sample_dest
             or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair)):
         raise ValueError("Unsupported pack operand")
-    st.vector[dst] = tuple(pair)
+    pair_of(st, dst, pair)
     packed_under(st, i, dst)
+
+
+@form(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), ([sv]\d+|0x[0-9a-f]{1,8}|-?\d+(?:\.\d+)?), (v\d+)", when=lambda st, m: not m[2].startswith("v"))
+def pack_e32_scalar_source(st, i, m):
+    # VOP2 takes S0 from an SGPR, an inline constant or a literal and S1 from a VGPR; same rules as the e64 form.
+    pack_tokens(st, i, m[1], [m[2], m[3]], None)
 
 
 @form(r"v_cvt_pkrtz_f16_f32_e64 (v\d+), ([^, ]+), ([^, ]+?)( clamp)?")
@@ -49,6 +81,10 @@ def pack_e64(st, i, m):
     # clamp and omod on this instruction on GFX10.3, a single report not measured on gfx1013 and not in the
     # ISA text. omod and op_sel do not match this grammar. https://github.com/llvm/llvm-project/issues/60591
     dst, *tokens, clamp = m.groups()
+    pack_tokens(st, i, dst, tokens, clamp)
+
+
+def pack_tokens(st, i, dst, tokens, clamp):
     if clamp:
         raise ValueError("clamp on v_cvt_pkrtz_f16_f32_e64 is refused: its hardware behaviour is unverified "
                          "(LLVM issue 60591 reports it is ignored on GFX10.3)")
@@ -61,7 +97,7 @@ def pack_e64(st, i, m):
                 raise ValueError(f"Unsupported pack operand {register}")
         st.lines.append(f"    precise float alu{i}_{n} = {fp_operand(token, st.scalar, st.vector, st.pending, st.sample_pending)};")
         pair.append(f"alu{i}_{n}")
-    st.vector[dst] = tuple(pair)
+    pair_of(st, dst, pair)
     packed_under(st, i, dst)
 
 

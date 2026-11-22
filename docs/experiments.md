@@ -3118,6 +3118,46 @@ Each backend runs 38 groups with empty, full and sparse ballots and 32 single-po
 ctest --preset dev -R 'bvh_reads|bvh_waves|bvh_wave64|bvh_hits' -V
 ```
 
+### Diagnosing independent native-wave shuffles
+
+The original BVH wave test combines logical 64-thread operations, native
+`WaveReadLaneAt` shuffles and prefix scans. Issue [#145](https://github.com/R0Y00/Xbox2Windows/issues/145)
+reports a WARP 1.0.22 **non-uniform shuffle** whose output matches the inverse
+of the requested permutation at native width 64. This is still an observation,
+not a proven WARP or driver defect. The independent, source-built
+`tests/bvh_shuffle_probe.hlsl` does **not** use the BVH scan: it tests only
+`WaveReadLaneAt` routing with distinct source dwords and GPU-reported physical
+lane IDs. The CPU oracle groups by `WaveReadLaneFirst(SV_GroupIndex)`, without
+assuming native wave membership or lane order from group-thread indices.
+
+Nine 64-thread groups compare forward `7*n+3 mod width`, inverse-affine,
+rotation, mirror, half-XOR, identity, a genuinely per-thread dynamic index,
+last-lane broadcast and first-lane broadcast. An inverse-route diagnostic
+counts mismatches that specifically match the inverse permutation. Widths
+4 and 8 are included as controls, but their affine permutation is
+self-inverse, so **only widths 16, 32 or 64 can identify this inversion**.
+The GPU test must fail on a mismatch, rather than silently changing its
+expected values. Synthetic-only; no title shaders or binaries are used.
+
+The default fixture targets shader model 6.5 because the Windows 10 in-box
+WARP may remove the device when a dynamic lane index is compiled under 6.0
+(see #145); explicit sizes require shader model 6.6 and a reported wave-lane
+range containing the requested width.
+Unsupported forced sizes return capability **SKIP (77)**. The checks below
+are newly added; no device result is claimed until independently run:
+
+```powershell
+python -B tests/bvh_shuffle_oracle_check.py
+ctest --preset dev --no-tests=error -R '^bvh_shuffle_(default|16|32|64)_(hardware|warp)$' -V
+```
+
+A useful comparison for [#145](https://github.com/R0Y00/Xbox2Windows/issues/145)
+is the same WARP 1.0.22 and Agility SDK 1.620.2 environment at forced widths
+16, 32 and 64, alongside a default-wave run. Record the exact WARP/runtime,
+Windows version, SHA and first failing route. The normal RTX Wave32 hardware
+check should pass its supported widths while the unsupported forced Wave64
+remains a skip; **this does not turn a native-Wave64 skip into a pass**.
+
 ### From buffer reads to ray hits
 
 `bvh_hits_hardware` and `bvh_hits_warp` connect bounded address reads and half-group prefix sums to ray intersections. Box and triangle tests follow AMD GPURT's software approach. A synthetic root holds 64 child bounds with logical 64-bit triangle addresses. The 64 logical lanes test bounds and compact candidates using both half-group sums. Receiving lanes fetch vertices and reduce nearest hits within and across native waves. The fixture breaks distance ties by the smallest primitive ID. [AMD GPURT intersections](https://github.com/GPUOpen-Drivers/gpurt/blob/dev/src/shaders/IntersectCommon.hlsl)

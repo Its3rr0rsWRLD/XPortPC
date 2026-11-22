@@ -225,6 +225,16 @@ def f16_exponent(token, scalar, vector, pending, sample_pending):
 RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw", "dppw", "f16w", "xw", "smw")
 
 
+class PackedPair(tuple):
+    """The two binary32 values (low half, high half) a v_cvt_pkrtz_f16_f32 packed. The compressed export reads the pair
+    itself; any other reader gets the word, whose helper `helpers` (the program's set of helper names) then receives, so
+    a program that only exports the pair is unchanged."""
+    helpers = None
+
+
+PACK_WORD = "(pack16_rtz({0}) | (pack16_rtz({1}) << 16))"
+
+
 def tracked_word(value):
     """The 32 bits of a tracked numeric register value as an unsigned expression, or None for any other value."""
     if isinstance(value, str) and value.startswith(("sample", "alu")):
@@ -264,6 +274,11 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
             if token in sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return value[1]
+        if isinstance(value, PackedPair):
+            if token in sample_pending and any(half.startswith("sample") for half in value):
+                raise ValueError("Sample used before vmcnt wait")
+            value.helpers.add("pack16_rtz")
+            return PACK_WORD.format(*value)
         if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError(f"Expected a numeric register: {token}")
         if token in sample_pending and value.startswith("sample"):

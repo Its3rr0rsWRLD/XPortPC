@@ -69,6 +69,7 @@ bool check_gpu_alias_lookup_writes(ID3D12Device* device);
 bool check_gpu_alias_registry(ID3D12Device* device);
 bool check_wave_shuffle(ID3D12Device* device);
 bool check_dxr_rays(ID3D12Device* device, bool usePipeline);
+bool check_bvh_shuffle(ID3D12Device* device, unsigned forced_width);
 bool check_dxr_update(ID3D12Device* device);
 bool check_dxr_facing(ID3D12Device* device);
 bool check_dxr_opacity(ID3D12Device* device, bool warp);

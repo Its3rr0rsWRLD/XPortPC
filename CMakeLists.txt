@@ -184,7 +184,26 @@ foreach(entry IN ITEMS DualUav SampleMip WriteRecurrent)
         BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/${entry}.cso" VERBATIM)
     target_sources(offscreen_check PRIVATE "${header}")
 endforeach()
-target_sources(offscreen_check PRIVATE tests/bvh_reads_waves.cpp tests/bvh_hits.cpp)
+target_sources(offscreen_check PRIVATE tests/bvh_reads_waves.cpp tests/bvh_hits.cpp tests/bvh_shuffle_probe.cpp)
+foreach(size IN ITEMS Default 16 32 64)
+    set(header "${CMAKE_CURRENT_BINARY_DIR}/Shuffle${size}.h")
+    set(defines)
+    # The in-box Windows 10 WARP can lose the device for a nonliteral lane
+    # index when the shader is compiled below SM 6.5 (see issue #145).
+    set(model cs_6_5)
+    if(NOT size STREQUAL "Default")
+        set(defines -D "FORCE_WAVE_SIZE=${size}")
+        set(model cs_6_6)
+    endif()
+    add_custom_command(OUTPUT "${header}"
+        COMMAND "${DXC_EXECUTABLE}" -T ${model} -E ShuffleProbe ${defines}
+            -Vn "Shuffle${size}" -Fh "${header}"
+            -Fo "${CMAKE_CURRENT_BINARY_DIR}/Shuffle${size}.cso"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/bvh_shuffle_probe.hlsl"
+        DEPENDS tests/bvh_shuffle_probe.hlsl
+        BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/Shuffle${size}.cso" VERBATIM)
+    target_sources(offscreen_check PRIVATE "${header}")
+endforeach()
 target_sources(offscreen_check PRIVATE tests/bvh_atomics.cpp tests/bvh_numeric.cpp)
 # A title graphics allocation opened as a D3D12 heap and addressed through translated GPU addresses.
 target_sources(offscreen_check PRIVATE tests/gpu_alias.cpp src/era_gpu_alias.cpp src/era_title_va.cpp src/era_heap.cpp)
@@ -361,6 +380,14 @@ foreach(adapter IN ITEMS hardware warp)
     foreach(work IN ITEMS reads waves wave64 hits differential atomics numeric packed)
         add_test(NAME bvh_${work}_${adapter} COMMAND offscreen_check ${adapter} --bvh-${work})
         set_tests_properties(bvh_${work}_${adapter} PROPERTIES TIMEOUT 45)
+    endforeach()
+    foreach(width IN ITEMS default 16 32 64)
+        set(arg --bvh-shuffle-${width})
+        if(width STREQUAL "default")
+            set(arg --bvh-shuffle)
+        endif()
+        add_test(NAME bvh_shuffle_${width}_${adapter} COMMAND offscreen_check ${adapter} ${arg})
+        set_tests_properties(bvh_shuffle_${width}_${adapter} PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
     endforeach()
     set_tests_properties(bvh_wave64_${adapter} bvh_differential_${adapter} PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME wave_shuffle_${adapter} COMMAND offscreen_check ${adapter} --wave-shuffle)
@@ -2615,6 +2642,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/array_atomics_dxil_check.py" "${DXC_EXECUTABLE}"
         "${CMAKE_CURRENT_BINARY_DIR}/ProbeArrayAtomics.cso" "${CMAKE_SOURCE_DIR}/tests/gpu_alias_writes.hlsl"
         "${CMAKE_SOURCE_DIR}/src")
+    add_test(NAME bvh_shuffle_oracle_math COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/bvh_shuffle_oracle_check.py")
     foreach(adapter IN ITEMS hardware warp)
         add_test(NAME mesh_pixel_pipeline_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/mesh_pixel_pipeline_check.py" "${DXC_EXECUTABLE}"
