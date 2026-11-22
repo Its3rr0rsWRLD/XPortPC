@@ -659,6 +659,61 @@ def check_avx_move_regs():
         assert only_fail["blocked_by_skip"] == []
 
 
+def check_sse2_regs():
+    """sse2_regs.asm covers 23 SSE2 forms in docs/coverage/x64_zen2.tsv group SSE2."""
+    expected_sse2 = {
+        "cmppd",
+        "cvtdq2pd", "cvtdq2ps", "cvtpd2dq", "cvtpd2ps", "cvtpi2pd",
+        "cvtps2dq", "cvtps2pd", "cvtsd2si",
+        "cvttpd2dq", "cvttps2dq",
+        "lfence", "mfence",
+        "maxsd", "minsd", "sqrtsd",
+        "movapd", "movdqa", "movhpd", "movlpd",
+        "movntdq", "movnti", "movntpd",
+    }
+    rejected_sse2 = {
+        # ABI-infeasible task forms: MMX register operands or implicit RDI addressing.
+        "cvtpd2pi", "cvttpd2pi", "movdq2q", "movq2dq", "maskmovdqu",
+        # Reserved for sibling translators.
+        "addpd", "addsd", "andnpd", "andpd", "comisd",
+        "cvtsi2sd", "cvttsd2si", "cvtss2sd", "cvtsd2ss",
+        "divpd", "divsd", "maxpd", "minpd", "movdqu", "movmskpd", "movupd",
+        "mulpd", "mulsd", "orpd",
+        "pmuludq", "pshufd", "pshufhw", "pshuflw", "pslldq", "psrldq",
+        "psubq", "punpckhqdq", "punpcklqdq",
+        "shufpd", "sqrtpd", "subpd", "subsd",
+        "ucomisd", "unpckhpd", "unpcklpd", "xorpd",
+    }
+    assert len(expected_sse2) == 23 and len(rejected_sse2) == 41
+    reference = fc.load_reference("x64_zen2.tsv")
+    all_sse2 = {form for group, form in reference if group == "SSE2"}
+    assert expected_sse2 | rejected_sse2 == all_sse2 and len(all_sse2) == 64
+
+    asm_text = (fc.ROOT / "tests" / "cpu" / "sse2_regs.asm").read_text(encoding="utf-8")
+    found = fc.masm_mnemonics(asm_text)
+    assert expected_sse2 <= found, expected_sse2 - found
+    assert rejected_sse2.isdisjoint(found), rejected_sse2 & found
+    # Exactly the 23 implemented SSE2 forms appear; rejected and reserved forms stay out.
+    assert (found & all_sse2) == expected_sse2, (found & all_sse2) ^ expected_sse2
+
+    passed = fc.measure({"cpu_aot_sse2_regs": "pass"})
+    assert passed["fixtures"]["sse2_regs.asm"] == "pass"
+    assert "sse2_regs.asm" not in passed["unclassified"]
+    assert passed["x64_zen2"]["groups"]["SSE2"]["covered"] == len(expected_sse2)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = sample_repo(tmp, {"sse2_regs": asm_text})
+        only_pass = fc.measure({"cpu_aot_sse2_regs": "pass"}, root)["x64_zen2"]
+        only_skip = fc.measure({"cpu_aot_sse2_regs": "skip"}, root)["x64_zen2"]
+        only_fail = fc.measure({"cpu_aot_sse2_regs": "fail"}, root)["x64_zen2"]
+        assert only_pass["groups"]["SSE2"]["covered"] == len(expected_sse2)
+        assert only_pass["fixture_forms_not_in_reference"] == []
+        assert only_skip["groups"]["SSE2"]["covered"] == 0
+        for form in expected_sse2:
+            assert f"SSE2 {form}" in only_skip["blocked_by_skip"]
+        assert only_fail["groups"]["SSE2"]["covered"] == 0
+        assert only_fail["blocked_by_skip"] == []
+
+
 if __name__ == "__main__":
     check_denominators()
     check_example()
@@ -674,4 +729,5 @@ if __name__ == "__main__":
     check_avx2_regs()
     check_avx_int_regs()
     check_avx_move_regs()
+    check_sse2_regs()
     print("form coverage checks passed")

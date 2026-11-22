@@ -840,6 +840,32 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_avx_move_regs_original>"
         "$<TARGET_FILE:cpu_avx_move_regs_original_lifted>"
         "$<TARGET_FILE:cpu_avx_move_regs_altered_lifted>")
+    set(cpu_sse2_exports
+        "op_cmppd_0,op_cmppd_1,op_cmppd_2,op_cmppd_3,op_cmppd_4,op_cmppd_5,op_cmppd_6,op_cmppd_7,"
+        "op_cmppd_mem,"
+        "op_maxsd_reg,op_maxsd_mem,op_minsd_reg,op_minsd_mem,op_sqrtsd_reg,op_sqrtsd_mem,"
+        "op_cvtsd2si_r32_reg,op_cvtsd2si_r64_reg,op_cvtsd2si_r32_mem,op_cvtsd2si_r64_mem,"
+        "op_cvtdq2pd_reg,op_cvtdq2pd_mem,op_cvtdq2ps_reg,op_cvtdq2ps_mem,"
+        "op_cvtpd2dq_reg,op_cvtpd2dq_mem,op_cvtpd2ps_reg,op_cvtpd2ps_mem,op_cvtpi2pd_mem,"
+        "op_cvtps2dq_reg,op_cvtps2dq_mem,op_cvtps2pd_reg,op_cvtps2pd_mem,"
+        "op_cvttpd2dq_reg,op_cvttpd2dq_mem,op_cvttps2dq_reg,op_cvttps2dq_mem,"
+        "op_movapd_ls,op_movapd_reg,op_movdqa_ls,op_movdqa_reg,"
+        "op_movhpd_load,op_movhpd_store,op_movlpd_load,op_movlpd_store,"
+        "op_movhpd_load_plus1,op_movlpd_load_plus1,"
+        "op_movhpd_store_plus1,op_movlpd_store_plus1,op_maxsd_mem_plus1,op_cvtsd2si_mem_plus1,"
+        "op_movntdq,op_movntpd,op_movnti32,op_movnti64,"
+        "op_lfence,op_mfence,op_pipeline")
+    string(CONCAT cpu_sse2_exports ${cpu_sse2_exports})
+    foreach(variant IN ITEMS original altered)
+        cpu_asm_fixture(cpu_sse2_regs_${variant} sse2_regs)
+        cpu_translation(cpu_sse2_regs_${variant} cpu_sse2_aot "${cpu_sse2_exports}")
+    endforeach()
+    target_compile_definitions(cpu_sse2_regs_altered PRIVATE ALTER_IMM)
+    add_test(NAME cpu_aot_sse2_regs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/sse2_regs_check.py"
+        "$<TARGET_FILE:cpu_sse2_regs_original>"
+        "$<TARGET_FILE:cpu_sse2_regs_original_lifted>"
+        "$<TARGET_FILE:cpu_sse2_regs_altered_lifted>")
     # Import tail jumps: one caller per provider (named, altered return, ordinal-only), each translated twice:
     # tail_mix (three arguments) bound to mix3 with three, tail_choose (three) and tail_pass4 (four) to mix4 with four.
     set(tail_files)
