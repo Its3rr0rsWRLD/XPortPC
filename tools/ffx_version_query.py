@@ -135,6 +135,32 @@ static inline void pclmul_x86(uint8_t out[16], const uint8_t lhs[16], const uint
         if ((b >> k) & 1ull) { lo ^= (a << k); if (k > 0u) hi ^= (a >> (64u - k)); }
     }
     memcpy(out, &lo, 8); memcpy(out + 8, &hi, 8);
+static inline uint32_t sha_rol32(uint32_t x, unsigned n) { return (x << n) | (x >> (32u - n)); }
+static inline uint32_t sha_ror32(uint32_t x, unsigned n) { return (x >> n) | (x << (32u - n)); }
+static inline void sha1_rnds4(uint32_t d[4], const uint32_t s[4], unsigned func) {
+    uint32_t a = d[3], b = d[2], c = d[1], dv = d[0], e = 0;
+    const uint32_t w[4] = {s[3], s[2], s[1], s[0]};
+    const uint32_t k = func == 0 ? 0x5a827999u : (func == 1 ? 0x6ed9eba1u : (func == 2 ? 0x8f1bbcdcu : 0xca62c1d6u));
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t f = func == 0 ? ((b & c) ^ (~b & dv))
+                         : (func == 2 ? ((b & c) ^ (b & dv) ^ (c & dv)) : (b ^ c ^ dv));
+        const uint32_t t = f + sha_rol32(a, 5) + w[i] + k + e;
+        e = dv; dv = c; c = sha_rol32(b, 30); b = a; a = t;
+    }
+    d[3] = a; d[2] = b; d[1] = c; d[0] = dv;
+}
+static inline void sha256_rnds2(uint32_t d[4], const uint32_t s[4], const uint32_t wk[4]) {
+    uint32_t a = s[3], b = s[2], c = d[3], dv = d[2], e = s[1], f = s[0], g = d[1], h = d[0];
+    for (int i = 0; i < 2; ++i) {
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t s0 = sha_ror32(a, 2) ^ sha_ror32(a, 13) ^ sha_ror32(a, 22);
+        const uint32_t s1 = sha_ror32(e, 6) ^ sha_ror32(e, 11) ^ sha_ror32(e, 25);
+        const uint32_t t1 = ch + s1 + wk[i] + h;
+        const uint32_t na = t1 + maj + s0, ne = t1 + dv;
+        h = g; g = f; f = e; e = ne; dv = c; c = b; b = a; a = na;
+    }
+    d[3] = a; d[2] = b; d[1] = e; d[0] = f;
 }
 """
 HEADER = INTEGER_HEADER + "struct Query { word type, next, effect, device, count, ids, names; };\n"
@@ -243,6 +269,9 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     crypto_legacy_ops = {M.AESENC, M.AESENCLAST, M.AESDEC, M.AESDECLAST, M.AESIMC, M.AESKEYGENASSIST, M.PCLMULQDQ}
     crypto_vex_ops = {M.VAESENC, M.VAESENCLAST, M.VAESDEC, M.VAESDECLAST, M.VAESIMC, M.VAESKEYGENASSIST, M.VPCLMULQDQ}
     has_wide = has_wide or any(i.mnemonic in (M.VMOVUPS, M.MOVDQU) or i.mnemonic in crypto_legacy_ops or i.mnemonic in crypto_vex_ops for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    sha_ops = {M.SHA1MSG1, M.SHA1MSG2, M.SHA1NEXTE, M.SHA1RNDS4, M.SHA256MSG1, M.SHA256MSG2, M.SHA256RNDS2}
+    has_wide = has_wide or any(i.mnemonic in (M.VMOVUPS, M.MOVDQU) or i.mnemonic in sha_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -983,6 +1012,44 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     last = "true" if op in (M.AESENCLAST, M.AESDECLAST, M.VAESENCLAST, M.VAESDECLAST) else "false"
                     stmt = (f"{{ uint8_t s1[16], o[16]; memcpy(s1, {src1}.data(), 16); {s2_init} "
                             f"aes_round(o, s1, s2, {dec}, {last}); memcpy({dst}.data(), o, 16);{zero_hi} }}")
+        elif op in sha_ops and i.encoding == EncodingKind.LEGACY and i.op0_kind == K.REGISTER and i.op0_register in wide_xmm and has_wide:
+            dst = wide_xmm[i.op0_register]
+            if i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
+                src_init = f"uint32_t s[4]; memcpy(s, {wide_xmm[i.op1_register]}.data(), 16);"
+            elif i.op1_kind == K.MEMORY:
+                src_init = f"uint32_t s[4]; memcpy(s, reinterpret_cast<const void*>({address()}), 16);"
+            else:
+                raise ValueError(f"unsupported SHA source at {i.ip:#x}: {i}")
+            if op == M.SHA1MSG1:
+                stmt = (f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"const uint32_t r[4] = {{d[0] ^ s[2], d[1] ^ s[3], d[2] ^ d[0], d[3] ^ d[1]}}; "
+                        f"memcpy({dst}.data(), r, 16); }}")
+            elif op == M.SHA1MSG2:
+                stmt = (f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"const uint32_t w16 = sha_rol32(d[3] ^ s[2], 1), w17 = sha_rol32(d[2] ^ s[1], 1), "
+                        f"w18 = sha_rol32(d[1] ^ s[0], 1), w19 = sha_rol32(d[0] ^ w16, 1); "
+                        f"const uint32_t r[4] = {{w19, w18, w17, w16}}; memcpy({dst}.data(), r, 16); }}")
+            elif op == M.SHA1NEXTE:
+                stmt = (f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"const uint32_t r[4] = {{s[0], s[1], s[2], s[3] + sha_rol32(d[3], 30)}}; "
+                        f"memcpy({dst}.data(), r, 16); }}")
+            elif op == M.SHA1RNDS4:
+                func = i.immediate(2) & 3
+                stmt = f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} sha1_rnds4(d, s, {func}u); memcpy({dst}.data(), d, 16); }}"
+            elif op == M.SHA256MSG1:
+                stmt = (f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"auto sig0 = [](uint32_t x) {{ return sha_ror32(x, 7) ^ sha_ror32(x, 18) ^ (x >> 3); }}; "
+                        f"const uint32_t r[4] = {{d[0] + sig0(d[1]), d[1] + sig0(d[2]), d[2] + sig0(d[3]), d[3] + sig0(s[0])}}; "
+                        f"memcpy({dst}.data(), r, 16); }}")
+            elif op == M.SHA256MSG2:
+                stmt = (f"{{ uint32_t d[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"auto sig1 = [](uint32_t x) {{ return sha_ror32(x, 17) ^ sha_ror32(x, 19) ^ (x >> 10); }}; "
+                        f"const uint32_t w16 = d[0] + sig1(s[2]), w17 = d[1] + sig1(s[3]), "
+                        f"w18 = d[2] + sig1(w16), w19 = d[3] + sig1(w17); "
+                        f"const uint32_t r[4] = {{w16, w17, w18, w19}}; memcpy({dst}.data(), r, 16); }}")
+            else:  # M.SHA256RNDS2
+                stmt = (f"{{ uint32_t d[4], wk[4]; memcpy(d, {dst}.data(), 16); {src_init} "
+                        f"memcpy(wk, wide0.data(), 16); sha256_rnds2(d, s, wk); memcpy({dst}.data(), d, 16); }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:

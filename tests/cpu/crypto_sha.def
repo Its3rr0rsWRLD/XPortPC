@@ -1,0 +1,11 @@
+EXPORTS
+    sha1msg1_op
+    sha1msg2_op
+    sha1nexte_op
+    sha1rnds4_0_op
+    sha1rnds4_1_op
+    sha1rnds4_2_op
+    sha1rnds4_3_op
+    sha256msg1_op
+    sha256msg2_op
+    sha256rnds2_op
