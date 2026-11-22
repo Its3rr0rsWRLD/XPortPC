@@ -185,9 +185,10 @@ def check_cf2_lane_controls():
         program = in_wqm(wave64)[1](in_wqm(wave64)[0])
         text = translate(program)
         assert "bool ex" not in text and "exw" not in text and "bool cf" in text, text
-    # Interpolation still needs whole-quad mode: before it and after the restore it is refused.
+    # Interpolation at the entry mask is a per-lane value (family interp_attrs), undefined on the helper lanes, so an
+    # implicit-level sample of it is refused.
     program = with_constants([])
-    must_reject_for("Unknown interpolation context", translate,
+    must_reject_for("Unsupported texture coordinate", translate,
                     [line for line in program if line != "s_wqm_b64 exec, exec"])
 
 

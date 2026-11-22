@@ -172,8 +172,12 @@ def check_pkrtz_controls():
     quad = program.index("v_interp_mov_f32_e32 v20, p0, attr1.x")
     must_reject(translate, [line for line in program if line != "s_mov_b32 m0, s24"])
     must_reject(translate, [line.replace("s_mov_b32 m0, s24", "s_mov_b32 m0, s25") for line in program])
-    must_reject(translate, program[:quad] + ["s_and_b64 exec, exec, s[50:51]"] + program[quad:])
-    for line in ("v_interp_mov_f32_e32 v20, p0, attr0.x", "v_interp_mov_f32_e32 v20, p0, attr32.x",
+    # At the entry mask the flat read is the same (family interp_attrs; cf2_lane refuses it while the lane may be off).
+    assert "precise float alu" in translate(program[:quad] + ["s_and_b64 exec, exec, s[50:51]"] + program[quad:])
+    # attr0 is interpolated for the sample too: it is read both ways (family interp_attrs).
+    mixed = translate(program[:quad] + ["v_interp_mov_f32_e32 v20, p0, attr0.x"] + program[quad + 1:])
+    assert "nointerpolation float4 attr0_v : TEXCOORD0" in mixed and "precise float4 uv = " in mixed, mixed
+    for line in ("v_interp_mov_f32_e32 v20, p0, attr32.x",
                  "v_interp_mov_f32_e64 v20, p0, attr1.x clamp", "v_interp_mov_f32_e64 v20, p10, attr1.x mul:2",
                  "v_interp_mov_f32_e32 v20, p0, attr1.x high", "v_interp_mov_f32_e32 v20, v0, attr1.x"):
         must_reject(translate, program[:quad] + [line] + program[quad + 1:])

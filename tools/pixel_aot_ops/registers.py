@@ -118,8 +118,8 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
         if quad_values is not None and token.startswith("v"):
             if not isinstance(value, str) or value not in quad_values:
                 raise ValueError("Operand lacks a helper-lane definition")
-            if value.startswith("uv."):
-                return value
+        if isinstance(value, str) and value.startswith("uv."):
+            return value  # the interpolated attr0.x or .y in whole-quad mode (forms/vintrp.py)
         if isinstance(value, int):
             return f"asfloat({value}u)"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":

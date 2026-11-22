@@ -33,7 +33,8 @@ def controls(directory):
     program = assembly(False)
     for old, new in (("s_mov_b32 s21, 0", "s_mov_b32 s21, 1"),
                      ("s_mov_b32 s40, 1", "s_mov_b32 s40, 8"),
-                     ("attr0.y", "attr1.y"),
+                     # p2 of another attribute than its p1 (any attribute may be sampled: family interp_attrs)
+                     ("v1, attr0.y", "v1, attr1.y"),
                      ("s_wqm_b64 exec, exec", "s_branch 0")):
         must_reject(translate, [line.replace(old, new) for line in program])
     must_reject(translate, program[:-1])

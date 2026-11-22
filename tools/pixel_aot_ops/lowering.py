@@ -54,7 +54,8 @@ class Lowering:
         self.integer_export = False  # the uncompressed export returns uint4 bit patterns (lower(integer_export=True))
         self.vm_issued = 0  # vector memory loads and samples issued on the path so far (the vmcnt issue order)
         self.flat_attrs = set()  # attributes read without interpolation
-        # attr0 interpolated in all four components at the entry mask (forms/vintrp.py): TEXCOORD0 is declared float4.
+        self.interp_attrs = set()  # attributes interpolated by v_interp_p1/p2 (forms/vintrp.py)
+        # attr0 interpolated in its z or w component (forms/vintrp.py): TEXCOORD0 is declared float4.
         self.attribute_input = False
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
         self.exports = ()  # exports before the done export on this path: (output name, width, mask, HLSL local)
@@ -253,14 +254,41 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if st.declarations:
         pos = st.lines.index(st.preamble)
         st.lines[pos:pos] = list(st.declarations.values())
-    if st.flat_attrs or st.quad_position:
+    attributes = st.flat_attrs | st.interp_attrs
+    mixed = st.flat_attrs & st.interp_attrs
+    if attributes - {0} or st.quad_position:
         pos = st.lines.index(st.preamble)
-        # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.
-        inputs = "".join(f", nointerpolation float4 attr{n} : TEXCOORD{n}" for n in sorted(st.flat_attrs))
-        note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
-        st.lines[pos] = (note
-                         + st.preamble.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
-    if st.attribute_input:
+        # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them, and
+        # TEXCOORD1 up to the last attribute read are all declared (each float4, one register) for the same reason.
+        # An attribute is nointerpolation when it is read flat and linear otherwise; one read both ways is the
+        # nointerpolation attrN_v (forms/vintrp.py).
+        def declaration(n):
+            if n in mixed:
+                return f", nointerpolation float4 attr{n}_v : TEXCOORD{n}"
+            return f", {'nointerpolation ' if n in st.flat_attrs else ''}float4 attr{n} : TEXCOORD{n}"
+        inputs = "".join(declaration(n) for n in range(1, max(attributes | {0}) + 1))
+        st.lines[pos] = st.preamble.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})")
+    if st.flat_attrs or mixed:
+        pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
+        line = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" + st.lines[pos]
+        if 0 in st.flat_attrs:
+            # Attribute 0 read flat: TEXCOORD0 is attr0 (or attr0_v), and uv, if it is read, is computed below.
+            line = line.replace("main(float2 uv : TEXCOORD0", f"main(nointerpolation float4 attr0{'_v' if 0 in mixed else ''} : TEXCOORD0", 1)
+        if mixed:
+            line = line.replace(") : SV_Target0 {", ", float3 bary : SV_Barycentrics) : SV_Target0 {", 1)
+        st.lines[pos] = line
+        prologue = []
+        for n in sorted(mixed):
+            # P0 + I * P10 + J * P20 of the vertex values, as the console's v_interp_p1 and p2 evaluate it.
+            def vertex(k):
+                return f"GetAttributeAtVertex(attr{n}_v, {k})"
+            local = "uv" if n == 0 else f"attr{n}"
+            prologue.append(f"    precise float4 {local} = ({vertex(0)} + bary.y * ({vertex(1)} - {vertex(0)}))"
+                            f" + bary.z * ({vertex(2)} - {vertex(0)});")
+            st.lines[:] = [text.replace(f"GetAttributeAtVertex(attr{n}, ", f"GetAttributeAtVertex(attr{n}_v, ")
+                           for text in st.lines]
+        st.lines[pos + 1:pos + 1] = prologue
+    if st.attribute_input and 0 not in st.flat_attrs:
         pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
         st.lines[pos] = st.lines[pos].replace("main(float2 uv : TEXCOORD0", "main(float4 uv : TEXCOORD0", 1)
     if st.signature:
