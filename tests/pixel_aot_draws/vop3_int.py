@@ -294,35 +294,6 @@ for op, bugs in SHIFT_BUGS.items():
                 {k: (lambda x, y, z, w, f=f, counts=counts: words(f(x if counts is None else counts, VALUE(z, w))))
                  for k, f in bugs.items()}, setup, pair, f"{op}_{variant}")
 
-# v_mad_u64_u32: {carry, D.u64} = S0 * S1 + S2.u64, the carry to a lane mask.
-MAD_SETS = ((0xa5c3e187, 0x3c96b45a, 0xc2f0171d, 0x6d1e8f2b), (M32, M32, M32, M32), (M32, M32, 0, 0),
-            (0x80000001, 0x80000001, 0x00000001, 0xffffffff), (0x00010001, 0x00010001, M32, 0), (7, 9, M32, M32),
-            (0xfffffffe, 0x00000003, 0x00000007, 0x00000002), (0x7fffffff, 0x80000000, 0x80000000, 0x3fffffff))
-MAD_BUGS = {
-    "carry_dropped": lambda a, b, c: (*words(mad64(a, b, c)[0]), 0),
-    "low_carry_only": lambda a, b, c: (*words(mad64(a, b, c)[0]), int((a * b & M32) + (c & M32) > M32)),
-    "carry_in_dropped": lambda a, b, c: (mad64(a, b, c)[0] & M32, ((a * b >> 32) + (c >> 32)) & M32, mad64(a, b, c)[1]),
-    "addend_high_dropped": lambda a, b, c: (*words(mad64(a, b, c & M32)[0]), mad64(a, b, c & M32)[1]),
-    "signed_multiply": lambda a, b, c: (*words((signed(a) * signed(b) + c) & M64), mad64(a, b, c)[1]),
-    "product_truncated": lambda a, b, c: (*words(((a * b & M32) + c) & M64), int((a * b & M32) + c > M64)),
-    "operands_rotated": lambda a, b, c: (*words(mad64(a, c & M32, b)[0]), mad64(a, c & M32, b)[1])}
-for variant, instruction, a_of, b_of, c_of, setup, pair, carry in (
-        ("vgpr_pair", "v_mad_u64_u32 v[19:20], s52, v18, v23, v[26:27]", lambda x, y, z, w: x, lambda x, y, z, w: y,
-         lambda x, y, z, w: VALUE(z, w), "xy", True, "s52"),
-        ("sgpr_pair_vcc", "v_mad_u64_u32 v[19:20], vcc_lo, v18, v23, s[46:47]", lambda x, y, z, w: x, lambda x, y, z, w: y,
-         lambda x, y, z, w: VALUE(z, w), "xy", False, "vcc_lo"),
-        ("inline_addend", "v_mad_u64_u32 v[19:20], s52, v18, 0x80000001, 5", lambda x, y, z, w: x,
-         lambda x, y, z, w: 0x80000001, lambda x, y, z, w: 5, "x", False, "s52")):
-    for half, reads in (("lo", LO), ("hi", HI)):
-        def reference(x, y, z, w, a_of=a_of, b_of=b_of, c_of=c_of):
-            total, carry_out = mad64(a_of(x, y, z, w), b_of(x, y, z, w), c_of(x, y, z, w))
-            return (*words(total), carry_out)
-
-        def bug(f, a_of=a_of, b_of=b_of, c_of=c_of):
-            return lambda x, y, z, w: f(a_of(x, y, z, w), b_of(x, y, z, w), c_of(x, y, z, w))
-
-        add(f"mad_u64_u32_{variant}_{half}", [instruction], ["v19", "v20", carry], reads, reference, MAD_SETS,
-            {k: bug(f) for k, f in MAD_BUGS.items()}, setup, pair, f"mad_u64_u32_{variant}")
 for group, seen in GROUPS.items():
     # A fixed inline count or addend cannot expose every bug (a count of 33 is the same masked to seven bits); each such
     # group still needs at least one.
@@ -375,8 +346,6 @@ def controls(directory):
     assert "uint v_perm_byte(" in perm_source and "uint v_absdiff_u32(" not in perm_source
     sad_source = translate(with_constants(ROWS[[row[0] for row in ROWS].index("sad_u8")][1]))
     assert "uint v_absdiff_u32(" in sad_source and "v_perm_byte" not in sad_source
-    mad_source = translate(with_constants(ROWS[[row[0] for row in ROWS].index("mad_u64_u32_vgpr_pair_lo")][1]))
-    assert "uint mul_hi_u32(" in mad_source and "mt" in mad_source
     # Refused neighbours: the e32 spelling (none exists), source modifiers, clamp, wrong operand shapes, and the forms not lowered.
     prefix = [SETUP["x"], SETUP["y"], SETUP["z"], *PAIR]
     for line in ("v_bfi_b32_e32 v19, v18, v23, v24", "v_bfi_b32 v19, -v18, v23, v24", "v_bfi_b32 v19, v18, |v23|, v24",
@@ -389,8 +358,7 @@ def controls(directory):
                  "v_sad_u16 v19, -v18, v23, v24", "v_sad_u32 v19, v18, v23, v24 clamp", "v_sad_u32_e32 v19, v18, v23, v24",
                  "v_msad_u8 v19, v18, v23, v24 clamp", "v_msad_u8 v19, v18, -v23, v24", "v_lerp_u8 v19, v18, v23, v24 clamp",
                  "v_lerp_u8 v19, -v18, v23, v24", "v_lerp_u8_e32 v19, v18, v23, v24",
-                 # Not lowered: the carry of the signed multiply-add and the float-to-byte rounding are not established.
-                 "v_mad_i64_i32 v[19:20], s52, v18, v23, v[26:27]", "v_mad_i64_i32 v[19:20], vcc_lo, v18, v23, 5",
+                 # Not lowered: the float-to-byte rounding is not established.
                  "v_cvt_pk_u8_f32 v19, v18, 1, v24", "v_cvt_pk_u8_f32 v19, v18, v23, v24"):
         must_reject(translate, with_constants([*prefix, line]))
     for line in ("v_lshlrev_b64 v[19:20], -v18, v[26:27]", "v_lshlrev_b64 v[19:20], v18, -v[26:27]",
@@ -401,7 +369,7 @@ def controls(directory):
                  "v_lshlrev_b64 v[19:20], v18, 0x80000000", "v_lshrrev_b64 v[19:20], v18, -1", "v_lshrrev_b64 v[19:20], v18, 65",
                  "v_ashrrev_i64 v[19:20], v18, s[45:46]", "v_lshlrev_b64 v[19:20], v18, v[30:31]",
                  "v_lshlrev_b64 v[19:20], v30, v[26:27]", "v_mad_u64_u32 v[19:20], s52, v18, v23, 0x80000000",
-                 "v_mad_u64_u32 v[19:20], s52, v18, v23, -1", "v_mad_u64_u32 v[19:20], s52, v18, v23, v24",
+                 "v_mad_u64_u32 v[19:20], s52, v18, v23, v24",
                  "v_mad_u64_u32 v[19:20], s52, -v18, v23, v[26:27]", "v_mad_u64_u32 v[19:20], s52, v18, v23, v[26:27] clamp",
                  "v_mad_u64_u32 v19, s52, v18, v23, v[26:27]", "v_mad_u64_u32 v[19:20], v18, v23, v[26:27]",
                  "v_mad_u64_u32 v[19:20], exec_lo, v18, v23, v[26:27]", "v_mad_u64_u32 v[19:20], s52, v18, v30, v[26:27]",

@@ -431,12 +431,9 @@ def refused(line):
 
 # Forms that are not lowered (module docstring): each spelling is refused as an unsupported instruction.
 REFUSED = (
-    "v_fma_f16 v19, s44, s45, s46", "v_fma_f16 v19, -s44, |s45|, s46 clamp", "v_mad_f16 v19, s44, s45, s46",
-    "v_fmac_f16_e32 v19, s44, v13", "v_fmac_f16_e64 v19, s44, s45", "v_fmaak_f16 v19, s44, v13, 0x3c00",
-    "v_fmamk_f16 v19, s44, 0x3c00, v13",
-    "v_div_fmas_f32 v19, s44, s45, s46", "v_div_scale_f32 v19, vcc, s44, s45, s46", "v_div_fixup_f32 v19, s44, s45, s46",
+    "v_mad_f16 v19, s44, s45, s46",
+        "v_div_fmas_f32 v19, s44, s45, s46", "v_div_scale_f32 v19, vcc, s44, s45, s46", "v_div_fixup_f32 v19, s44, s45, s46",
     "v_div_fixup_f16 v19, s44, s45, s46",
-    "v_ldexp_f32 v19, s44, s45", "v_ldexp_f32 v19, s44, 3",
     "v_cvt_norm_i16_f16_e32 v19, s44", "v_cvt_norm_u16_f16_e32 v19, s44", "v_cvt_norm_i16_f16_e64 v19, s44",
     "v_cvt_norm_u16_f16_e64 v19, s44",
     "v_cvt_pknorm_i16_f32 v19, s44, s45", "v_cvt_pknorm_u16_f32 v19, s44, s45", "v_cvt_pknorm_i16_f16 v19, s44, s45",

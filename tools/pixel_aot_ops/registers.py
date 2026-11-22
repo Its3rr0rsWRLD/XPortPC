@@ -204,8 +204,8 @@ def f16_exponent(token, scalar, vector, pending, sample_pending):
 # of control flow (docs/design/control-flow.md): raw 32-bit bits per register, declared where a branch or loop starts.
 # exw is a masked write of a raw word over a raw word while the lane may be inactive (lowering.masked_writes). dppw is the
 # sum or difference with carry of a DPP instruction (forms/dpp.py), a word that a later export may read as the float of its bits. f16w is a 16-bit result merged into the kept high half
-# of its destination (forms/valu_float_rest.py).
-RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw", "dppw", "f16w")
+# of its destination (forms/valu_float_rest.py). xw is a result of forms/valu_exact.py (ldexp, binary16 fma, 64-bit mad), computed on bit patterns.
+RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw", "dppw", "f16w", "xw")
 
 
 def tracked_word(value):
