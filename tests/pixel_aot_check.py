@@ -2637,7 +2637,7 @@ def check_load_controls() -> None:
     # Memory declarations and the title lookup are present only when a program loads, and V# words are runtime parameters.
     source = buffer_case(load, "s_waitcnt vmcnt(0)", ubyte(0, 12, "v24", "e32"))
     assert pixel_aot.TITLE_LOOKUP.read_text(encoding="utf-8") in source and pixel_aot.TITLE_DECLARATIONS in source, source
-    assert "uint4 rsrc" in source and "asuint(params[2].x), asuint(params[2].y)" in source, source
+    assert "uint4 rsrc" in source and "params[2].x, params[2].y" in source and "asuint(params[2]" not in source, source
     assert "title_memory" not in translate(curve()) and "TitleLookup" not in translate(curve())
     # A load's registers are unusable before vmcnt(0); a store over one, a V# not yet loaded and a bad window are refused.
     must_reject(translate_loads, with_constants([*ready, load, ubyte(0, 12, "v24", "e32")]))
@@ -2804,12 +2804,12 @@ def check_f16_cmp_controls():
     # read from the 16-bit encoding after the modifiers, and the mask stays a 32-bit integer.
     body = translate(with_constants(["v_mov_b32_e32 v18, s45", "v_cmp_nge_f16_e32 vcc_lo, s44, v18",
                                      "v_cmp_lt_f16_e64 s0, -0.5, |v18|"])).split("float4 main", 1)[1]
-    for expected in ("precise float cmpa", "widen16((asuint(params[0].w) & 0xffffu))", "widen16(0xb800u)", "isnan(cmpa"):
+    for expected in ("precise float cmpa", "widen16((params[0].w & 0xffffu))", "widen16(0xb800u)", "isnan(cmpa"):
         assert expected in body, expected
     body = translate(with_constants(["v_mov_b32_e32 v18, s46", "v_cmp_class_f16_e32 vcc_lo, s44, v18",
                                      "v_cmp_class_f16_e64 s0, -|s44|, 0x8c", "v_cmp_class_f16_e64 s1, 0.5, s47"])).split("float4 main", 1)[1]
-    for expected in ("class16((((asuint(params[0].w) & 0xffffu) & 0x7fffu) ^ 0x8000u)) & 140u) != 0u",
-                     "class16(0x3800u) & asuint(", "class16((asuint(params[0].w) & 0xffffu)) & asuint("):
+    for expected in ("class16((((params[0].w & 0xffffu) & 0x7fffu) ^ 0x8000u)) & 140u) != 0u",
+                     "class16(0x3800u) & params[", "class16((params[0].w & 0xffffu)) & movw"):
         assert expected in body, expected
     assert translate(with_constants(["v_cmp_class_f16 vcc_lo, s44, 3"])) == translate(with_constants(["v_cmp_class_f16_e32 vcc_lo, s44, 3"]))
     for operation in ("v_cmp_lt_f16_e64 s0, s44, v13 op_sel:[1,0]", "v_cmp_lt_f16_e64 s0, s44, v13 op_sel:[0,1]",
@@ -3016,6 +3016,7 @@ def check_controls(directory):
     check_scalar_constant_reads()
     check_load_controls()
     check_image_controls()
+    check_raw_word_controls()
     # Whole-dword SDWA comparisons lower exactly as the e32 forms; byte and word selections are refused.
     for first in range(0, 16, 4):
         assert translate(predicate_group(first, sdwa=True)) == translate(predicate_group(first)), first
@@ -3023,7 +3024,7 @@ def check_controls(directory):
         "v_cmp_lt_f32_sdwa vcc_lo, s44, v18 src0_sel:WORD_1 src1_sel:DWORD"]))
     # v_cvt_f32_f16 widens the low half through widen16 and applies modifiers after widening.
     body = translate(with_constants(HALF_BODY)).split("float4 main", 1)[1]
-    assert body.count("widen16(asuint(") == 4 and "(-abs(widen16(" in body, body
+    assert body.count("widen16(params[") == 4 and "(-abs(widen16(" in body, body
     must_reject(translate, with_constants(["v_cvt_f32_f16_e32 v12, 1.0"]))
     must_reject(translate, with_constants(["v_cvt_f32_f16_sdwa v12, s44 src0_sel:WORD_1"]))
     # v_cvt_f16_f32 keeps the destination's high half and narrows the modified source through narrow16.
@@ -3041,8 +3042,8 @@ def check_controls(directory):
     # destination's high half; subrev swaps its operands, and a modifier acts on bit 15 before widening.
     body = translate(with_constants(F16_PROGRAMS[0][1])).split("float4 main", 1)[1]
     assert body.count("& 0xffff0000u) | narrow16(") == 4 and body.count("narrow16(") == 4, body
-    assert "widen16(((asuint(params[0].w) & 0xffffu) ^ 0x8000u)) - widen16(((asuint(alu20) & 0xffffu) & 0x7fffu))" in body, body
-    assert "widen16((asuint(alu20) & 0xffffu)) - widen16((asuint(params[1].y) & 0xffffu))" in body, body
+    assert "widen16(((params[0].w & 0xffffu) ^ 0x8000u)) - widen16(((movw20 & 0xffffu) & 0x7fffu))" in body, body
+    assert "widen16((movw20 & 0xffffu)) - widen16((params[1].y & 0xffffu))" in body, body
     # An inline constant is a binary16 value, an integer inline constant is a bit pattern and a literal supplies
     # its low half; a destination that was never written contributes a zero high half.
     body = translate(with_constants(["v_add_f16_e32 v20, 0.5, v13", "v_add_f16_e32 v21, 3, v13", "v_add_f16_e64 v22, -3, v13",
@@ -3126,7 +3127,7 @@ def check_controls(directory):
 
     program = truncate_values()
     source = translate(program)
-    assert "trunc(params[1].x)" in source
+    assert "trunc(asfloat(params[1].x))" in source
     must_reject(translate, [line.replace("v13, s45", "v13, s45, v12") for line in program])
     wait = program.index("s_waitcnt vmcnt(0)")
     program.remove("v_trunc_f32_e32 v13, s45")
@@ -3190,15 +3191,17 @@ def check_controls(directory):
 
     program = arithmetic()
     source = translate(program)
-    for expected in ("= sample16.x;", "= (params[2].x * alu20);", "= saturate((alu21 + params[2].y));",
-                     "= params[2].z;", "= (alu23 - sample16.y);", "= saturate((alu25 - params[2].w));",
-                     "= asfloat(1048576000u);", "= alu29;"):
+    # Constant words are unsigned: a float use reads asfloat(word), and a move of a raw word stays an unsigned copy.
+    for expected in ("= sample16.x;", "= (asfloat(params[2].x) * alu20);", "= saturate((alu21 + asfloat(params[2].y)));",
+                     "uint movw23 = params[2].z;", "= (asfloat(movw23) - sample16.y);",
+                     "= saturate((alu25 - asfloat(params[2].w)));", "uint movw28 = 1048576000u;", "= alu29;"):
         assert expected in source, expected
     # A move is a bit copy: LLVM prints integer inline constants as integers.
-    for operand, expected in (("1", "asfloat(1u)"), ("-4", "asfloat(4294967292u)"),
-                              ("-0.5", "(-0.5f)"), ("0.15915494", "0.15915494f"), ("s40", "asfloat(1u)")):
+    for operand, expected in (("1", "uint movw28 = 1u;"), ("-4", "uint movw28 = 4294967292u;"),
+                              ("-0.5", "float alu28 = (-0.5f);"), ("0.15915494", "float alu28 = 0.15915494f;"),
+                              ("s40", "uint movw28 = 1u;")):
         changed = [line.replace("v20, 0x3e800000", f"v20, {operand}") for line in program]
-        assert f"alu28 = {expected};" in translate(changed), operand
+        assert expected in translate(changed), operand
     for old, new in (("v18, v12", "v18, v0"), ("v18, v12", "v18, v8"), ("v18, v12", "v18, v30"),
                      ("v19, s46", "v19, s28"), ("v19, s46", "v19, -s46"), ("v19, s46", "v19, s46 clamp"),
                      ("v18, v12", "v18, v12, v13"), ("v14, -0.5, v14", "v14, v14"),
@@ -3238,8 +3241,8 @@ def check_controls(directory):
     assert translate(select(True)) == source
     for expected in ("(sample16.x >= sample16.y || isnan(sample16.x) || isnan(sample16.y))",
                      "sample16.x == sample16.y",
-                     "params[0].w < sample16.x", "sample16.y >= params[1].x",
-                     "? 1.0f : asfloat(0u);", "? sample16.w : params[1].z;"):
+                     "asfloat(params[0].w) < sample16.x", "sample16.y >= asfloat(params[1].x)",
+                     "? 1065353216u : 0u;", "? asuint(sample16.w) : params[1].z;"):
         assert expected in source, expected
     for wave64 in (False, True):
         program = select(wave64)
@@ -3335,7 +3338,7 @@ def check_controls(directory):
     source = translate(program)
     for expected in ("uint2 s_lshl_b64(", "uint2 s_lshr_b64(", "uint2 s_ashr_i64(",
                      "uint2 s_bfm_b64(", "uint s_bfe_u32(", "uint s_bfe_i32(",
-                     "reversebits(", "asfloat(salu"):
+                     "reversebits(", " = salu"):
         assert expected in source, expected
     # Existing programs without shifts/bfm/bfe emit none of the scalar helper functions.
     assert "uint2 s_lshl_b64(" not in translate(assembly(False))
@@ -3436,6 +3439,7 @@ def check_binary(directory, assembler, objcopy, library):
     fixtures.extend((with_constants(body), translate) for _, body, *_ in F16_PROGRAMS)
     fixtures.extend((with_constants(body), translate) for _, body, *_ in (*F16_CMP_PROGRAMS, *F16_CLASS_PROGRAMS))
     fixtures.extend((with_constants(body), translate) for body, *_ in ARITH_PROGRAMS)
+    fixtures.extend((with_constants(body), translate) for _, body, *_ in RAW_WORD_PROGRAMS)
     fixtures.extend((with_constants(body), translate_loads) for body, *_ in LOAD_PROGRAMS)
     fixtures.extend((with_constants(body), translate) for _, body, *_ in IMAGE_PROGRAMS)
     fixtures.append((scheduling_hints(), translate))
@@ -3676,6 +3680,125 @@ def check_scalar64_draws(directory, compiler, renderer, backend):
             raise AssertionError(f"Mutation of {label} escaped detection")
 
 
+# Raw 32-bit words through the constant buffer, moves, selects and sign-bit operations. The constant buffer is declared
+# uint4 and a move or select of a raw word is an unsigned copy, so no float type touches the word. On the RTX 4070 Ti
+# (driver 32.0.16.1088) a float4 constant buffer made the driver treat a sign-bit operation on a word as a float
+# negation: a negative binary32 NaN pattern came back as 0x7fffffff, and the high word 0x00264543 of a binary64 (a
+# binary32 denormal) lost its low 20 bits after a flip of its sign; WARP and the same shaders over a uint4 buffer
+# were exact. These draws keep that exactness checked on both backends. Words: negative NaNs with the payload in
+# the quiet bit, below it and all ones, a positive signalling NaN, the sign bit alone, the smallest denormal, and a
+# denormal with a payload.
+RAW_SIGN = 0x80000000
+RAW_WORDS = (0xff800001, 0xffc00000, 0xfffffffe, 0x7f800001, 0x80000000, 0x00000001, 0x00264543)
+RAW_MASK = 0xffffffff  # itself a negative NaN pattern, read from the constant buffer as the AND mask of one program
+
+
+def raw_readback(register):
+    return [ubyte(n, 12 + n, register, "e32") for n in range(4)]
+
+
+# (name, body, model(word) -> expected word, {bug: wrong(word) -> word}). The word is constant word 3 (s44); s45 is
+# RAW_MASK, s46 and s47 are zero.
+RAW_WORD_PROGRAMS = (
+    # The step-1 program: a copy through v_or, then a sign flip of the whole word.
+    ("or_xor", ["v_or_b32_e64 v18, 0, s44", "v_xor_b32_e64 v19, 0x80000000, v18", *raw_readback("v19")],
+     lambda w: w ^ RAW_SIGN,
+     {"sign_cleared": lambda w: (w ^ RAW_SIGN) & 0x7fffffff, "quieted": lambda w: (w ^ RAW_SIGN) | 0x400000,
+      "payload_zeroed": lambda w: (w ^ RAW_SIGN) & 0xff800000, "canonical_nan": lambda w: 0x7fffffff if (w & 0x7fffffff) > 0x7f800000 else w ^ RAW_SIGN}),
+    # Constant buffer, v_mov, sign flip, then a v_cndmask select whose condition is always true.
+    ("mov_xor_select",
+     ["v_mov_b32_e32 v18, s44", "v_xor_b32_e32 v19, 0x80000000, v18", "v_cmp_class_f32_e64 vcc_lo, s46, 0x3ff",
+      "v_cndmask_b32_e32 v20, v18, v19, vcc_lo", *raw_readback("v20")],
+     lambda w: w ^ RAW_SIGN,
+     {"sign_cleared": lambda w: (w ^ RAW_SIGN) & 0x7fffffff, "quieted": lambda w: (w ^ RAW_SIGN) | 0x400000,
+      "unselected": lambda w: w}),
+    # The same with a condition that is always false, so the select takes its first source.
+    ("mov_xor_select_false",
+     ["v_mov_b32_e32 v18, s44", "v_xor_b32_e32 v19, 0x80000000, v18", "v_cmp_class_f32_e64 vcc_lo, s46, 0",
+      "v_cndmask_b32_e64 v20, v19, v18, vcc_lo", *raw_readback("v20")],
+     lambda w: w ^ RAW_SIGN,
+     {"sign_cleared": lambda w: (w ^ RAW_SIGN) & 0x7fffffff, "payload_zeroed": lambda w: (w ^ RAW_SIGN) & 0xff800000,
+      "unselected": lambda w: w}),
+    # Scalar and vector move chains with no arithmetic: the word must arrive unchanged, and the select picks it.
+    ("move_chain",
+     ["s_mov_b32 s48, s44", "s_mov_b32 s49, s48", "v_mov_b32_e32 v18, s49", "v_mov_b32_e32 v19, v18",
+      "v_cmp_class_f32_e64 vcc_lo, s46, 0x3ff", "v_cndmask_b32_e32 v20, 0, v19, vcc_lo", *raw_readback("v20")],
+     lambda w: w,
+     {"sign_cleared": lambda w: w & 0x7fffffff, "quieted": lambda w: w | 0x400000, "payload_zeroed": lambda w: w & 0xff800000,
+      "sign_flipped": lambda w: w ^ RAW_SIGN}),
+    # The shape that failed on hardware: the flipped word, kept whole, is ANDed with a mask read from the buffer.
+    ("xor_and_mask", ["v_xor_b32_e64 v19, 0x80000000, s44", "v_and_b32_e32 v20, s45, v19", *raw_readback("v20")],
+     lambda w: (w ^ RAW_SIGN) & RAW_MASK,
+     {"sign_cleared": lambda w: (w ^ RAW_SIGN) & 0x7fffffff, "canonical_nan": lambda w: 0x7fffffff if (w & 0x7fffffff) > 0x7f800000 else w ^ RAW_SIGN,
+      "quieted": lambda w: ((w ^ RAW_SIGN) | 0x400000) & RAW_MASK}),
+    # Setting the sign bit, and clearing it, on the word kept whole.
+    ("or_sign_and_abs", ["v_or_b32_e64 v19, 0x80000000, s44", "v_and_b32_e64 v20, 0x7fffffff, s44",
+                         "v_xor_b32_e32 v21, v19, v20", "v_xor_b32_e32 v22, v19, v20", "v_and_b32_e32 v23, s45, v19",
+                         "v_and_b32_e32 v24, s45, v20", "v_or_b32_e32 v25, v23, v24", *raw_readback("v25")],
+     lambda w: (w | RAW_SIGN) | (w & 0x7fffffff),
+     {"sign_cleared": lambda w: w & 0x7fffffff, "canonical_nan": lambda w: 0x7fffffff if (w & 0x7fffffff) > 0x7f800000 else w | RAW_SIGN}),
+)
+
+
+def raw_word_constants(word):
+    constants = bytearray(256)
+    struct.pack_into("<4I", constants, 12, word, RAW_MASK, 0, 0)
+    return constants
+
+
+def check_raw_word_draws(directory, compiler, renderer, backend):
+    case = directory / "raw.case"
+    for index, (name, body, model, bugs) in enumerate(RAW_WORD_PROGRAMS):
+        source = directory / f"raw{index}.hlsl"
+        shader = directory / f"raw{index}.cso"
+        source.write_text(translate(with_constants(body)), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        separated = {bug: False for bug in bugs}
+        for word in RAW_WORDS:
+            constants = raw_word_constants(word)
+            expected = [float(byte(model(word), n)) for n in range(4)]
+            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
+            result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode:
+                raise AssertionError(f"raw word {word:#010x} through {name} is not bit-exact on {backend}: "
+                                     f"{result.stdout}{result.stderr}")
+            for bug, wrong in bugs.items():
+                if wrong(word) == model(word):
+                    continue
+                separated[bug] = True
+                case.write_bytes(constants + struct.pack("<4f", *[float(byte(wrong(word), n)) for n in range(4)]) * 64)
+                result = subprocess.run(draw, capture_output=True, text=True)
+                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                    raise AssertionError(f"Wrong reference {bug} escaped detection in {name}, word {word:#010x}")
+        assert all(separated.values()), (name, separated)
+
+
+def check_raw_word_controls():
+    # The constant buffer is unsigned and no raw word in a move, select or sign flip takes a float type.
+    for name, body, model, bugs in RAW_WORD_PROGRAMS:
+        source = translate(with_constants(body))
+        assert "uint4 params[16]" in source and "float4 params" not in source, name
+        main = source.split("float4 main", 1)[1]
+        if not any("v_cmp_class" in line for line in body):  # a class test reads the word as a float on purpose
+            assert "asfloat(" not in main, (name, main)
+    main = translate(with_constants(RAW_WORD_PROGRAMS[1][1])).split("float4 main", 1)[1]
+    assert "uint movw" in main and "uint selw" in main and "= (2147483648u ^ movw" in main, main
+    # A float source keeps the float move and select; a source with a modifier does too.
+    main = translate(with_constants(["v_mov_b32_e32 v18, 1.0", "v_mov_b32_e32 v19, -0.5",
+                                     "v_cmp_class_f32_e64 vcc_lo, s46, 0x3ff", "v_cndmask_b32_e32 v12, 0.5, 1.0, vcc_lo",
+                                     "v_cndmask_b32_e64 v13, -v18, |v19|, vcc_lo"])).split("float4 main", 1)[1]
+    assert "float alu20 = 1.0f;" in main and "float alu21 = (-0.5f);" in main and "movw" not in main, main
+    assert "float alu23 = cmp22 ? 1.0f : 0.5f;" in main and "float alu24 = cmp22 ?" in main and "selw" not in main, main
+    # A raw word moved into a destination keeps working as the tracked kept half of a 16-bit result.
+    main = translate(with_constants(["v_mov_b32_e32 v18, s44", "v_cvt_f16_f32_e32 v18, s45"])).split("float4 main", 1)[1]
+    assert "(movw20 & 0xffff0000u) | narrow16(" in main, main
+    must_reject(translate, with_constants(["v_mov_b32_e32 v18, v19"]))
+    must_reject(translate, with_constants(["v_mov_b32_e32 v18, s60"]))
+    must_reject(translate, with_constants(["v_cndmask_b32_e32 v18, s44, v19, vcc_lo"]))
+
+
+
 # Draw families in the order check_render always ran them. Each takes (directory, compiler, renderer, backend),
 # compiles what it needs and depends on nothing another family leaves behind, so a process can run any subset.
 # `pixel_aot_check.py --list-families` prints these names; CMake makes one CTest test per name. A family
@@ -3711,6 +3834,7 @@ DRAW_FAMILIES = {
     "fract": check_fract_draw,
     "scalar64": check_scalar64_draws,
     "mad": check_mad_draw,
+    "raw_word": check_raw_word_draws,
 }
 
 

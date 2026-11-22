@@ -492,8 +492,6 @@ def scalar_u32(token, scalar, pending):
             return f"{value}u"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
             return value[1]
-        if isinstance(value, str) and value.startswith("params["):
-            return f"asuint({value})"
         raise ValueError(f"Expected a numeric scalar register: {token}")
     if re.fullmatch(r"-?\d+", token):
         value = int(token)
@@ -552,7 +550,7 @@ def fp_operand(token, scalar, vector, pending, sample_pending):
             if sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return f"asfloat({value[1]})"
-        if not isinstance(value, str) or not value.startswith(("sample", "alu", "params[")):
+        if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError("Expected a numeric register")
         if sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
@@ -580,7 +578,7 @@ def f16_bits(token, scalar, vector, pending, sample_pending):
     if re.fullmatch(r"0x[0-9a-f]{1,4}", token):
         return f"{int(token, 16):#x}u"
     if re.fullmatch(r"[vs]\d+", token):
-        return f"(asuint({fp_operand(token, scalar, vector, pending, sample_pending)}) & 0xffffu)"
+        return f"({word_of(token, scalar, vector, pending, sample_pending)} & 0xffffu)"
     raise ValueError(f"Unsupported 16-bit operand {token}")
 
 
@@ -624,6 +622,39 @@ def f16_exponent(token, scalar, vector, pending, sample_pending):
     raise ValueError(f"Unsupported exponent operand {token}")
 
 
+# A raw 32-bit word held as an unsigned HLSL expression: a constant-buffer word or the result of a register move or
+# select. These are tagged by name so that the places that accepted a tracked numeric value (a float string) before
+# raw words had their own representation accept exactly the same registers now.
+RAW_WORD_PREFIXES = ("params[", "movw", "selw")
+
+
+def tracked_word(value):
+    """The 32 bits of a tracked numeric register value as an unsigned expression, or None for any other value."""
+    if isinstance(value, str) and value.startswith(("sample", "alu")):
+        return f"asuint({value})"
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint" and value[1].startswith(RAW_WORD_PREFIXES):
+        return value[1]
+    return None
+
+
+def raw_source(token, scalar, vector):
+    """Whether a plain source operand is a raw word: an integer literal, or a register that holds an integer word."""
+    if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", token):
+        return True
+    if re.fullmatch(r"[vs]\d+", token):
+        value = (vector if token.startswith("v") else scalar).get(token)
+        return isinstance(value, int) or (isinstance(value, tuple) and len(value) == 2 and value[0] == "uint")
+    return False
+
+
+def word_of(token, scalar, vector, pending, sample_pending):
+    """The 32 bits of a plain source operand: a raw word is read as the unsigned word it is, anything else through its
+    float value."""
+    if raw_source(token, scalar, vector):
+        return vector_u32(token, scalar, vector, pending, sample_pending)
+    return f"asuint({fp_operand(token, scalar, vector, pending, sample_pending)})"
+
+
 def vector_u32(token, scalar, vector, pending, sample_pending):
     """Read a 32-bit operand of an integer vector instruction as an unsigned HLSL expression."""
     if re.fullmatch(r"v\d+", token):
@@ -636,7 +667,7 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
             if sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return value[1]
-        if not isinstance(value, str) or not value.startswith(("sample", "alu", "params[")):
+        if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError(f"Expected a numeric register: {token}")
         if sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
@@ -674,10 +705,11 @@ def sdwa_dest(result, sel, unused, old):
     if unused == "UNUSED_PAD":
         return field
     # The kept bits must come from a tracked numeric value; hardware would keep whatever an untracked register holds.
-    if not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+    kept = tracked_word(old)
+    if kept is None:
         raise ValueError("UNUSED_PRESERVE needs a tracked numeric destination")
     keep = ~(((1 << width) - 1) << offset) & 0xffffffff
-    return f"((asuint({old}) & {keep:#x}u) | {field})"
+    return f"(({kept} & {keep:#x}u) | {field})"
 
 
 # Integer add, subtract, multiply and three-input forms. Semantics: AMD RDNA 2 ISA guide (instruction pseudocode in
@@ -749,7 +781,8 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if constant_descriptor is not None:
         if constant_descriptor < 0 or constant_descriptor % 4:
             raise ValueError("Invalid constant descriptor offset")
-        lines.insert(0, "cbuffer Constants : register(b0) { float4 params[16]; };")
+        # uint4, not float4: the words are raw data and must never be typed as floats (see docs/experiments.md).
+        lines.insert(0, "cbuffer Constants : register(b0) { uint4 params[16]; };")
     bindings = {0: "tex"}
     if second_texture_offset is not None:
         if second_texture_offset < 32 or second_texture_offset % 32:
@@ -917,9 +950,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 word = offset // 4 + j
                 if descriptor and offset in vsharp_words:
                     word = vsharp_words[offset] + j
-                    scalar[f"s{n}"] = ("uint", f"asuint(params[{word // 4}].{'xyzw'[word % 4]})")
+                    scalar[f"s{n}"] = ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
                 else:
-                    scalar[f"s{n}"] = ("cbv", j) if descriptor else f"params[{word // 4}].{'xyzw'[word % 4]}"
+                    scalar[f"s{n}"] = ("cbv", j) if descriptor else ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
                 pending.add(f"s{n}")
         elif m := match(r"v_cube(id|sc|tc|ma)_f32(?:_e64)? (v\d+), ([^,]+), ([^,]+), ([^,]+?)( clamp)?"):
             # LLVM ConstantFoldAMDGCNCubeIntrinsic: z, then y, then x is the major axis; a face is negative
@@ -1058,7 +1091,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 raise ValueError("Invalid register move")
             if dst in sample_dest:
                 raise ValueError("Write overlaps an outstanding sample")
-            word = f"asuint({fp_operand(src, scalar, vector, pending, sample_pending)})"
+            word = word_of(src, scalar, vector, pending, sample_pending)
             result = sdwa_dest(sdwa_source(word, src_sel, bool(sext)), dst_sel, unused, vector.get(dst))
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({result});")
@@ -1127,7 +1160,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 raise ValueError("Invalid conversion")
             if dst in sample_dest:
                 raise ValueError("Write overlaps an outstanding sample")
-            word = f"asuint({fp_operand(bars or plain, scalar, vector, pending, sample_pending)})"
+            word = word_of(bars or plain, scalar, vector, pending, sample_pending)
             expression = f"widen16({sdwa_source(word, src_sel, False)})"
             if bars:
                 expression = f"abs({expression})"
@@ -1161,9 +1194,15 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 raise ValueError("Invalid register move")
             if dst in sample_dest:
                 raise ValueError("Write overlaps an outstanding sample")
-            value = fp_operand(src, scalar, vector, pending, sample_pending)
-            vector[dst] = f"alu{i}"
-            lines.append(f"    precise float alu{i} = {value};")
+            if raw_source(src, scalar, vector):
+                # A raw word is copied as an unsigned integer. It never takes a float type, so the compiler or the
+                # driver has no float semantics (NaN canonicalization, denormal flushing) to apply to it.
+                lines.append(f"    uint movw{i} = {vector_u32(src, scalar, vector, pending, sample_pending)};")
+                vector[dst] = ("uint", f"movw{i}")
+            else:
+                value = fp_operand(src, scalar, vector, pending, sample_pending)
+                vector[dst] = f"alu{i}"
+                lines.append(f"    precise float alu{i} = {value};")
         elif m := match(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac)_f32(?:_e32|_e64)? (v\d+), (.+?)( clamp)?"):
             op, dst, operands, clamp = m.groups()
             tokens = operands.split(", ")
@@ -1188,7 +1227,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
                 bits = f"{int(classes, 0) & 0xffffffff}u"
             elif re.fullmatch(r"[vs]\d+", classes):
-                bits = f"asuint({fp_operand(classes, scalar, vector, pending, sample_pending)})"
+                bits = word_of(classes, scalar, vector, pending, sample_pending)
             else:
                 raise ValueError("Unsupported class mask")
             operand = fp_operand(value, scalar, vector, pending, sample_pending)
@@ -1254,9 +1293,17 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                     or condition[0] != "condition"
                     or [scalar.get(r) for r in regs] != [(*condition[:2], j, len(regs)) for j in range(len(regs))]):
                 raise ValueError("Select mask is not a tracked comparison")
-            values = [fp_operand(t, scalar, vector, pending, sample_pending) for t in (chosen, unset)]
-            vector[dst] = f"alu{i}"
-            lines.append(f"    precise float alu{i} = {condition[1]} ? {values[0]} : {values[1]};")
+            plain = r"[vs]\d+|-?\d+|0x[0-9a-f]{1,8}|-?\d+\.\d+"
+            if (all(re.fullmatch(plain, t) for t in (chosen, unset))
+                    and any(raw_source(t, scalar, vector) for t in (chosen, unset))):
+                # A select with a raw-word source picks between unsigned words, never between floats.
+                words = [vector_u32(t, scalar, vector, pending, sample_pending) for t in (chosen, unset)]
+                lines.append(f"    uint selw{i} = {condition[1]} ? {words[0]} : {words[1]};")
+                vector[dst] = ("uint", f"selw{i}")
+            else:
+                values = [fp_operand(t, scalar, vector, pending, sample_pending) for t in (chosen, unset)]
+                vector[dst] = f"alu{i}"
+                lines.append(f"    precise float alu{i} = {condition[1]} ? {values[0]} : {values[1]};")
         elif m := match(r"v_cvt_f32_f16(?:_e32|_e64)? (v\d+), (-?)(?:\|([vs]\d+|0x[0-9a-f]{1,8}|\d+)\||abs\(([vs]\d+|0x[0-9a-f]{1,8}|\d+)\)|([vs]\d+|0x[0-9a-f]{1,8}|\d+))( clamp)?"):
             dst, negate, bars, call, plain, clamp = m.groups()
             if mask != "entry":
@@ -1267,7 +1314,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             if re.fullmatch(r"0x[0-9a-f]{1,8}|\d+", source):
                 word = f"{int(source, 0) & 0xffffffff}u"
             else:
-                word = f"asuint({fp_operand(source, scalar, vector, pending, sample_pending)})"
+                word = word_of(source, scalar, vector, pending, sample_pending)
             expression = f"widen16({word})"
             if bars or call:
                 expression = f"abs({expression})"
@@ -1286,11 +1333,11 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             if dst in sample_dest:
                 raise ValueError("Write overlaps an outstanding sample")
             old = vector.get(dst)
-            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+            if old is not None and tracked_word(old) is None:
                 raise ValueError("Unsupported conversion destination")
             # fp_operand reads modifiers and inline constants, so -1 stays the bit pattern 0xffffffff.
             value = fp_operand(src, scalar, vector, pending, sample_pending)
-            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            high = f"({tracked_word(old)} & 0xffff0000u)" if old is not None else "0u"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({high} | narrow16({value}));")
         elif m := match(r"v_(add|sub|subrev|mul|max|min|ldexp|floor|ceil|trunc|rndne|fract)_f16(?:_(e32|e64))? (v\d+), (.+?)( clamp)?"):
@@ -1307,7 +1354,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             if dst in sample_dest:
                 raise ValueError("Write overlaps an outstanding sample")
             old = vector.get(dst)
-            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+            if old is not None and tracked_word(old) is None:
                 raise ValueError("Unsupported arithmetic destination")
             values = [f16_operand(t, scalar, vector, pending, sample_pending) for t in tokens[:1 if op == "ldexp" else len(tokens)]]
             if op == "fract":
@@ -1321,15 +1368,22 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 else:
                     expression = F16_ALU[op][1].format(*values)
                 encoding = f"narrow16({f'saturate({expression})' if clamp else expression})"
-            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            high = f"({tracked_word(old)} & 0xffff0000u)" if old is not None else "0u"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({high} | {encoding});")
         elif m := match(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), (v\d+), (v\d+)"):
             dst, lo, hi = m.groups()
-            pair = (vector[lo], vector[hi])
+            pair = []
+            for n, register in enumerate((lo, hi)):
+                value = vector[register]
+                if isinstance(value, tuple) and tracked_word(value) is not None:
+                    # A raw word is exported as the float with those bits; the export is where it becomes a float.
+                    lines.append(f"    precise float alu{i}_{n} = asfloat({value[1]});")
+                    value = f"alu{i}_{n}"
+                pair.append(value)
             if mask != "entry" or sample_pending or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair):
                 raise ValueError("Unsupported pack operand")
-            vector[dst] = pair
+            vector[dst] = tuple(pair)
         elif m := match(r"exp mrt0,? (v\d+), \1, (v\d+), \2 done compr vm"):
             pairs = [vector[v] for v in m.groups()]
             if mask != "entry" or exported or not all(isinstance(p, tuple) and len(p)==2 and
