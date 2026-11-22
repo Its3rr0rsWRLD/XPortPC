@@ -215,6 +215,8 @@ def registers(first, last, count):
     return range(first, last+1)
 
 
+HINT_LIMITS = {"s_clause": 0x3f, "s_setprio": 3, "s_sleep": 0x7f}
+
 ALU = {
     "log": (1, "log2({0})"), "exp": (1, "exp2({0})"), "rcp": (1, "(1.0f / {0})"),
     "sqrt": (1, "sqrt({0})"), "rsq": (1, "rsqrt({0})"),
@@ -471,6 +473,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         if exported and line != "s_endpgm":
             raise ValueError("Unexpected instruction after color export")
         if match(r"(?:s_inst_prefetch|s_nop) (?:0x[0-9a-f]+|\d+)"):
+            continue
+        # Scheduling hints with no effect on results. Each operand is limited to the width
+        # of its RDNA 2 field: clause length minus one, wave priority and sleep duration.
+        if m := match(r"(s_clause|s_setprio|s_sleep) (0x[0-9a-f]+|\d+)"):
+            if int(m[2], 0) > HINT_LIMITS[m[1]]:
+                raise ValueError(f"Invalid {m[1]} operand")
             continue
         if line == "s_waitcnt lgkmcnt(0)":
             pending.clear()

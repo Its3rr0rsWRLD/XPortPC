@@ -1,4 +1,5 @@
-"""Differential checks and rejection controls for 8- and 16-bit register writes and return widths."""
+"""Differential checks and rejection controls for 8- and 16-bit register writes and return widths,
+plus 64-bit IMUL, CL shifts and MOVSX (qword_ops) and the flags of INC, TEST and CMP (flag_results)."""
 
 import ctypes
 from pathlib import Path
@@ -16,7 +17,9 @@ from direct_check import GUARDS, MASK, SENTINELS, input_pairs, observe, register
 # Consecutive low bytes of RAX defined at every reachable RET of each export that the test calls.
 WIDTHS = {"byte_merge": 8, "word_ops": 8, "byte_shift": 8, "byte_unary": 8, "al_less": 1,
           "mixed_width": 1, "ax_copy": 2, "zx_byte": 8, "set_less": 1, "set_zx": 8, "store_only": 0,
-          "store_ret0": 0}
+          "store_ret0": 0, "qword_ops": 8, "flag_results": 8}
+
+FOCUSED_INPUTS = {"qword_ops": [(32, 0x8000000000000080)], "flag_results": [(255, 255)]}
 
 
 def merge(register, value, width):
@@ -62,6 +65,16 @@ def reference(name, x, y, rax):
         trace[0] = y
     elif name == "store_ret0":
         trace[1] = x
+    elif name == "qword_ops":
+        scale = 2 ** (x % 64)
+        rax = x * y & MASK
+        trace = [y * scale & MASK, signed(y, 64) // scale & MASK, signed(y, 8) & MASK]
+    elif name == "flag_results":
+        incremented = (x + 1) % 256
+        difference = (x - y) % (MASK + 1)
+        # TEST always clears the carry flag.
+        trace = [int(incremented == 0), 0, int(signed(x, 64) <= signed(y, 64))]
+        rax = difference >> 63
     return rax, (GUARDS[0], *trace, GUARDS[1])
 
 
@@ -87,7 +100,11 @@ def check(probe_path, original_path, lifted_path):
         caller = ctypes.cast(source, ctypes.c_void_p).value
         low = (1 << width * 8) - 1
         carried = 0
-        inputs = shift_inputs() if name == "byte_shift" else input_pairs()
+        if name in FOCUSED_INPUTS:
+            # The focused input pins each mutation; the general pairs vary every operand.
+            inputs = FOCUSED_INPUTS[name] + input_pairs()
+        else:
+            inputs = shift_inputs() if name == "byte_shift" else input_pairs()
         for x, y in inputs:
             want, trace = reference(name, x, y, caller)
             original, actual = observe(probe, source, x, y), observe(probe, translation, x, y)

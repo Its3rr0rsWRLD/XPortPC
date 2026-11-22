@@ -96,6 +96,7 @@ Review `gpu-report-hardware.md` and paste its full contents as a comment on the 
 | NVIDIA GeForce RTX 3090 | 32 | Skipped, lane range 32–32 | 408 queries passed | [32.0.16.2124 report](https://github.com/R0Y00/Xbox2Windows/issues/1#issuecomment-7068348193) |
 | NVIDIA RTX 3500 Ada Generation Laptop GPU | 32 | Skipped, lane range 32–32 | 408 queries passed | [32.0.16.2124 report](https://github.com/R0Y00/Xbox2Windows/issues/1#issuecomment-7068667745) |
 | AMD Radeon Graphics (device 15bf) | 32 | Passed, 64 lanes | 408 queries passed | [32.0.32015.14001 report](https://github.com/R0Y00/Xbox2Windows/issues/1#issuecomment-7069396910) |
+| AMD Radeon RX 5600 XT | 32 | Passed, 64 lanes | Skipped, DXR unsupported | [32.0.21045.16010 report](https://github.com/R0Y00/Xbox2Windows/issues/1#issuecomment-7070378299) |
 | Microsoft WARP (software) | 4 | Skipped | 408 queries passed | [Maintainer baseline](docs/experiments.md#independent-bvh-checks-on-pc) |
 
 On CachyOS, an RTX 3060 completed 408 comparisons through Proton and vkd3d-proton with NVIDIA driver 620.70.06. The adapter reported a 32-lane maximum and skipped forced wave64. [Linux translation-layer report](https://github.com/R0Y00/Xbox2Windows/issues/1#issuecomment-7064204388)

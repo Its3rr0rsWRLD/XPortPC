@@ -1,5 +1,6 @@
 ; 8- and 16-bit register writes and returns that define 0, 1, 2 or 8 low bytes of RAX, for the
-; jump-table translator.
+; jump-table translator. qword_ops and flag_results cover 64-bit IMUL, CL shifts and MOVSX and
+; the flags of INC, TEST and CMP.
 ; Every export takes RCX, RDX and R8 = address of three writable QWORDs. An 8- or 16-bit write
 ; leaves the other bytes of its register unchanged; a 32-bit write zero-extends.
 .code
@@ -143,6 +144,37 @@ spin:
     inc rcx
     jmp spin
 self_loop ENDP
+
+qword_ops PROC FRAME
+    .endprolog
+    mov rax, rcx
+    imul rax, rdx
+    mov r9, rdx
+    shl r9, cl
+    mov QWORD PTR [r8], r9
+    mov r10, rdx
+    sar r10, cl
+    mov QWORD PTR [r8+8], r10
+    movsx r11, dl
+    mov QWORD PTR [r8+16], r11
+    ret
+qword_ops ENDP
+
+flag_results PROC FRAME
+    .endprolog
+    movzx eax, cl
+    inc al
+    sete al
+    mov QWORD PTR [r8], rax
+    test rcx, rdx
+    setb al
+    mov QWORD PTR [r8+8], rax
+    cmp rcx, rdx
+    setle al
+    mov QWORD PTR [r8+16], rax
+    sets al
+    ret
+flag_results ENDP
 
 ; Rejected: after the join only AL is defined on one path, and ADD reads all of EAX.
 join_wide PROC FRAME

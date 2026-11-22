@@ -11,6 +11,8 @@ EXPORTS
     set_zx
     store_only
     store_ret0
+    qword_ops
+    flag_results
     self_loop
     join_wide
     cmov_word
