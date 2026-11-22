@@ -282,6 +282,38 @@ SALU_HELPERS = {
         "    return s_lshl_b64(m, offset);\n"
         "}"
     ),
+    # 32x32 -> 64 products without 64-bit HLSL types: 16-bit partial products, carries summed in the middle word.
+    "mul_hi_u32": (
+        "uint mul_hi_u32(uint a, uint b) {\n"
+        "    uint a0 = a & 0xffffu, a1 = a >> 16, b0 = b & 0xffffu, b1 = b >> 16;\n"
+        "    uint p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;\n"
+        "    uint mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu);\n"
+        "    return p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16);\n"
+        "}"
+    ),
+    # Signed high word = unsigned high word minus b when a is negative and minus a when b is negative (mod 2^32).
+    "mul_hi_i32": (
+        "uint mul_hi_i32(uint a, uint b) {\n"
+        "    return mul_hi_u32(a, b) - (asint(a) < 0 ? b : 0u) - (asint(b) < 0 ? a : 0u);\n"
+        "}"
+    ),
+    # Saturating forms of the VOP3 clamp bit on integer add and subtract (LLVM saddsat/ssubsat patterns).
+    "v_add_sat_u32": "uint v_add_sat_u32(uint a, uint b) {\n    uint r = a + b;\n    return r < a ? 0xffffffffu : r;\n}",
+    "v_sub_sat_u32": "uint v_sub_sat_u32(uint a, uint b) {\n    return a >= b ? a - b : 0u;\n}",
+    "v_add_sat_i32": (
+        "uint v_add_sat_i32(uint a, uint b) {\n"
+        "    uint r = a + b;\n"
+        "    if (((a ^ r) & (b ^ r)) >> 31 != 0u) return (a >> 31) != 0u ? 0x80000000u : 0x7fffffffu;\n"
+        "    return r;\n"
+        "}"
+    ),
+    "v_sub_sat_i32": (
+        "uint v_sub_sat_i32(uint a, uint b) {\n"
+        "    uint r = a - b;\n"
+        "    if (((a ^ b) & (a ^ r)) >> 31 != 0u) return (a >> 31) != 0u ? 0x80000000u : 0x7fffffffu;\n"
+        "    return r;\n"
+        "}"
+    ),
     "s_bfe_u32": (
         "uint s_bfe_u32(uint src, uint ctrl) {\n"
         "    uint off = ctrl & 31u;\n"
@@ -452,6 +484,63 @@ def sdwa_dest(result, sel, unused, old):
         raise ValueError("UNUSED_PRESERVE needs a tracked numeric destination")
     keep = ~(((1 << width) - 1) << offset) & 0xffffffff
     return f"((asuint({old}) & {keep:#x}u) | {field})"
+
+
+# Integer add, subtract, multiply and three-input forms. Semantics: AMD RDNA 2 ISA guide (instruction pseudocode in
+# the VOP2/VOP3 sections): V_ADD_NC_U32 D=S0+S1, V_SUB_NC_U32 D=S0-S1, V_SUBREV_NC_U32 D=S1-S0, V_MUL_U32_U24
+# D=S0.u[23:0]*S1.u[23:0], V_MUL_I32_I24 D=S0.i[23:0]*S1.i[23:0], V_MUL_HI_U32_U24 D=(S0.u24*S1.u24)>>32,
+# V_MUL_HI_I32_I24 D=(S0.i24*S1.i24)>>32, V_MUL_HI_U32/V_MUL_HI_I32 D=(S0*S1)>>32, V_MUL_LO_U32 D=(S0*S1)[31:0],
+# V_MAD_U32_U24 D=S0.u[23:0]*S1.u[23:0]+S2, V_MAD_I32_I24 D=S0.i[23:0]*S1.i[23:0]+S2, V_ADD3_U32 D=S0+S1+S2,
+# V_LSHL_ADD_U32 D=(S0<<S1[4:0])+S2, V_ADD_LSHL_U32 D=(S0+S1)<<S2[4:0], V_LSHL_OR_B32 D=(S0<<S1[4:0])|S2,
+# V_AND_OR_B32 D=(S0&S1)|S2, V_OR3_B32 D=S0|S1|S2, V_XOR3_B32 D=S0^S1^S2, V_XAD_U32 D=(S0^S1)+S2,
+# V_ADD_NC_I32 D=S0+S1, V_SUB_NC_I32 D=S0-S1. Shift counts are the bit slice [4:0], so they are masked to five bits.
+# Results wrap. The VOP3 clamp bit saturates the add and subtract forms (LLVM VOP3Instructions.td maps saddsat and
+# ssubsat to V_ADD_I32_e64/V_SUB_I32_e64 with clamp); it is accepted only there, never on the multiplies, which
+# llvm-mc assembles with clamp but whose saturation point is not established here.
+INT_VOP2 = ("add_nc_u32", "sub_nc_u32", "subrev_nc_u32", "mul_u32_u24", "mul_i32_i24", "mul_hi_u32_u24", "mul_hi_i32_i24")
+INT_VOP3 = ("add_nc_i32", "sub_nc_i32", "mul_lo_u32", "mul_hi_u32", "mul_hi_i32")
+INT_CLAMPED = ("add_nc_u32", "sub_nc_u32", "subrev_nc_u32", "add_nc_i32", "sub_nc_i32")
+INT_TERNARY = ("mad_u32_u24", "mad_i32_i24", "add3_u32", "lshl_add_u32", "add_lshl_u32", "lshl_or_b32", "and_or_b32",
+               "or3_b32", "xor3_b32", "xad_u32")
+
+
+def sext24(word):
+    return f"asuint(asint({word} << 8u) >> 8)"
+
+
+def int_binary(op, a, b, clamp, helpers):
+    """HLSL uint expression for a two-source integer form; a and b are the first and second source words."""
+    if clamp:
+        name = {"add_nc_u32": "v_add_sat_u32", "sub_nc_u32": "v_sub_sat_u32", "subrev_nc_u32": "v_sub_sat_u32",
+                "add_nc_i32": "v_add_sat_i32", "sub_nc_i32": "v_sub_sat_i32"}[op]
+        helpers.add(name)
+        return f"{name}({b}, {a})" if op == "subrev_nc_u32" else f"{name}({a}, {b})"
+    if op.startswith("mul_hi"):
+        helpers.update(("mul_hi_u32", "mul_hi_i32") if op.endswith("i32") or op.endswith("i24") else ("mul_hi_u32",))
+    return {
+        "add_nc_u32": f"({a} + {b})", "add_nc_i32": f"({a} + {b})",
+        "sub_nc_u32": f"({a} - {b})", "sub_nc_i32": f"({a} - {b})", "subrev_nc_u32": f"({b} - {a})",
+        "mul_u32_u24": f"(({a} & 0xffffffu) * ({b} & 0xffffffu))",
+        "mul_i32_i24": f"({sext24(a)} * {sext24(b)})",
+        "mul_hi_u32_u24": f"mul_hi_u32({a} & 0xffffffu, {b} & 0xffffffu)",
+        "mul_hi_i32_i24": f"mul_hi_i32({sext24(a)}, {sext24(b)})",
+        "mul_lo_u32": f"({a} * {b})", "mul_hi_u32": f"mul_hi_u32({a}, {b})", "mul_hi_i32": f"mul_hi_i32({a}, {b})",
+    }[op]
+
+
+def int_ternary(op, a, b, c):
+    return {
+        "mad_u32_u24": f"((({a} & 0xffffffu) * ({b} & 0xffffffu)) + {c})",
+        "mad_i32_i24": f"(({sext24(a)} * {sext24(b)}) + {c})",
+        "add3_u32": f"({a} + {b} + {c})",
+        "lshl_add_u32": f"(({a} << ({b} & 31u)) + {c})",
+        "add_lshl_u32": f"(({a} + {b}) << ({c} & 31u))",
+        "lshl_or_b32": f"(({a} << ({b} & 31u)) | {c})",
+        "and_or_b32": f"(({a} & {b}) | {c})",
+        "or3_b32": f"({a} | {b} | {c})",
+        "xor3_b32": f"({a} ^ {b} ^ {c})",
+        "xad_u32": f"(({a} ^ {b}) + {c})",
+    }[op]
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None):
@@ -731,6 +820,25 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 raise ValueError("Write overlaps an outstanding sample")
             word = vector_u32(src, scalar, vector, pending, sample_pending)
             lines.append(f"    uint valu{i} = {'~' if op == 'not' else 'reversebits'}({word});")
+            vector[dst] = ("uint", f"valu{i}")
+        elif m := match(r"v_(" + "|".join(INT_VOP2 + INT_VOP3) + r")(_e32|_e64)? (v\d+), ([^,\s]+), ([^,\s]+)( clamp)?"):
+            op, suffix, dst, first, second, clamp = m.groups()
+            if mask != "entry" or (op in INT_VOP3 and suffix == "_e32") or (clamp and (suffix == "_e32" or op not in INT_CLAMPED)):
+                raise ValueError("Invalid integer operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            a = vector_u32(first, scalar, vector, pending, sample_pending)
+            b = vector_u32(second, scalar, vector, pending, sample_pending)
+            lines.append(f"    uint valu{i} = {int_binary(op, a, b, bool(clamp), helpers)};")
+            vector[dst] = ("uint", f"valu{i}")
+        elif m := match(r"v_(" + "|".join(INT_TERNARY) + r")(_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)"):
+            op, _, dst, first, second, third = m.groups()
+            if mask != "entry":
+                raise ValueError("Invalid integer operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            a, b, c = (vector_u32(t, scalar, vector, pending, sample_pending) for t in (first, second, third))
+            lines.append(f"    uint valu{i} = {int_ternary(op, a, b, c)};")
             vector[dst] = ("uint", f"valu{i}")
         elif m := match(r"v_cvt_f32_f16_sdwa (v\d+), (-?)(?:\|([vs]\d+)\||([vs]\d+))( clamp)? dst_sel:DWORD dst_unused:UNUSED_(?:PAD|PRESERVE) src0_sel:(WORD_[01])"):
             # The SDWA form widens the selected half; modifiers apply after widening, as in the e64 form.
