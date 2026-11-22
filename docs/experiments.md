@@ -80,7 +80,8 @@ against the desktop `xmem.dll` and `d3d12_xs.dll`. The DLL checks that its
 process attach ran once before the call. It allocates, writes, queries and frees
 a page-backed XMem block, then checks that the freed range is no longer committed
 or registered as graphics memory under the desktop policy. It also checks the
-unsupported working-set reply and round-trips a tagged root signature. The
+unsupported working-set reply for a selector the callers do not pass
+(`0x20000002`) and round-trips a tagged root signature. The
 resulting descriptor retains its root constants and the desktop flag.
 
 `cpu_native_shim_startup` runs the same EXE and companion under Windows and
@@ -2522,7 +2523,7 @@ The handler therefore fills that byte by a desktop policy, not by a confirmed Sc
 - the policy applies only to queries of the current process;
 - a buffer shorter than 48 bytes fails with `ERROR_BAD_LENGTH`, as `VirtualQueryEx` does.
 
-With registration, the callers' predicates accept GPU-intended memory and reject everything else. What the console's tail byte means, and what sets it, remain open. The selector `0x20000001` and the output units of `XMemGetWorkingSetStatistics` have no public reference either; the desktop `xmem.dll` below reports that call as unsupported.
+With registration, the callers' predicates accept GPU-intended memory and reject everything else. What the console's tail byte means, and what sets it, remain open. The selector `0x20000001` of `XMemGetWorkingSetStatistics` has no public reference either. Its callers use the value at `+8` as a byte count of GPU memory (see the call evidence below); the desktop `xmem.dll` below returns this process's DXGI GPU memory usage there.
 
 | CTest case | Inputs and checks |
 |---|---|
@@ -2540,18 +2541,28 @@ With registration, the callers' predicates accept GPU-intended memory and reject
 | `XMemAlloc` | Size and attribute word (Bink and AMD callers). | `era_heap::allocate`. Graphics memory types are also tracked by `era_title_gpu`, which registers them with `era_query` so they count as GPU-intended, and gives them desktop GPU addresses once a D3D12 device is attached (see below). |
 | `XMemFree` | Allocation and the same attribute word. | Untracks graphics allocations, dropping any alias and the `era_query` registration, then `era_heap::release_with_attributes`. |
 | `XMemVirtualQuery` | The four BVH callers pass the process in `rcx`, the address in `rdx` and a 64-byte buffer in `r8`; `r9` is not set, so there is no length argument. They test the 32-bit result in `eax`. | `era_query::query` on the 64-byte buffer; returns `TRUE` when it succeeds. |
-| `XMemGetWorkingSetStatistics` | The seven AMD callers pass `0x20000001` in `ecx` and an output address in `rdx` and test the 32-bit result. On failure each uses zero instead of the 64-bit value at `+8`. | Returns `FALSE` with `ERROR_NOT_SUPPORTED` and leaves the output untouched. |
+| `XMemGetWorkingSetStatistics` | The seven AMD callers pass `0x20000001` in `ecx` and a 128-byte stack buffer in `rdx` and test the 32-bit result. On failure each uses zero instead of the 64-bit value at `+8`. They use only the difference of that value around GPU heap and committed-resource creation and release. | For `0x20000001`, writes the qword at `+8` with this process's GPU memory in bytes and returns `TRUE`; no other byte is written. The value is DXGI `QueryVideoMemoryInfo` `CurrentUsage`, local plus non-local, per adapter LUID, combined by the aggregation rules below. `dxgi.dll` and `gdi32.dll` (D3DKMT) are delay-loaded on the first call. When the rules give no total (including when the adapter list cannot be stored), or for other selectors, the call returns `FALSE` with `ERROR_NOT_SUPPORTED`; a null output returns `ERROR_INVALID_PARAMETER`. A failed call leaves the whole output untouched. |
 
-The registration of graphics memory and the unsupported working-set call are desktop policies, not confirmed Scarlett behavior.
+Windows can list one device under several LUIDs, and each view reports the same allocations. Without a GPU, Windows Server 2025 lists the Microsoft Basic Render Driver with flags 0 and as a software adapter. A hybrid laptop on Windows build 26200 (RTX 4060 Laptop, driver 32.0.16.1656) listed its NVIDIA GPU twice with flags 0. In that case both local counters moved from 7,294,976 to 74,403,840 bytes on one 64 MiB heap, so a plain sum reported 2x. Matching vendor and device IDs, or equal readings, do not show that two LUIDs are one device: separate adapters of the same model must each be counted. The shim therefore identifies each LUID by the PnP hardware registry keys of its physical adapters, which contain the device instance path, read with D3DKMT (`src/adapter_identity.cpp`), and `src/xmem_gpu_usage.h` publishes a total only when it is complete and non-duplicated:
+
+- an incomplete enumeration, no adapters, or any failed reading gives no total;
+- LUIDs with the same keys count once and must report the same value; LUIDs with different keys are summed;
+- LUIDs that share some but not all keys give no total;
+- an adapter whose keys cannot be read may report usage only when no other adapter does;
+- a total of zero is valid.
+
+The registration of graphics memory and the working-set value are desktop policies, not confirmed Scarlett behavior. The console value's scope and what it counts besides GPU allocations remain open; the callers depend only on its differences.
 
 A local scan of the inspected package's 16 DLLs together with this `xmem.dll` (`tools/pe_inventory.py`) resolved all six xmem import edges to it. The unresolved edges dropped from eight to two, both `d3d12_xs.dll` root-signature functions. The scan reads the images and runs no package code.
 
 | CTest case | Inputs and checks |
 |---|---|
-| `xmem_shim_exports` | The four names resolve through `GetProcAddress`, and the test's named imports bind to the same module. |
+| `xmem_shim_exports` | The four names resolve through `GetProcAddress`, and the test's named imports bind to the same module. Neither `d3d12.dll` nor `dxgi.dll` is loaded (the test executable delay-loads both for its GPU cases). |
 | `xmem_shim_allocation` | The Bink word returns 32-byte-aligned, zeroed heap memory. The AMD word returns committed read/write memory on a 64 KiB boundary that `XMemFree` releases (`MEM_FREE`). Zero size, a reserved bit and a physical memory type return null, and freeing null is a no-op for both memory types. |
 | `xmem_shim_query` | Graphics memory from `XMemAlloc` passes both BVH predicates and keeps the sentinel after `+0x30`, through the pseudo-handle and a real handle. After `XMemFree` the address reads as `MEM_FREE` with a clear tail. Heap memory fails the tail check, and an address outside user space returns `FALSE` without touching the buffer. |
-| `xmem_shim_working_set` | Returns `FALSE` with `ERROR_NOT_SUPPORTED` and leaves the output untouched, so the callers' value is zero. |
+| `xmem_shim_working_set` | Selector `0x20000001` returns `TRUE` and writes only the qword at `+8` of a 128-byte buffer. Selector `0x20000002` returns `FALSE` with `ERROR_NOT_SUPPORTED` and leaves the buffer untouched; a null output returns `ERROR_INVALID_PARAMETER`. |
+| `xmem_shim_working_set_aggregation` | Synthetic readings for the aggregation rules. Regression reference: the laptop readings above give no total when the two LUIDs have no identity, and a 64 MiB difference when both carry the same key. Also covered: Basic Render Driver aliases count once, distinct adapters of the same model with equal readings are summed, a genuine zero is published, and an all-failed, partly failed or incomplete enumeration, disagreeing aliases, an active adapter of unknown identity next to another active adapter, partly overlapping linked adapters and an overflowing sum give no total. |
+| `xmem_shim_working_set_warp`, `xmem_shim_working_set_hardware` | As the callers do, reads `+8` (zero on failure) before and after creating and releasing 64 MiB DEFAULT, UPLOAD and READBACK heaps and a 32 MiB committed buffer on a new device. Each creation must add at least the allocation size (`GetResourceAllocationInfo` for the buffer) and at most 4 MiB more, and each release must remove as much. Negative control: with the former `ERROR_NOT_SUPPORTED` stub every difference is 0 and both cases fail. Prints each DXGI adapter with its LUID and PnP keys. Skips (77) without the adapter or a D3D12 device. |
 
 ### Desktop d3d12_xs.dll
 
@@ -2822,7 +2833,15 @@ Build `cpu_bink_heap_lifted` and run `ctest --preset dev --no-tests=error -R '^c
 
 Immediately after the statistics calls at RVAs `0x74d2` and `0x75b1`, both paths add the new sample minus the previous sample to a 64-bit counter. A zero status substitutes zero for the new sample even if the supplied output word is nonzero. With starting counters 11 and 101, a previous sample of 23, a new sample of 70, successful status and flag 256, creation produces 58 and 148. Release produces 58 and 101 because it reads only the low flag byte. Both counters wrap modulo 2^64.
 
-Build `cpu_working_set_delta_lifted` and run `ctest --preset dev --no-tests=error -R '^cpu_working_set_delta$'` for the source-built assembly control and its translation. With `FFX_UPSCALER_IMAGE` set to the fingerprinted local upscaler, build `ffx_package_working_set_delta` and run its namesake test for the two translated instruction ranges. The test supplies the status, samples and flags at the point where the query returns. The Xbox statistics provider, measurement units and real sample values remain unverified.
+Build `cpu_working_set_delta_lifted` and run `ctest --preset dev --no-tests=error -R '^cpu_working_set_delta$'` for the source-built assembly control and its translation. With `FFX_UPSCALER_IMAGE` set to the fingerprinted local upscaler, build `ffx_package_working_set_delta` and run its namesake test for the two translated instruction ranges. The test supplies the status, samples and flags at the point where the query returns. The Xbox statistics provider and real sample values remain unverified. The call evidence below gives the samples as bytes of GPU memory, and the [desktop `xmem.dll`](#desktop-xmemdll) supplies them from DXGI.
+
+`ffx_package_working_set_xmem_warp` and `ffx_package_working_set_xmem_hardware`, defined with the same image, feed the two translated ranges with samples from the desktop `xmem.dll` taken around creating and releasing a 64 MiB D3D12 heap, once with the aliasable flag clear and once set. The total counter must grow by the heap size and the aliasable counter by the heap size only when the flag is set, and release must restore both. The test substitutes zero for a failed earlier sample as the caller does at `0x7475` and `0x7577`, outside the translated ranges. Negative control: with the former `ERROR_NOT_SUPPORTED` stub both counters stay unchanged and both cases fail. The resource creation and release pairs (`0x2ea1`/`0x39a9`, `0x3b40`) are not translated.
+
+```powershell
+cmake --preset dev -B out/build/pkg "-DFFX_UPSCALER_IMAGE=<upscaler DLL>"
+cmake --build out/build/pkg --target ffx_package_working_set_xmem
+ctest --test-dir out/build/pkg --no-tests=error -R '^ffx_package_working_set_'
+```
 
 ## Six API call sites
 
@@ -2838,7 +2857,7 @@ After loading the toolchain, inspect three local DLLs. `out/calls/six-apis.json`
 | `XMemAlloc` | At `0x25c35`, Bink's fallback requests the length plus 64 with attributes `0x05e50000` and checks for null. It advances the base by `64 - (base & 31)` bytes (33–64), giving a 32-byte-aligned user pointer. The two preceding bytes hold the offset at `[-1]` and a tag at `[-2]`. At `0x565d`, AMD rounds the nonzero request up to a multiple of 256, reads attributes at `0x6eee0` (on-disk initial value `0xa8004000`) and checks for null. Under the ERA layout the alignment fields give 32 and 256 bytes, matching this caller arithmetic. `era_heap_observed_words` checks the desktop handling of both words; allocator-ID and GPU-visibility semantics remain unconfirmed. |
 | `XMemFree` | At `0x25be4`, Bink uses the saved offset to recover the allocation base and passes the same attributes. Custom allocations use a matching callback. AMD cleanup at `0x5712` and release at `0x5921` both use the allocation's attribute slot. The latter also clears the stored pointer. No observed caller consumes the return value. |
 | `XMemVirtualQuery` | Four BVH callers pass the current process, target address and a zeroed 64-byte buffer. Each checks a nonzero return, bit `0x1000` of the word at `+0x20` and either low bit of the byte at `+0x30`. Source acceleration structure validation at `0x19c69` also requires the byte at `+0x24` to intersect mask `6`. Destination acceleration structure (`0x19ccb`), index buffer (`0x19d9d`) and vertex buffer (`0x19df9`) use the common checks. Diagnostics describe the whole check. The individual tail bits have no confirmed meaning. |
-| `XMemGetWorkingSetStatistics` | Seven AMD calls pass selector `0x20000001` and a local output address. At `0x26b3` and elsewhere a zero return contributes zero to a calculation. Success uses the 64-bit value at `+8`. Code near `0x74d2/75b1` uses a before/after difference to update a counter. The units, scope and selector meaning remain open. |
+| `XMemGetWorkingSetStatistics` | Seven AMD calls pass selector `0x20000001` and a 128-byte stack buffer (`0x2690`: `rsp+0x20` up to the cookie at `rsp+0xa0`). A zero return contributes zero; success uses the 64-bit value at `+8`. The calls bracket four operations, and only `after - before` is used: resource creation `0x2ea1`/`0x39a9` and heap creation `0x7452`/`0x74d2` (`ID3D12Device::CreateHeap`, vtable `+0xe0`) add it, and resource release (getter `0x26b3`, called twice from `0x3b40`) and heap release `0x7568`/`0x75b1` subtract it. The targets are two qwords at `+0x40` and `+0x48` of 96-byte per-effect records; the second changes only for aliasable resources and heaps. This matches the per-effect `vramUsage` (`totalUsageInBytes`, `aliasableUsageInBytes`) of the public FidelityFX SDK DX12 backend: v2.3.0, whose FSR upscaling version 4.1.1 is the version string in this DLL, `Kits/FidelityFX/backend/dx12/ffx_dx12.cpp`, MIT-licensed per `docs/license.md`. That backend adds known allocation sizes at the same four points, with the same callback argument shapes. The value at `+8` is therefore used as a byte count of GPU memory. Its scope and the selector's meaning remain open. |
 | `D3D12SerializeVersionedRootSignature` | At `0xc2d0` the BVH code copies a caller's 48-byte descriptor and adds flags `0x03000000` at `+0x28`. At `0xc32f` it passes the descriptor, a blob output pointer and a null error output. Negative HRESULT enters diagnostics. Success uses the blob length and data pointer. A synthetic v1.1 descriptor returned `S_OK` with baseline flags and `E_INVALIDARG` with the two added bits. |
 | `D3D12CreateRootSignatureDeserializer` | At `0x4f88`, AMD reads a byte pointer and a 32-bit length from record offsets `+0/+8`, then supplies an interface IID and object output address. A negative HRESULT or null object triggers partial cleanup. Success retrieves the descriptor via the object. Desktop code read the root signature from a complete Microsoft sample shader and returned `E_INVALIDARG` for a synthetic shader without one. |
 

@@ -51,17 +51,29 @@ add_test(NAME era_title_gpu_alloc COMMAND era_title_gpu_alloc_check)
 set_tests_properties(era_title_gpu_alloc PROPERTIES TIMEOUT 30)
 
 # Desktop xmem.dll for the package DLLs' four named xmem imports.
-add_library(xmem_shim SHARED src/xmem_shim.cpp src/xmem_shim.def src/era_heap.cpp src/era_query.cpp
+add_library(xmem_shim SHARED src/xmem_shim.cpp src/xmem_shim.def src/xmem_gpu_usage.cpp src/adapter_identity.cpp src/era_heap.cpp src/era_query.cpp
     src/era_title_gpu.cpp src/era_gpu_alias.cpp src/era_title_va.cpp)
 set_target_properties(xmem_shim PROPERTIES OUTPUT_NAME xmem)
 target_include_directories(xmem_shim PRIVATE src)
 target_compile_features(xmem_shim PRIVATE cxx_std_20)
 target_compile_definitions(xmem_shim PRIVATE X2W_TITLE_GPU_EXPORTS)
-add_executable(xmem_shim_check tests/xmem_shim_check.cpp)
-target_link_libraries(xmem_shim_check PRIVATE xmem_shim)
+# Delay-loaded: only XMemGetWorkingSetStatistics uses DXGI and D3DKMT (gdi32).
+target_link_libraries(xmem_shim PRIVATE dxgi gdi32 delayimp)
+target_link_options(xmem_shim PRIVATE /DELAYLOAD:dxgi.dll /DELAYLOAD:gdi32.dll)
+add_executable(xmem_shim_check tests/xmem_shim_check.cpp src/adapter_identity.cpp)
+# D3D12 and DXGI are delay-loaded so the exports scenario can check that xmem.dll loads neither.
+target_link_libraries(xmem_shim_check PRIVATE xmem_shim d3d12 dxgi gdi32 delayimp)
+target_link_options(xmem_shim_check PRIVATE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll)
+target_include_directories(xmem_shim_check PRIVATE src)
 target_compile_features(xmem_shim_check PRIVATE cxx_std_17)
-foreach(scenario IN ITEMS exports allocation query working_set)
+# working_set_aggregation feeds synthetic adapter readings to src/xmem_gpu_usage.h.
+foreach(scenario IN ITEMS exports allocation query working_set working_set_aggregation)
     add_test(NAME xmem_shim_${scenario} COMMAND xmem_shim_check ${scenario})
+endforeach()
+# XMemGetWorkingSetStatistics differences around D3D12 heap and committed-resource lifetimes.
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME xmem_shim_working_set_${adapter} COMMAND xmem_shim_check working_set_${adapter})
+    set_tests_properties(xmem_shim_working_set_${adapter} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
 endforeach()
 
 add_library(xmem_gpu_client SHARED tests/xmem_gpu_client.cpp tests/xmem_gpu_client.def)
@@ -1025,6 +1037,14 @@ if(EXISTS "${INTAKE_PYTHON}")
         working_set_delta_translation(ffx_package_working_set_delta "${FFX_UPSCALER_IMAGE}" "${FFX_UPSCALER_IMAGE}" --package)
         add_test(NAME ffx_package_working_set_delta COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/cpu/working_set_delta_check.py" "$<TARGET_FILE:ffx_package_working_set_delta>")
+        # The same translated updates fed with desktop xmem.dll samples around a real D3D12 heap.
+        add_executable(ffx_package_working_set_xmem tests/cpu/working_set_xmem_check.cpp)
+        target_link_libraries(ffx_package_working_set_xmem PRIVATE ffx_package_working_set_delta xmem_shim d3d12 dxgi)
+        target_compile_features(ffx_package_working_set_xmem PRIVATE cxx_std_17)
+        foreach(adapter IN ITEMS warp hardware)
+            add_test(NAME ffx_package_working_set_xmem_${adapter} COMMAND ffx_package_working_set_xmem ${adapter})
+            set_tests_properties(ffx_package_working_set_xmem_${adapter} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+        endforeach()
     endif()
     cpu_asm_fixture(cpu_bink_descriptors bink_descriptors)
     function(bink_descriptors_translation target image dependency)
