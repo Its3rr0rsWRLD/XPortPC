@@ -81,6 +81,13 @@ extern "C" __declspec(dllimport) void __stdcall RaiseException(unsigned long, un
     RaiseException(zero_divisor ? 0xc0000094ul : 0xc0000095ul, 1, 0, nullptr);
     __assume(0);
 }
+[[noreturn]] static void raise_cmpxchg16b_alignment() {
+    // #GP(0) for a CMPXCHG16B operand that is not 16-byte aligned. Windows reports it as an access
+    // violation reading address -1 (measured), so the exception carries the same two parameters.
+    const uintptr_t info[2] = {0, ~static_cast<uintptr_t>(0)};
+    RaiseException(0xc0000005ul, 0, 2, info);
+    __assume(0);
+}
 static inline uint8_t aes_gf_mul(uint8_t a, uint8_t b) {
     uint8_t p = 0;
     for (int i = 0; i < 8; ++i) {
@@ -889,6 +896,24 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 else:
                     stmt = (f"{{ const {width} acc = static_cast<{width}>(rax), d = {operand(0)}, s = {operand(1)}; "
                             f"zero = acc == d; carry = acc < d; overflow = (((acc ^ d) & (acc ^ (acc - d))) >> {8 * size - 1}) != 0; if (zero) {{ {write('s')} }} else {{ rax = d; }} }}")
+        elif op in (M.CMPXCHG8B, M.CMPXCHG16B):
+            # Compare EDX:EAX (RDX:RAX) with the memory operand. If equal, set ZF and store ECX:EBX (RCX:RBX);
+            # otherwise clear ZF and load the operand into EDX:EAX (RDX:RAX), zero-extending a 32-bit half.
+            # The other flags are unchanged. CMPXCHG16B faults on an operand that is not 16-byte aligned.
+            if i.op0_kind != K.MEMORY:
+                raise ValueError(f"unsupported query operation at {i.ip:#x}: {i}")
+            if op == M.CMPXCHG8B:
+                stmt = (f"{{ const word addr = {address()}; const uint64_t d = load<uint64_t>(addr), "
+                        "acc = (static_cast<uint64_t>(static_cast<uint32_t>(rdx)) << 32) | static_cast<uint32_t>(rax); "
+                        "zero = acc == d; if (zero) store<uint64_t>(addr, "
+                        "(static_cast<uint64_t>(static_cast<uint32_t>(rcx)) << 32) | static_cast<uint32_t>(rbx)); "
+                        "else { rax = static_cast<uint32_t>(d); rdx = d >> 32; } }")
+            else:
+                stmt = (f"{{ const word addr = {address()}; if (addr & 15u) raise_cmpxchg16b_alignment(); "
+                        "const uint64_t lo = load<uint64_t>(addr), hi = load<uint64_t>(addr + 8); "
+                        "zero = lo == rax && hi == rdx; "
+                        "if (zero) { store<uint64_t>(addr, rbx); store<uint64_t>(addr + 8, rcx); } "
+                        "else { rax = lo; rdx = hi; } }")
         elif op in (M.VMOVQ, M.VMOVSD, M.VMOVHPD) and has_wide:
             lanes = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
             if i.op1_kind == K.MEMORY and op != M.VMOVHPD:
