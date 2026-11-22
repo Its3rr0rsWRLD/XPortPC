@@ -634,7 +634,7 @@ ctest --preset dev --no-tests=error -R '^cpu_native_exe_start$' -V
 
 ### Starting an EXE with two DLLs
 
-`cpu_startup_exe` and two DLLs, all built without a C runtime, import each other in a known order. `cpu_startup_a` has no imports and keeps an event log and a value set by its initializer (`7`). `cpu_startup_b` imports `cpu_startup_a`, and its initializer publishes `a_value() * 2`, so it reads zero if it runs first. The EXE imports both. These initializers are the DLLs' `DLL_PROCESS_ATTACH` entry points, called by the loader, not C++ static constructors. The EXE's TLS callback logs `t` and its entry point logs `e`. The entry point then runs two worker threads one after the other and joins each with a 30 s limit. Every thread keeps its own value in a `TlsAlloc` slot (`1` in the main thread, `2` and `3` in the workers). That is explicit TLS through kernel32, not implicit `__declspec(thread)` data. The entry point writes the log to standard output and returns `b_value() | first worker << 8 | second worker << 16 | main << 24` as its exit code.
+`cpu_startup_exe` and two DLLs, all built without a C runtime, import each other in a known order. `cpu_startup_a` has no fixture DLL dependencies and keeps an event log and a value set by its initializer (`7`). `cpu_startup_b` imports `cpu_startup_a`, and its initializer publishes `a_value() * 2`, so it reads zero if it runs first. The EXE imports both. These initializers are the DLLs' `DLL_PROCESS_ATTACH` entry points, called by the loader, not C++ static constructors. The EXE's TLS callback logs `t` and its entry point logs `e`. The entry point then runs two worker threads one after the other and joins each with a 10 s limit. A's TLS callback allocates an explicit kernel32 `TlsAlloc` slot and sets `1` on the main thread. The workers set `2` and `3` in their respective copies of the slot. Both images use empty static TLS data templates. The entry point writes the event log and the callback trace to standard output and returns `b_value() | first worker << 8 | second worker << 16 | main << 24` as its exit code.
 
 `cpu_native_startup` launches the EXE with the Windows loader in a directory holding the two DLLs, and starts it with `pe_map_run` in a child process. The harness reads the import tables, orders the images dependencies first, maps each DLL, serves the imports of the DLLs with `pe_map_export` on the mapped images and the kernel32 imports with the host. `pe_map` does the mapping, relocation, section protection, each DLL's attach notification and the start of the EXE; it does not read import tables to find dependencies. On Windows 11 build 26300:
 
@@ -643,15 +643,15 @@ native: LOG:abtew2w3m1 exit 0x103020e
 mapped: LOG:abtew2w3m1 exit 0x103020e
 ```
 
-- The logs, exit codes, standard output and standard error (empty) are identical. Under both loaders `a` and `b` ran once and in dependency order, the TLS callback ran after the DLL initializers and before the entry point, the entry point ran once, and `b_value()` was `14`. The three threads read their own `TlsAlloc` values.
+- The startup event logs and exit codes match, and both standard error streams are empty. Under both loaders `a` and `b` ran once and in dependency order, the TLS callback ran after the DLL initializers and before the entry point, the entry point ran once, and `b_value()` was `14`. The three threads read their own `TlsAlloc` values.
 - Without B's initializer (`cpu_startup_b_noinit` under B's name) both loaders give `LOG:atew2w3m1` and exit code `0x1030200`. With another A under A's name (`cpu_startup_a_alt`, whose value is 9) both give the original log and `0x1030212`. Both controls differ from the original under both loaders.
 - Mapping the EXE before its DLLs fails with `unresolved import cpu_startup_b.dll!b_value`.
-- Thread notifications are not part of the comparison: the fixture does not count the `DLL_THREAD_ATTACH` events of the workers, because `pe_map` does not forward them to mapped images.
+- On Windows 10 build 19045.6456, A's TLS callback read `1` on process attach using the main thread ID. For each joined worker it read `0` on thread attach, then the worker's value (`2` or `3`) on thread detach. The harness checks the recorded IDs against the actual main and worker IDs in each process. Both loaders produce the same observations by thread role, including with B's initializer disabled and with the alternate A. The test measures callbacks of the dependency DLL. [Thread forwarding](https://github.com/R0Y00/Xbox2Windows/pull/139)
 
 Not covered: `DLL_PROCESS_DETACH` ordering at exit, DLLs built with the C runtime (C++ constructors), implicit TLS and `GetModuleHandle(NULL)`. Measured on Windows 11 build 26300. [Issue #165](https://github.com/R0Y00/Xbox2Windows/issues/165)
 
 ```powershell
-cmake --build --preset dev --target pe_map cpu_startup_exe cpu_startup_a cpu_startup_a_alt cpu_startup_b cpu_startup_b_noinit
+cmake --build --preset dev --target pe_map cpu_startup_exe cpu_startup_a cpu_startup_a_alt cpu_startup_b cpu_startup_b_noinit cpu_startup_exe_timeout cpu_startup_exe_create
 ctest --preset dev --no-tests=error -R '^cpu_native_startup$' -V
 ```
 

@@ -1,16 +1,18 @@
 // CRT-free EXE importing both DLLs and kernel32. Its TLS callback and entry point log into the first
-// DLL; the entry point then runs two worker threads in turn, each with a per-thread value kept by TlsAlloc (an
-// explicit slot, not implicit __declspec(thread) data) and writes the whole log to standard output.
+// DLL; the entry point then runs two worker threads in turn. A's TLS callback observes the explicit
+// TLS slot before and after each worker runs. The EXE writes both logs to standard output.
 // Exit code: b_value() | first worker's value << 8 | second worker's << 16 | main thread's << 24.
 // A failure ends the process with 0xE0000001 (TlsAlloc), 0xE0000002 (CreateThread), 0xE0000003 (wait timed out),
 // 0xE0000004 (wait failed) or 0xE0000005 (unexpected wait result).
-#include <windows.h>
+#include "startup_tls.h"
 #include <intrin.h>
 
 #pragma runtime_checks("", off)
 
 extern "C" __declspec(dllimport) void a_log(char event);
 extern "C" __declspec(dllimport) unsigned a_snapshot(char* out);
+extern "C" __declspec(dllimport) DWORD a_tls_slot();
+extern "C" __declspec(dllimport) unsigned a_tls_snapshot(StartupTlsEvent* out);
 extern "C" __declspec(dllimport) unsigned b_value();
 
 namespace {
@@ -60,6 +62,18 @@ void write_line(HANDLE out, const char* prefix, const char* text, unsigned lengt
     DWORD written = 0;
     WriteFile(out, line, n, &written, nullptr);
 }
+
+void write_tls_line(HANDLE out, const char* prefix, DWORD first, DWORD second, DWORD third) {
+    static constexpr char hex[] = "0123456789abcdef";
+    const DWORD fields[] = {first, second, third};
+    char text[26];
+    unsigned n = 0;
+    for (DWORD value : fields) {
+        if (n) text[n++] = ' ';
+        for (int shift = 28; shift >= 0; shift -= 4) text[n++] = hex[(value >> shift) & 15];
+    }
+    write_line(out, prefix, text, n);
+}
 }  // namespace
 
 extern "C" void NTAPI tls_callback(PVOID, DWORD reason, PVOID) {
@@ -72,33 +86,22 @@ ULONG tls_index_slot;
 #pragma section(".tlscb", read)
 extern "C" __declspec(allocate(".tlscb")) PIMAGE_TLS_CALLBACK tls_callbacks[] = {tls_callback, nullptr};
 
-// The linker finds the TLS directory through this name. Pointer members keep it a constant initializer
-// with base relocations; the layout is IMAGE_TLS_DIRECTORY64 with an empty data template.
-struct TlsDirectory {
-    void* start;
-    void* end;
-    ULONG* index;
-    PIMAGE_TLS_CALLBACK* callbacks;
-    DWORD zero_fill;
-    DWORD characteristics;
-};
 extern "C" const TlsDirectory _tls_used = {nullptr, nullptr, &tls_index_slot, tls_callbacks, 0, 0};
 
 extern "C" DWORD WINAPI exe_entry(void*) {
     a_log('e');
-    g_slot = TlsAlloc();
+    g_slot = a_tls_slot();
     if (g_slot == TLS_OUT_OF_INDEXES) ExitProcess(TLS_ALLOC_FAILED);
-    TlsSetValue(g_slot, reinterpret_cast<void*>(1));
-    DWORD worker_values[2];
+    DWORD worker_values[2], worker_ids[2];
+    HANDLE threads[2];
     for (DWORD i = 0; i < 2; ++i) {  // two workers one after the other, so the log order is fixed
         g_next_value = 2 + i;
-        HANDLE thread = CreateThread(nullptr, STACK_SIZE, worker, nullptr, 0, nullptr);
-        if (!thread) ExitProcess(CREATE_FAILED);
-        const DWORD waited = WaitForSingleObject(thread, WAIT_MS);
+        threads[i] = CreateThread(nullptr, STACK_SIZE, worker, nullptr, 0, &worker_ids[i]);
+        if (!threads[i]) ExitProcess(CREATE_FAILED);
+        const DWORD waited = WaitForSingleObject(threads[i], WAIT_MS);
         if (waited == WAIT_TIMEOUT) ExitProcess(WAIT_TIMED_OUT);
         if (waited == WAIT_FAILED) ExitProcess(WAIT_FAILED_CODE);
         if (waited != WAIT_OBJECT_0) ExitProcess(WAIT_UNEXPECTED);
-        CloseHandle(thread);  // the worker has finished; this only releases the handle
         worker_values[i] = g_worker_value;
     }
     const DWORD mine = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(TlsGetValue(g_slot)));
@@ -108,5 +111,13 @@ extern "C" DWORD WINAPI exe_entry(void*) {
     char log[64];
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     write_line(out, "LOG:", log, a_snapshot(log));
+    write_tls_line(out, "THREADS:", GetCurrentThreadId(), worker_ids[0], worker_ids[1]);
+    StartupTlsEvent events[startup_tls_capacity];
+    const unsigned count = a_tls_snapshot(events);
+    for (unsigned i = 0; i < count; ++i) {
+        write_tls_line(out, "TLS:", events[i].thread, events[i].reason, events[i].value);
+    }
+    // Keep the joined threads' IDs from being reused before we finish recording.
+    for (HANDLE thread : threads) CloseHandle(thread);
     return b_value() | (worker_values[0] << 8) | (worker_values[1] << 16) | (mine << 24);
 }
