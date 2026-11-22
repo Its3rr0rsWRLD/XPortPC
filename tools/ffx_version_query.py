@@ -152,6 +152,10 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         for k in ("madd", "msub", "nmadd", "nmsub", "maddsub", "msubadd") for o in ("132", "213", "231") for s in ("ps", "pd")
     }
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in fma_packed for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    ssse3_ops = (M.MOVDQU, M.PABSB, M.PABSW, M.PABSD, M.PSIGNB, M.PSIGNW, M.PSIGND,
+                 M.PSHUFB, M.PALIGNR, M.PHADDW, M.PHADDD, M.PHSUBW, M.PHSUBD, M.PHADDSW, M.PHSUBSW)
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in ssse3_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -665,6 +669,63 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     f"for (size_t lane = 0; lane < {vec_size // sz}; ++lane) {{ const size_t n = lane * {sz}; "
                     f"const {ftype} r = fma_x86<{ftype}, {utype}>({s0}, {s1}, {s2_expr}, {order}, {neg_p}, {neg_c}); "
                     f"memcpy({dst}.data() + n, &r, {sz}); }} }}")
+        elif has_wide and i.encoding == EncodingKind.LEGACY and op == M.MOVDQU:
+            if i.op1_kind == K.MEMORY and i.op0_register in wide_xmm:
+                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), reinterpret_cast<const void*>({address()}), 16);"
+            elif i.op0_kind == K.MEMORY and i.op1_register in wide_xmm:
+                stmt = f"memcpy(reinterpret_cast<void*>({address()}), {wide_xmm[i.op1_register]}.data(), 16);"
+            elif i.op0_register in wide_xmm and i.op1_register in wide_xmm:
+                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), {wide_xmm[i.op1_register]}.data(), 16);"
+            else:
+                raise ValueError(f"unsupported query operation at {i.ip:#x}: {i}")
+        elif has_wide and i.encoding == EncodingKind.LEGACY and i.op0_register in wide_xmm and op in (
+                M.PABSB, M.PABSW, M.PABSD, M.PSIGNB, M.PSIGNW, M.PSIGND, M.PSHUFB, M.PALIGNR,
+                M.PHADDW, M.PHADDD, M.PHSUBW, M.PHSUBD, M.PHADDSW, M.PHSUBSW):
+            dst = wide_xmm[i.op0_register]
+            s2_init = (f"const auto in2 = load<std::array<uint8_t,16>>({address()});" if i.op1_kind == K.MEMORY
+                       else f"const auto in2 = load<std::array<uint8_t,16>>(reinterpret_cast<word>({wide_xmm[i.op1_register]}.data()));")
+            if op in (M.PABSB, M.PABSW, M.PABSD):
+                sz = {M.PABSB: 1, M.PABSW: 2, M.PABSD: 4}[op]
+                ut, st = UINT[sz], f"int{8 * sz}_t"
+                stmt = (f"{{ {s2_init} for (size_t n = 0; n < 16; n += {sz}) {{ "
+                        f"const {st} s = load<{st}>(reinterpret_cast<word>(in2.data() + n)); "
+                        f"const {ut} v = s < 0 ? static_cast<{ut}>(0u - static_cast<{ut}>(s)) : static_cast<{ut}>(s); "
+                        f"memcpy({dst}.data() + n, &v, {sz}); }} }}")
+            elif op in (M.PSIGNB, M.PSIGNW, M.PSIGND):
+                sz = {M.PSIGNB: 1, M.PSIGNW: 2, M.PSIGND: 4}[op]
+                ut, st = UINT[sz], f"int{8 * sz}_t"
+                stmt = (f"{{ const auto in1 = {dst}; {s2_init} for (size_t n = 0; n < 16; n += {sz}) {{ "
+                        f"const {ut} a = load<{ut}>(reinterpret_cast<word>(in1.data() + n)); "
+                        f"const {st} b = load<{st}>(reinterpret_cast<word>(in2.data() + n)); "
+                        f"const {ut} v = b < 0 ? static_cast<{ut}>(0u - a) : (b == 0 ? static_cast<{ut}>(0) : a); "
+                        f"memcpy({dst}.data() + n, &v, {sz}); }} }}")
+            elif op == M.PSHUFB:
+                stmt = (f"{{ const auto in1 = {dst}; {s2_init} for (size_t n = 0; n < 16; ++n) {{ "
+                        f"const uint8_t c = in2[n]; {dst}[n] = (c & 0x80u) ? 0u : in1[c & 0x0fu]; }} }}")
+            elif op == M.PALIGNR:
+                imm = i.immediate(2)
+                stmt = (f"{{ const auto in1 = {dst}; {s2_init} std::array<uint8_t,32> cat{{}}; "
+                        f"memcpy(cat.data(), in2.data(), 16); memcpy(cat.data() + 16, in1.data(), 16); "
+                        f"for (size_t n = 0; n < 16; ++n) {{ {dst}[n] = (n + {imm}u < 32u) ? cat[n + {imm}u] : 0u; }} }}")
+            else:  # PHADDW/D, PHSUBW/D, PHADDSW, PHSUBSW
+                sz = 4 if op in (M.PHADDD, M.PHSUBD) else 2
+                lanes = 16 // sz
+                half = lanes // 2
+                ut = UINT[sz]
+                sub = op in (M.PHSUBW, M.PHSUBD, M.PHSUBSW)
+                sat = op in (M.PHADDSW, M.PHSUBSW)
+                if sat:
+                    calc = (f"int32_t s = static_cast<int32_t>(static_cast<int16_t>(a)) {'-' if sub else '+'} "
+                            f"static_cast<int32_t>(static_cast<int16_t>(b)); "
+                            f"const uint16_t v = static_cast<uint16_t>(static_cast<int16_t>(s > 32767 ? 32767 : (s < -32768 ? -32768 : s)));")
+                else:
+                    calc = f"const {ut} v = static_cast<{ut}>(a {'-' if sub else '+'} b);"
+                stmt = (f"{{ const auto in1 = {dst}; {s2_init} for (size_t k = 0; k < {lanes}; ++k) {{ "
+                        f"const uint8_t* src = k < {half} ? in1.data() : in2.data(); "
+                        f"const size_t base = (k % {half}) * {2 * sz}; "
+                        f"const {ut} a = load<{ut}>(reinterpret_cast<word>(src + base)), "
+                        f"b = load<{ut}>(reinterpret_cast<word>(src + base + {sz})); "
+                        f"{calc} memcpy({dst}.data() + k * {sz}, &v, {sz}); }} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
