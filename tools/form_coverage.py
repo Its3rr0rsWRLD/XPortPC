@@ -78,6 +78,7 @@ CPU_FIXTURES = {
     "string_ops": "cpu_aot_string_ops",
     "bit_ops": "cpu_aot_bit_ops",
     "cmov_setcc": "cpu_aot_cmov_setcc",
+    "mul_div": "cpu_aot_mul_div",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
