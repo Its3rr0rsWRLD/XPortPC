@@ -958,7 +958,7 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME dxcontainer_part_offsets COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/dxcontainer_part_offsets_check.py")
     # One pixel_aot test per draw family and adapter. The family list comes from the script itself at
-    # configure time (and a change to the script re-runs configure), so it cannot drift from the code.
+    # configure time (and a change to the script or a family module re-runs configure), so it cannot drift from the code.
     execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" --list-families
         OUTPUT_VARIABLE PIXEL_AOT_FAMILIES RESULT_VARIABLE pixel_aot_list_status OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT pixel_aot_list_status EQUAL 0 OR PIXEL_AOT_FAMILIES STREQUAL "")
@@ -966,7 +966,10 @@ if(EXISTS "${INTAKE_PYTHON}")
     endif()
     string(REPLACE "\r" "" PIXEL_AOT_FAMILIES "${PIXEL_AOT_FAMILIES}")
     string(REPLACE "\n" ";" PIXEL_AOT_FAMILIES "${PIXEL_AOT_FAMILIES}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py")
+    # The families are the modules of tests/pixel_aot_draws/: a new, removed or changed module re-runs configure too.
+    file(GLOB pixel_aot_family_modules CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_draws/*.py")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py"
+        ${pixel_aot_family_modules})
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600

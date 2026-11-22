@@ -1,0 +1,41 @@
+"""VINTRP: attribute interpolation (v_interp_p1/p2) and flat attribute reads (v_interp_mov)."""
+from ..dispatch import form
+
+
+@form(r"v_interp_p([12])_f32_e32 (v\d+), (v\d+), attr0\.([xy])")
+def interpolate(st, i, m):
+    phase, dst, src, component = m.groups()
+    if st.mask != "quad" or st.scalar.get("m0") != "interp_base":
+        raise ValueError("Unknown interpolation context")
+    if phase == "1" and st.vector[src] == "bary_i":
+        st.vector[dst] = ("partial", component)
+    elif phase == "2" and st.vector[src] == "bary_j" and st.vector[dst] == ("partial", component):
+        st.vector[dst] = f"uv.{component}"
+    else:
+        raise ValueError("Unpaired interpolation")
+
+
+@form(r"v_interp_mov_f32(?:_e32|_e64)? (v\d+), p(10|20|0), attr(\d+)\.([xyzw])")
+def interpolate_move(st, i, m):
+    # Copies one attribute channel without interpolation. The parameter is P0 (the first vertex's value), P10 =
+    # P1 - P0 or P20 = P2 - P0, the terms of P0 + I * P10 + J * P20 that v_interp_p1 and p2 evaluate, selected by
+    # p0, p10 and p20, and read from the attribute slot that m0 addresses, so m0 must hold the interpolation
+    # base as for those. Parameter selection: LLVM AMDGPU gfx1030 operand table ("Interpolation parameter to
+    # read"); semantics: CLRX GCN VINTRP page, V_INTERP_MOV_F32 ("Move parameter value into VDST").
+    # A flat attribute is an input declared nointerpolation; GetAttributeAtVertex (shader model 6.1) reads its
+    # three vertex values. Attribute N is TEXCOORDN. Attribute 0 is the interpolated TEXCOORD0 read by
+    # v_interp_p1 and p2 and cannot also be flat.
+    dst, param, attr, channel = m.groups()
+    if st.mask != "quad" or st.scalar.get("m0") != "interp_base":
+        raise ValueError("Unknown interpolation context")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    if not 1 <= int(attr) <= 31:
+        raise ValueError("Only attributes 1 to 31 can be read without interpolation")
+
+    def vertex(k):
+        return f"GetAttributeAtVertex(attr{attr}, {k}).{channel}"
+    value = {"0": vertex(0), "10": f"({vertex(1)} - {vertex(0)})", "20": f"({vertex(2)} - {vertex(0)})"}[param]
+    st.flat_attrs.add(int(attr))
+    st.vector[dst] = f"alu{i}"
+    st.lines.append(f"    precise float alu{i} = {value};")

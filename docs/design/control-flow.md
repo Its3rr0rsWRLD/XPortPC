@@ -1,6 +1,6 @@
 # Control flow in pixel_aot: design
 
-Status: CF-1 implemented; CF-2 designed in detail below (section "CF-2: divergent control flow"), not implemented; CF-3 proposed. Applies to tools/pixel_aot.py `lower()` (after the per-family split, to whichever module holds `lower()` and the CF-1 walk).
+Status: CF-1 implemented; CF-2 designed in detail below (section "CF-2: divergent control flow"), not implemented; CF-3 proposed. Applies to tools/pixel_aot.py `lower()`, now in tools/pixel_aot_ops/lowering.py; the CF-1 walk is `program()` in tools/pixel_aot_ops/control_flow.py (see module-layout.md).
 
 ## Where we are
 `lower()` tracks each register symbolically (`vector`/`scalar` dicts holding HLSL names, `("uint", expr)` words, descriptor provenance such as `texture_ptr` or `(name, j)`, lane masks as `("condition", name, j, width)`). CF-1 added basic blocks (`split_blocks`), loop discovery (`find_loops`), the structured walk (`program()` → `walk_region` / `walk_loop` / `loop_body`), and join variables (`plan_join`, `sync_lines`: `uint jv_*`, `uint js_*`, `bool jc_*`) for uniform branches on SCC. The execution mask is still only `entry` or `quad`: every VALU branch refuses `mask != "entry"`, a branch in `quad` mode is refused, and no instruction may write EXEC except the fixture idiom `s_mov_b64 s[a:b], exec` / `s_wqm_b64 exec, exec` / `s_and_b64 exec, exec, s[a:b]`.
