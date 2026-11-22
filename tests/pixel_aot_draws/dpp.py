@@ -355,7 +355,6 @@ DPP_F16_BODY = [
     "v_sub_f16_dpp v25, v20, v20 dpp8:[1,2,3,0,5,6,7,4]",
     "v_min_f16_dpp v26, v25, v25 quad_perm:[3,3,3,3] row_mask:0xf bank_mask:0xf",
     "v_mov_b32_e32 v27, v24",
-    "v_fmac_f16_dpp v27, v22, v23 dpp8:[1,0,3,2,5,4,7,6]",
     "v_mov_b32_e32 v28, s44",
     "v_add_f16_dpp v27, v27, -v26 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
     "v_add_f16_dpp v27, v27, v28 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
@@ -900,6 +899,10 @@ def controls_419():
         "v_floor_f16_dpp v18, v18, v19 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
         "v_add_f16_dpp v256, v18, v19 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
         "v_mad_f16_dpp v18, v18, v19, v18 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
+        # Fused: narrow16(mad()) would round twice, so every spelling is refused (as valu_f16 refuses v_fmac_f16).
+        "v_fmac_f16_dpp v18, v18, v19 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
+        "v_fmac_f16_dpp v18, v18, v19 dpp8:[1,0,3,2,5,4,7,6]",
+        "v_fmac_f16_dpp v18, -v18, |v19| quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
     ):
         must_reject(translate, with_constants(["v_mov_b32_e32 v18, s44", "v_mov_b32_e32 v19, s45", bad]))
     wait_vm = dpp_f16.index("s_waitcnt vmcnt(0)")

@@ -30,6 +30,8 @@ def move_32(st, i, m):
     op, dst, src = m.groups()
     if src in st.pending or dst in st.pending:
         raise ValueError("Unresolved scalar memory dependency")
+    if src.startswith("s") and src not in st.scalar:
+        raise ValueError(f"Read of unset scalar register {src}")
     val = st.scalar[src] if src.startswith("s") else int(src, 0)
     if op == "s_movk_i32":
         if not isinstance(val, int) or not 0 <= val <= 0xffff:

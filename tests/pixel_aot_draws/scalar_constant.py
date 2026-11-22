@@ -2,7 +2,7 @@
 import struct
 import subprocess
 
-from .common import RAMP, half_rtz, lower, must_reject, single, translate, with_constants
+from .common import RAMP, assembly, half_rtz, lower, must_reject, single, translate, with_constants
 from .curve_shaping import curve
 
 
@@ -166,6 +166,28 @@ def check_scalar_constant_reads() -> None:
     must_reject(translate, alias[:wait + 1] + [load] + alias[wait + 1:])
 
 
+def check_untracked_scalar_reads() -> None:
+    """An SGPR the binding contract does not name (here s3) holds an unknown value. Reading it must refuse with
+    ValueError, as every other refusal does; it raised KeyError before (found by tools/corpus_translate.py, where
+    RADV programs read entry SGPRs such as s3). The tracked neighbours still translate."""
+    program = assembly(False)
+    for line in ("s_mov_b32 s60, s3", "s_movk_i32 s60, s3", "s_cmp_eq_i32 s3, 0", "s_bfe_u32 s60, s3, 0x20016",
+                 "s_add_u32 s60, s3, 1", "v_mul_f32_e32 v20, s3, v8"):
+        try:
+            translate([line] + program)
+        except ValueError as error:
+            assert "Read of unset scalar register s3" in str(error), error
+        else:
+            raise AssertionError(f"{line} read an untracked SGPR")
+    try:
+        translate(["v_mul_f32_e32 v20, 1.0, v30"] + program)
+    except ValueError as error:
+        assert "Read of unset vector register v30" in str(error), error
+    else:
+        raise AssertionError("v_mul_f32 read an unset VGPR")
+    for line in ("s_mov_b32 s60, s20", "s_mov_b32 s60, 7"):
+        translate([line] + program)
+
 
 def check_scalar_constant_draws(directory, compiler, renderer, backend):
     source = directory / "fixture.hlsl"
@@ -194,6 +216,7 @@ def controls(directory):
     check_constant_descriptor_bounds()
     check_scalar_constant_reads()
     check_scalar_pair_reads()
+    check_untracked_scalar_reads()
 
 
 def binary_fixtures():

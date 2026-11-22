@@ -34,6 +34,8 @@ def class_f32(st, i, m):
     modified = re.fullmatch(r"(-?)(?:abs\(([^()|]+)\)|\|([^()|]+)\|)", value) or re.fullmatch(r"(-)()([vs]\d+)", value)
     if modified:
         neg, inner = modified.group(1), modified.group(2) or modified.group(3)
+        if inner.startswith("-") and not re.fullmatch(r"-\d+(?:\.\d+)?", inner):
+            raise ValueError(f"Malformed modifier {value}")
         word = f"asuint({fp_operand(inner, st.scalar, st.vector, st.pending, st.sample_pending)})"
         if modified.group(2) or "|" in value:
             word = f"({word} & 0x7fffffffu)"

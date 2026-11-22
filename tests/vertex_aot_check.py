@@ -722,7 +722,7 @@ def check_refusals():
         ([line for line in base if not line.startswith("s_movk_i32 s3")], FETCH_ROLES, "high word"),
         ([line.replace("s[2:3], null", "s[2:3], 0x10") for line in base], FETCH_ROLES, "not in the role map"),
         ([line.replace("s[2:3], null", "s[2:3], s5") for line in base], FETCH_ROLES, "immediate"),
-        ([*base], {2: FETCH_ROLES[2]}, "unset register"),  # s3 has no role: the base vertex copy reads nothing
+        ([*base], {2: FETCH_ROLES[2]}, "unset scalar register"),  # s3 has no role: the base vertex copy reads nothing
         ([*base], {2: ("descriptors", HIGH, {0: ("vsharp", 8)}), 3: ("base_vertex",)}, "not in the role map"),
         ([*base], {**FETCH_ROLES, 2: ("descriptors", HIGH, {0: ("vsharp", 8), 16: ("vsharp", 10)})}, "overlap"),
         ([*base], {**FETCH_ROLES, 2: ("descriptors", HIGH, {8: ("vsharp", 8)})}, "aligned"),

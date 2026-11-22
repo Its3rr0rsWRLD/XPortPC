@@ -6,7 +6,7 @@ source register, then the instruction runs on the swizzled word exactly as its n
 non-DPP form is lowered in another family module, the DPP form swizzles its first source into a scratch register and
 hands that instruction to the same dispatch, so its arithmetic, its helpers and its refusals are those of
 the non-DPP form. The forms that exist only here (bit scans, conversions that no other module lowers, frexp, carry-in
-adds, the binary16 transcendentals) are lowered below.
+adds, the binary16 transcendentals) are lowered below; v_fmac_f16 is refused (it fuses, and rounds twice here).
 
 Both sources of a DPP instruction are VGPRs. Source modifiers (abs, neg) exist only in DPP16 and only on floating-point
 sources; they act after the read. The destination is a VGPR. Refused: a lane that may be inactive (`st.ex`), whole-quad
@@ -134,15 +134,18 @@ OWN = {
     "cos_f16": ("f16", "f16", "narrow16(cos(({0}) * 6.283185307179586f))", ()),
     "frexp_mant_f16": ("f16", "f16", "narrow16(dpp_frexp_mant_f16({0}))", ("dpp_frexp_mant_f16",)),
     "frexp_exp_i16_f16": ("f16", "f16", "dpp_frexp_exp_i16_f16({0})", ("dpp_frexp_exp_i16_f16",)),
-    "fmac_f16": ("f16", "f16", "narrow16(mad({0}, {1}, {2}))", ()),
     "cvt_pkrtz_f16_f32": ("u32", "f32", "(dpp_pack16_rtz({0}) | (dpp_pack16_rtz({1}) << 16))", ("dpp_pack16_rtz",)),
 }
 # Float sources of these take abs and neg in DPP16 (bit sources and integer ones do not).
 MODIFIABLE = {"cvt_flr_i32_f32", "cvt_rpi_i32_f32", "sin_f32", "cos_f32", "frexp_mant_f32", "frexp_exp_i32_f32",
               "log_f16", "exp_f16", "rcp_f16", "sqrt_f16", "rsq_f16", "sin_f16", "cos_f16", "frexp_mant_f16",
-              "frexp_exp_i16_f16", "fmac_f16", "cvt_pkrtz_f16_f32", "cvt_i16_f16", "cvt_u16_f16", "cvt_norm_i16_f16", "cvt_norm_u16_f16"}
+              "frexp_exp_i16_f16", "cvt_pkrtz_f16_f32", "cvt_i16_f16", "cvt_u16_f16", "cvt_norm_i16_f16", "cvt_norm_u16_f16"}
 CARRY = ("add_co_ci_u32", "sub_co_ci_u32", "subrev_co_ci_u32")
-BINARY_OWN = {"fmac_f16", "cvt_pkrtz_f16_f32"}  # a second source; v_fmac_f16 also accumulates into the destination
+BINARY_OWN = {"cvt_pkrtz_f16_f32"}  # a second source
+# Refused: v_fmac_f16 is a fused multiply-add that rounds once to binary16. Lowering it as narrow16(mad(...)) in
+# binary32 rounds twice (the product and sum are exact in binary32 only up to 24 bits, then narrow16 rounds again), which
+# can differ from the hardware result; valu_f16 refuses v_fma_f16, v_mad_f16 and v_fmac_f16 for the same reason.
+FUSED_F16 = ("fmac_f16",)
 
 VGPR = r"v\d+"
 SOURCE = r"(-?)(?:\|(v\d+)\||abs\((v\d+)\)|(v\d+))"
@@ -219,6 +222,8 @@ def dpp(st, i, m):
         dispatch(st, i, f"v_{target}_e32 {dst}, {', '.join([first, *rest])}")
         for name in scratches:
             del st.vector[name]
+    elif op in FUSED_F16:
+        raise ValueError(f"v_{op}_dpp is refused: a fused binary16 multiply-add rounded through binary32 rounds twice")
     elif op in OWN:
         own(st, i, op, dst, operands)
     elif op in CARRY:
@@ -258,11 +263,6 @@ def own(st, i, op, dst, operands):
     if op in BINARY_OWN:
         reg1, neg1, abs1 = _vgpr(tokens[1], st, mods=not dpp8)
         args.append(_typed(_word(st, reg1), source, neg1, abs1))
-        if op == "fmac_f16":
-            acc = st.vector.get(dst)
-            if tracked_word(acc) is None:
-                raise ValueError("v_fmac_f16_dpp accumulates into a destination that holds no numeric word")
-            args.append(f"widen16({tracked_word(acc)} & 0xffffu)")
     st.helpers.update(helpers)
     expression = template.format(*args)
     if kind == "u32":

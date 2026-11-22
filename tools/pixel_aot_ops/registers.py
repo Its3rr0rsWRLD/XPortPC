@@ -45,6 +45,9 @@ def scalar_u32(token, scalar, pending):
         sgpr_name(token)
         if token in pending:
             raise ValueError("Constant read before load completion")
+        if token not in scalar:
+            # An entry SGPR the binding contract does not name, or one never written: its value is unknown.
+            raise ValueError(f"Read of unset scalar register {token}")
         value = scalar[token]
         if isinstance(value, int):
             return f"{value}u"
@@ -96,14 +99,22 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
     if re.fullmatch(r"-\d+", token):
         return f"asfloat({int(token) & 0xffffffff}u)"
     if token.startswith("-"):
+        if token.startswith("--"):
+            raise ValueError(f"Malformed modifier {token}")
         return "(-" + fp_operand(token[1:], scalar, vector, pending, sample_pending, quad_values=quad_values) + ")"
     if absolute := re.fullmatch(r"abs\(([^()|]+)\)|\|([^()|]+)\|", token):
         inner = absolute.group(1) or absolute.group(2)
+        if inner.startswith("-") and not re.fullmatch(r"-\d+(?:\.\d+)?", inner):
+            # LLVM prints |-2.0| for the absolute value of a negative inline constant; |-v1| it never prints.
+            raise ValueError(f"Malformed modifier {token}")
         return f"abs({fp_operand(inner, scalar, vector, pending, sample_pending, quad_values=quad_values)})"
     if re.fullmatch(r"[vs]\d+", token):
         if token in pending:
             raise ValueError("Constant read before load completion")
-        value = (vector if token.startswith("v") else scalar)[token]
+        space = vector if token.startswith("v") else scalar
+        if token not in space:
+            raise ValueError(f"Read of unset {'vector' if token.startswith('v') else 'scalar'} register {token}")
+        value = space[token]
         if quad_values is not None and token.startswith("v"):
             if not isinstance(value, str) or value not in quad_values:
                 raise ValueError("Operand lacks a helper-lane definition")
