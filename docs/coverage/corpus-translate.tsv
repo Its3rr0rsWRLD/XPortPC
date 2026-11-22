@@ -3,12 +3,11 @@
 # (every form covered by a test); translated means lower() accepted the whole program and produced HLSL.
 # Pixel: shaders 250; translated 140; all_covered 197; all_covered_translated 139.
 # Refusal reasons, most shaders first: shaders (all_covered shaders), kind, place, reason.
-# Reason 21 (18)	no_form	dispatch	no form matches image_sample
+# Reason 23 (18)	no_form	dispatch	no form matches image_sample
 # Reason 6 (6)	refused	exp.pack_e64	Unsupported pack operand
 # Reason 6 (0)	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word
 # Reason 6 (3)	refused	vintrp.interpolate	Unknown interpolation context
 # Reason 5 (3)	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant
-# Reason 5 (0)	no_form	dispatch	no form matches v_cos_f32_e32
 # Reason 5 (0)	no_form	dispatch	no form matches v_readfirstlane_b32
 # Reason 5 (1)	refused	smem.scalar_load	Constant read exceeds binding
 # Reason 4 (3)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9
@@ -21,7 +20,9 @@
 # Reason 2 (1)	no_form	dispatch	no form matches image_sample_b
 # Reason 2 (2)	no_form	dispatch	no form matches s_endpgm
 # Reason 2 (2)	no_form	dispatch	no form matches s_mov_b32
+# Reason 2 (0)	refused	control_flow.plan_join	Lane mask differs at a loop entry
 # Reason 2 (0)	refused	exec_mask.saveexec	Unsupported execution mask
+# Reason 2 (0)	refused	mimg.sample	Unsupported texture coordinate
 # Reason 2 (2)	refused	valu_f32.move	Read of unset vector register v2
 # Reason 2 (0)	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000
 # Reason 2 (2)	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333
@@ -30,7 +31,6 @@
 # Reason 1 (0)	no_form	dispatch	no form matches image_sample_o
 # Reason 1 (1)	no_form	dispatch	no form matches s_cselect_b64
 # Reason 1 (1)	refused	control_flow.same_provenance	Execution or load state differs at a join
-# Reason 1 (0)	refused	mimg.sample	Unsupported texture coordinate
 # Reason 1 (0)	refused	valu_bits.bitfield_extract	Read of unset vector register v2
 # Reason 1 (0)	refused	valu_f32.arithmetic	Expected a numeric register
 # Reason 1 (0)	refused	valu_f32.arithmetic	Unsupported arithmetic operand neg(0.5)
@@ -117,15 +117,15 @@ sascha__oit__color.frag.s	0	refused	contract	smem.compute_descriptor_load	Unreso
 sascha__oit__geometry.frag.s	0	refused	refused	exec_mask.saveexec	Unsupported execution mask	5: s_and_saveexec_b64 s[12:13], s[12:13]
 sascha__parallaxmapping__parallax.frag.s	0	refused	refused	valu_int.convert_to_float	Invalid conversion	79: v_cvt_f32_i32_e32 v14, s4
 sascha__particlesystem__normalmap.frag.s	1	refused	refused	vop3p.fma_mix	Unsupported arithmetic destination	95: v_fma_mixlo_f16 v1, v23, v11, neg(0) op_sel_hi:[0,0,1]
-sascha__particlesystem__particle.frag.s	0	refused	no_form	dispatch	no form matches v_cos_f32_e32	16: v_cos_f32_e32 v6, v5
+sascha__particlesystem__particle.frag.s	0	refused	refused	mimg.sample	Unsupported texture coordinate	33: image_sample v[4:6], v[8:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D
 sascha__pbrbasic__pbr.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
-sascha__pbribl__genbrdflut.frag.s	0	refused	no_form	dispatch	no form matches v_cos_f32_e32	43: v_cos_f32_e32 v10, v9
-sascha__pbribl__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches v_cos_f32_e32	36: v_cos_f32_e32 v13, v12
+sascha__pbribl__genbrdflut.frag.s	0	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
+sascha__pbribl__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches image_sample	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
 sascha__pbribl__pbribl.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
 sascha__pbribl__prefilterenvmap.frag.s	0	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
 sascha__pbribl__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	23: image_sample v[10:12], v[7:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
-sascha__pbrtexture__genbrdflut.frag.s	0	refused	no_form	dispatch	no form matches v_cos_f32_e32	43: v_cos_f32_e32 v10, v9
-sascha__pbrtexture__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches v_cos_f32_e32	36: v_cos_f32_e32 v13, v12
+sascha__pbrtexture__genbrdflut.frag.s	0	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
+sascha__pbrtexture__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches image_sample	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
 sascha__pbrtexture__pbrtexture.frag.s	0	refused	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor	526: s_load_dwordx4 s[4:7], s[2:3], 0xd0
 sascha__pbrtexture__prefilterenvmap.frag.s	0	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
 sascha__pbrtexture__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	23: image_sample v[10:12], v[7:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
