@@ -834,6 +834,39 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         elif line == "s_waitcnt vmcnt(0)":
             sample_pending = False
             sample_dest.clear()
+        elif m := match(r"s_waitcnt((?: (?:vmcnt|expcnt|lgkmcnt)\(\d+\))+)"):
+            # The counters named by one s_waitcnt, as the disassembler spells them (vmcnt expcnt lgkmcnt). Like the
+            # two forms above, only a count of 0 is accepted: a nonzero count leaves loads in flight that lower() does
+            # not model. expcnt(0) waits for exports, and the only export is the last instruction.
+            fields = re.findall(r"(\w+)\((\d+)\)", m[1])
+            if len({name for name, _ in fields}) != len(fields) or any(int(count) for _, count in fields):
+                raise ValueError("Only zero wait counts without repeats are supported")
+            if any(name == "lgkmcnt" for name, _ in fields):
+                pending.clear()
+            if any(name == "vmcnt" for name, _ in fields):
+                sample_pending = False
+                sample_dest.clear()
+        elif m := match(r"s_waitcnt_(vmcnt|expcnt|lgkmcnt|vscnt) null, (0x[0-9a-f]+|\d+)"):
+            # The split forms wait until the counter is at most SGPR + immediate, and null reads as 0. They clear the
+            # same state as the combined forms and accept a count of 0 only.
+            op, count = m[1], int(m[2], 0)
+            if count > 0xffff:
+                raise ValueError("Invalid wait count immediate")
+            if op == "vscnt":
+                # vscnt counts stores, which orders nothing here: lower() accepts no store instruction.
+                pass
+            elif count:
+                raise ValueError("Only zero wait counts are supported")
+            elif op == "lgkmcnt":
+                pending.clear()
+            elif op == "vmcnt":
+                sample_pending = False
+                sample_dest.clear()
+            # expcnt(0) waits for exports; the only export is the last instruction.
+        elif match(r"s_waitcnt_depctr (?:0x[0-9a-f]{1,4}|(?:depctr_(?:hold_cnt|sa_sdst|va_vdst|va_sdst|va_ssrc|va_vcc|vm_vsrc)\(\d+\) ?)+)"):
+            # Orders VALU, SALU and VMEM register dependencies (the hazards RADV waits out). The translator emits each
+            # instruction as a single assignment in program order, so every such dependency already holds.
+            pass
         elif m := match(r"s_mov_b64 s\[(\d+):(\d+)\], exec"):
             regs = registers(*m.groups(), 2)
             for n in regs:
@@ -917,43 +950,81 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                     raise ValueError("Invalid movk immediate")
                 val = (val if val < 0x8000 else val - 0x10000) & 0xffffffff
             scalar[dst] = val
-        elif m := match(r"s_load_dwordx8 s\[(\d+):(\d+)\], s\[(\d+):(\d+)\], (null|0x[0-9a-f]+)"):
+        elif ((m := match(r"s_load_dwordx8 s\[(\d+):(\d+)\], s\[(\d+):(\d+)\], (null|0x[0-9a-f]+)"))
+              and (0 if m[5] == "null" else int(m[5], 16)) in bindings):
+            # Any other offset is a descriptor-table read for the scalar-load branch below, which refuses it unless
+            # every word belongs to a tracked descriptor.
             dst = registers(*m.groups()[:2], 8)
             addr = registers(*m.groups()[2:4], 2)
             offset = 0 if m[5] == "null" else int(m[5], 16)
-            if offset not in bindings:
-                raise ValueError("Unbound texture descriptor offset")
             if any(f"s{n}" in pending for n in (*addr, *dst)) or [scalar.get(f"s{n}") for n in addr] != ["texture_ptr", 0]:
                 raise ValueError("Texture address differs from binding contract")
             for j, n in enumerate(dst):
                 scalar[f"s{n}"] = (bindings[offset], j)
                 pending.add(f"s{n}")
-        elif m := match(r"(?:(s_load_dwordx4|s_buffer_load_dwordx4) s\[(\d+):(\d+)\]|s_buffer_load_dword s(\d+))"
-                        r", s\[(\d+):(\d+)\], (0x[0-9a-f]+|null)"):
-            op, first, last, single, low, high, imm = m.groups()
-            offset = 0 if imm == "null" else int(imm, 16)
-            descriptor = op == "s_load_dwordx4"
-            if single is not None and (int(single) > 105 or int(low) % 4 or int(high) > 105):
-                raise ValueError("Invalid scalar buffer registers")
-            dst = registers(single, single, 1) if single is not None else registers(first, last, 4)
-            base = [f"s{n}" for n in registers(low, high, 2 if descriptor else 4)]
+        elif m := match(r"(s_buffer_load|s_load)_dword(x2|x4|x8|x16)? (s\d+|s\[\d+:\d+\]), (s\[\d+:\d+\]), "
+                        r"(null|0x[0-9a-f]+|s\d+)(?: offset:(0x[0-9a-f]+))?( glc)?( dlc)?"):
+            # SMEM loads of 1, 2, 4, 8 or 16 dwords. s_buffer_load reads constant words through the constant buffer
+            # descriptor that s_load_dwordx4 produced; s_load reads descriptor-table words, which are the tracked
+            # descriptors: the constant descriptor and the buffer_descriptors V#s. glc and dlc only select cache
+            # behaviour, and the constants never change during a draw. An SGPR offset must hold a translation-time
+            # constant, because the range checks below need it. The range checks use the dword count, so a wide read
+            # past the 64 constant words is refused instead of reading zeros as hardware does.
+            op, width, dst_token, base_token, soffset, extra, _glc, _dlc = m.groups()
+            count = int(width[1:]) if width else 1
+            descriptor = op == "s_load"
+            if count == 1:
+                dst = [sgpr_name(dst_token)]
+            else:
+                if not (span := re.fullmatch(r"s\[(\d+):(\d+)\]", dst_token)):
+                    raise ValueError("Scalar load destination width mismatch")
+                first, last = map(int, span.groups())
+                # RDNA SGPR tuples: 64-bit pairs are even-aligned, wider ones are 4-aligned; s105 is the last SGPR.
+                if (last - first + 1 != count or first % (2 if count == 2 else 4) or last > 105):
+                    raise ValueError("Invalid scalar load destination registers")
+                dst = [f"s{n}" for n in range(first, last + 1)]
+            if descriptor:
+                base = sgpr_pair(base_token)
+            else:
+                low, high = map(int, re.fullmatch(r"s\[(\d+):(\d+)\]", base_token).groups())
+                if high - low != 3 or low % 4 or high > 105:
+                    raise ValueError("Invalid scalar buffer registers")
+                base = [f"s{n}" for n in range(low, high + 1)]
             expected = ["texture_ptr", 0] if descriptor else [("cbv", n) for n in range(4)]
             if constant_descriptor is None or pending.intersection(base) or [scalar.get(r) for r in base] != expected:
                 raise ValueError("Unresolved constant buffer binding")
-            if descriptor and offset != constant_descriptor and offset not in vsharp_words:
-                raise ValueError("Constant descriptor differs from binding contract")
-            if not descriptor and (offset % 4 or offset + 4 * len(dst) > 256):
-                raise ValueError("Constant read exceeds binding or is unaligned")
-            for j, n in enumerate(dst):
-                if f"s{n}" in pending:
-                    raise ValueError("Write overlaps an outstanding scalar load")
-                word = offset // 4 + j
-                if descriptor and offset in vsharp_words:
-                    word = vsharp_words[offset] + j
-                    scalar[f"s{n}"] = ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
+            if soffset.startswith("s"):
+                value = scalar.get(sgpr_name(soffset))
+                if soffset in pending or not isinstance(value, int):
+                    raise ValueError("Scalar load offset register must hold a known constant")
+                offset = value + int(extra or "0x0", 16)
+            elif extra is not None:
+                raise ValueError("An offset: field needs an SGPR offset")
+            else:
+                offset = 0 if soffset == "null" else int(soffset, 16)
+            if offset % 4 or not 0 <= offset <= 0xffffffff or (soffset[0] != "s" and offset > 0xfffff):
+                raise ValueError("Scalar load offset is misaligned or out of range")
+            if not descriptor and offset + 4 * count > 256:
+                raise ValueError("Constant read exceeds binding")
+            words = []
+            for j in range(count):
+                at = offset + 4 * j
+                if not descriptor:
+                    word = at // 4
+                    words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+                elif constant_descriptor <= at < constant_descriptor + 16:
+                    words.append(("cbv", (at - constant_descriptor) // 4))
                 else:
-                    scalar[f"s{n}"] = ("cbv", j) if descriptor else ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
-                pending.add(f"s{n}")
+                    entry = next((start for start in vsharp_words if start <= at < start + 16), None)
+                    if entry is None:
+                        raise ValueError("Descriptor table word is not a tracked descriptor")
+                    word = vsharp_words[entry] + (at - entry) // 4
+                    words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+            for n, value in zip(dst, words):
+                if n in pending:
+                    raise ValueError("Write overlaps an outstanding scalar load")
+                scalar[n] = value
+                pending.add(n)
         elif m := match(r"v_cube(id|sc|tc|ma)_f32(?:_e64)? (v\d+), ([^,]+), ([^,]+), ([^,]+?)( clamp)?"):
             # LLVM ConstantFoldAMDGCNCubeIntrinsic: z, then y, then x is the major axis; a face is negative
             # only for a nonzero, non-NaN negative coordinate.
