@@ -8,6 +8,8 @@ from .valu_bits import BITS_UNARY
 from .valu_f16 import F16_ALU
 from .valu_int import INT_VOP2, int_binary
 from .valu_f32 import ALU
+from .valu_float_rest import OPS as CONVERT_OPS, _source as convert_source
+from .dpp import OWN
 from .vopc import COMPARE, INT16_COMPARE, INT_COMPARE
 
 # SDWA selections: (bit offset, width). A source selection is zero-extended, or sign-extended with sext();
@@ -17,7 +19,7 @@ SDWA_SEL = {"BYTE_0": (0, 8), "BYTE_1": (8, 8), "BYTE_2": (16, 8), "BYTE_3": (24
             "WORD_0": (0, 16), "WORD_1": (16, 16), "DWORD": (0, 32)}
 # Exact arithmetic with SDWA forms on gfx1013 (docs/coverage/gfx1013.tsv).
 SDWA_ALU = ("add", "sub", "subrev", "mul", "mul_legacy", "max", "min", "floor", "ceil", "fract", "trunc",
-            "rndne", "log", "exp", "rcp", "sqrt", "rsq")
+            "rndne", "log", "exp", "rcp", "rcp_iflag", "sqrt", "rsq")
 
 
 def sdwa_source(word, sel, sext):
@@ -137,7 +139,7 @@ SDWA_BITWISE = {
     "lshlrev_b32": "({b} << ({a} & 31u))", "lshrrev_b32": "({b} >> ({a} & 31u))",
     "ashrrev_i32": "asuint(asint({b}) >> ({a} & 31u))",
 }
-SDWA_F16 = ("add", "subrev", "mul", "min", "floor", "fract", "trunc", "ldexp")
+SDWA_F16 = ("add", "sub", "subrev", "mul", "min", "max", "floor", "ceil", "fract", "trunc", "rndne", "ldexp")
 
 
 def source_parts(token, sel, allow_sext=True):
@@ -228,7 +230,7 @@ def f16_result(st, op, tokens, sels, clamp):
 def arithmetic_f16_sdwa(st, i, m):
     op, dst, operands, clamp, dst_sel, unused, sel0, sel1 = m.groups()
     tokens = operands.split(", ")
-    unary = op in ("floor", "fract", "trunc")
+    unary = op in ("floor", "ceil", "fract", "trunc", "rndne")
     if len(tokens) != (1 if unary else 2) or bool(sel1) == unary or dst_sel == "DWORD":
         raise ValueError("Invalid binary16 SDWA operation")
     encoding = f16_result(st, op, tokens, (sel0, sel1), bool(clamp))
@@ -386,3 +388,34 @@ def float_to_int_sdwa(st, i, m):
         expression = f"cvtb{i} > 0x7f800000u ? 0u : cvtb{i} >= 0x4f800000u ? 0xffffffffu : uint(cvti{i})"
     st.lines.append(f"    uint valu{i} = {expression};")
     place_word(st, i, dst, f"valu{i}", dst_sel, unused)
+
+
+# The conversions, bit scans of 16-bit integers, and frexp of valu_float_rest (OWN holds their arithmetic, the one the
+# DPP and e32 spellings lower), with selected sources:
+# - an integer source is the selected field, zero- or sign-extended (sext()), and an inline constant takes DWORD only;
+# - a binary16 source is the selected 16 bits with abs and neg on bit 15, widened exactly;
+# - a binary32 source (and a frexp source, whose neg and abs act on the sign bit) takes DWORD only, like SDWA arithmetic;
+# - a 32-bit result is placed like an SDWA word or float result; a 16-bit result keeps its low bits in the field, and
+#   DWORD (what the other half would hold) is refused, as for the binary16 arithmetic above; clamp is refused.
+@form(rf"v_({'|'.join(CONVERT_OPS)})_sdwa (v\d+), ([^,\s]+){DST_FIELDS}{SRC0}")
+def convert_sdwa(st, i, m):
+    op, dst, token, dst_sel, unused, sel = m.groups()
+    kind, source, template, helpers = OWN[op]
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    if kind == "f16" and dst_sel == "DWORD":
+        raise ValueError("A 16-bit result has no whole-dword placement")
+    if source == "f16":
+        value = f"widen16({f16_source(st, token, sel)})"
+    elif source == "bits" and op not in ("frexp_mant_f32", "frexp_exp_i32_f32"):
+        value = int_source(st, token, sel)
+    else:
+        if sel != "DWORD":
+            raise ValueError("A binary32 source takes DWORD only")
+        value = convert_source(st, op, source, token, "_e64")
+    st.helpers.update(helpers)
+    expression = template.format(value)
+    if kind == "f32":
+        place_float(st, i, dst, expression, dst_sel, unused)
+    else:
+        place_word(st, i, dst, expression, dst_sel, unused)
