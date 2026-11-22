@@ -85,7 +85,7 @@ def compare_two_providers(mapper_path, native, lifted, io, mix, second):
     check("missing second provider diagnostic", detail, diagnostic)
     for extra in ((), ((mix, "accumulate_args"),)):
         try:
-            translate(native, io, mix, extra)
+            translate(native, io, mix, extra, entry_export="native_entry")
         except ValueError as exc:
             if f"unbound import {dll}!{symbol}" not in str(exc):
                 raise
@@ -97,7 +97,7 @@ def compare_two_providers(mapper_path, native, lifted, io, mix, second):
                        "lifted", "lifted_callee2", "word", "store", "uint64_t", "mix_args")
     for invalid in invalid_symbols:
         try:
-            translate(native, io, mix, ((second, invalid),))
+            translate(native, io, mix, ((second, invalid),), entry_export="native_entry")
         except ValueError as exc:
             if "import symbol" not in str(exc) or repr(invalid) not in str(exc):
                 raise
