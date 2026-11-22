@@ -2,7 +2,7 @@
 import re
 
 from ..dispatch import form
-from ..registers import registers, sgpr_name, sgpr_pair
+from ..registers import DescriptorWord, registers, sgpr_name, sgpr_pair
 from .. import bindings
 
 
@@ -21,6 +21,16 @@ def table_set(st, values):
     if m := re.fullmatch(r"texture_ptr\.([1-7])", values[0]):
         return int(m[1])
     return None
+
+
+def data_word(st, key, value):
+    """Word j of the descriptor at key, (tag, j); a DescriptorWord carrying params[first + j] when the contract gives
+    the descriptor's words as data (st.descriptor_data: key -> index of its first word in params)."""
+    first = getattr(st, "descriptor_data", {}).get(key)
+    if first is None:
+        return value
+    word = first + value[1]
+    return DescriptorWord(value, f"params[{word // 4}].{'xyzw'[word % 4]}")
 
 
 @form(r"s_load_dword(x2|x4|x8|x16)? (s\d+|s\[\d+:\d+\]), (s\[\d+:\d+\]), (null|0x[0-9a-f]+|s\d+)(?: offset:(0x[0-9a-f]+))?"
@@ -74,11 +84,11 @@ def compute_descriptor_load(st, i, m):
         vsharp = next((k for k in st.vsharp_words if k <= at < k + 16), None)
         cbv = next((k for k in constants if k <= at < k + 16), None)
         if texture is not None:
-            words.append((st.bindings[texture], (at - texture) // 4))
+            words.append(data_word(st, texture, (st.bindings[texture], (at - texture) // 4)))
         elif image is not None:
-            words.append((f"image{st.storage_images[image][0]}", (at - image) // 4))
+            words.append(data_word(st, image, (f"image{st.storage_images[image][0]}", (at - image) // 4)))
         elif sampler is not None:
-            words.append((st.sampler_offsets[sampler], (at - sampler) // 4))
+            words.append(data_word(st, sampler, (st.sampler_offsets[sampler], (at - sampler) // 4)))
         elif cbv is not None:
             words.append((constants[cbv], (at - cbv) // 4))
         elif vsharp is not None:

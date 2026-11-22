@@ -40,6 +40,18 @@ def vgprs(token, count):
     return [token]
 
 
+class DescriptorWord(tuple):
+    """A descriptor word whose value the binding contract also supplies as data (docs/design/compute-stage.md,
+    descriptor words as data): it is the provenance (tag, j) for every form that reads a descriptor (equal to that
+    tuple), and `data` is its 32-bit value as a uint expression (a params[] word the harness writes), which
+    scalar_u32 returns, so a SALU form reads it as any word (imageSize from the T#'s WIDTH and HEIGHT fields)."""
+
+    def __new__(cls, value, data=None):
+        word = super().__new__(cls, value)
+        word.data = data
+        return word
+
+
 def scalar_u32(token, scalar, pending):
     if re.fullmatch(r"s\d+", token):
         sgpr_name(token)
@@ -53,6 +65,8 @@ def scalar_u32(token, scalar, pending):
             return f"{value}u"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
             return value[1]
+        if isinstance(value, DescriptorWord) and value.data is not None:
+            return value.data
         raise ValueError(f"Expected a numeric scalar register: {token}")
     if re.fullmatch(r"-?\d+", token):
         value = int(token)

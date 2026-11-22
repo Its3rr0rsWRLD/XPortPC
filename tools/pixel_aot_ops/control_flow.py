@@ -166,12 +166,13 @@ ASSIGNMENT = re.compile(r"\s*(?:precise\s+)?(?:(?:float|uint|int|bool)[234]?\s+)
 IDENTIFIER = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(\s*\()?")
 
 
-def uniform_names(lines, excluded=()):
+def uniform_names(lines, excluded=(), roots=()):
     """The HLSL names whose value is the same on every lane of the wave: the greatest set in which every assignment
     to a name reads only constants, params[] words, pure functions and names of the set. A name assigned nowhere
     (uv, a sample, an interpolated attribute) is not uniform. Lowered HLSL has no divergent scope (CF-2c lowers skips
     as predicated straight-line code and branches only on uniform conditions), so an assignment inside an if or a loop
-    is uniform when what it reads is."""
+    is uniform when what it reads is. roots: further unassigned names that are uniform (the compute stage's
+    group_id)."""
     pure = pure_functions()
     assigned = {}
     for line in lines:
@@ -182,7 +183,7 @@ def uniform_names(lines, excluded=()):
     while changed:
         changed = False
         for name in sorted(uniform):
-            if not all(reads_uniform(rhs, uniform, pure, excluded) for rhs in assigned[name]):
+            if not all(reads_uniform(rhs, uniform | set(roots), pure, excluded) for rhs in assigned[name]):
                 uniform.discard(name)
                 changed = True
     return uniform
@@ -890,6 +891,8 @@ def program(st, blocks, labels, latch_of):
     narrow = []  # the implied sets of the narrow-only regions the walk is in (check_exec)
     null_targets = set()
     live = ["true"]  # lane bits under which the wave provably has an active lane (uniform_vcc), by region
+    st.live = live  # read by forms/lanes.py (C-7)
+    st.nesting = (skips, loops, awaiting_restore)  # read by forms/exec_mask.write_mask (compute full waves)
     dead_skips = set()  # and the bits at skips to the all-lanes-dead block, from there on
     uniform_claims = []  # compares that s_cbranch_vccz/vccnz lowered as uniform
     yield from walk_region(0, len(blocks))

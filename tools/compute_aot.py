@@ -39,7 +39,8 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_LOOKUP  # noqa: E402
-from pixel_aot_ops.control_flow import find_loops, poisoned_operands, program, split_blocks  # noqa: E402
+from pixel_aot_ops.control_flow import (find_loops, poisoned_operands, program, split_blocks,  # noqa: E402
+                                       uniform_names)
 from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
 from pixel_aot_ops.bindings import RADV_DESCRIPTOR_HIGH, SET_STRIDE, overlap, pointer_role, valid_key  # noqa: E402
 from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
@@ -70,8 +71,8 @@ LOCAL_IDS = ("local_id.x", "local_id.y", "local_id.z")
 LATER = (
     (r"ds_\w+.*", "LDS (groupshared) access is card C-6"),
     (r"s_barrier", "s_barrier is card C-6"),
-    (r"(v_readfirstlane_b32|v_readlane_b32|v_writelane_b32)\b.*",
-     "a cross-lane read or write needs a proof of wave uniformity (card C-7)"),
+    (r"(v_readlane_b32|v_writelane_b32)\b.*",
+     "a cross-lane read or write by lane index is refused (C-7 lowers v_readfirstlane_b32 of a wave-uniform value)"),
     (r"(v_mbcnt_\w+|s_bcnt[01]_i32_b(32|64)|s_ff[01]_i32_b(32|64)|s_flbit_i32\w*|s_bitreplicate_b64_b32)\b.*exec.*",
      "a lane count or lane index of EXEC depends on the wave size (card C-8)"),
     (r"v_mbcnt_\w+.*", "v_mbcnt depends on the wave size and the lane order (card C-8)"),
@@ -103,7 +104,7 @@ def parse_role(token):
 
 def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_ids=False, constant_descriptor=None,
                   buffer_descriptors=None, textures=None, storage_images=None, sampler=None,
-                  descriptor_high=RADV_DESCRIPTOR_HIGH):
+                  descriptor_high=RADV_DESCRIPTOR_HIGH, descriptor_data=None):
     """Lower a gfx1013 compute program to HLSL source (cards C-1 to C-4).
 
     numthreads: the workgroup size (x, y, z). wave: 32 or 64, the console wave size the program was compiled for; it
@@ -115,7 +116,10 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     (tex1, t1)}, bound as RGBA8 SRVs. storage_images: {key of a 32-byte T# the program writes: (slot 0..3, format)},
     a format of forms/image_writes.py. sampler: the key of the 16-byte S# the explicit-LOD samples read (the harness's
     static point sampler). descriptor_high: the high word the program completes a descriptor-list pointer with (RADV's
-    0xffff8000; a title's container may use another, such as 0 in R0Y00/Xbox2Windows#483's fixtures)."""
+    0xffff8000; a title's container may use another, such as 0 in R0Y00/Xbox2Windows#483's fixtures).
+    descriptor_data: {key of a declared T#, storage image or S#: index of its first word in params}: the runtime writes
+    the descriptor's words (8, or 4 for an S#) there, and a scalar form that reads a word of it as data (the T#'s
+    WIDTH field for imageSize) reads that params word; the forms that use the descriptor still bind it as before."""
     if not isinstance(descriptor_high, int) or not 0 <= descriptor_high <= 0xffffffff:
         raise ValueError("Invalid descriptor high word")
     if (len(numthreads) != 3 or any(not isinstance(n, int) or n < 1 for n in numthreads) or numthreads[0] > 1024
@@ -166,6 +170,14 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     users = {int(r[5:]) for r in roles if r.startswith("user:")}
     if any(w <= u < w + 4 for u in users for w in vsharp_words.values()):
         raise ValueError("A user-data word overlaps the words of a buffer V#")
+    descriptor_data = dict(descriptor_data or {})
+    sizes = {**{k: 8 for k in (*textures, *storage_images)}, **({sampler: 4} if sampler is not None else {})}
+    data_words = [(w, w + sizes.get(k, 0)) for k, w in descriptor_data.items()]
+    if any(k not in sizes or not isinstance(w, int) or not 0 <= w <= 64 - sizes[k] for k, w in descriptor_data.items()):
+        raise ValueError("Descriptor data for an undeclared image or sampler, or past the 64 constant words")
+    taken = [*((w, w + 4) for w in vsharp_words.values()), *((u, u + 1) for u in users), *data_words]
+    if descriptor_data and overlap(sorted((a, b - a) for a, b in taken)):
+        raise ValueError("Descriptor data words overlap a buffer V#, a user-data word or each other")
     vector = {f"v{n}": ("uint", LOCAL_IDS[n]) for n in range(local_ids)}
     lines = [PREAMBLE]
     # Without a constant buffer, its offset lies below the table (-16), where no descriptor load can reach.
@@ -173,9 +185,12 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
                   () if sampler is None else tuple(("sampler", j) for j in range(4)),
                   -16 if constant_descriptor is None else constant_descriptor, vsharp_words)
     st.stage = "compute"
+    st.workgroup_threads = numthreads[0] * numthreads[1] * numthreads[2]  # forms/lanes.py (C-7)
+    st.full_waves = st.workgroup_threads % wave == 0  # every lane a thread: EXEC = -1 is lowered (forms/exec_mask.py)
     st.descriptor_high = descriptor_high
     st.storage_images.update(storage_images)
     st.sampler_offsets = {} if sampler is None else {sampler: "sampler"}
+    st.descriptor_data = descriptor_data  # forms/smem.data_word
     for i, line in enumerate(instructions):
         for pattern, reason in LATER:
             if re.fullmatch(pattern, line):
@@ -210,6 +225,13 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(poison_message(st, poisoned))
     if not st.ended:
         raise ValueError("Missing s_endpgm")
+    if st.uniform_claims:
+        # C-7: each v_readfirstlane_b32 result (forms/lanes.py) must be the same on every thread of the workgroup:
+        # built from constants, params[] words, group_id and pure functions of them.
+        uniform = uniform_names(st.lines, st.lane_values, roots=("group_id",))
+        for name in st.uniform_claims:
+            if name not in uniform:
+                raise ValueError(f"v_readfirstlane_b32 of a value that is not provably wave-uniform ({name})")
     return emit(st, numthreads)
 
 
@@ -365,6 +387,8 @@ def main():
     tr.add_argument("--texture", action="append", default=[], help="OFFSET=0|1 (tex or tex1)")
     tr.add_argument("--storage-image", action="append", default=[], help="OFFSET=SLOT:FORMAT")
     tr.add_argument("--sampler", type=key_arg)
+    tr.add_argument("--descriptor-data", action="append", default=[],
+                    help="OFFSET=WORD: the image or sampler descriptor's words as data, from constant word WORD")
     tr.add_argument("--output", type=Path, required=True)
     sv = sub.add_parser("survey")
     sv.add_argument("--isa", type=Path, required=True)
@@ -402,7 +426,9 @@ def main():
         source = lower_compute(instructions, numthreads=numthreads, wave=args.wave, descriptor_high=args.descriptor_high,
                                sgprs=sgprs, local_ids=args.local_ids, constant_descriptor=args.constant_descriptor,
                                buffer_descriptors=buffers, textures=textures, storage_images=images,
-                               sampler=args.sampler)
+                               sampler=args.sampler,
+                               descriptor_data={key_arg(k): int(v, 0) for k, v in
+                                                (item.split("=", 1) for item in args.descriptor_data)})
     except (ValueError, KeyError, OSError) as exc:
         parser.exit(1, f"Translation failed: {exc}\n")
     dest.parent.mkdir(parents=True, exist_ok=True)
