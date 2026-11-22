@@ -1450,6 +1450,25 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_aot_x87_moves COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_moves.py"
         check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_moves>"
         "$<TARGET_FILE:cpu_x87_moves_lifted>" ${x87_moves_control_files})
+    cpu_asm_fixture(cpu_x87_constants x87_constants)
+    # The lifted DLL and four mutated controls that the check requires to mismatch.
+    set(x87_constants_control_files "")
+    foreach(variant IN ITEMS lifted pc53 chop fldzneg swaplogs)
+        set(x87_constants_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_x87_constants_${variant}.cpp")
+        add_custom_command(OUTPUT "${x87_constants_fixture}"
+            COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_constants.py"
+                emit "$<TARGET_FILE:cpu_x87_constants>" "${x87_constants_fixture}" ${variant}
+            DEPENDS cpu_x87_constants tests/cpu/x87_constants.py tests/cpu/x87_moves.py tests/cpu/x87_sub.py
+                tests/cpu/x87_div.py tests/cpu/x87_mul.py tests/cpu/x87_add.py tools/ffx_version_query.py
+                tools/x87_lower.py tools/x87_soft.h tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+        add_library(cpu_x87_constants_${variant} SHARED "${x87_constants_fixture}")
+        if(NOT variant STREQUAL "lifted")
+            list(APPEND x87_constants_control_files "$<TARGET_FILE:cpu_x87_constants_${variant}>")
+        endif()
+    endforeach()
+    add_test(NAME cpu_aot_x87_constants COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_constants.py"
+        check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_constants>"
+        "$<TARGET_FILE:cpu_x87_constants_lifted>" ${x87_constants_control_files})
     cpu_asm_fixture(cpu_create create_context)
     set(create_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_create_lifted.cpp")
     add_custom_command(OUTPUT "${create_fixture}"
