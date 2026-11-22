@@ -1058,3 +1058,28 @@ if(EXISTS "${INTAKE_PYTHON}")
             --host $<TARGET_FILE:rcas_coordinate_readback> --backend warp --case ${control})
     endforeach()
 endif()
+
+# Native launch: x2w_launch maps an EXE with pe_map and routes imports to shims, package DLLs, Windows or
+# logging stubs. The fake title is a source-built stand-in that needs all of these routes.
+if(TARGET pe_map AND TARGET xmem_shim)
+    add_executable(x2w_launch tools/x2w_launch.cpp)
+    target_compile_features(x2w_launch PRIVATE cxx_std_17)
+    add_dependencies(x2w_launch pe_map)
+    set(x2w_missing_lib "${CMAKE_CURRENT_BINARY_DIR}/x2w_missing.lib")
+    add_custom_command(OUTPUT "${x2w_missing_lib}"
+        COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64 "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/x2w_missing.def"
+            "/OUT:${x2w_missing_lib}"
+        DEPENDS tests/native/x2w_missing.def VERBATIM)
+    add_custom_target(x2w_missing_import DEPENDS "${x2w_missing_lib}")
+    add_executable(x2w_fake_title tests/native/fake_title.cpp)
+    add_dependencies(x2w_fake_title x2w_missing_import)
+    target_compile_options(x2w_fake_title PRIVATE /GS- /Zl)
+    target_link_options(x2w_fake_title PRIVATE /ENTRY:exe_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+        /INCREMENTAL:NO)
+    target_link_libraries(x2w_fake_title PRIVATE kernel32 xmem_shim "${x2w_missing_lib}")
+    add_test(NAME native_launch_fake_title COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/launch_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
+    set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
+endif()
+

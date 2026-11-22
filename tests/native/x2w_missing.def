@@ -1,0 +1,4 @@
+LIBRARY x2w_missing
+EXPORTS
+    X2wMissingFirst
+    X2wMissingSecond
