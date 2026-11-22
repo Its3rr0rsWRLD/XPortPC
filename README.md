@@ -63,6 +63,18 @@ Do not add game files, dumps, distribution links or credentials to the repositor
 
 Build the suite, run `.\tools\package-gpu-check.ps1` to make the standalone GPU check, run it, and paste the full contents of `gpu-report-hardware.md` as a comment on the [hardware thread](https://github.com/Its3rr0rsWRLD/XPortPC/issues/1). Do not open a new GitHub issue. Reports with a failure or a capability skip are welcome.
 
+## FAQ
+
+**Is XPortPC an Xbox emulator?** No. An emulator such as Xenia (Xbox 360) runs console code inside a simulated console. Xbox Series X|S titles are already x64 code for an AMD Zen 2 CPU, so XPortPC runs that code natively on Windows and converts only what is console-specific: the GPU shaders (RDNA gfx10 machine code to HLSL and DXIL for DirectX 12), the console's graphics and memory libraries, and the rest of the platform layer.
+
+**Can it run Xbox Series X|S games on PC today?** Not yet. The shader converter, GPU memory loads and the native launcher work and are tested on real GPUs with source-built programs; control flow, the console Direct3D 12 layer and the system libraries are in progress. The coverage badge above shows the current instruction coverage.
+
+**Do I need an Xbox, the GDK or game files to help?** No. Every test builds its own fixtures. A Windows PC with Visual Studio and a DirectX 12 GPU is enough, and hardware reports from any GPU help.
+
+**Does XPortPC include or download games?** No, and it never will. Do not post game files, dumps or links to them.
+
+**Which GPUs are tested?** Each instruction form is drawn on real hardware and on Microsoft WARP and compared bit for bit with a CPU reference. Hardware reports from NVIDIA, AMD and Intel GPUs are collected in issue #1.
+
 ## Based on Xbox2Windows
 
 XPortPC started from [Xbox2Windows](https://github.com/R0Y00/Xbox2Windows) by R0Y00 and its contributors, and keeps its full history. We merge upstream changes into XPortPC regularly. Upstream's experiment notes remain in [docs/experiments.md](docs/experiments.md). Names such as `x2w_` in the code come from upstream and are kept so merges stay simple.
