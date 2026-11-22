@@ -2737,6 +2737,33 @@ This covers only the two root-signature imports observed in the pre-executable D
 | `d3d12_xs_shim_deserialize` | Round-trips a sanitized blob from `d3d12_xs.dll` and reads the embedded `RTS0` part of `pso_compute_embedded`; rejects `pso_compute_stripped` and empty/null buffers with `E_INVALIDARG`. |
 | `d3d12_xs_shim_warp_root` | Serializes a v1.1 `SRV(t0),UAV(u0),RootConstants(16,b0)` descriptor tagged with `0x03000000` through `d3d12_xs.dll` (verified rejected by desktop `d3d12.dll`), creates a WARP `ID3D12RootSignature`, and builds a compute PSO with `pso_compute_stripped`. |
 
+#### Graphics shim skeleton (runtime rung R2)
+
+`d3d12_xs.dll` also exports `D3D12CreateDevice` and `D3D12GetDebugInterface`, and wraps the objects a clear and present needs over desktop D3D12 ([runtime.md](design/runtime.md), section 3, work item 2). Translation only: each wrapped method forwards to the desktop object, unwrapping arguments that are wrappers, and logs its first use.
+
+| Wrapper | Public order and slots | Unwrapped arguments |
+|---|---|---|
+| `ID3D12Device` | 44 | allocator in `CreateCommandList`, objects in `MakeResident`/`Evict`/`CreateSharedHandle` |
+| `ID3D12CommandQueue` | 19 | lists in `ExecuteCommandLists`, fences in `Signal`/`Wait` |
+| `ID3D12CommandAllocator` | 9 | |
+| `ID3D12GraphicsCommandList` | 60 | allocator in `Reset`, bundle in `ExecuteBundle` |
+| `ID3D12Fence1` | 12 | |
+| `IDXGISwapChain3` | 40 | queues in `ResizeBuffers1` |
+
+- **Unknown entries.** Each wrapper's vtable continues past its public slots to slot 255 with logging thunks. A call there returns `E_NOTIMPL` and logs, once per interface and slot, the slot index, the caller (`module+RVA`) and RDX/R8/R9. `QueryInterface` of an IID the wrapper does not implement, including later public versions such as `ID3D12Device1`, logs the IID and caller once and returns `E_NOINTERFACE` with a null output. The debug-layer interfaces `ID3D12InfoQueue` and `ID3D12DebugDevice` are the exceptions: they are returned as the desktop objects.
+- **Not wrapped.** Resources, heaps, descriptor heaps, pipeline states, root signatures and query heaps are the desktop objects. Root GPU addresses are passed through untranslated.
+- **Present path.** The console's present entry point is not publicly documented. `X2WGfxCreateSwapChainForHwnd` (`src/d3d12_xs_api.h`) creates a DXGI flip-model swap chain on the desktop queue behind a wrapped queue and returns it wrapped.
+- **Title memory.** When `xmem.dll` is loaded, device creation attaches the desktop device to its title GPU registry (`X2WTitleGpuAttach`). The first device keeps the registry and detaches it when released.
+- **Logging interface.** Without a sink, lines go to stderr as `[x2w] unimplemented d3d12_xs!ID3D12Device::slot47 ...` and `[x2w] first use d3d12_xs!ID3D12Device::CreateFence ...`. `X2WGfxSetLogSink` replaces that output with a callback that receives the slot, IID, caller and arguments. It is the hook for the launcher's unimplemented-call report. `X2WGfxGetCounters` returns the call counts.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_r2_clear_warp`, `runtime_r2_clear_hardware` | `tests/runtime/r2_clear.cpp` imports device creation from `d3d12_xs.dll` (no desktop `d3d12.lib`) and allocates 64 KiB of graphics memory through `xmem.dll` first. Through the shim it creates the device, queue, allocator, list, fence and a 64x64 `R8G8B8A8_UNORM` swap chain. For 3 frames it clears the back buffer to a frame colour (each channel `k/255`), copies it to a readback buffer, waits on the fence and presents. Every pixel must equal the colour bit for bit. Also required: 3 successful presents, no debug-layer errors, no unknown slot or IID, the device counted as created by the shim, and either a non-zero `X2WTitleGpuTranslate` of the allocation or the registry's `E_NOTIMPL`. Every wrapper must be released at exit. The hardware case skips (77) without a hardware adapter. |
+| `runtime_r2_wrong_color_warp`, `runtime_r2_wrong_color_hardware` | Control: the same frames compared against the colour with green one step higher. Passes only when every pixel of every frame is reported as a mismatch and everything else holds. |
+| `runtime_r2_unknown_entries_warp` | With a recording sink: slots 44 and 77 of the device, 19 of the queue, 9 of the allocator, 60 of the list and 12 of the fence return `E_NOTIMPL`. Each is logged once with its interface, slot index, this pointer, the three marker arguments and a caller inside the test. A repeated slot is counted but not logged again. A made-up IID and `ID3D12Device1` fail on the device with `E_NOINTERFACE` and are logged with their IID, and the made-up IID is logged again for the queue. Known IIDs and slot 7 (`GetNodeCount`) log nothing. Seven slot calls and three IID calls are counted. |
+
+The R2 program does not run under `x2w_launch` yet: it links the CRT, and `pe_map` refuses its TLS template (the implicit-TLS gap in [runtime.md](design/runtime.md), section 1).
+
 ### Attribute words at xmem call sites
 
 `tools/xmem_attribute_scan.py` reads a PE image without loading or running it. It reports the attribute word at each call or tail jump into `xmem.dll`'s `XMemAlloc` or `XMemFree`, from a normal or delay-load import. It finds sites reached through the IAT slot, through an import thunk, or through a register loaded from the slot.

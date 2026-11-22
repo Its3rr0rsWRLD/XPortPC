@@ -89,11 +89,31 @@ target_include_directories(xmem_gpu_cross_dll_check PRIVATE src)
 add_test(NAME xmem_gpu_cross_dll_warp COMMAND xmem_gpu_cross_dll_check "$<TARGET_FILE:xmem_gpu_client>")
 set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 
-# Desktop d3d12_xs.dll for the package DLLs' two named d3d12_xs root-signature imports.
-add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_shim.def)
+# Desktop d3d12_xs.dll, the graphics shim: the package DLLs' two named root-signature imports, and
+# device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
+# DXGI is delay-loaded: only the shim's present path needs it.
+add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
+    src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
-target_link_libraries(d3d12_xs_shim PRIVATE d3d12)
+target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
+target_link_libraries(d3d12_xs_shim PRIVATE d3d12 dxgi dxguid delayimp)
+target_link_options(d3d12_xs_shim PRIVATE /DELAYLOAD:dxgi.dll)
+
+# Runtime ladder R2 (docs/design/runtime.md, section 6): a console-style program that imports device
+# creation from d3d12_xs.dll (no desktop d3d12.lib), clears, reads back and presents 3 frames.
+add_executable(r2_clear tests/runtime/r2_clear.cpp)
+target_include_directories(r2_clear PRIVATE src)
+target_compile_features(r2_clear PRIVATE cxx_std_17)
+target_link_libraries(r2_clear PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME runtime_r2_clear_${adapter} COMMAND r2_clear ${adapter} clear)
+    add_test(NAME runtime_r2_wrong_color_${adapter} COMMAND r2_clear ${adapter} wrong_color)
+    set_tests_properties(runtime_r2_clear_${adapter} runtime_r2_wrong_color_${adapter} PROPERTIES
+        TIMEOUT 60 SKIP_RETURN_CODE 77)
+endforeach()
+add_test(NAME runtime_r2_unknown_entries_warp COMMAND r2_clear warp unknown_entries)
+set_tests_properties(runtime_r2_unknown_entries_warp PROPERTIES TIMEOUT 60)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
