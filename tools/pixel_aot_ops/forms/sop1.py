@@ -1,6 +1,16 @@
 """SOP1 and SOPK: 64-bit unary scalar forms and 32-bit scalar moves."""
 from ..dispatch import form
+from .exec_mask import _neg, is_mask, read_mask, write_mask
 from ..registers import sgpr_pair, scalar_u32, scalar_u64
+
+
+@form(r"s_not_b64 (s\[\d+:\d+\]|vcc), (exec|vcc|s\[\d+:\d+\])", when=lambda st, m: is_mask(st, m[2]))
+def not_mask(st, i, m):
+    # s_not_b64 of a lane mask: this lane's bit inverted, so an inactive lane's 0 from a masked compare becomes 1 as
+    # on the console. SCC = (D != 0) is lane local (exec_mask). The destination is never EXEC (whole-wave mode).
+    dst, src = m.groups()
+    write_mask(st, i, dst, _neg(read_mask(st, src)))
+    st.scc = None
 
 
 @form(r"s_(cmov|not|brev)_b64 (s\[\d+:\d+\]), ([^,]+)")

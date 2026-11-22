@@ -263,7 +263,7 @@ def check_shader_records():
         ("SOP2", "s_bfm_b64"), ("SOP2", "s_bfe_u32"), ("SOP2", "s_bfe_i32"),
     }
     rejected_forms = {
-        "s_and_saveexec_b64", "s_or_saveexec_b64", "s_andn2_saveexec_b64",
+        # Removed as lowered (draw family cf2_exec, CF-2b): the ten *_saveexec_b64 forms and every v_cmpx_* e32/e64.
         # Removed as lowered (draw family salu_rest): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
         # s_bitcmp1_b64 and s_not_b32, as were s_add_u32, s_and_b32, s_bfm_b32 and s_cselect_b32 before them.
         # What is left reads or writes EXEC or is lane-mask or control flow (CF-2/CF-3): s_wqm_b32, s_quadmask_*,
@@ -288,6 +288,11 @@ def check_shader_records():
         covered = fc.gfx_forms(pixel.ACCEPTED, fc.load_reference(name))
         assert scalar64_forms <= covered, (name, scalar64_forms - covered)
         assert salu_rest_forms <= covered, (name, salu_rest_forms - covered)
+        saveexec = {("SOP1", f"s_{op}_saveexec_b64") for op in
+                    ("and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor", "andn1", "orn1")}
+        cmpx = {form for form in fc.load_reference(name) if form[1].startswith("v_cmpx_") and form[0] != "SDWA"
+                and not form[1].endswith(("f64", "i64", "u64", "f64_e64", "i64_e64", "u64_e64"))}
+        assert len(cmpx) == 124 and saveexec | cmpx <= covered, (name, (saveexec | cmpx) - covered)
 
 
 def check_parsing():

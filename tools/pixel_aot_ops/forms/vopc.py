@@ -17,18 +17,16 @@ COMPARE = {
 }
 
 
-@form(rf"v_cmp_class_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
-def class_f32(st, i, m):
-    dst, value, classes = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
+def _class_bits(st, classes, reader):
     if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
-        bits = f"{int(classes, 0) & 0xffffffff}u"
-    elif re.fullmatch(r"[vs]\d+", classes):
-        bits = word_of(classes, st.scalar, st.vector, st.pending, st.sample_pending)
-    else:
-        raise ValueError("Unsupported class mask")
+        return f"{int(classes, 0) & 0xffffffff}u"
+    if re.fullmatch(r"[vs]\d+", classes):
+        return reader(classes, st.scalar, st.vector, st.pending, st.sample_pending)
+    raise ValueError("Unsupported class mask")
+
+
+def class_f32_relation(st, i, value, classes):
+    bits = _class_bits(st, classes, word_of)
     # The class test is exact on every encoding, a subnormal included: abs and neg act on the sign bit of the word, never
     # through a float negate or abs, which a device may flush (a negated subnormal then reads as zero).
     modified = re.fullmatch(r"(-?)(?:abs\(([^()|]+)\)|\|([^()|]+)\|)", value) or re.fullmatch(r"(-)()([vs]\d+)", value)
@@ -44,103 +42,161 @@ def class_f32(st, i, m):
         operand = f"asfloat({word})"
     else:
         operand = fp_operand(value, st.scalar, st.vector, st.pending, st.sample_pending)
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-    st.lines.append(f"    bool cmp{i} = (class32({operand}) & {bits}) != 0u;")
+    return f"(class32({operand}) & {bits}) != 0u"
 
 
-@form(rf"v_cmp_class_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
-def class_f16(st, i, m):
+def class_f16_relation(st, i, value, classes):
     # The class is read from the binary16 encoding itself (class16). The class mask is a 32-bit integer
     # source, not a binary16 value, so a float constant there is refused.
-    dst, value, classes = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
-    if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
-        bits = f"{int(classes, 0) & 0xffffffff}u"
-    elif re.fullmatch(r"[vs]\d+", classes):
-        bits = vector_u32(classes, st.scalar, st.vector, st.pending, st.sample_pending)
-    else:
-        raise ValueError("Unsupported class mask")
+    bits = _class_bits(st, classes, vector_u32)
     operand = f16_encoding(value, st.scalar, st.vector, st.pending, st.sample_pending)
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-    st.lines.append(f"    bool cmp{i} = (class16({operand}) & {bits}) != 0u;")
+    return f"(class16({operand}) & {bits}) != 0u"
 
 
-@form(rf"v_cmp_({'|'.join(COMPARE)})_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
-def compare_f16(st, i, m):
+def f16_relation(st, i, op, tokens):
     # Both sources are widened from their low halves. Widening binary16 to binary32 is exact (including
     # subnormals, infinities and the NaN-ness of the operands), so every comparison of the widened values
     # in binary32 gives the binary16 result, and the f32 predicate table applies unchanged.
-    op, dst, *tokens = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
     values = [f16_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.lines.append(f"    precise float cmpa{i} = {values[0]};")
     st.lines.append(f"    precise float cmpb{i} = {values[1]};")
-    st.lines.append(f"    bool cmp{i} = {COMPARE[op].format(f'cmpa{i}', f'cmpb{i}')};")
+    return COMPARE[op].format(f"cmpa{i}", f"cmpb{i}")
 
 
-@form(rf"v_cmp_({'|'.join(COMPARE)})_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
-def compare_f32(st, i, m):
-    op, dst, *tokens = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
+def f32_relation(st, i, op, tokens):
     values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-    st.lines.append(f"    bool cmp{i} = {COMPARE[op].format(*values)};")
+    return COMPARE[op].format(*values)
 
 
 # Integer comparisons (V_CMP_{EQ,NE,LT,LE,GT,GE}_{I32,U32}, VOPC and their VOP3 e64 forms): the signed or unsigned
 # order of the two words, written per lane to the lane mask like the float comparisons. llvm-mc refuses source
-# modifiers and clamp on them. v_cmpx (which writes EXEC) is not lowered here. V_CMP_F and V_CMP_T (always false,
-# always true; from R0Y00/Xbox2Windows#306 by Alexander) still read and check both sources.
+# modifiers and clamp on them. V_CMP_F and V_CMP_T (always false, always true; from R0Y00/Xbox2Windows#306 by
+# Alexander) still read and check both sources.
 INT_COMPARE = {"f": None, "eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">=", "t": None}
 
 
-@form(rf"v_cmp_({'|'.join(INT_COMPARE)})_(i32|u32)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
-def compare_int(st, i, m):
-    op, kind, dst, *tokens = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
+def int_relation(st, i, op, kind, tokens):
     words = [vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     if kind == "i32":
         words = [f"asint({w})" for w in words]
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-    relation = {"f": "false", "t": "true"}.get(op) or f"{words[0]} {INT_COMPARE[op]} {words[1]}"
-    st.lines.append(f"    bool cmp{i} = {relation};")
+    return {"f": "false", "t": "true"}.get(op) or f"{words[0]} {INT_COMPARE[op]} {words[1]}"
 
 
 # 16-bit integer comparisons (V_CMP_{EQ,NE,LT,LE,GT,GE}_{I16,U16}, VOPC and VOP3 e64): both sources are the low 16
 # bits of their words (a register's low half, an inline constant or a literal's low half; bits 16..31 never take
 # part). i16 sign-extends the low half, u16 zero-extends it. There are no F and T forms for 16-bit integers, no
-# source modifiers and no clamp, and v_cmpx is not lowered here.
+# source modifiers and no clamp.
 INT16_COMPARE = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
 
 
-@form(rf"v_cmp_({'|'.join(INT16_COMPARE)})_(i16|u16)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
-def compare_int16(st, i, m):
-    op, kind, dst, *tokens = m.groups()
-    regs = lane_mask(dst)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid comparison")
+def int16_relation(st, i, op, kind, tokens):
     if any("." in t for t in tokens):
         raise ValueError("A float constant is not a 16-bit integer source")
     words = [f16_bits(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     if kind == "i16":
         words = [f"((int({w}) ^ 0x8000) - 0x8000)" for w in words]
+    return f"{words[0]} {INT16_COMPARE[op]} {words[1]}"
+
+
+def write_compare(st, i, dst, relation):
+    """VOPC writes this lane's bit of the destination mask: the relation while the lane is active, 0 while it is not
+    (docs/design/control-flow.md, CF-2 section 3: D = ex && cmp)."""
+    regs = lane_mask(dst)
+    if st.pending.intersection(regs):
+        raise ValueError("Invalid comparison")
     for j, reg in enumerate(regs):
         st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-    st.lines.append(f"    bool cmp{i} = {words[0]} {INT16_COMPARE[op]} {words[1]};")
+    st.lines.append(f"    bool cmp{i} = {relation if st.ex == 'true' else f'{st.ex} && ({relation})'};")
+
+
+def compare_exec(st, i, relation):
+    """V_CMPX on gfx10 writes EXEC only (no VCC or SGPR destination): EXEC &= the compare, so an inactive lane stays
+    inactive and an active one stays active where the relation holds."""
+    st.lines.append(f"    bool cmp{i} = {relation};")
+    st.exec_and(i, f"cmp{i}")
+
+
+def _pending_check(st, dst):
+    if st.pending.intersection(lane_mask(dst)):
+        raise ValueError("Invalid comparison")
+
+
+@form(rf"v_cmp_class_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
+def class_f32(st, i, m):
+    dst, value, classes = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, class_f32_relation(st, i, value, classes))
+
+
+@form(rf"v_cmp_class_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
+def class_f16(st, i, m):
+    dst, value, classes = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, class_f16_relation(st, i, value, classes))
+
+
+@form(rf"v_cmp_({'|'.join(COMPARE)})_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
+def compare_f16(st, i, m):
+    op, dst, *tokens = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, f16_relation(st, i, op, tokens))
+
+
+@form(rf"v_cmp_({'|'.join(COMPARE)})_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)")
+def compare_f32(st, i, m):
+    op, dst, *tokens = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, f32_relation(st, i, op, tokens))
+
+
+@form(rf"v_cmp_({'|'.join(INT_COMPARE)})_(i32|u32)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
+def compare_int(st, i, m):
+    op, kind, dst, *tokens = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, int_relation(st, i, op, kind, tokens))
+
+
+@form(rf"v_cmp_({'|'.join(INT16_COMPARE)})_(i16|u16)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
+def compare_int16(st, i, m):
+    op, kind, dst, *tokens = m.groups()
+    _pending_check(st, dst)
+    write_compare(st, i, dst, int16_relation(st, i, op, kind, tokens))
+
+
+# V_CMPX (CF-2b): the same relations, into EXEC. gfx10 encodes no destination in either the VOPC or the VOP3 form, so
+# a text with a first operand that is a lane mask is not a v_cmpx of this target and does not match.
+@form(r"v_cmpx_class_f32(?:_e32|_e64)? ([^,]+), ([^,]+)")
+def cmpx_class_f32(st, i, m):
+    compare_exec(st, i, class_f32_relation(st, i, *m.groups()))
+
+
+@form(r"v_cmpx_class_f16(?:_e32|_e64)? ([^,]+), ([^,]+)")
+def cmpx_class_f16(st, i, m):
+    compare_exec(st, i, class_f16_relation(st, i, *m.groups()))
+
+
+@form(rf"v_cmpx_({'|'.join(COMPARE)})_f16(?:_e32|_e64)? ([^,]+), ([^,]+)")
+def cmpx_f16(st, i, m):
+    op, *tokens = m.groups()
+    compare_exec(st, i, f16_relation(st, i, op, tokens))
+
+
+@form(rf"v_cmpx_({'|'.join(COMPARE)})_f32(?:_e32|_e64)? ([^,]+), ([^,]+)")
+def cmpx_f32(st, i, m):
+    op, *tokens = m.groups()
+    compare_exec(st, i, f32_relation(st, i, op, tokens))
+
+
+@form(rf"v_cmpx_({'|'.join(INT_COMPARE)})_(i32|u32)(?:_e32|_e64)? ([^,\s]+), ([^,\s]+)")
+def cmpx_int(st, i, m):
+    op, kind, *tokens = m.groups()
+    compare_exec(st, i, int_relation(st, i, op, kind, tokens))
+
+
+@form(rf"v_cmpx_({'|'.join(INT16_COMPARE)})_(i16|u16)(?:_e32|_e64)? ([^,\s]+), ([^,\s]+)")
+def cmpx_int16(st, i, m):
+    op, kind, *tokens = m.groups()
+    compare_exec(st, i, int16_relation(st, i, op, kind, tokens))
 
 
 @form(rf"v_cndmask_b32(?:_e32|_e64)? (v\d+), ([^,]+), ([^,]+), {LANE_MASK}")

@@ -132,15 +132,11 @@ def check_cf2_lane_controls():
     assert st.lines == lines and st.scalar["s45"] == st.scalar["s44"]
     refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v23, 1.0")
     refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v0, 1.0")
-    # What cannot be masked yet is refused while the lane may be inactive: lane-mask writes (CF-2b), interpolation,
-    # loads, the sample, the pack and the export (CF-2d discards dead lanes).
+    # What cannot be masked yet is refused while the lane may be inactive: SDWA lane-mask writes (VOPC ones are masked
+    # since CF-2b, family cf2_exec), interpolation, loads, the sample, the pack and the export (CF-2d discards dead lanes).
     st.wqm = True
     st.scalar.update({"m0": "interp_base", "vcc": ("condition", "cmp1", 0, 1)})
-    for text, line in (("Invalid comparison", "v_cmp_lt_f32_e32 vcc_lo, v12, v13"),
-                       ("Invalid comparison", "v_cmp_class_f32_e64 s[60:61], v12, 3"),
-                       ("Invalid comparison", "v_cmp_lt_f16_e32 vcc_lo, v12, v13"),
-                       ("Invalid comparison", "v_cmp_class_f16_e32 vcc_lo, v12, v13"),
-                       ("Invalid comparison", "v_cmp_lt_f32_sdwa vcc_lo, v12, v13 src0_sel:DWORD src1_sel:DWORD"),
+    for text, line in (("Invalid comparison", "v_cmp_lt_f32_sdwa vcc_lo, v12, v13 src0_sel:DWORD src1_sel:DWORD"),
                        ("Unknown interpolation context", "v_interp_p1_f32_e32 v8, v0, attr0.x"),
                        ("Unknown interpolation context", "v_interp_mov_f32_e32 v8, p0, attr1.x"),
                        ("Unsupported pack operand", "v_cvt_pkrtz_f16_f32_e32 v16, v12, v13"),
