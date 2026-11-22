@@ -2,7 +2,7 @@
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
 from .control_flow import find_loops, program, split_blocks, word_expr
 from .dispatch import dispatch
-from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP
+from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS
 from .registers import tracked_word
 from . import forms  # noqa: F401  (registers every form)
 
@@ -21,6 +21,8 @@ class Lowering:
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.uses_memory = False  # emit the title-memory helpers
+        self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
+        self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order
         self.pending = set()  # SGPRs an outstanding scalar load writes (cleared by lgkmcnt(0))
         self.scc = None  # SCC as an HLSL bool expression, or None when it is not tracked
         self.helpers = set()  # names of SALU_HELPERS (hlsl.py) the program uses
@@ -169,7 +171,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         st.lines[pos:pos] = defs
     if st.uses_memory:
         pos = st.lines.index(PREAMBLE)
-        st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS]
+        declarations = TITLE_RW_DECLARATIONS if st.writes_memory else TITLE_DECLARATIONS
+        st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), declarations, MEMORY_HELPERS,
+                             *st.memory_helpers.values()]
     if st.flat_attrs or st.quad_position:
         pos = st.lines.index(PREAMBLE)
         # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.

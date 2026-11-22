@@ -121,6 +121,11 @@ TITLE_DECLARATIONS = """StructuredBuffer<TitleRange> title_ranges : register(t2)
 ByteAddressBuffer title_memory[8] : register(t0, space1);
 cbuffer TitleCount : register(b1) { uint title_range_count; };
 """
+# A program that stores or runs atomics binds the same slots as UAVs (u0, space1, the harness's write table) and loads
+# through them too, since one resource cannot be both a shader resource and an unordered-access target in one draw.
+TITLE_RW_DECLARATIONS = TITLE_DECLARATIONS.replace("ByteAddressBuffer title_memory[8] : register(t0, space1);",
+                                                   "RWByteAddressBuffer title_memory[8] : register(u0, space1);")
+assert TITLE_RW_DECLARATIONS != TITLE_DECLARATIONS
 # Buffer resource (V#) on gfx10, as four words w0..w3:
 #   base = w0 | (w1 & 0xffff) << 32, stride = (w1 >> 16) & 0x3fff, num_records = w2, OOB_SELECT = (w3 >> 28) & 3,
 #   SWIZZLE_ENABLE = w1 bit 31, ADD_TID_ENABLE = w3 bit 23.

@@ -7,7 +7,8 @@ static const float4 FLAT1[3] = { float4(1, 2, 3, 4), float4(9, 6, 12, 20), float
 static const float4 FLAT2[3] = { float4(7, 13, 21, 34), float4(10, 29, 3, 55), float4(8, 5, 40, 6) };
 [RootSignature("DescriptorTable(SRV(t0,numDescriptors=2),visibility=SHADER_VISIBILITY_PIXEL),CBV(b0,visibility=SHADER_VISIBILITY_PIXEL),"
                "SRV(t2,visibility=SHADER_VISIBILITY_PIXEL),DescriptorTable(SRV(t0,space=1,numDescriptors=8),visibility=SHADER_VISIBILITY_PIXEL),"
-               "RootConstants(num32BitConstants=1,b1,visibility=SHADER_VISIBILITY_PIXEL),StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_POINT,"
+               "RootConstants(num32BitConstants=1,b1,visibility=SHADER_VISIBILITY_PIXEL),"
+               "DescriptorTable(UAV(u0,space=1,numDescriptors=8),visibility=SHADER_VISIBILITY_PIXEL),StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_POINT,"
                "addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)")]
 Vertex main(uint id : SV_VertexID)
 {

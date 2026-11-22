@@ -45,6 +45,14 @@ def case_bytes(addresses, expected, memory):
     return case_file([w for a in addresses for w in address(a)] + [0] * 56, expected, memory)
 
 
+EXPECTED_MAGIC = 0x45573258
+
+
+def expect(slots, magic=EXPECTED_MAGIC):
+    """The GOOD section followed by expected contents after the draw, one blob per slot."""
+    return GOOD + struct.pack("<2I", magic, len(slots)) + b"".join(struct.pack("<I", len(b)) + b for b in slots)
+
+
 GOOD = section([(BASE0, BASE0 + SIZE0, 0), (BASE1, BASE1 + SIZE1, 1)], SLOTS)
 HIT_FIRST = BASE0 + 0x44
 LAST_WORD = BASE1 + SIZE1 - 4
@@ -98,7 +106,23 @@ def main(compiler, renderer, backend):
         must_mismatch([EXPECTED[0], EXPECTED[1], byte_at(0, 0x10), -1.0], "A hit in the gap",
                       ADDRESSES[:2] + [GAP, UNALIGNED])
 
+        # Expected contents after the draw (the 'X2WE' part, used by the stores and atomics draws): the probe writes
+        # nothing, so its initial contents match and any changed byte is reported as a memory mismatch.
+        same = run(draw, case, case_bytes(ADDRESSES, EXPECTED, expect(SLOTS)))
+        if same.returncode != 0:
+            sys.stderr.write(same.stderr)
+            raise AssertionError("Unchanged memory did not match its expected contents")
+        changed = [SLOTS[0], SLOTS[1][:7] + bytes([SLOTS[1][7] ^ 1]) + SLOTS[1][8:]]
+        result = run(draw, case, case_bytes(ADDRESSES, EXPECTED, expect(changed)))
+        if result.returncode != 1 or "memory_mismatch slot=1 offset=0x4" not in result.stderr:
+            raise AssertionError(f"A changed expected byte escaped detection (exit {result.returncode})")
+
         bad = {
+            "expected magic": expect(SLOTS, magic=0x12345678),
+            "expected slot count": GOOD + struct.pack("<2I", EXPECTED_MAGIC, 1) + struct.pack("<I", SIZE0) + SLOTS[0],
+            "expected slot size": expect([SLOTS[0], SLOTS[1][:-4]]),
+            "expected trailing byte": expect(SLOTS) + b"\0",
+            "expected truncated": expect(SLOTS)[:-1],
             "unsorted ranges": section([(BASE1, BASE1 + SIZE1, 1), (BASE0, BASE0 + SIZE0, 0)], SLOTS),
             "overlapping ranges": section([(BASE0, BASE0 + SIZE0, 0), (BASE0 + 0x100, BASE0 + 0x180, 1)], SLOTS),
             "slot out of bounds": section([(BASE0, BASE0 + SIZE0, 0), (BASE1, BASE1 + SIZE1, 2)], SLOTS),

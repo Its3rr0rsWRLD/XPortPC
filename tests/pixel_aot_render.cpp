@@ -48,6 +48,8 @@ static_assert(sizeof(TitleRangeRecord) == 24);
 struct TitleMemory {
     std::vector<TitleRangeRecord> ranges;
     std::vector<std::vector<BYTE>> slots;
+    // When not empty: each slot's contents after the draw, compared byte for byte (a case that checks shader writes).
+    std::vector<std::vector<BYTE>> expected;
 };
 
 struct PixelInput {
@@ -115,6 +117,18 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             slotBuffers[i] = zeroBuffer;
             slotWords[i] = 4;
         }
+    }
+    // A case with expected memory checks what the shader writes: each slot with data gets a writable copy, bound as
+    // RWByteAddressBuffer (u0, space1; root parameter 5) and compared after the single draw. Otherwise that table
+    // holds null views.
+    const auto& expectedMemory = input.memory.expected;
+    const bool checksWrites = !expectedMemory.empty();
+    if (checksWrites && draws.size() != 1) throw std::runtime_error("A title memory write check needs exactly one draw");
+    std::array<ComPtr<ID3D12Resource>, 8> writable;
+    for (size_t i = 0; checksWrites && i < input.memory.slots.size(); ++i) {
+        if (!input.memory.slots[i].empty())
+            writable[i] = make_buffer(device, input.memory.slots[i].size(), D3D12_HEAP_TYPE_DEFAULT,
+                                      D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     }
     std::ifstream file(path, std::ios::binary);
     std::vector<char> ps{std::istreambuf_iterator<char>(file), {}};
@@ -199,7 +213,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvs)), "Pixel depth heap");
     }
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.NumDescriptors = 2 + 8;
+    heapDesc.NumDescriptors = 2 + 8 + 8;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&srvs)), "Pixel texture heap");
     const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
@@ -224,6 +238,16 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += size_t(2 + i) * increment;
         device->CreateShaderResourceView(slotBuffers[i].Get(), &raw, handle);
+    }
+    for (UINT i = 0; i < 8; ++i) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC rw{};
+        rw.Format = DXGI_FORMAT_R32_TYPELESS;
+        rw.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        rw.Buffer.NumElements = writable[i] ? slotWords[i] : 4;
+        rw.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(2 + 8 + i) * increment;
+        device->CreateUnorderedAccessView(writable[i].Get(), nullptr, &rw, handle);
     }
 
     bool textureUploaded = false;
@@ -280,6 +304,12 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                 list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 transition(list, secondTexture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
+            for (size_t i = 0; i < writable.size(); ++i) {
+                if (!writable[i]) continue;
+                transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+                list->CopyBufferRegion(writable[i].Get(), 0, slotBuffers[i].Get(), 0, input.memory.slots[i].size());
+                transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
             textureUploaded = true;
         }
         ID3D12DescriptorHeap* heaps[]{srvs.Get()};
@@ -292,6 +322,9 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         memoryTable.ptr += UINT64(2) * increment;
         list->SetGraphicsRootDescriptorTable(3, memoryTable);
         list->SetGraphicsRoot32BitConstants(4, 1, &rangeCount, 0);
+        auto writeTable = srvs->GetGPUDescriptorHandleForHeapStart();
+        writeTable.ptr += UINT64(2 + 8) * increment;
+        list->SetGraphicsRootDescriptorTable(5, writeTable);
         // WARP and hardware can use either the rounded SRV extent or the
         // unrounded base extent for implicit LOD. Their geometric mean is
         // within half a mip of both, since rounding discards less than one texel.
@@ -341,7 +374,29 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             dst.PlacedFootprint = depthLayout;
             list->CopyTextureRegion(&dst, 0,0,0, &src, nullptr);
         }
+        std::array<ComPtr<ID3D12Resource>, 8> memoryBack;
+        for (size_t i = 0; i < writable.size(); ++i) {
+            if (!writable[i]) continue;
+            const UINT64 bytes = input.memory.slots[i].size();
+            memoryBack[i] = make_buffer(device, bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+            transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->CopyBufferRegion(memoryBack[i].Get(), 0, writable[i].Get(), 0, bytes);
+        }
         cmd.submit_and_wait(device);
+        for (size_t i = 0; i < memoryBack.size(); ++i) {
+            if (!memoryBack[i]) continue;
+            const auto& want = expectedMemory[i];
+            const auto got = read(memoryBack[i].Get(), want.size() / 4);
+            for (size_t w = 0; w < got.size(); ++w) {
+                Word wanted;
+                std::memcpy(&wanted, want.data() + 4 * w, sizeof(wanted));
+                if (got[w] != wanted) {
+                    std::fprintf(stderr, "memory_mismatch slot=%zu offset=0x%zx expected=%08x actual=%08x\n",
+                                 i, 4 * w, static_cast<unsigned>(wanted), static_cast<unsigned>(got[w]));
+                    throw std::runtime_error("Title memory after the draw differs from CPU reference");
+                }
+            }
+        }
         if (outputs) {
             // One reference per texel for every target and the depth; nothing but the exact bits is admitted.
             // Init-captures: C++17 cannot capture the structured bindings width and height themselves.
@@ -518,7 +573,21 @@ TitleMemory parse_memory_section(const char* data, size_t size)
         memory.slots.emplace_back(data + at, data + at + bytes);
         at += bytes;
     }
-    if (at != size) throw BadCase("Memory section has trailing bytes");
+    // Optional expected contents after the draw: magic 'X2WE', a slot count equal to the one above, then each slot
+    // as a byte size equal to its initial size and its bytes.
+    if (at != size) {
+        if (word("expected magic") != 0x45573258u) throw BadCase("Memory section has trailing bytes");
+        if (word("expected slot count") != slotCount || !slotCount)
+            throw BadCase("Expected memory names a different slot count");
+        for (UINT i = 0; i < slotCount; ++i) {
+            const UINT bytes = word("expected slot size");
+            if (bytes != memory.slots[i].size()) throw BadCase("Expected memory slot size differs from its slot");
+            if (size - at < bytes) throw BadCase("Expected memory is truncated in a slot");
+            memory.expected.emplace_back(data + at, data + at + bytes);
+            at += bytes;
+        }
+        if (at != size) throw BadCase("Expected memory has trailing bytes");
+    }
     for (size_t i = 0; i < memory.ranges.size(); ++i) {
         const auto& range = memory.ranges[i];
         if (range.reserved != 0) throw BadCase("Memory range reserved word is not zero");

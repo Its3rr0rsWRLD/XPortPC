@@ -231,10 +231,10 @@ def check_load_sub_controls() -> None:
                 "global_load_ubyte v[24:25], v[18:19], off", "global_load_ubyte v24, v18, off", "global_load_sshort v24, v[18:19], off tfe",
                 "global_load_ubyte v24, v[18:19], off offset:2048", "global_load_ubyte v24, v[18:19], off offset:-2049",
                 "global_load_short_d16 v24, v[18:19], s[44:45]", "global_load_sbyte_d16_hi v24, v20, s44",
-                # Flat addresses may be LDS or scratch; scratch and every store stay out.
+                # Flat addresses may be LDS or scratch; scratch stays out. (Stores are lowered by forms/stores.py and
+                # checked by the stores family; this glc-less atomic spells a returned register and is malformed.)
                 "flat_load_ubyte v24, v[18:19]", "flat_load_sshort v24, v[18:19]", "flat_load_short_d16_hi v24, v[18:19]",
-                "scratch_load_ubyte v24, v18, off", "global_store_byte v[18:19], v24, off", "buffer_store_byte v24, v18, s[52:55], 0 offen",
-                "global_atomic_add v24, v[18:19], v25, off"):
+                "scratch_load_ubyte v24, v18, off", "global_atomic_add v24, v[18:19], v25, off"):
         must_reject(translate_loads, case(bad))
 
 
