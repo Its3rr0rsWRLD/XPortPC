@@ -1,0 +1,25 @@
+EXPORTS
+    vfmadd132ss_op
+    vfmadd132sd_op
+    vfmadd213ss_op
+    vfmadd213sd_op
+    vfmadd231ss_op
+    vfmadd231sd_op
+    vfmsub132ss_op
+    vfmsub132sd_op
+    vfmsub213ss_op
+    vfmsub213sd_op
+    vfmsub231ss_op
+    vfmsub231sd_op
+    vfnmadd132ss_op
+    vfnmadd132sd_op
+    vfnmadd213ss_op
+    vfnmadd213sd_op
+    vfnmadd231ss_op
+    vfnmadd231sd_op
+    vfnmsub132ss_op
+    vfnmsub132sd_op
+    vfnmsub213ss_op
+    vfnmsub213sd_op
+    vfnmsub231ss_op
+    vfnmsub231sd_op
