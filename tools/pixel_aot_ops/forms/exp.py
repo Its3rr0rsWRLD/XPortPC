@@ -1,8 +1,24 @@
 """Color export and the v_cvt_pkrtz_f16_f32 packing that feeds it."""
 import re
 
+from ..control_flow import implies
 from ..dispatch import form
 from ..registers import fp_operand, tracked_word, vector_u32
+
+
+def packed_under(st, i, dst):
+    """CF-2d: a pack while the lane may be inactive is not masked (lowering.masked_writes skips it); the export checks
+    the bit it ran under (st.pack_ex)."""
+    if st.ex != "true":
+        st.pack_ex.setdefault(dst, {})[i] = st.ex
+
+
+def discard_dead_lane(st):
+    """CF-2d: the valid-mask bit of `exp ... done vm` kills a lane that is off in EXEC: `if (!ex) discard;` when the
+    lane may be inactive. A lane that exports must hold every packed pair it exports as written."""
+    if st.ex == "true":
+        return
+    st.lines.append("    discard;" if st.ex == "false" else f"    if (!{st.ex}) discard;")
 
 
 @form(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), (v\d+), (v\d+)")
@@ -17,10 +33,11 @@ def pack_e32(st, i, m):
             value = f"alu{i}_{n}"
         pair.append(value)
     # Only the sources and the destination must be settled: another load may still be in flight (R0Y00/Xbox2Windows#176).
-    if (st.ex != "true" or lo in st.sample_dest or hi in st.sample_dest or dst in st.sample_dest
+    if (lo in st.sample_dest or hi in st.sample_dest or dst in st.sample_dest
             or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair)):
         raise ValueError("Unsupported pack operand")
     st.vector[dst] = tuple(pair)
+    packed_under(st, i, dst)
 
 
 @form(r"v_cvt_pkrtz_f16_f32_e64 (v\d+), ([^, ]+), ([^, ]+?)( clamp)?")
@@ -35,7 +52,7 @@ def pack_e64(st, i, m):
     if clamp:
         raise ValueError("clamp on v_cvt_pkrtz_f16_f32_e64 is refused: its hardware behaviour is unverified "
                          "(LLVM issue 60591 reports it is ignored on GFX10.3)")
-    if st.ex != "true" or st.sample_pending or dst in st.sample_dest:
+    if st.sample_pending or dst in st.sample_dest:
         raise ValueError("Unsupported pack operand")
     pair = []
     for n, token in enumerate(tokens):
@@ -45,6 +62,7 @@ def pack_e64(st, i, m):
         st.lines.append(f"    precise float alu{i}_{n} = {fp_operand(token, st.scalar, st.vector, st.pending, st.sample_pending)};")
         pair.append(f"alu{i}_{n}")
     st.vector[dst] = tuple(pair)
+    packed_under(st, i, dst)
 
 
 # Pixel exports. A pixel program exports colour to mrt0..mrt7, depth to mrtz, or nothing (`exp null`, a program without
@@ -102,12 +120,21 @@ def export(st, i, m):
         raise ValueError(f"exp {target} is a vertex or primitive export; a pixel program exports to mrt0..mrt7, mrtz and null")
     if not re.fullmatch(r"mrt[0-7]|mrtz|null", target):
         raise ValueError(f"Unknown export target {target}")
-    if st.ex != "true" or st.exported:
+    if st.exported:
         raise ValueError("Unsupported export")
     if bool(done) != bool(vm):
         raise ValueError("Only the last export carries done, and it carries vm with it")
     enabled = [source != "off" for source in sources]
+    # CF-2d: an export may run while the lane may be inactive. Only exports come between the first export and the done
+    # one (lowering.lower), so every export of the path runs under the same bit, and the done export's vm kills a lane
+    # that is off: `if (!ex) discard;` before the return (finish). A packed pair it exports must have been packed under
+    # a bit the export's implies.
+    for source in set(sources) - {"off"}:
+        if not all(implies(st.lines, st.ex, {bit}) for bit in st.pack_ex.get(source, {}).values()):
+            raise ValueError("Export of a pair packed while the exporting lane may have been inactive")
     if st.integer_export:
+        if st.ex != "true":
+            raise ValueError("Unsupported export")
         # lower(integer_export=True): the shader returns uint4 of the four bit patterns instead of binary32 values, so the
         # render target cannot canonicalize a NaN or flush a denormal: the lossless readback of integer moves, bit
         # operations and bitcasts (R0Y00/Xbox2Windows#363 by abilliontokens). Four distinct registers into mrt0.
@@ -170,6 +197,7 @@ def finish(st, layout, outputs):
     if st.layout is not None and st.layout != layout:
         raise ValueError("Paths of the program export different targets")
     st.layout = layout
+    discard_dead_lane(st)
     if layout == (("target0", 4, 0xf),):
         st.lines.append(f"    return {outputs[0][3]};")
     elif not layout:

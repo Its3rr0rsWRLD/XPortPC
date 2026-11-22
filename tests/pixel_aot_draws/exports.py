@@ -351,18 +351,28 @@ def check_exports_controls():
     plain = translate(lines)
     lines.insert(lines.index("exp mrt0 v16, v16, v17, v17 done compr vm"), "s_wqm_b64 exec, exec")
     assert translate(lines) == plain
-    # An export while this lane may be inactive is refused: the done export, one that is not done, and exp null.
+    # CF-2d: an export while this lane may be inactive is lowered (the done export's vm kills an inactive lane):
+    # the done export discards before its return, one that is not done only holds its value, and exp null discards
+    # before the void return. The integer-export readback still needs every lane active.
     for export in ("exp mrt0 v16, v16, v17, v17 done compr vm", "exp mrt0 v16, v16, v17, v17 compr",
                    "exp mrtz v12, off, off, off done vm", NULL_EXPORT):
         st = Lowering({}, {"v16": ("alu1", "alu2"), "v17": ("alu3", "alu4"), "v12": "alu5"}, [], {0: "tex"},
                       [1, 2, 3, 4], 64, {})
         st.ex = "ex9"
-        try:
-            dispatch(st, 1, export)
-        except ValueError as error:
-            assert "Unsupported export" in str(error), (export, str(error))
-        else:
-            raise AssertionError(f"{export!r} accepted with ex = {st.ex}")
+        dispatch(st, 1, export)
+        discards = st.lines.count("    if (!ex9) discard;")
+        assert discards == (" done " in export), (export, st.lines)
+        if discards:
+            assert st.lines.index("    if (!ex9) discard;") < next(n for n, line in enumerate(st.lines)
+                                                                    if line.startswith("    return")), st.lines
+    st = Lowering({}, {f"v{n}": f"alu{n}" for n in (12, 13, 14, 15)}, [], {0: "tex"}, [1, 2, 3, 4], 64, {})
+    st.ex, st.integer_export = "ex9", True
+    try:
+        dispatch(st, 1, "exp mrt0 v12, v13, v14, v15 done vm")
+    except ValueError as error:
+        assert "Unsupported export" in str(error), str(error)
+    else:
+        raise AssertionError("integer export accepted with ex = ex9")
     # An outstanding sample: the uncompressed export reads the sample before vmcnt(0).
     lines = [line for line in with_exports("exp mrt0 v12, v13, v14, v15 done vm") if not line.startswith("v_cvt_pkrtz")]
     lines.insert(lines.index("s_waitcnt vmcnt(0)"), "exp mrt1 v12, off, off, off")

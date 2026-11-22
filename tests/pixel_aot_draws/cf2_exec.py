@@ -541,10 +541,15 @@ def check_cf2_exec_controls():
     # The SDWA and DPP compares are not masked yet; branches on EXEC are CF-2c.
     refused("Invalid comparison", lane("ex3"), 22, "v_cmp_lt_f32_sdwa vcc_lo, v12, v13 src0_sel:DWORD src1_sel:DWORD")
 
-    # Through lower(): a narrowed EXEC must be restored before the export.
-    rejected("Unsupported pack operand", [line for line in IF_ELSE if line != "s_mov_b64 exec, s[60:61]"])
-    rejected("Unsupported pack operand", [line for line in CMPX_REGION if line != "s_mov_b64 exec, s[62:63]"])
-    rejected("Unsupported pack operand", ["v_cmpx_lt_f32_e32 s44, v12"])
+    # Through lower(): a narrowed EXEC that is not restored reaches the export, which since CF-2d discards the lanes
+    # that are off (family cf2_discard); a pair packed under the narrowed EXEC and exported after the restore is refused.
+    for body in ([line for line in IF_ELSE if line != "s_mov_b64 exec, s[60:61]"],
+                 [line for line in CMPX_REGION if line != "s_mov_b64 exec, s[62:63]"], ["v_cmpx_lt_f32_e32 s44, v12"]):
+        assert ") discard;" in translate(with_constants(body))
+    program = with_constants(["s_mov_b64 s[62:63], exec", "v_cmpx_lt_f32_e32 s44, v12"])
+    pack = program.index("v_cvt_pkrtz_f16_f32_e32 v17, v14, v15") + 1
+    program[pack:pack] = ["s_mov_b64 exec, s[62:63]"]
+    must_reject(translate, program)
     # s_cbranch_exec* are lowered since CF-2c (family cf2_skip); a skip over the else form, which restores a mask
     # saved outside the skipped region, is refused.
     for branch in ("s_cbranch_execz", "s_cbranch_execnz"):

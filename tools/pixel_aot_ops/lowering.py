@@ -73,6 +73,13 @@ class Lowering:
         # CF-2c: HLSL names a VGPR took unmasked because it had no value before (masked_writes); a lane that was
         # inactive holds something else on the console, so they are never wave-uniform.
         self.lane_values = set()
+        # CF-2d: (index, bit) of the last mask operation, whose SCC (D != 0) is lane local: this lane's part of it is
+        # its bit of D. Only s_cbranch_scc0 to the all-lanes-dead block reads it (control_flow.program).
+        self.lane_scc = None
+        # CF-2d: the lane bits a v_cvt_pkrtz_f16_f32 ran under while the lane may have been inactive, by destination
+        # VGPR and instruction index. The packed pair is not masked (it is no word); the export it feeds must run under
+        # a bit that implies each of them, so that a lane that exports holds the new pair.
+        self.pack_ex = {}
 
     @property
     def sample_pending(self):
@@ -120,6 +127,8 @@ def masked_writes(st, i, ex, before):
     instruction wrote keeps its old value when the lane is inactive, `v = ex ? new : old`. A register with no value
     before takes the new one (a refinement of an undefined register). Both values must be 32-bit words."""
     for reg, value in list(st.vector.items()):
+        if i in st.pack_ex.get(reg, {}):
+            continue
         old = before.get(reg)
         if old is None and value is not None:
             st.lane_values.add(word_expr(value) or str(value))

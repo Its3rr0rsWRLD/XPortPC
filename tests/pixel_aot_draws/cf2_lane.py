@@ -133,18 +133,22 @@ def check_cf2_lane_controls():
     refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v23, 1.0")
     refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v0, 1.0")
     # What cannot be masked yet is refused while the lane may be inactive: SDWA lane-mask writes (VOPC ones are masked
-    # since CF-2b, family cf2_exec), interpolation, loads, the sample, the pack and the export (CF-2d discards dead lanes).
+    # since CF-2b, family cf2_exec), interpolation and loads. The pack is not masked but recorded, and the export
+    # discards the lane when it is off (CF-2d, family cf2_discard).
     st.wqm = True
     st.scalar.update({"m0": "interp_base", "vcc": ("condition", "cmp1", 0, 1)})
     for text, line in (("Invalid comparison", "v_cmp_lt_f32_sdwa vcc_lo, v12, v13 src0_sel:DWORD src1_sel:DWORD"),
                        ("Unknown interpolation context", "v_interp_p1_f32_e32 v8, v0, attr0.x"),
                        ("Unknown interpolation context", "v_interp_mov_f32_e32 v8, p0, attr1.x"),
-                       ("Unsupported pack operand", "v_cvt_pkrtz_f16_f32_e32 v16, v12, v13"),
-                       ("Unsupported pack operand", "v_cvt_pkrtz_f16_f32_e64 v16, v12, v13"),
                        ("Unsupported instruction", "s_wqm_b64 exec, exec")):
         refused(text, st, 16, line)
-    st.vector.update({"v16": ("sample4.x", "sample4.y"), "v17": ("sample4.z", "sample4.w")})
-    refused("Unsupported export", st, 17, "exp mrt0 v16, v16, v17, v17 done compr vm")
+    step(st, 16, "v_cvt_pkrtz_f16_f32_e32 v16, v12, v13")
+    assert st.vector["v16"] == ("sample4.x", "sample4.y") and st.pack_ex == {"v16": {16: "ex9"}}, st.pack_ex
+    st.vector.update({"v17": ("sample4.z", "sample4.w")})
+    step(st, 17, "exp mrt0 v16, v16, v17, v17 done compr vm")
+    assert st.lines[-2:] == ["    if (!ex9) discard;", "    return float4(export16(sample4.x), export16(sample4.y), "
+                             "export16(sample4.z), export16(sample4.w));"], st.lines[-2:]
+    st.exported = False
     for text, line in (("Invalid image operation", "image_load v[12:15], v[8:9], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D unorm"),
                         ("Invalid buffer load", "buffer_load_dword v20, v12, s[28:31], 0 offen"),
                         ("Invalid global load", "global_load_dword v20, v[12:13], off")):
@@ -160,7 +164,7 @@ def check_cf2_lane_controls():
     # the paths of a uniform branch is refused at the join.
     narrowed = with_constants(["v_cmp_lt_f32_e64 s[60:61], v12, v13", "s_and_b64 exec, exec, s[60:61]",
                                "v_mov_b32_e32 v12, 1.0"])
-    must_reject_for("Unsupported pack operand", translate, narrowed)
+    assert "    if (!ex" in translate(narrowed)  # since CF-2d the export discards the lanes that are off
     program = with_constants([])
     sample = program.index("image_sample v[12:15], v[8:9], s[28:35], s[40:43] dmask:0xf dim:SQ_RSRC_IMG_2D")
     for mask, accepted in (("s[60:61]", False), ("s[50:51]", True)):  # a compare's mask, or the saved EXEC
@@ -168,8 +172,8 @@ def check_cf2_lane_controls():
         if accepted:
             assert "bool ex" not in translate(twin)
         else:
-            # Since CF-2c the sample is masked (family cf2_skip); the export still needs EXEC restored.
-            must_reject_for("Unsupported pack operand", translate, twin)
+            # Since CF-2c the sample is masked (family cf2_skip); since CF-2d the export discards the lanes that are off.
+            assert "    if (!ex" in translate(twin)
     split = with_constants(["v_cmp_lt_f32_e64 s[60:61], v12, v13", "s_cmp_eq_u32 s44, s45", "s_cbranch_scc1 BB0_1",
                             "s_and_b64 exec, exec, s[60:61]", "BB0_1:"])
     must_reject_for("Execution or load state differs at a join", translate, split)

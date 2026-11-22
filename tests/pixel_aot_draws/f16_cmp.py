@@ -299,7 +299,6 @@ def check_f16_cmp_controls():
                       "v_cmp_lt_f16_sdwa vcc_lo, 1.5, v13 src0_sel:WORD_1 src1_sel:WORD_0",
                       "v_cmp_class_f16_sdwa vcc_lo, s44, 1.0 src0_sel:WORD_0 src1_sel:DWORD",
                       "v_cmp_lt_f16_dpp vcc_lo, v13, v14 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
-                      "v_cmpx_lt_f16_e32 s44, v13", "v_cmpx_class_f16_e32 s44, v13",
                       "v_cmp_class_f16_e64 s0, s44, 1.0", "v_cmp_class_f16_e64 s0, s44, 0.5",
                       "v_cmp_class_f16_e64 s0, s44, -s45", "v_cmp_class_f16_e64 s0, s44, |s45|",
                       "v_cmp_class_f16_e64 s0, s44, 0x123456789",
@@ -310,6 +309,7 @@ def check_f16_cmp_controls():
                       "v_cmp_lt_f16_e32 vcc_lo, s44, v30", "v_cmp_class_f16_e32 vcc_lo, s44, v30",
                       "v_cmp_class_f16_e32 vcc_lo, v30, s44"):
         must_reject(translate, with_constants([operation]))
+    # (v_cmpx_lt_f16_e32 / v_cmpx_class_f16_e32 before the export are kills since CF-2d, family cf2_discard.)
     # A source cannot be read before the sample or the scalar load it depends on arrives.
     program = with_constants(["v_cmp_lt_f16_e32 vcc_lo, s44, v13"])
     translate(program)

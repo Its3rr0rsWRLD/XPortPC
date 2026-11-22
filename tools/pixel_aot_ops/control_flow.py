@@ -88,8 +88,39 @@ def implies(lines, name, implied, depth=0):
     pattern = re.compile(rf"\s*bool {re.escape(name)} = (.*);")
     for line in reversed(lines):
         if m := pattern.fullmatch(line):
-            return any(implies(lines, part, implied, depth + 1) for part in conjuncts(m[1]))
-    return False
+            if any(implies(lines, part, implied, depth + 1) for part in conjuncts(m[1])):
+                return True
+            break
+    if depth:
+        return False
+    # CF-2d: a conjunction implies another when it has every operand of it, both expanded through the bool names
+    # they are made of (the exact mask after a kill, `bool lm = !cmp`, implies the killed EXEC, `bool ex = !cmp`).
+    held = atoms(lines, name)
+    return "false" in held or any(atoms(lines, other) <= held for other in implied)
+
+
+def atoms(lines, expression, depth=0):
+    """The operands of a bool expression read as a conjunction, with every name that the HLSL text defines once (as
+    `bool name = ...;`, never assigned again) replaced by the operands of its definition; true is no operand."""
+    out = set()
+    for part in conjuncts(expression):
+        if part == "true":
+            continue
+        definition = defined_once(lines, part) if depth < 16 else None
+        if definition is None:
+            out.add(part)
+        else:
+            out |= atoms(lines, definition, depth + 1)
+    return frozenset(out)
+
+
+def defined_once(lines, name):
+    if not re.fullmatch(r"[A-Za-z_]\w*", name):
+        return None
+    definitions = [m[1] for line in lines if (m := re.fullmatch(rf"\s*bool {name} = (.*);", line))]
+    if len(definitions) != 1 or any(re.fullmatch(rf"\s*{name} = .*;", line) for line in lines):
+        return None
+    return definitions[0]
 
 
 # Functions whose result depends only on their arguments, for the uniformity lattice (CF-2 section 5): the HLSL
@@ -375,6 +406,33 @@ def program(st, blocks, labels, latch_of):
             if narrow:
                 check_exec(before)
 
+    def lane_mask_scc(block):
+        """Whether SCC at the end of `block` is the lane-local SCC of a mask operation in it (st.lane_scc), with no
+        instruction after it that may write SCC."""
+        if st.lane_scc is None or st.scc is not None:
+            return False
+        after = [text for index, text in block["ins"] if index > st.lane_scc[0]]
+        return any(index == st.lane_scc[0] for index, _ in block["ins"]) and not any(
+            text.startswith("s_") and not re.match(r"s_(waitcnt|nop|mov_|movk_|clause|load_|buffer_load_)", text)
+            for text in after)
+
+    def cleared_by_region(old, new, entry):
+        """CF-2d: a lane mask the region only cleared bits of, for lanes it ran active: new is `old && !y` (the kill of
+        an outer save, s_andn2_b64 S, S, M) with y implying the region's entry bit. A lane the wave skipped the region
+        for has y false, so its bit is the same on both paths and needs no poison."""
+        if not (is_condition(old) and is_condition(new) and old[2:] == new[2:]):
+            return False
+        definition = defined_once(st.lines, new[1])
+        if definition is None:
+            return False
+        parts = conjuncts(definition)
+        for n, part in enumerate(parts):
+            rest = parts[:n] + parts[n + 1:]
+            if part.startswith("!") and implies(st.lines, part[1:], {entry}) \
+                    and atoms(st.lines, " && ".join(rest) or "true") == atoms(st.lines, old[1]):
+                return True
+        return False
+
     def is_null(k):
         return [text for _, text in blocks[k]["ins"]] == NULL_BLOCK and blocks[k]["term"] is None
 
@@ -410,7 +468,8 @@ def program(st, blocks, labels, latch_of):
             st.ex = before["ex"]
         if before["ex"] != "true":
             for reg in set(before["scalar"]) | set(after["scalar"]):
-                if before["scalar"].get(reg) != after["scalar"].get(reg):
+                if before["scalar"].get(reg) != after["scalar"].get(reg) and not cleared_by_region(
+                        before["scalar"].get(reg), after["scalar"].get(reg), before["ex"]):
                     st.scalar[reg] = POISON
             if before["scc"] != after["scc"]:
                 st.scc = None
@@ -453,6 +512,19 @@ def program(st, blocks, labels, latch_of):
                 if st.ex != "true":
                     narrow.append({st.ex})
                     dead_skips.add(st.ex)
+                k += 1
+                continue
+            if term[0] == "cbr" and not term[1] and target > k and is_null(target) and lane_mask_scc(block):
+                # CF-2d: s_andn2_b64 Sexact, Sexact, M; s_cbranch_scc0 to the all-lanes-dead block (a kill, also in
+                # whole-quad mode): SCC is the wave's question whether any lane is left in the exact mask, so the
+                # branch is not taken. A lane whose exact bit is clear must already be off and stay off to the end.
+                bit = st.lane_scc[1]
+                if not implies(st.lines, st.ex, {bit}):
+                    raise ValueError("Kill branch while a lane outside the exact mask may be active")
+                null_targets.add(target)
+                narrow.append({bit} if st.ex == bit else {bit, st.ex} - {"true"})
+                dead_skips.add(bit)
+                st.scc = None
                 k += 1
                 continue
             if target <= k:

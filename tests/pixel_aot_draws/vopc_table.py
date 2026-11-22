@@ -328,7 +328,7 @@ def check_vopc_table_controls():
         "v_cmp_lt_i16_e32 vcc_lo, s44, v30", "v_cmp_lt_u16_e32 vcc_lo, v30, s44",
         "v_cmp_f_i16_e32 vcc_lo, s44, v18", "v_cmp_t_u16_e32 vcc_lo, s44, v18", "v_cmp_f_u16_e64 s0, s44, v18",
         "v_cmp_lt_i16_dpp vcc_lo, v18, v19 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
-        "v_cmpx_lt_i16_e32 s44, v18", "v_cmpx_lt_u16_e64 s0, s44, v18",
+        "v_cmpx_lt_u16_e64 s0, s44, v18",  # (v_cmpx_lt_i16_e32 before the export is a kill since CF-2d)
         "v_cmp_lt_i16_e64 s0, s44, v13 mul:2", "v_cmp_lt_u16_e64 s0, s44, v18 div:2",
         # Neighbours of the f32, f16, class and 32-bit integer forms.
         "v_cmp_lt_f32_e64 s0, s44, v18 clamp",

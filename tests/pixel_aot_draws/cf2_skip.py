@@ -462,7 +462,7 @@ def check_cf2_skip_controls():
         with_constants([]), "exp mrt0 v16, v16, v17, v17 done compr vm",
         ["s_cbranch_execz BB0_2", "BB0_1:", "exp mrt0 v16, v16, v17, v17 done compr vm", "BB0_2:"]))
     # The all-lanes-dead block: a skip to it is not taken. After it EXEC may only narrow, so a killed lane cannot
-    # come back, and (until CF-2d discards dead lanes) the export still needs EXEC provably on.
+    # come back, and the export discards it (CF-2d).
     null = ["exp null off, off, off, off done vm", "s_endpgm"]
     accepted = with_constants(["s_cbranch_execz BB0_9", "v_mov_b32_e32 v12, 1.0"]) + ["BB0_9:", *null]
     assert "exp null" not in translate(accepted)
@@ -473,8 +473,9 @@ def check_cf2_skip_controls():
                                   "s_cbranch_execz BB0_2", "v_cmpx_lt_f32_e32 s45, v13", "s_cbranch_execz BB0_9",
                                   "BB0_2:", "s_mov_b64 exec, s[60:61]"]) + ["BB0_9:", *null]
     rejected("EXEC re-enabled inside a skipped region", nested_kill)
-    rejected("Unsupported pack operand", with_constants(["v_cmpx_lt_f32_e32 s44, v12", "s_cbranch_execz BB0_9"])
-             + ["BB0_9:", *null])
+    # Since CF-2d the killed lane is discarded at the export (family cf2_discard).
+    assert "    if (!ex" in translate(with_constants(["v_cmpx_lt_f32_e32 s44, v12", "s_cbranch_execz BB0_9"])
+                                    + ["BB0_9:", *null])
     # A skip to a block that is not the dead block is an ordinary skip, so its region must end inside the program.
     rejected("Branch leaves its region", with_constants(["s_cmp_eq_u32 s44, s45",
                                                          "s_cbranch_scc1 BB0_2", "s_cbranch_execz BB0_3", "BB0_2:",

@@ -243,7 +243,9 @@ def move_mask(st, i, m):
     bit = read_mask(st, src)
     saved = st.scalar.get(_pair(src)[0]) if src.startswith("s[") else None
     write_mask(st, i, dst, bit, widens=src == "-1")
-    if dst == "exec" and isinstance(saved, Saved) and st.ex == "true":
+    if dst == "exec" and isinstance(saved, Saved) and (st.ex == "true" or not saved.wqm):
+        # CF-2d: a mask saved outside whole-quad mode leaves it also when the lane may be inactive (the restore of
+        # the exact mask after a kill).
         st.wqm = saved.wqm
     elif dst.startswith("s[") and isinstance(saved, Saved):
         for reg in _pair(dst):
@@ -258,13 +260,21 @@ def mask_op_to_special(st, i, m):
     a, b = read_mask(st, src0), read_mask(st, src1)
     write_mask(st, i, dst, MASK_OPS[op](a, b), widens=widens(MASK_OPS[op], (src0, src1)))
     st.scc = None  # lane local
+    st.lane_scc = (i, st.ex if dst == "exec" else st.scalar["vcc"][1])
 
 
 def mask_op(st, i, op, dst, src0, src1):
     """A mask operation into an SGPR pair (sop2.py claims the text and calls this when a source is a lane mask)."""
     a, b = read_mask(st, src0), read_mask(st, src1)
+    saved = st.scalar.get(_pair(src0)[0]) if dst == src0 and op in ("and", "andn2") else None
     write_mask(st, i, dst, MASK_OPS[op](a, b))
     st.scc = None  # lane local
+    st.lane_scc = (i, st.scalar[_pair(dst)[0]][1])
+    if isinstance(saved, Saved):
+        # CF-2d: the exact mask narrowed in place by a kill (s_andn2_b64 Sexact, Sexact, M) is still the mask saved
+        # before whole-quad mode, so restoring it leaves whole-quad mode as before.
+        for reg in _pair(dst):
+            st.scalar[reg] = Saved(st.scalar[reg], saved.wqm)
 
 
 @form(rf"s_({'|'.join(SAVEEXEC_OPS)})_saveexec_b64 (s\[\d+:\d+\]|vcc), ([^,\s]+)")
