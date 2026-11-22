@@ -29,7 +29,9 @@ MODIFIABLE = {"cvt_flr_i32_f32", "cvt_rpi_i32_f32", "cvt_i16_f16", "cvt_u16_f16"
 PLAIN = r"[vs]\d+|-?\d+|0x[0-9a-f]{1,8}|-?\d+\.\d+"
 MODIFIED = re.compile(r"-[vs]|-?\||-?abs\(")
 
+# SALU_HELPERS are emitted before the preamble helpers (hlsl.HELPERS), so ftz32 is declared forward here.
 SALU_HELPERS["mad_legacy32"] = (
+    "float ftz32(float value);\n"
     "float mad_legacy32(float a, float b, float c) {\n"
     "    precise float product = (ftz32(a) == 0.0f || ftz32(b) == 0.0f) ? 0.0f : ftz32(ftz32(a) * ftz32(b));\n"
     "    precise float sum = product + ftz32(c);\n"
