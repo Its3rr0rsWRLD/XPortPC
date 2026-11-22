@@ -316,6 +316,28 @@ SALU_HELPERS = {
         "    return t.Load(int3(int(x), int(y), int(mip)));\n"
         "}"
     ),
+    # The texel offset of an offset MIMG form is packed in its first address VGPR as three signed 6-bit fields, x in
+    # bits 5:0 and y in bits 13:8 (z, bits 21:16, is unused by a 2D read), the layout Mesa's ACO and radv pack for
+    # RDNA. Direct3D can only give a literal offset, so the offset is added to the coordinate in texels of the level
+    # that is read; under point filtering and clamp addressing, moving the coordinate by whole texels reads the texel
+    # that many texels away, clamped at the edge, as the offset does. The addition is exact for the power-of-two level
+    # sizes; at other sizes a coordinate within one binary32 ulp of a texel edge could land on the other side of it.
+    "image_offset_uv": (
+        "float2 image_offset_uv(Texture2D<float4> t, float2 uv, float level, uint packed) {\n"
+        "    uint w, h, levels;\n"
+        "    t.GetDimensions(uint(level), w, h, levels);\n"
+        "    int2 o = int2(asint(packed << 26u) >> 26, asint((packed >> 8u) << 26u) >> 26);\n"
+        "    return uv + float2(o) / float2(float(w), float(h));\n"
+        "}"
+    ),
+    # The nearest level of an explicit lod, clamped to the levels that exist.
+    "image_level": (
+        "float image_level(Texture2D<float4> t, float lod) {\n"
+        "    uint w, h, levels;\n"
+        "    t.GetDimensions(0u, w, h, levels);\n"
+        "    return clamp(floor(lod + 0.5f), 0.0f, float(levels - 1u));\n"
+        "}"
+    ),
     "image_resinfo": (
         "uint4 image_resinfo2d(Texture2D<float4> t, uint mip) {\n"
         "    uint w, h, levels;\n"
