@@ -959,8 +959,158 @@ NEUTRAL_PROGRAMS = [
 ]
 
 
+# Family `lanes` (C-7): v_readfirstlane_b32 of a wave-uniform value. Program A (the corpus's shading-rate shape): 8x8
+# workgroups (wave64) narrow EXEC to the threads inside two bounds and skip the rest with s_cbranch_execz; inside, two
+# values built only from constant words are rounded (v_rndne_f32), converted and read with v_readfirstlane_b32 while
+# EXEC is narrowed, so their VGPRs hold masked writes (an inactive thread keeps the value from before the region). The
+# first, clamped to at least 1 by s_max_u32, is the trip count of a uniform loop; the second is stored. Program B (the
+# corpus's headless shape): one-thread workgroups load a count at the group's own address, read it with
+# v_readfirstlane_b32 into an SGPR and run a scalar Fibonacci loop on it (one lane per wave: the first active lane is
+# the thread itself). Both use the V# at descriptor 0 (constant words 8 to 11).
+LANES_A = [
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[12:15], s[2:3], null",
+    "v_lshl_add_u32 v2, s8, 3, v0",
+    "v_lshl_add_u32 v3, s9, 3, v1",
+    "v_cvt_f32_u32_e32 v1, s6",
+    "v_cvt_f32_u32_e32 v5, s4",
+    "v_cmp_gt_u32_e32 vcc, s4, v2",
+    "v_cmp_gt_u32_e64 s[0:1], s5, v3",
+    "s_and_b64 exec, vcc, s[0:1]",
+    "s_cbranch_execz BB9",
+    "v_mul_f32_e32 v1, s7, v1",
+    "v_mul_f32_e32 v5, 0x3e800000, v5",
+    "v_rndne_f32_e32 v1, v1",
+    "v_rndne_f32_e32 v5, v5",
+    "v_cvt_u32_f32_e32 v1, v1",
+    "v_cvt_u32_f32_e32 v5, v5",
+    "v_readfirstlane_b32 s0, v1",
+    "v_readfirstlane_b32 s1, v5",
+    "s_max_u32 s0, 1, s0",
+    "v_mov_b32_e32 v6, 0",
+    "s_mov_b32 s10, 0",
+    "BB2:",
+    "s_cmp_ge_u32 s10, s0",
+    "s_cbranch_scc1 BB4",
+    "v_xor_b32_e32 v7, s10, v3",
+    "v_lshl_add_u32 v6, v6, 1, v7",
+    "s_add_u32 s10, s10, 1",
+    "s_branch BB2",
+    "BB4:",
+    "v_mov_b32_e32 v7, s1",
+    "v_lshl_add_u32 v8, v3, 4, v2",
+    "v_lshlrev_b32_e32 v8, 3, v8",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dwordx2 v[6:7], v8, s[12:15], 0 offen",
+    "BB9:",
+    "s_endpgm",
+]
+LANES_A_CONTRACT = {"numthreads": (8, 8, 1), "wave": 64, "local_ids": 2,
+                    "sgprs": {"s2": "descriptors", **{f"s{4 + n}": f"user:{n}" for n in range(4)},
+                              "s8": "group_id.x", "s9": "group_id.y"},
+                    "buffer_descriptors": {0: 8}}
+LANES_B = [
+    "s_cmp_lt_u32 s3, 24",
+    "s_cbranch_scc0 BB11",
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[4:7], s[2:3], null",
+    "s_lshl_b32 s0, s0, 2",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dword v0, off, s[4:7], s0",
+    "s_waitcnt vmcnt(0)",
+    "v_readfirstlane_b32 s1, v0",
+    "s_cmp_lt_u32 1, s1",
+    "s_cbranch_scc0 BB9",
+    "s_mov_b32 s2, 1",
+    "s_mov_b32 s3, 1",
+    "s_mov_b32 s8, 2",
+    "BB3:",
+    "s_cmp_ge_u32 s8, s1",
+    "s_cbranch_scc1 BB7",
+    "s_add_u32 s3, s2, s3",
+    "s_add_u32 s8, s8, 1",
+    "s_xor_b32 s3, s3, s2",
+    "s_xor_b32 s2, s3, s2",
+    "s_xor_b32 s3, s3, s2",
+    "s_branch BB3",
+    "BB7:",
+    "s_mov_b32 s1, s2",
+    "BB9:",
+    "v_mov_b32_e32 v0, s1",
+    "buffer_store_dword v0, off, s[4:7], s0",
+    "BB11:",
+    "s_endpgm",
+]
+LANES_B_CONTRACT = {"numthreads": (1, 1, 1), "wave": 64, "local_ids": 1,
+                    "sgprs": {"s2": "descriptors", "s3": "group_id.x"}, "buffer_descriptors": {0: 8}}
+LANES_BASE = 0x3_0000_1000
+
+
+def rndne_u32(bits, flaws):
+    """v_rndne_f32 then v_cvt_u32_f32 of a finite non-negative value (truncation in the wrong reference)."""
+    value = f32_value(bits)
+    n, rest = divmod(value.numerator, value.denominator)
+    if "truncate" not in flaws and (2 * rest > value.denominator or (2 * rest == value.denominator and n & 1)):
+        n += 1
+    return n
+
+
+def lanes_a_reference(inputs, flaws):
+    seed, bound_x, bound_y, count, scale = inputs
+    before = cf_memory(seed)[:8 * 256]
+    memory = Memory([(LANES_BASE, LANES_BASE + len(before), 0)], [before])
+    constants = [0] * 64
+    constants[0:4] = [bound_x, bound_y, count, scale]
+    constants[8:12] = vsharp(LANES_BASE, 0, len(before), 3)
+    trips = rndne_u32(mul(scale, f32_bits(Fraction(count))), flaws)
+    second = rndne_u32(mul(0x3e800000, f32_bits(Fraction(bound_x))), flaws)
+    if "swap" in flaws:
+        trips, second = second, trips
+    if "no_max" not in flaws:
+        trips = max(1, trips)
+    for y in range(16):
+        for x in range(16):
+            if not (x < bound_x and y < bound_y) and "no_mask" not in flaws:
+                continue
+            total = 0
+            for k in range(trips):
+                total = (total << 1) + (y ^ k) & M32
+            memory.store(LANES_BASE + 8 * (16 * y + x), total)
+            memory.store(LANES_BASE + 8 * (16 * y + x) + 4, second)
+    return (2, 2, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+def lanes_b_reference(inputs, flaws):
+    seed, = inputs
+    counts = [(seed * 37 + 11 * n) % 48 for n in range(32)]
+    counts[3], counts[5] = 0, 1
+    before = struct.pack("<32I", *counts)
+    memory = Memory([(LANES_BASE, LANES_BASE + len(before), 0)], [before])
+    constants = [0] * 64
+    constants[8:12] = vsharp(LANES_BASE, 0, len(before), 3)
+    for group in range(32):
+        if group >= 24 and "no_bound" not in flaws:
+            continue
+        n = 0 if "read_zero" in flaws else counts[group]
+        if n > 1:
+            a, b = 1, 1
+            for _ in range(2, n - (1 if "one_less" in flaws else 0)):
+                a, b = (a + b) & M32, a
+            n = a
+        memory.store(LANES_BASE + 4 * group, n)
+    return (32, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+LANES_PROGRAMS = [
+    (LANES_A, LANES_A_CONTRACT, [(3, 13, 9, 7, 0x3f000000), (21, 10, 16, 1, 0x3e800000)], lanes_a_reference,
+     [{"no_mask"}, {"no_max"}, {"truncate"}, {"swap"}]),
+    (LANES_B, LANES_B_CONTRACT, [(5,), (12,)], lanes_b_reference, [{"no_bound"}, {"read_zero"}, {"one_less"}]),
+]
+
+
 FAMILIES = {"ids": IDS_PROGRAMS, "store": STORE_PROGRAMS, "integrate": INTEGRATE_PROGRAMS,
-            "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS}
+            "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS, "lanes": LANES_PROGRAMS}
 
 
 def check_reference_arithmetic():
@@ -1029,6 +1179,30 @@ def check_refusals():
                 "buffer_store_format_x v0, v4, s[8:11], 0 offen", "flat_store_dword v[4:5], v0"):
         must_reject(program(bad))
         must_reject(program(bad, store))
+    # C-7: v_readfirstlane_b32 of a wave-uniform value (forms/lanes.py). Accepted: a value built from the group id, and
+    # in a one-thread workgroup any value (the only lane is the first active one). Refused: a lane-varying or loaded
+    # value in a larger workgroup (a load at a uniform address too: another thread's store may land between two
+    # desktop waves' loads), a masked write read after EXEC is restored, a read while the wave may have no active lane
+    # (v_cmpx without a skip branch: with EXEC zero the console reads lane 0), a destination that is not an SGPR,
+    # v_readlane_b32 and the pixel stage.
+    masked = ["v_cmp_gt_u32_e64 s[20:21], 5, v0", "s_mov_b64 s[22:23], exec", "s_and_b64 exec, exec, s[20:21]"]
+    rfl_store = ["v_mov_b32_e32 v7, s5", "buffer_store_dword v7, v4, s[8:11], 0 offen"]
+    assert "uint rfl" in program("v_mov_b32_e32 v6, s0", "v_readfirstlane_b32 s5, v6", *rfl_store)()
+    one = {**base, "numthreads": (1, 1, 1)}
+    assert "uint rfl" in program("v_readfirstlane_b32 s5, v0", *rfl_store, contract=one)()
+    for body in (("buffer_load_dword v6, v4, s[8:11], 0 offen", "s_waitcnt vmcnt(0)"),
+                 ("buffer_load_dword v6, off, s[8:11], s0", "s_waitcnt vmcnt(0)"),
+                 ("v_mov_b32_e32 v6, s0", *masked, "v_mov_b32_e32 v6, 7", "s_mov_b64 exec, s[22:23]"),
+                 ("v_mov_b32_e32 v6, s0", "v_cmpx_gt_u32_e32 5, v0"),
+                 ("v_cvt_f32_u32_e32 v6, v0",)):
+        must_reject(program(*body, "v_readfirstlane_b32 s5, v6", *rfl_store))
+    assert "uint rfl" in program("v_mov_b32_e32 v6, s0", "v_cmpx_gt_u32_e32 5, v0", "s_cbranch_execz _L0",
+                                 "v_add_nc_u32_e32 v6, 7, v6", "v_readfirstlane_b32 s5, v6", *rfl_store, "_L0:")()
+    must_reject(program("v_mov_b32_e32 v6, s0", "v_cmpx_gt_u32_e32 5, v0", "s_cbranch_execz _L0",
+                        "v_add_nc_u32_e32 v6, v0, v6", "v_readfirstlane_b32 s5, v6", *rfl_store, "_L0:"))
+    for bad in ("v_readfirstlane_b32 s5, v[6:7]", "v_readfirstlane_b32 m0, v6", "v_readlane_b32 s5, v6, 0"):
+        must_reject(program("v_mov_b32_e32 v6, s0", bad, *rfl_store))
+    must_reject(common.translate, common.with_constants(["v_readfirstlane_b32 s60, v12"]))
     # Store operands and modifiers.
     for bad in ("buffer_store_dword v0, v4, s[8:11], 0 offen tfe", "buffer_store_dword v0, v4, s[8:11], 0 offen lds",
                 "buffer_store_dword v0, v4, s[8:11], 0 offen offset:4096", "buffer_store_dword v0, v4, s[8:11], 0",

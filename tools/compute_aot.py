@@ -39,7 +39,8 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_LOOKUP  # noqa: E402
-from pixel_aot_ops.control_flow import find_loops, poisoned_operands, program, split_blocks  # noqa: E402
+from pixel_aot_ops.control_flow import (find_loops, poisoned_operands, program, split_blocks,  # noqa: E402
+                                       uniform_names)
 from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
 from pixel_aot_ops.bindings import RADV_DESCRIPTOR_HIGH, SET_STRIDE, overlap, pointer_role, valid_key  # noqa: E402
 from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
@@ -70,8 +71,8 @@ LOCAL_IDS = ("local_id.x", "local_id.y", "local_id.z")
 LATER = (
     (r"ds_\w+.*", "LDS (groupshared) access is card C-6"),
     (r"s_barrier", "s_barrier is card C-6"),
-    (r"(v_readfirstlane_b32|v_readlane_b32|v_writelane_b32)\b.*",
-     "a cross-lane read or write needs a proof of wave uniformity (card C-7)"),
+    (r"(v_readlane_b32|v_writelane_b32)\b.*",
+     "a cross-lane read or write by lane index is refused (C-7 lowers v_readfirstlane_b32 of a wave-uniform value)"),
     (r"(v_mbcnt_\w+|s_bcnt[01]_i32_b(32|64)|s_ff[01]_i32_b(32|64)|s_flbit_i32\w*|s_bitreplicate_b64_b32)\b.*exec.*",
      "a lane count or lane index of EXEC depends on the wave size (card C-8)"),
     (r"v_mbcnt_\w+.*", "v_mbcnt depends on the wave size and the lane order (card C-8)"),
@@ -173,6 +174,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
                   () if sampler is None else tuple(("sampler", j) for j in range(4)),
                   -16 if constant_descriptor is None else constant_descriptor, vsharp_words)
     st.stage = "compute"
+    st.workgroup_threads = numthreads[0] * numthreads[1] * numthreads[2]  # forms/lanes.py (C-7)
     st.descriptor_high = descriptor_high
     st.storage_images.update(storage_images)
     st.sampler_offsets = {} if sampler is None else {sampler: "sampler"}
@@ -210,6 +212,13 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(poison_message(st, poisoned))
     if not st.ended:
         raise ValueError("Missing s_endpgm")
+    if st.uniform_claims:
+        # C-7: each v_readfirstlane_b32 result (forms/lanes.py) must be the same on every thread of the workgroup:
+        # built from constants, params[] words, group_id and pure functions of them.
+        uniform = uniform_names(st.lines, st.lane_values, roots=("group_id",))
+        for name in st.uniform_claims:
+            if name not in uniform:
+                raise ValueError(f"v_readfirstlane_b32 of a value that is not provably wave-uniform ({name})")
     return emit(st, numthreads)
 
 

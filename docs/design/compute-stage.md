@@ -1,10 +1,11 @@
 # Compute stage: design
 
-Status: C-1 to C-4 are implemented (`tools/compute_aot.py`, checked by `tests/compute_aot_check.py` and
-`tests/compute_aot_render.cpp`); C-5 to C-8 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
+Status: C-1 to C-4 and the first part of C-7 are implemented (`tools/compute_aot.py`, checked by
+`tests/compute_aot_check.py` and `tests/compute_aot_render.cpp`); C-5, C-6, C-8 and the rest of C-7 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
 the instruction lowerings stay in `tools/pixel_aot_ops/forms/` and are shared, and the compute stage adds only its entry
 contract, its terminator, its refusals and its test harness. With C-4, 12 of the 27 corpus compute shaders translate
-(see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18.
+(see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18. C-7's lane reads add headless
+(see [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)).
 
 ## What the corpus shows
 The corpus has 27 compute shaders (10 from Sascha Willems' Vulkan samples, 17 from Khronos Vulkan-Samples; licenses in
@@ -161,9 +162,9 @@ wave64 waves) are disabled at entry on the console and absent on desktop, which 
 A desktop wave has a different size (WARP, NVIDIA 32, AMD 32 or 64) and a different lane order, so anything that
 reads another lane or counts lanes cannot be computed by one thread. C-1 refuses, with the card that would accept it:
 
-- **Lane reads**: `v_readfirstlane_b32`, `v_readlane_b32`, `v_writelane_b32` (C-7, only for a value the translator
-  proves wave-uniform: one built from SGPRs, constants, the group id and loads from uniform addresses; the result is
-  then the value itself, with no wave intrinsic). Any other use stays refused.
+- **Lane reads**: `v_readfirstlane_b32`, `v_readlane_b32`, `v_writelane_b32` (C-7 lowers `v_readfirstlane_b32` of a
+  value the translator proves wave-uniform, with no wave intrinsic; see
+  [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)). Any other use stays refused.
 - **Lane counts and indices**: `v_mbcnt_*`, `s_bcnt1`, `s_ff1`, `s_flbit` of EXEC, and a lane mask read as a number
   (the register model refuses a saved mask used as data). C-8 recognizes the wave-aggregated atomic idiom of cull as a
   whole (the count of active lanes, one elected lane, one atomic for the wave; with a returned value, the base read back
@@ -282,6 +283,46 @@ Draw families of C-2 to C-4 (each also runs its wrong references; `controls` che
 
 The harness reads two optional sections after the expected memory ('X2WT' read images, 'X2WI' storage images with
 their expected texels, see tests/compute_aot_render.cpp) and binds root parameters 4 (two SRVs) and 5 (32 UAVs).
+
+## C-7: wave-uniform lane reads
+`v_readfirstlane_b32 sD, S0` (`tools/pixel_aot_ops/forms/lanes.py`, compute stage only) writes the SGPR with S0 of the
+first active lane of the wave, or of lane 0 when EXEC is zero. One HLSL thread is one console lane and there is no
+console wave on desktop (a desktop wave has another size and lane order), so the lowering never reads another thread.
+It is lowered in two cases and refused in every other:
+
+- **One-thread workgroup** (`numthreads` 1x1x1: headless and the n-body shaders whose `LocalSizeId` defaults to 1). The
+  wave has one lane, lane 0, which is both the first active lane and the lane read when EXEC is zero, so D is this
+  thread's S0 under any EXEC, whatever S0 is.
+- **A value the same on every thread of the workgroup.** Every lane of a wave belongs to one workgroup, so a value
+  that is uniform over the workgroup is uniform over the wave. What an active lane holds is S0 with each masked write
+  (`v = ex ? new : old`, lowering.masked_writes) whose lane bit the current EXEC bit implies replaced by its new word:
+  such a lane was active at that write. The lowering emits that value, and again every definition between those
+  writes and S0, under new names (`name_r<i>`, `uint rfl<i> = ...`), so that an inactive thread computes the same D as
+  the active ones; then a uniform loop bounded by D runs the same trips on every thread, and none runs a trip count
+  made from its stale registers. Once the whole text is lowered, `rfl<i>` must be in the uniformity lattice of
+  CF-2c (`control_flow.uniform_names`: constants, `params[]` words, pure functions, and in the compute stage
+  `group_id`), or the program is refused. The instruction must also run where the wave provably has an active lane
+  (EXEC bit true, or the bit of an `s_cbranch_execz` region, control_flow's `live` bits): with EXEC zero the console
+  reads lane 0, whose register a masked write may have left at its old value. An SGPR written inside a skipped region
+  is poisoned after it, as any other (CF-2c).
+
+Not uniform, and refused: anything that reads `local_id`, a masked write whose bit the current bit does not imply
+(read after EXEC is restored), and every load. A load at a uniform address returns one word to all lanes of a
+console wave at once, but the desktop threads of one console wave can sit in different desktop waves, and another
+thread's store to that address may land between their loads; the corpus's shader of this kind (headless) has
+one-thread workgroups and takes the first case. The Sascha Willems particle_calculate
+reads LDS words at a uniform address after a barrier, which is C-6 plus a lattice root for LDS after a barrier.
+
+Corpus: headless translates. generate_shading_rate lowers its two `v_readfirstlane_b32` (masked writes of values built
+from constant words, under the execz region) and then stops at `s_buffer_load_dwordx2 s[4:5], s[8:11], s1`, a constant
+load at a runtime SGPR offset (a loop index), the blocker of the three 16bit_arithmetic shaders and raytracing too.
+
+Draw family `lanes`: program A, the shading-rate shape (two bounds narrow EXEC under `s_cbranch_execz`, two
+constant-built values rounded and read under the narrowed EXEC, one the trip count of a uniform loop after
+`s_max_u32` with 1, the other stored); program B, the headless shape (one-thread workgroups, a count loaded at the
+group's address, read into an SGPR, a scalar Fibonacci loop). Wrong references: no mask, no max, truncation for
+`v_rndne_f32`, the two read values swapped; no group bound, the read value taken as 0, one trip fewer. `controls`
+checks the refusals above, `v_readlane_b32`, a vector or m0 destination and the pixel stage.
 
 ## Cards
 Counts are corpus shaders whose first translatable card it is (`tools/compute_aot.py survey`, "first_card"),

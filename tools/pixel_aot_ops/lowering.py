@@ -83,6 +83,10 @@ class Lowering:
         # CF-2c: HLSL names a VGPR took unmasked because it had no value before (masked_writes); a lane that was
         # inactive holds something else on the console, so they are never wave-uniform.
         self.lane_values = set()
+        # C-7 (forms/lanes.py): each masked-write name -> (the lane bit it was written under, the new word), and the
+        # names of v_readfirstlane_b32 results the compute stage must prove wave-uniform once the text is complete.
+        self.masked = {}
+        self.uniform_claims = []
         # CF-2d: (index, bit) of the last mask operation, whose SCC (D != 0) is lane local: this lane's part of it is
         # its bit of D. Only s_cbranch_scc0 to the all-lanes-dead block reads it (control_flow.program).
         self.lane_scc = None
@@ -153,6 +157,7 @@ def masked_writes(st, i, ex, before):
         if reg in st.sample_dest:
             name = f"mem_ex{i}_{reg[1:]}"
         st.lines.append(f"    uint {name} = {ex} ? {new_word} : {old_word};")
+        st.masked[name] = (ex, new_word)
         st.vector[reg] = ("uint", name)
 
 
