@@ -969,6 +969,48 @@ Not covered: RIP-relative constants, packed operations, `SQRT`, `MIN` and `MAX`,
 
 On Linux, `llvm-ml` assembled the fixture and `lld-link` linked it. The original machine code ran in-process through a Windows-ABI trampoline that loads each slot into both its integer and its XMM register. It matched the lifted C++ built with clang at `-O0`, `-O2` and `-O3` on every call, for both builds, and all rejection controls passed. The generated sources compile without warnings under clang-cl `/W4 /WX`. A Windows run of `cpu_aot_scalar_float` with ML64 and MSVC has not been recorded yet.
 
+## AVX2 leaf recompilation
+
+[The AVX2 leaf translator](../tools/cpu_avx2_aot.py) lifts bounded straight-line Windows x64 leaf functions covering all 28 AVX2 forms in `docs/coverage/x64_zen2.tsv` group `AVX2`:
+
+- 128-bit lane broadcast and permute: `vbroadcasti128` (`m128` source), `vextracti128`, `vinserti128`, `vperm2i128`
+- Element broadcasts: `vpbroadcastb`, `vpbroadcastw`, `vpbroadcastd`, `vpbroadcastq` (XMM and YMM destinations)
+- Cross-lane permutes: `vpermd`, `vpermpd`, `vpermps`, `vpermq`
+- Blend: `vpblendd` (XMM and YMM widths)
+- Variable shifts: `vpsllvd`, `vpsllvq`, `vpsravd`, `vpsrlvd`, `vpsrlvq` (XMM and YMM widths)
+- Indexed gathers (VSIB): `vgatherdps`, `vgatherdpd`, `vgatherqps`, `vgatherqpd`, `vpgatherdd`, `vpgatherdq`, `vpgatherqd`, `vpgatherqq` (all 16 VEX encodings across `vm32x`, `vm32y`, `vm64x`, `vm64y` and XMM/YMM widths)
+- Masked loads and stores: `vpmaskmovd`, `vpmaskmovq` (all 8 VEX encodings across XMM/YMM load and store forms)
+
+Each lifted export takes `(word rcx, word rdx, word r8)` pointing to caller-owned flat buffers and returns `void`. For transport and ABI glue the translator accepts `vmovdqu` (128- and 256-bit flat loads, stores and register copies), `vzeroupper` and terminal `ret`.
+
+### State model, memory semantics and explicit rejections
+
+YMM registers `ymm0`..`ymm5` are represented as a portable C++ value struct (`struct Vec256 { std::uint64_t q[4]; }`) rather than MSVC AVX2 intrinsics, so the generated C++ compiles with default x64 flags without `/arch:AVX2` and avoids C++ shift-width undefined behavior when shift counts are `>= 32` or `>= 64`. Every VEX write to an XMM destination zeroes bits 128..255 of the corresponding YMM register, and `vzeroupper` zeroes bits 128..255 of all defined YMM registers. `vpermd` and `vpermps` mask each 32-bit index to its low 3 bits; floating-point permutes and gathers transfer raw bits without canonicalization or FP exceptions. Per the AVX2 ISA, variable shifts do not wrap counts modulo lane width: unsigned lane counts `>= 32` (32-bit shifts) or `>= 64` (64-bit shifts) zero the lane in `vpsllvd`, `vpsllvq`, `vpsrlvd` and `vpsrlvq`, and fill the lane with the sign bit in `vpsravd`.
+
+Memory-domain AVX2 instructions follow the Intel SDM lane, fault-suppression and register-state rules:
+
+- **Indexed gathers (`vgather*` / `vpgather*`)**: each lane `i` within the instruction's gathered element count checks the MSB of `mask[i]`; when set, it loads 32 or 64 bits from `base + SignExtend(vindex[i]) * scale + disp` inside an `if` guard so masked-off lanes never dereference memory. Masked-off lanes within the gathered element count preserve their prior destination value; upper bits beyond the gathered element count are zeroed (bits `64..255` for `vgatherqps`/`vpgatherqd` with `vm64x`, bits `128..255` for other XMM-destination gathers). After every gather, the entire 256-bit mask register is zeroed.
+- **Masked loads and stores (`vpmaskmovd` / `vpmaskmovq`)**: masked loads read only lanes whose mask MSB is set and zero masked-off lanes (and bits `128..255` for XMM destinations) while preserving the mask register; masked stores write only lanes whose mask MSB is set and never touch masked-off memory locations.
+
+Memory-operand scope remains explicit: `vbroadcasti128` (`m128`), `vmovdqu` and `vpmaskmovd`/`vpmaskmovq` require flat `[base + disp]` addressing rooted in `rcx`, `rdx` or `r8`, and gathers require VSIB `[base + vindex*scale + disp]` with base in `rcx`/`rdx`/`r8`, SIB scale in `{1, 2, 4, 8}`, and pairwise distinct `dest`/`index`/`mask` vector registers. The translator explicitly rejects:
+
+- memory operands on all 17 register-only AVX2 forms;
+- overlapping gather destination/index/mask registers (including XMM/YMM cross-width aliases), illegal VSIB scales, missing/non-argument/32-bit/`rsp` bases, RIP-relative or GPR-indexed `vpmaskmov` operands, and reads of undefined `dest`/`index`/`mask`/`src` vector registers;
+- EVEX encodings (including EVEX gathers), instruction prefixes, nonvolatile vector registers (`xmm6`..`xmm15` / `ymm6`..`ymm15`), branches, out-of-scope instructions, missing terminal `ret` and unreachable instructions after `ret`.
+
+```powershell
+cmake --build --preset dev --target cpu_avx2_regs_original cpu_avx2_regs_original_lifted cpu_avx2_regs_altered_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_avx2_regs$' -V
+```
+
+### Measured results and open scope
+
+The [MASM fixture](../tests/cpu/avx2_regs.asm) builds 68 exports covering all 28 AVX2 forms (42 register-domain exports plus 18 gather exports and 8 `vpmaskmov` load/store exports) across XMM and YMM widths, ignored immediate bits, `vperm2i128` lane-zeroing control bits, IEEE-754 special bit patterns (signed zero, subnormals, infinities, sNaN and qNaN), boundary lane indices (`0`..`7` with high-bit noise), boundary shift counts (`0`, `1`, `15`, `31`, `32`, `33`, `63`, `64`, `65`, `128`, `0x100000001`, `0x7fffffff`, `0x80000000`, `0xffffffff`, `0xffffffffffffffff`), `vzeroupper` upper-lane clearing, a chained `op_pipeline` function, full/partial/zero masks (including `0x7fffffff`/`0x7fffffffffffffff` non-MSB checks), negative and boundary signed 32-bit and 64-bit VSIB indices, scales `1`/`2`/`4`/`8`, positive/negative displacements, all four gather dest-width/index-width combinations (including `vm64x` bits `64..255` zeroing and post-gather mask zeroing), and Windows `VirtualAlloc` + `PAGE_NOACCESS` guard-page fault-suppression checks for every gather and `vpmaskmov` export. [The Windows test](../tests/cpu/avx2_regs_check.py) checks 1,120 differential cases (772 register-domain + 348 memory-domain) and 34 guard-page fault-suppression cases across all 68 exports with 16-byte pre/post guards against both the native MASM DLL and an independent Python reference model.
+
+An `ALTER_IMM` variant changes the immediates or memory displacements of `op_perm2i128_mix`, `op_permq`, `op_pblendd_ymm`, `op_gatherdps_ymm` and `op_pmaskmovd_load_ymm`, and must match the altered reference while diverging from the unmodified reference on 14, 14, 16, 12 and 10 cases respectively. An output-mutation negative control flips one bit of `op_pipeline` and confirms the comparator fails. Rejection controls cover 59 unit cases (memory-operand variants of all 17 register-only AVX2 forms, 7 out-of-scope ops, 23 gather/maskmov/EVEX violations including overlapping dest/index/mask registers and unsupported addressing, and 12 ABI/state violations), 4 direct invalid-scale checks (`0`, `3`, `5`, `16`), and 9 end-to-end PE-patched DLL cases. In `tools/form_coverage.py`, `avx2_regs.asm` accounts for all 28 of 28 forms in `x64_zen2.tsv` group `AVX2`.
+
+Not covered by this experiment: memory operands on the 17 register-only AVX2 forms, control flow or calls mixed with AVX2 state, nonvolatile `XMM6`..`XMM15` save/restore prologues, and title CPU code execution.
+
 ## Offline pixel shader recompilation
 
 `tools/pixel_aot.py` extracts one named pixel program from a local archive, decodes gfx1013 instructions with LLVM and emits HLSL. DXC compiles the result to desktop DXIL before the draw. The lowerer tracks register writes across whole-quad interpolation of attribute 0, a scalar texture-descriptor load, a 2D RGBA sample, packed round-toward-zero binary16 conversions and one compressed color export. Unknown instructions, mismatched bindings and reads before the required wait cause translation to fail. [LLVM disassembler API](https://llvm.org/docs/doxygen/group__LLVMCDisassembler.html) · [Leonida public format reference](https://github.com/ItsNotRexed/Leonida/blob/56f023a10a726da20702d4e121656ceda2391d93/tools/fssm_unpack.py)

@@ -392,6 +392,44 @@ def check_cpu_records():
             report = fc.measure(results, root, {test: forms})
             assert report['x64_zen2']['covered'] == 0
             assert len(report['x64_zen2']['blocked_by_skip']) == (12 if state == 'skip' else 0)
+def check_avx2_regs():
+    """avx2_regs.asm covers all 28 AVX2 forms in docs/coverage/x64_zen2.tsv group AVX2."""
+    expected_avx2 = {
+        "vbroadcasti128", "vextracti128", "vinserti128", "vperm2i128",
+        "vpbroadcastb", "vpbroadcastw", "vpbroadcastd", "vpbroadcastq",
+        "vpermd", "vpermpd", "vpermps", "vpermq",
+        "vpblendd",
+        "vpsllvd", "vpsllvq", "vpsravd", "vpsrlvd", "vpsrlvq",
+        "vgatherdpd", "vgatherdps", "vgatherqpd", "vgatherqps",
+        "vpgatherdd", "vpgatherdq", "vpgatherqd", "vpgatherqq",
+        "vpmaskmovd", "vpmaskmovq",
+    }
+    reference = fc.load_reference("x64_zen2.tsv")
+    all_avx2 = {form for group, form in reference if group == "AVX2"}
+    assert expected_avx2 == all_avx2 and len(all_avx2) == 28
+
+    asm_text = (fc.ROOT / "tests" / "cpu" / "avx2_regs.asm").read_text(encoding="utf-8")
+    found = fc.masm_mnemonics(asm_text)
+    assert expected_avx2 <= found, expected_avx2 - found
+
+    passed = fc.measure({"cpu_aot_avx2_regs": "pass"})
+    assert passed["fixtures"]["avx2_regs.asm"] == "pass"
+    assert "avx2_regs.asm" not in passed["unclassified"]
+    avx2_group = passed["x64_zen2"]["groups"]["AVX2"]
+    assert avx2_group == {"covered": 28, "total": 28}, avx2_group
+    with tempfile.TemporaryDirectory() as tmp:
+        root = sample_repo(tmp, {"avx2_regs": asm_text})
+        only_pass = fc.measure({"cpu_aot_avx2_regs": "pass"}, root)["x64_zen2"]
+        only_skip = fc.measure({"cpu_aot_avx2_regs": "skip"}, root)["x64_zen2"]
+        only_fail = fc.measure({"cpu_aot_avx2_regs": "fail"}, root)["x64_zen2"]
+        assert only_pass["groups"]["AVX2"] == {"covered": 28, "total": 28}
+        assert only_pass["fixture_forms_not_in_reference"] == []
+        assert only_skip["groups"]["AVX2"] == {"covered": 0, "total": 28}
+        for form in expected_avx2:
+            assert f"AVX2 {form}" in only_skip["blocked_by_skip"]
+        assert only_fail["groups"]["AVX2"] == {"covered": 0, "total": 28}
+        assert only_fail["blocked_by_skip"] == []
+
 
 if __name__ == "__main__":
     check_denominators()
@@ -404,4 +442,5 @@ if __name__ == "__main__":
     check_shader_records()
     check_parsing()
     check_dashboard()
+    check_avx2_regs()
     print("form coverage checks passed")
