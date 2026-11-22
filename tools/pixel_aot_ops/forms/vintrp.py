@@ -88,6 +88,10 @@ def interpolate_move(st, i, m):
     value = {"0": vertex(0), "10": f"({vertex(1)} - {vertex(0)})", "20": f"({vertex(2)} - {vertex(0)})"}[param]
     st.flat_attrs.add(attr)
     st.vector[dst] = f"alu{i}"
+    if st.wqm:
+        # The primitive's vertex values, the same on every lane of the quad, helper lanes included: a quad value
+        # (lowering.Lowering.quad_values) that does not vary with the interpolated coordinate.
+        st.quad_values[f"alu{i}"] = False
     st.lines.append(f"    precise float alu{i} = {value};")
 
 
