@@ -205,6 +205,22 @@ uint narrow16(float value) {
     uint rounded = (full + 0xfffu + ((full >> 13) & 1u)) >> 13;
     return sign | min(((exponent - 113u) << 10) + rounded, 0x7c00u);
 }
+// v_ldexp_f16: scale a widened binary16 by 2^exponent. The exponent is a signed 16-bit value; clamping it to
+// [-64, 64] changes no result. A nonzero binary16 magnitude lies in [2^-24, 2^16), so at 40 or more the product is
+// at least 2^16 (infinity once narrowed) and at -41 or less it is below 2^-25 (zero), while in the clamped range the
+// product stays inside the normal binary32 range and the power-of-two scale is exact. The scale is built from its
+// encoding because exp2 is not exact on every adapter.
+float ldexp16(float value, int exponent) {
+    precise float scale = asfloat(uint(clamp(exponent, -64, 64) + 127) << 23);
+    return value * scale;
+}
+// v_fract_f16: x - floor(x) is exact in binary32 for a binary16 input. As in fract32, the result stays below 1.0,
+// here 0x3bff, so a tiny negative input cannot round up to 1.0; a NaN keeps its encoding and a NaN input gives NaN.
+uint fract16(float value) {
+    precise float f = value - floor(value);
+    uint h = narrow16(f);
+    return h == 0x3c00u ? 0x3bffu : h;
+}
 float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"""
 
 
@@ -228,6 +244,16 @@ ALU = {
     "mul_legacy": (2, "(({0} == 0 || {1} == 0) ? 0.0f : {0} * {1})"),
     "fma": (3, "mad({0}, {1}, {2})"), "fmac": (3, "mad({0}, {1}, {2})"),
     "mad": (3, "mad32({0}, {1}, {2})"), "mac": (3, "mad32({0}, {1}, {2})"),
+}
+# Binary16 arithmetic on widened operands. Each operation is computed once in binary32 and narrowed once with
+# narrow16. That equals rounding the exact result straight to binary16 for add, sub, mul, min, max, floor, ceil,
+# trunc, rndne, fract and ldexp: binary32 has p' = 24 significant bits and binary16 has p = 11, and p' >= 2p + 2
+# makes the double rounding innocuous for + - * (Figueroa), while the others are exact in binary32. round() is the
+# round-half-even of DXIL.
+F16_ALU = {
+    "add": (2, "({0} + {1})"), "sub": (2, "({0} - {1})"), "subrev": (2, "({1} - {0})"), "mul": (2, "({0} * {1})"),
+    "max": (2, "max({0}, {1})"), "min": (2, "min({0}, {1})"),
+    "floor": (1, "floor({0})"), "ceil": (1, "ceil({0})"), "trunc": (1, "trunc({0})"), "rndne": (1, "round({0})"),
 }
 # N-prefixed predicates include unordered operands. Keep NLG's NaN case explicit in DXIL.
 COMPARE = {
@@ -398,6 +424,61 @@ def fp_operand(token, scalar, vector, pending, sample_pending):
     if re.fullmatch(r"\d+\.\d+", token):
         return token + "f"
     raise ValueError(f"Unsupported arithmetic operand {token}")
+
+# Inline constants of 16-bit float operands (the ISA table, as LLVM prints them for gfx10): the binary16 value, so
+# 1.0 is 0x3c00 and 1/(2*pi) is 0x3118. Integer inline constants -16..64 are the integer bit pattern in the low 16 bits.
+F16_CONSTANT = {"0.5": 0x3800, "-0.5": 0xb800, "1.0": 0x3c00, "-1.0": 0xbc00, "2.0": 0x4000, "-2.0": 0xc000,
+                "4.0": 0x4400, "-4.0": 0xc400, "0.15915494": 0x3118}
+
+
+def f16_bits(token, scalar, vector, pending, sample_pending):
+    """The low 16 bits of an unmodified source: a register's low half, an inline constant or a literal's low half."""
+    if token in F16_CONSTANT:
+        return f"{F16_CONSTANT[token]:#x}u"
+    if re.fullmatch(r"-?\d+", token):
+        if not -16 <= int(token) <= 64:
+            raise ValueError(f"Integer inline constant out of range: {token}")
+        return f"{int(token) & 0xffff:#x}u"
+    if re.fullmatch(r"0x[0-9a-f]{1,4}", token):
+        return f"{int(token, 16):#x}u"
+    if re.fullmatch(r"[vs]\d+", token):
+        return f"(asuint({fp_operand(token, scalar, vector, pending, sample_pending)}) & 0xffffu)"
+    raise ValueError(f"Unsupported 16-bit operand {token}")
+
+
+def f16_operand(token, scalar, vector, pending, sample_pending):
+    """A binary16 source widened to binary32. Negation and absolute value act on bit 15 of the 16-bit value, as in
+    hardware, before widening."""
+    if token in F16_CONSTANT or re.fullmatch(r"-\d+", token):
+        return f"widen16({f16_bits(token, scalar, vector, pending, sample_pending)})"
+    negate = token.startswith("-")
+    body = token[1:] if negate else token
+    absolute = re.fullmatch(r"\|([^|]+)\||abs\(([^()]+)\)", body)
+    if absolute:
+        body = absolute.group(1) or absolute.group(2)
+    if body.startswith("-"):
+        raise ValueError(f"Unsupported 16-bit operand {token}")
+    bits = f16_bits(body, scalar, vector, pending, sample_pending)
+    if absolute:
+        bits = f"({bits} & 0x7fffu)"
+    if negate:
+        bits = f"({bits} ^ 0x8000u)"
+    return f"widen16({bits})"
+
+
+def f16_exponent(token, scalar, vector, pending, sample_pending):
+    """The signed 16-bit exponent of v_ldexp_f16 as an int expression. Source modifiers and the inline float
+    constants do not apply to an integer operand and are refused."""
+    if re.fullmatch(r"-?\d+", token):
+        if not -16 <= int(token) <= 64:
+            raise ValueError(f"Integer inline constant out of range: {token}")
+        return str(int(token))
+    if re.fullmatch(r"0x[0-9a-f]{1,4}", token):
+        value = int(token, 16)
+        return str(value - 0x10000 if value & 0x8000 else value)
+    if re.fullmatch(r"[vs]\d+", token):
+        return f"((int({f16_bits(token, scalar, vector, pending, sample_pending)}) ^ 0x8000) - 0x8000)"
+    raise ValueError(f"Unsupported exponent operand {token}")
 
 
 def vector_u32(token, scalar, vector, pending, sample_pending):
@@ -874,6 +955,37 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({high} | narrow16({value}));")
+        elif m := match(r"v_(add|sub|subrev|mul|max|min|ldexp|floor|ceil|trunc|rndne|fract)_f16(?:_(e32|e64))? (v\d+), (.+?)( clamp)?"):
+            # Binary16 arithmetic. The result replaces only the low half of the destination, as for
+            # v_cvt_f16_f32. Min and max take HLSL min/max, the NaN convention of the binary32 forms. Output
+            # modifiers, op_sel and any other trailing text fail in the operand grammar. A clamp saturates the
+            # binary32 value before narrowing, the same as saturating the binary16 result because 0 and 1 are exact.
+            op, form, dst, operands, clamp = m.groups()
+            tokens = operands.split(", ")
+            if mask != "entry" or len(tokens) != (1 if op in ("floor", "ceil", "trunc", "rndne", "fract") else 2):
+                raise ValueError("Invalid arithmetic operation")
+            if clamp and form != "e64":
+                raise ValueError("Invalid arithmetic operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            old = vector.get(dst)
+            if old is not None and not (isinstance(old, str) and old.startswith(("sample", "alu", "params["))):
+                raise ValueError("Unsupported arithmetic destination")
+            values = [f16_operand(t, scalar, vector, pending, sample_pending) for t in tokens[:1 if op == "ldexp" else len(tokens)]]
+            if op == "fract":
+                encoding = f"fract16({values[0]})"
+                if clamp:
+                    encoding = f"narrow16(saturate(widen16({encoding})))"
+            else:
+                if op == "ldexp":
+                    exponent = f16_exponent(tokens[1], scalar, vector, pending, sample_pending)
+                    expression = f"ldexp16({values[0]}, {exponent})"
+                else:
+                    expression = F16_ALU[op][1].format(*values)
+                encoding = f"narrow16({f'saturate({expression})' if clamp else expression})"
+            high = f"(asuint({old}) & 0xffff0000u)" if old is not None else "0u"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({high} | {encoding});")
         elif m := match(r"v_cvt_pkrtz_f16_f32_e32 (v\d+), (v\d+), (v\d+)"):
             dst, lo, hi = m.groups()
             pair = (vector[lo], vector[hi])
