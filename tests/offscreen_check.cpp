@@ -459,6 +459,8 @@ int main(int argc, char** argv)
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
         } else if (operation == "--check-pixel-quad-lod") {
             check_pixel_quad_lod(device.Get(), argv[3]);
+        } else if (argc == 5 && operation == "--check-vertex-case") {
+            check_translated_vertex(device.Get(), argv[3], argv[4]);
         } else if (operation == "--check-pixel") {
             if (argc != 5 || (std::string_view(argv[4]) != "rgba" && std::string_view(argv[4]) != "bgra"))
                 throw std::runtime_error("Expected --check-pixel <pixel.cso> rgba|bgra");

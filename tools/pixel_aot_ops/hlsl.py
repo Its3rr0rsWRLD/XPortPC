@@ -3,9 +3,12 @@ helper functions a form asks for through `st.helpers`."""
 from pathlib import Path
 
 
-PREAMBLE = """Texture2D<float4> tex : register(t0);
+# The pixel entry's declarations and signature around the stage-neutral numeric helpers. HELPERS is what another stage
+# (tools/vertex_aot.py) emits with its own entry; PREAMBLE is unchanged for the pixel stage.
+PIXEL_DECLARATIONS = """Texture2D<float4> tex : register(t0);
 SamplerState samp : register(s0);
-// v_cmp_class_f32: the ten binary32 classes of LLVM SIInstrFlags::ClassFlags, from the raw encoding:
+"""
+HELPERS = """// v_cmp_class_f32: the ten binary32 classes of LLVM SIInstrFlags::ClassFlags, from the raw encoding:
 // signaling NaN, quiet NaN, -inf, -normal, -denormal, -0, +0, +denormal, +normal, +inf.
 uint class32(float value) {
     uint bits = asuint(value);
@@ -106,7 +109,9 @@ uint fract16(float value) {
     uint h = narrow16(f);
     return h == 0x3c00u ? 0x3bffu : h;
 }
-float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"""
+"""
+PIXEL_ENTRY = "float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"
+PREAMBLE = PIXEL_DECLARATIONS + HELPERS + PIXEL_ENTRY
 
 
 # Title memory for buffer and global loads (see docs/experiments.md). The declarations match the pixel root signature

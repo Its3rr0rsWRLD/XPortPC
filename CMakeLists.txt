@@ -108,6 +108,7 @@ add_custom_command(OUTPUT "${pixel_vs}" COMMAND "${DXC_EXECUTABLE}" -T vs_6_0 -E
     -Fh "${pixel_vs}" -Vn pixel_aot_vs "${CMAKE_CURRENT_SOURCE_DIR}/tests/pixel_aot_vs.hlsl"
     DEPENDS tests/pixel_aot_vs.hlsl VERBATIM)
 target_sources(offscreen_check PRIVATE tests/pixel_aot_render.cpp "${pixel_vs}")
+target_sources(offscreen_check PRIVATE tests/vertex_aot_render.cpp)
 target_sources(offscreen_check PRIVATE tests/binding_mips.cpp tests/ffx_recurrent_views.cpp)
 target_sources(offscreen_check PRIVATE tests/ffx_rcas_views.cpp)
 foreach(storage IN ITEMS Native Packed)
@@ -1785,6 +1786,31 @@ if(EXISTS "${INTAKE_PYTHON}")
             # The gfx programs this test translated, for tools/form_coverage.py (one record per test).
             set_tests_properties(pixel_aot_${family}_${adapter} PROPERTIES
                 ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/pixel_aot_${family}_${adapter}.txt")
+        endforeach()
+    endforeach()
+    # Vertex stage (card V-1): one test per draw family and adapter, listed by the script as for pixel_aot.
+    execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/vertex_aot_check.py" --list-families
+        OUTPUT_VARIABLE VERTEX_AOT_FAMILIES RESULT_VARIABLE vertex_aot_list_status OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT vertex_aot_list_status EQUAL 0 OR VERTEX_AOT_FAMILIES STREQUAL "")
+        message(FATAL_ERROR "tests/vertex_aot_check.py --list-families failed (status ${vertex_aot_list_status})")
+    endif()
+    string(REPLACE "\r" "" VERTEX_AOT_FAMILIES "${VERTEX_AOT_FAMILIES}")
+    string(REPLACE "\n" ";" VERTEX_AOT_FAMILIES "${VERTEX_AOT_FAMILIES}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/vertex_aot_check.py")
+    add_test(NAME vertex_aot_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/vertex_aot_check.py" controls)
+    set_tests_properties(vertex_aot_controls PROPERTIES TIMEOUT 300
+        ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/vertex_aot_controls.txt")
+    foreach(adapter IN ITEMS hardware warp)
+        foreach(family IN LISTS VERTEX_AOT_FAMILIES)
+            add_test(NAME vertex_aot_${family}_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+                "${CMAKE_SOURCE_DIR}/tests/vertex_aot_check.py" draw "${DXC_EXECUTABLE}"
+                "$<TARGET_FILE:offscreen_check>" ${adapter} --family ${family})
+            set_tests_properties(vertex_aot_${family}_${adapter} PROPERTIES TIMEOUT 600
+                ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/vertex_aot_${family}_${adapter}.txt")
+            if(adapter STREQUAL "hardware")
+                set_tests_properties(vertex_aot_${family}_hardware PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
         endforeach()
     endforeach()
     add_test(NAME compressed_scene_metadata COMMAND "${INTAKE_PYTHON}" -B

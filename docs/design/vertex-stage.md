@@ -1,8 +1,12 @@
 # Vertex stage: design
 
-Status: proposed. Nothing is implemented yet except the corpus measurement (`tools/vertex_corpus_report.py`,
-checked by `tests/vertex_corpus_report_check.py`). The translator today accepts only the pixel stage
-(`tools/pixel_aot.py`, `stages_supported: ["pixel"]` in `site/status.json`).
+Status: card V-1 is implemented and awaits its draws on the PC; V-2 onward are proposed. The corpus measurement is
+`tools/vertex_corpus_report.py` (checked by `tests/vertex_corpus_report_check.py`). V-1 is `tools/vertex_aot.py`
+(the vertex entry contract and exports over the `tools/pixel_aot_ops` forms), `tests/vertex_aot_check.py` (Python
+integer references, wrong-reference controls, GPU-free refusals; CTest `vertex_aot_controls` and
+`vertex_aot_<family>_<adapter>`) and `tests/vertex_aot_render.cpp` (the stream-output draw,
+`offscreen_check --check-vertex-case`). `stages_supported` in `site/status.json` still lists only the pixel stage
+until those draws pass on both adapters.
 
 ## Why vertex next
 The corpus (544 MIT/Apache shaders, [corpus-sources.md](../coverage/corpus-sources.md)) has 244 vertex shaders.
