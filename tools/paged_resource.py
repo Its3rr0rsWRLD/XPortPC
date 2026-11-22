@@ -62,7 +62,10 @@ class PagedResource:
                     raise ValueError("Compressed segment exceeds read budget")
                 data = self._read_at(segment.offset, segment.stored)
                 decoder = zlib.decompressobj()
-                decoded = decoder.decompress(data, segment.size + 1)
+                try:
+                    decoded = decoder.decompress(data, segment.size + 1)
+                except zlib.error as exc:
+                    raise ValueError("Invalid compressed segment or decoded extent") from exc
                 if (len(data) != segment.stored or not decoder.eof or decoder.unused_data
                         or len(decoded) != segment.size):
                     raise ValueError("Invalid compressed segment or decoded extent")

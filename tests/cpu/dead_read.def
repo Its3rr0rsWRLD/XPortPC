@@ -4,3 +4,6 @@ EXPORTS
     byte_dead
     pair_dead
     read_live
+    read_skip
+    sum_zero
+    add_in_place

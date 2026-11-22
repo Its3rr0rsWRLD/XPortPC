@@ -102,10 +102,10 @@ def ref_bt_op(op, a, bit, bits):
 def check(native_path, lifted_path):
     lifted = load_lib(lifted_path)
     lifted.host_has_popcnt_lzcnt.argtypes, lifted.host_has_popcnt_lzcnt.restype = [], ctypes.c_int
-    if not lifted.host_has_popcnt_lzcnt():
-        print("Host CPU lacks POPCNT or LZCNT (CPUID leaf 1 ECX bit 23 / 80000001h ECX bit 5); skipping native differential check.")
-        sys.exit(77)
     native = load_lib(native_path)
+    both = ((native, "native"), (lifted, "lifted"))
+    has_count_ops = lifted.host_has_popcnt_lzcnt()
+    count_backends = both if has_count_ops else ((lifted, "lifted"),)
     slot = U64(0)
     values = (
         0, 1, 2, 0x80, 0x01020304, 0x55aa55aa, 0x7fffffff, 0x80000000, 0xffffffff,
@@ -119,7 +119,7 @@ def check(native_path, lifted_path):
         mask = (1 << bits) - 1
         for a in values:
             masked = a & mask
-            for lib, label in ((native, "native"), (lifted, "lifted")):
+            for lib, label in both:
                 slot.value = 0xdeadbeef
                 got = getattr(lib, name)(a, ctypes.byref(slot))
                 if masked == 0:
@@ -134,7 +134,7 @@ def check(native_path, lifted_path):
     for name, bits in (("bswap32", 32), ("bswap64", 64)):
         for a in values:
             want = ref_bswap(a, bits)
-            for lib, label in ((native, "native"), (lifted, "lifted")):
+            for lib, label in both:
                 got = getattr(lib, name)(a)
                 if got != want:
                     raise AssertionError(f"{label} {name}({a:#x}) = {got:#x}, expected {want:#x}")
@@ -144,7 +144,7 @@ def check(native_path, lifted_path):
                            ("lzcnt32", ref_lzcnt, 32), ("lzcnt64", ref_lzcnt, 64)):
         for a in values:
             want_v, want_f = fn(a, bits)
-            for lib, label in ((native, "native"), (lifted, "lifted")):
+            for lib, label in count_backends:
                 slot.value = 0xdeadbeef
                 got = getattr(lib, name)(a, ctypes.byref(slot))
                 if (got, slot.value) != (want_v, want_f):
@@ -162,7 +162,7 @@ def check(native_path, lifted_path):
         for a in values:
             for bit in bits_list:
                 want_v, want_cf = ref_bt_op(op, a, bit, bits)
-                for lib, label in ((native, "native"), (lifted, "lifted")):
+                for lib, label in both:
                     slot.value = 0xdeadbeef
                     got = getattr(lib, name)(a, bit, ctypes.byref(slot))
                     if (got, slot.value) != (want_v, want_cf):
@@ -173,13 +173,16 @@ def check(native_path, lifted_path):
 
     for a in values:
         want_v, want_cf = ref_bt_op("btc", a, 47, 64)
-        for lib, label in ((native, "native"), (lifted, "lifted")):
+        for lib, label in both:
             slot.value = 0xdeadbeef
             got = lib.btc64_imm(a, ctypes.byref(slot))
             if (got, slot.value) != (want_v, want_cf):
                 raise AssertionError(f"{label} btc64_imm({a:#x}) = ({got:#x}, {slot.value}), expected ({want_v:#x}, {want_cf})")
         cases += 1
 
+    if not has_count_ops:
+        print(f"{cases} reference cases passed; skipping native POPCNT/LZCNT because CPUID lacks a required feature.")
+        sys.exit(77)
     print(f"{cases} integer bit-op cases (BSF, BSR, BSWAP, POPCNT, LZCNT, BT/BTS/BTR/BTC) matched native and translated DLLs")
 
 
@@ -199,7 +202,7 @@ if __name__ == "__main__":
     if mode == "emit":
         emit(Path(native), Path(other))
     elif mode == "check":
-        check(native, other)
         check_rejections()
+        check(native, other)
     else:
         raise ValueError(mode)

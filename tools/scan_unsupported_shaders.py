@@ -42,7 +42,8 @@ SUPPORTED_ALU = {f"v_{name}_f32" for name in PIXEL_ALU_NAMES}
 SUPPORTED_INSTRUCTIONS_REGEX = [
     r"s_inst_prefetch\s+.*",
     r"s_nop\s+.*",
-    r"s_waitcnt\s+(?:lgkmcnt\(0\)|vmcnt\(0\))",
+    r"s_waitcnt_expcnt\s+(?:(?:null|s\d+),\s*)?(?:0x[0-7]|[0-7])",
+    r"s_waitcnt\s+(?:lgkmcnt\(0\)|vmcnt\(0\)|expcnt\([0-7]\)|vmcnt\(0\)\s+lgkmcnt\(0\)|lgkmcnt\(0\)\s+vmcnt\(0\))",
     r"s_mov_b64\s+s\[\d+:\d+\],\s+exec",
     r"s_wqm_b64\s+exec,\s+exec",
     r"s_and_b64\s+exec,\s+exec,\s+s\[\d+:\d+\]",

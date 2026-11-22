@@ -1,11 +1,14 @@
 """Conditional routes must not overrule an ordinary import path or apply to unknown binaries."""
 
 from pathlib import Path
+import struct
 import sys
+
+import pefile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from dependency_paths import FFX_EXPORTS, FFX_LOADER, trace
-from pe_inventory import resolve_desktop
+from pe_inventory import import_tables, resolve_desktop
 
 
 def check_desktop_forwarders():
@@ -185,6 +188,55 @@ def main():
     assert "ffx:0x10000" not in unknown["reachable"][upscaler]["reasons"]
 
 
+def check_pe32plus_import_reserved_bits():
+    """Reject PE32+ by-name import thunks with reserved bits 62-31 set."""
+    def build_pe(thunk_val):
+        pe_offset = 0x80
+        section_rva = 0x1000
+        raw_offset = 0x200
+        raw_size = 0x200
+        buf = bytearray(raw_offset + raw_size)
+        buf[0:2] = b"MZ"
+        struct.pack_into("<I", buf, 60, pe_offset)
+        buf[pe_offset:pe_offset + 4] = b"PE\0\0"
+        struct.pack_into("<HHIIIHH", buf, pe_offset + 4, 0x8664, 1, 0, 0, 0, 240, 0x2022)
+        opt = pe_offset + 24
+        struct.pack_into("<HBBIIIIIQIIHHHHHHIIIIHHQQQQII", buf, opt,
+                         0x20B, 0, 0, 0, raw_size, 0, 0, section_rva, 0x180000000,
+                         0x1000, 0x200, 6, 0, 0, 0, 6, 0, 0, 0x2000, raw_offset,
+                         0, 3, 0, 0, 0, 0, 0, 0, 16)
+        sec = opt + 240
+        struct.pack_into("<8sIIIIIIHHI", buf, sec,
+                         b".rdata\0\0", 0x200, section_rva, raw_size, raw_offset,
+                         0, 0, 0, 0, 0x40000040)
+        struct.pack_into("<II", buf, opt + 112 + 8, section_rva, 40)
+        struct.pack_into("<5I", buf, raw_offset, section_rva + 0x30, 0, 0, section_rva + 0x50, 0)
+        struct.pack_into("<QQ", buf, raw_offset + 0x30, thunk_val, 0)
+        module_name = b"provider.dll\0"
+        buf[raw_offset + 0x50:raw_offset + 0x50 + len(module_name)] = module_name
+        struct.pack_into("<H", buf, raw_offset + 0x70, 0)
+        func_name = b"test_func\0"
+        buf[raw_offset + 0x72:raw_offset + 0x72 + len(func_name)] = func_name
+        assert len(buf) == raw_offset + raw_size
+        return bytes(buf)
+
+    valid_pe = build_pe(0x1070)
+    with pefile.PE(data=valid_pe, fast_load=True) as pe:
+        rows = import_tables(pe, "synthetic.exe")
+    assert rows == [("normal", "provider.dll", "test_func")]
+
+    for bad_thunk in (0x1070 | (1 << 31), 0x1070 | (1 << 40), 0x1070 | (1 << 62)):
+        invalid_pe = build_pe(bad_thunk)
+        with pefile.PE(data=invalid_pe, fast_load=True) as pe:
+            try:
+                import_tables(pe, "synthetic.exe")
+            except ValueError as error:
+                assert "Reserved bits set in PE32+ import thunk" in str(error)
+            else:
+                raise AssertionError(f"import_tables accepted reserved bits in thunk {bad_thunk:#x}")
+
+
 if __name__ == "__main__":
     check_desktop_forwarders()
+    check_pe32plus_import_reserved_bits()
     main()

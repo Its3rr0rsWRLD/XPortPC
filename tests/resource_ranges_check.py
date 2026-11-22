@@ -353,6 +353,48 @@ class ResourceChecks(unittest.TestCase):
             ],
         })
 
+    def test_texture_descriptor_detail_command(self) -> None:
+        tool = Path(__file__).resolve().parents[1] / "tools" / "texture_descriptors.py"
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.ttpf"
+            path.write_bytes(descriptor_archive())
+            command = [sys.executable, "-B", tool, path, "--descriptor"]
+            result = subprocess.run([*command, "257"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                "descriptor_index": 257, "width": 12, "height": 44,
+                "dxgi_format": 71, "mip_marker": 0, "logical_offset": 8192,
+            })
+            for index in ("-1", "258"):
+                with self.subTest(index=index):
+                    result = subprocess.run([*command, index], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("Descriptor index outside the ETPF table", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_texture_descriptor_detail_read_scope(self) -> None:
+        from texture_descriptors import describe_descriptor
+
+        index = 12
+        record = 272 + 16 * index
+
+        class SelectedRecordOnly(ShortReadStream):
+            def read(self, size: int = -1, /) -> bytes:
+                start = self.tell()
+                if not any(left <= start <= start + size <= right for left, right in
+                           ((0, 40), (256, 272), (record, record + 16))):
+                    raise AssertionError(f"Unexpected read of {size} bytes at {start}")
+                return super().read(size)
+
+        archive = descriptor_archive()
+        self.assertEqual(describe_descriptor(SelectedRecordOnly(archive), index), {
+            "descriptor_index": index, "width": 44, "height": 12,
+            "dxgi_format": 99, "mip_marker": 2, "logical_offset": 12288,
+        })
+        struct.pack_into("<I", archive, record + 8, 4)
+        with self.assertRaisesRegex(ValueError, "outside the declared logical archive"):
+            describe_descriptor(SelectedRecordOnly(archive), index)
+
     def test_texture_descriptor_bounds(self) -> None:
         for label, offset, replacement in (
             ("RDS5 header", 0, b"TEST"),
@@ -426,9 +468,11 @@ class ResourceChecks(unittest.TestCase):
 
     def test_invalid_segments(self):
         packet = zlib.compress(b"page")
-        for payload, count in ((packet[:-1], 4), (packet + b"extra", 4), (packet, 2), (packet, 8)):
+        intact_reader = PagedResource(io.BytesIO(packet), [Segment(0, len(packet), 4, "zlib")])
+        self.assertEqual(intact_reader.read(0, 4), b"page")
+        for payload, count in ((packet[:-1], 4), (packet + b"extra", 4), (packet, 2), (packet, 8), (b"not zlib", 4)):
             reader = PagedResource(io.BytesIO(payload), [Segment(0, len(payload), count, "zlib")])
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "Invalid compressed segment or decoded extent"):
                 reader.read(0, 1)
         for seg in (Segment(0, 1, 2, "raw"), Segment(2, 1, 1, "raw"), Segment(-1, 1, 1, "raw")):
             with self.assertRaises(ValueError):

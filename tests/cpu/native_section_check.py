@@ -101,11 +101,103 @@ def compare(mapper, case, image, exact=None, target=None):
     return native
 
 
+class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [("BaseAddress", ctypes.c_void_p), ("AllocationBase", ctypes.c_void_p),
+                ("AllocationProtect", wintypes.DWORD), ("PartitionId", wintypes.WORD), ("RegionSize", ctypes.c_size_t),
+                ("State", wintypes.DWORD), ("Protect", wintypes.DWORD), ("Type", wintypes.DWORD)]
+
+
+def protections(base, sections):
+    result = {}
+    for name, rva, _ in sections:
+        info = MEMORY_BASIC_INFORMATION()
+        kernel.VirtualQuery(ctypes.c_void_p(base + rva), ctypes.byref(info), ctypes.sizeof(info))
+        result[name] = info.Protect
+    return result
+
+
+def edit_header(source, target, edit):
+    with pefile.PE(str(source)) as pe:
+        edit(pe)
+        pe.write(str(target))
+
+
+def check_protections(mapper, folder, probe):
+    """Section page protections must match Windows, also when .pdata loses IMAGE_SCN_MEM_READ.
+
+    RtlAddFunctionTable reads the table, so pe_map must register it before applying a protection that
+    leaves it unreadable. Windows maps such an image and keeps the page PAGE_NOACCESS."""
+    def unreadable_pdata(pe):
+        section = next(s for s in pe.sections if s.Name.rstrip(b"\0") == b".pdata")
+        section.Characteristics &= ~(0x40000000 | 0x80000000 | 0x20000000)
+
+    unpatched = folder / "protect_original.dll"
+    unpatched.write_bytes(probe.read_bytes())
+    patched = folder / "protect_pdata.dll"
+    edit_header(probe, patched, unreadable_pdata)
+    for case, image in (("unpatched", unpatched), (".pdata without read access", patched)):
+        if image is patched:
+            base, status, detail, _ = mapper(image, {})
+            if base:
+                mapper.release(base)
+            if base or status != STATUS["unsupported"] or "exception table is not readable" not in detail:
+                raise AssertionError(f"{case}: expected unsupported, got {status} ({detail})")
+            continue
+        sections = layout(image)
+        module = kernel.LoadLibraryExW(str(image), None, 0)
+        if not module:
+            raise AssertionError(f"{case}: LoadLibraryExW failed with {ctypes.get_last_error()}")
+        try:
+            native = protections(module, sections)
+        finally:
+            kernel.FreeLibrary(module)
+        base, status, detail, _ = mapper(image, {})
+        if status != STATUS["ok"] or not base:
+            raise AssertionError(f"{case}: map returned {status} ({detail})")
+        try:
+            mapped = protections(base, sections)
+        finally:
+            mapper.release(base)
+        if mapped != native:
+            raise AssertionError(f"{case}: pe_map protections {mapped} differ from Windows {native}")
+        print(f"{case}: {len(sections)} section protections match the Windows loader")
+
+
+# (SectionAlignment, pe_map status, reason). Windows refuses each with ERROR_BAD_EXE_FORMAT (193).
+ALIGNMENTS = [
+    (0x2000, "format", "not aligned to 0x2000"),
+    (0x1001, "format", "is not a power of two"),
+    (0x800, "unsupported", "below the page size"),
+]
+
+
+def check_alignments(mapper, folder, probe):
+    """A section that does not start on SectionAlignment could share a page with the headers or with
+    another section, whose protection it would then change. Windows refuses these alignments."""
+    for alignment, status_name, reason in ALIGNMENTS:
+        image = folder / f"align_{alignment:x}.dll"
+        edit_header(probe, image, lambda pe: setattr(pe.OPTIONAL_HEADER, "SectionAlignment", alignment))
+        module = kernel.LoadLibraryExW(str(image), None, 0)
+        if module:
+            kernel.FreeLibrary(module)
+            raise AssertionError(f"SectionAlignment {alignment:#x}: LoadLibraryExW accepted the image")
+        error = ctypes.get_last_error()
+        base, status, detail, _ = mapper(image, {})
+        if base:
+            mapper.release(base)
+        if status != STATUS[status_name] or reason not in detail:
+            raise AssertionError(f"SectionAlignment {alignment:#x}: map returned {status} ({detail}), "
+                                 f"expected {status_name} with {reason!r}")
+        print(f"SectionAlignment {alignment:#x}: Windows refuses with {error}, pe_map with {status_name}: {detail}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mapper", type=Path)
     parser.add_argument("probe", type=Path, help="source-built image with no entry point and no imports")
     args = parser.parse_args()
+    # Refused images must return loader errors instead of a Bad Image dialog on interactive runners.
+    kernel.SetErrorMode(kernel.GetErrorMode() | 0x0001)  # SEM_FAILCRITICALERRORS
     mapper = Mapper(args.mapper)
 
     with TemporaryDirectory() as folder:
@@ -132,6 +224,8 @@ def main():
                 raise AssertionError(f"Windows no longer zero-fills {name} without a file offset")
         if failures:
             raise AssertionError(f"{len(failures)} of {len(CASES)} cases differ from the Windows loader: {failures}")
+        check_protections(mapper, Path(folder), args.probe)
+        check_alignments(mapper, Path(folder), args.probe)
 
 
 if __name__ == "__main__":

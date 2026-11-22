@@ -59,12 +59,26 @@ class RootChecks(unittest.TestCase):
             ("schema mismatch", 184, "<I", 24), ("duplicate root schema", 192, "<I", ROOT_TYPE),
             ("unknown type", 272, "<I", 3), ("unbounded root", 280, "<Q", BASE + 390),
             ("root aliases directory", 280, "<Q", BASE + 256),
+            ("block map inside header", 8, "<Q", BASE + 32),
+            ("block map outside virtual region", 8, "<Q", 0x60000000),
+            ("block map past buffer", 8, "<Q", BASE + 400),
+            ("block map aliases schemas", 8, "<Q", BASE + 160),
+            ("block map aliases directory", 8, "<Q", BASE + 256),
+            ("block map aliases root", 8, "<Q", BASE + 352),
         ):
             with self.subTest(label=label):
                 invalid = resource()
                 struct.pack_into(fmt, invalid, offset, value)
                 with self.assertRaises(ValueError):
                     inspect_root(invalid)
+
+    def test_block_map_boundaries(self) -> None:
+        """Check valid boundary placements of the block-map pointer adjacent to tables and the buffer end."""
+        from resource_root import inspect_root
+        for offset in (96, 159, 255, 351, 384, 399):
+            valid = resource()
+            struct.pack_into("<Q", valid, 8, BASE + offset)
+            self.assertEqual(inspect_root(valid), (ROOT_TYPE, 32))
 
     def test_read_budget(self) -> None:
         from resource_root import read_member

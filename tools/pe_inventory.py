@@ -281,8 +281,13 @@ def import_tables(pe, path):
             entry = lookup - base
             while value := int.from_bytes(read_rva(pe, entry, width), "little"):
                 entry += width
-                symbol = (f"#{value & 0xFFFF}" if value & by_ordinal
-                          else label(read_name(pe, ((value - base) & 0x7FFFFFFF) + 2)))
+                if value & by_ordinal:
+                    symbol = f"#{value & 0xFFFF}"
+                else:
+                    target_rva = value - base
+                    if wide and (target_rva > 0x7FFFFFFF or target_rva < 0):
+                        raise ValueError(f"Reserved bits set in PE32+ import thunk {value:#x}")
+                    symbol = label(read_name(pe, (target_rva & 0x7FFFFFFF) + 2))
                 imports.append((kind, module, symbol))
         if not found:
             raise ValueError(f"Could not parse {kind} imports in {path}")

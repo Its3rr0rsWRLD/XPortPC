@@ -1,0 +1,16 @@
+EXPORTS
+    fiadd_i16
+    fiadd_i32
+    fisub_i16
+    fisub_i32
+    fisubr_i16
+    fisubr_i32
+    fimul_i16
+    fimul_i32
+    fidiv_i16
+    fidiv_i32
+    fidivr_i16
+    fidivr_i32
+    fimul_i32_m64
+    fiadd_fisub
+    fidivr_depth8

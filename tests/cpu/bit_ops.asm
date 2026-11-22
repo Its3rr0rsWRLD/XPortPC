@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_bit_ops
 ; Source-owned differential fixture for x64 integer bit-scan, bit-count,
 ; byte-swap, and register bit-test instructions in 32-bit and 64-bit forms:
 ; BSF, BSR, BSWAP, POPCNT, LZCNT, BT, BTS, BTR, BTC.

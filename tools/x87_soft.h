@@ -369,3 +369,45 @@ static inline X87Value x87_rndint(X87Value v) {
     const int lead = x87_clz(magnitude);
     return {magnitude << lead, static_cast<uint16_t>(sign | (16383 + 63 - lead))};
 }
+
+// FXTRACT: the significand of v, with v's sign and biased exponent 16383 (a value in [1, 2)), and in
+// `exponent` the unbiased exponent as an exact value. A denormal is normalized first. A zero keeps its
+// sign and gives an exponent of -inf (the masked divide-by-zero response); an infinity keeps its sign
+// and gives +inf. A NaN is quieted into both results, and an unsupported encoding gives the indefinite
+// in both. The precision control does not apply.
+static inline X87Value x87_xtract(X87Value v, X87Value& exponent) {
+    if (x87_unsupported(v)) { exponent = x87_indefinite; return x87_indefinite; }
+    if (x87_is_nan(v)) { exponent = x87_quiet(v); return exponent; }
+    if (x87_is_inf(v)) { exponent = {x87_integer_bit, 0x7fff}; return v; }
+    if (x87_is_zero(v)) { exponent = {x87_integer_bit, 0xffff}; return v; }  // xtract zero
+    const X87Unpacked u = x87_unpack(v);
+    exponent = x87_from_integer(u.e);
+    return {u.sig, static_cast<uint16_t>((u.sign ? 0x8000 : 0) | 16383)};
+}
+
+// FSCALE: ST(0) * 2^n with n = ST(1) truncated toward zero. The precision control does not apply: the
+// result keeps 64 significand bits and rounds only below the normal range (denormalized at the same
+// bit positions) or overflows to infinity. ST(1) = -inf gives a zero and +inf an infinity, both with
+// the sign of ST(0); an infinite ST(0) scaled by -inf and a zero scaled by +inf are invalid. A zero or
+// infinite ST(0) is otherwise unchanged. NaN and unsupported operands follow x87_special_operands. n is
+// clamped to +-2^20, far beyond the exponent range, before it is added to the exponent.
+static const X87Format x87_scale_format{64, 16383, 0x7ffe};
+static inline X87Value x87_scale(X87Value a, X87Value b) {
+    X87Value out;
+    if (x87_special_operands(a, b, &out)) return out;
+    const uint16_t s = a.se & 0x8000;
+    if (x87_is_inf(b)) {
+        if (x87_sign(b)) return x87_is_inf(a) ? x87_indefinite : X87Value{0, s};
+        return x87_is_zero(a) ? x87_indefinite : X87Value{x87_integer_bit, static_cast<uint16_t>(s | 0x7fff)};
+    }
+    if (x87_is_zero(a) || x87_is_inf(a)) return a;
+    int n = 0;
+    if (!x87_is_zero(b)) {
+        const X87Unpacked y = x87_unpack(b);
+        const int magnitude = y.e >= 20 ? 1 << 20 : y.e >= 0 ? static_cast<int>(y.sig >> (63 - y.e)) : 0;
+        n = x87_sign(b) ? -magnitude : magnitude;  // scale truncate
+    }
+    const X87Unpacked x = x87_unpack(a);
+    const X87Rounded r = x87_round(x.sign, x.e + n, x.sig, 0, x87_scale_format, x87_rc);  // scale round
+    return {r.sig, static_cast<uint16_t>(s | r.biased)};
+}

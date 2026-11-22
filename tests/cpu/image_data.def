@@ -1,0 +1,12 @@
+EXPORTS
+    read_counter
+    bump_counter
+    counter_address
+    load_counter_ptr
+    is_counter
+    set_vtable
+    vtable_entry
+    swap_scratch
+    load_through
+    switch_count
+    switch_only

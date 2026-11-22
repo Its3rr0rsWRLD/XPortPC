@@ -60,6 +60,8 @@ struct PixelInput {
     TitleMemory memory;
     bool integerRT = false;      // bit 0 of the flags word of the optional 'X2WF' case section
     std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
+    UINT8 writeMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    std::vector<BYTE> coverage;
 };
 
 // The outputs of a --check-pixel-outputs draw: R32G32B32A32_FLOAT targets 0..N-1, each cleared to -1 and drawn with
@@ -135,7 +137,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
         blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         blend.LogicOp = D3D12_LOGIC_OP_NOOP;
-        blend.RenderTargetWriteMask = static_cast<UINT8>(outputs ? outputs->masks[t] : D3D12_COLOR_WRITE_ENABLE_ALL);
+        blend.RenderTargetWriteMask = static_cast<UINT8>(outputs ? outputs->masks[t] : input.writeMask);
         desc.RTVFormats[t] = targetFormat;
     }
     desc.SampleMask = UINT_MAX;
@@ -316,7 +318,29 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         }
         if (depth) list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, depthClear.DepthStencil.Depth, 0, 0, nullptr);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        if (partialTriangle) {
+        ComPtr<ID3D12QueryHeap> queries;
+        ComPtr<ID3D12Resource> queryResults;
+        if (!input.coverage.empty()) {
+            const UINT pixels = width * height;
+            if (pixels != input.coverage.size()) throw std::runtime_error("Coverage reference extent");
+            D3D12_QUERY_HEAP_DESC queryDesc{D3D12_QUERY_HEAP_TYPE_OCCLUSION, pixels + 1, 0};
+            check(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&queries)), "Coverage queries");
+            queryResults = make_buffer(device, (pixels + 1) * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK,
+                                       D3D12_RESOURCE_STATE_COPY_DEST);
+            // First measure a full draw with neighboring lanes active, then locate
+            // each surviving sample with a one-pixel scissor.
+            for (UINT i = 0; i <= pixels; ++i) {
+                if (i) {
+                    LONG x = (i - 1) % width, y = (i - 1) / width;
+                    const D3D12_RECT pixel{x, y, x + 1, y + 1};
+                    list->RSSetScissorRects(1, &pixel);
+                }
+                list->BeginQuery(queries.Get(), D3D12_QUERY_TYPE_OCCLUSION, i);
+                list->DrawInstanced(3, 1, 0, 0);
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_OCCLUSION, i);
+            }
+            list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_OCCLUSION, 0, pixels + 1, queryResults.Get(), 0);
+        } else if (partialTriangle) {
             const D3D12_INDEX_BUFFER_VIEW indices{partialTriangle->GetGPUVirtualAddress(),
                                                    3 * sizeof(Word), DXGI_FORMAT_R32_UINT};
             list->IASetIndexBuffer(&indices);
@@ -342,6 +366,19 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             list->CopyTextureRegion(&dst, 0,0,0, &src, nullptr);
         }
         cmd.submit_and_wait(device);
+        if (queryResults) {
+            auto counts = read(queryResults.Get(), (input.coverage.size() + 1) * 2);
+            UINT sum = 0;
+            for (size_t i = 0; i < input.coverage.size(); ++i) {
+                sum += input.coverage[i];
+                if (counts[2*i+2] != input.coverage[i] || counts[2*i+3]) {
+                    std::fprintf(stderr, "coverage pixel=%zu expected=%u actual=%u\n", i, unsigned(input.coverage[i]), counts[2*i+2]);
+                    throw std::runtime_error("Sample coverage mismatch");
+                }
+            }
+            if (counts[0] != sum || counts[1]) throw std::runtime_error("Full draw coverage mismatch");
+            std::printf("covered_samples=%u checked_pixels=%zu\n", sum, input.coverage.size());
+        }
         if (outputs) {
             // One reference per texel for every target and the depth; nothing but the exact bits is admitted.
             // Init-captures: C++17 cannot capture the structured bindings width and height themselves.
@@ -552,9 +589,10 @@ PixelInput ramp_input(bool swapRB)
 }
 }
 
-void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference)
+void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference, UINT8 writeMask)
 {
     PixelInput input = ramp_input(swapRB);
+    input.writeMask = writeMask;
     if (reference) {
         std::ifstream file(reference, std::ios::binary);
         const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
@@ -676,6 +714,41 @@ void check_pixel_outputs(ID3D12Device* device, const char* path, const char* ref
     std::vector<PixelInput> levels;
     levels.push_back(std::move(input));
     draw_verified(device, path, levels, {8, 8}, 0, {{0, levels.front().scale}}, nullptr, &outputs);
+}
+
+void check_attribute_pixel(ID3D12Device* device, const char* shader, const char* reference, bool rg)
+{
+    PixelInput input{32, 32, 1, DXGI_FORMAT_R8G8B8A8_UNORM};
+    if (rg) input.writeMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN;
+    input.rows.resize(input.width * input.height * 4);
+    input.expected.resize(input.width * input.height);
+    std::ifstream file(reference, std::ios::binary);
+    file.read(reinterpret_cast<char*>(input.constants.data()), input.constants.size() * sizeof(Word));
+    file.read(reinterpret_cast<char*>(input.expected.data()), input.expected.size() * sizeof(Color));
+    if (!file || file.peek() != std::char_traits<char>::eof())
+        throw std::runtime_error("Expected a 256-byte constant buffer and 32 by 32 float4 colors");
+    draw_verified(device, shader, {std::move(input)}, 0, 0, nullptr);
+}
+
+void check_sampled_coverage(ID3D12Device* device, const char* shader, const char* reference)
+{
+    PixelInput input{8, 8, 1, DXGI_FORMAT_R8G8B8A8_UNORM};
+    for (UINT y = 0; y < 8; ++y) {
+        for (UINT x = 0; x < 8; ++x) {
+            BYTE alpha = BYTE((x*41 + y*19) & 255);
+            input.rows.insert(input.rows.end(), {255, 0, 128, alpha});
+            input.secondRows.insert(input.secondRows.end(), {0, 255, 128, BYTE(255-alpha)});
+        }
+    }
+    input.expected.assign(64, Color{-1, -1, -1, -1});
+    input.coverage.resize(64);
+    std::ifstream file(reference, std::ios::binary);
+    file.read(reinterpret_cast<char*>(input.constants.data()), input.constants.size() * sizeof(Word));
+    file.read(reinterpret_cast<char*>(input.coverage.data()), input.coverage.size());
+    if (!file || file.peek() != std::char_traits<char>::eof() ||
+        std::any_of(input.coverage.begin(), input.coverage.end(), [](BYTE v){ return v > 1; }))
+        throw std::runtime_error("Invalid coverage case");
+    draw_verified(device, shader, {input}, 0, 0, nullptr);
 }
 
 void check_dual_pixel(ID3D12Device* device, const char* shader, const char* capture, bool swap)

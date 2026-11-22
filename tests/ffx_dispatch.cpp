@@ -228,7 +228,7 @@ static std::vector<uint32_t> run_dispatch(LoopContext& ctx, const void* records,
                 const float history_weight=scratch.expected_history_fraction(x,y);
                 const float gain=0.5f+0.5f*history_weight;
                 int exponent;
-                std::frexp(log_color[2]*gain,&exponent);
+                static_cast<void>(std::frexp(log_color[2]*gain,&exponent));
                 const float unit=std::ldexp(1.f,exponent-9);
                 for (UINT c=0; c<3; ++c) {
                     const float expected=log_color[c]*gain;

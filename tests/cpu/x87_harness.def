@@ -1,4 +1,5 @@
 EXPORTS
     x87_call
+    x87_call_flags
     x87_call_envonly
     x87_seeded

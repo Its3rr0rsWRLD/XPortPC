@@ -1,4 +1,4 @@
-"""Summarize the ETPF texture descriptors in the first raw range of an RDS5 archive."""
+"""Inspect ETPF texture descriptors in the first raw range of an RDS5 archive."""
 import argparse
 from collections import Counter
 from collections.abc import Iterator
@@ -118,6 +118,28 @@ def page_address(location: int, logical_size: int) -> int:
     return address
 
 
+def descriptor_fields(shape: int, flags: int) -> Descriptor:
+    return Descriptor((shape & 0x3fff) + 1, ((shape >> 14) & 0x3fff) + 1,
+                      (flags >> 3) & 127, flags >> 24)
+
+
+def descriptor_offset(tables: Tables, index: int) -> int:
+    if not 0 <= index < tables.records:
+        raise ValueError("Descriptor index outside the ETPF table")
+    return 16 + index * 16
+
+
+def describe_descriptor(stream: BinaryIO, index: int) -> dict[str, int]:
+    tables = read_tables(stream)
+    offset = descriptor_offset(tables, index)
+    shape, flags, location = struct.unpack("<III4x", tables.metadata.read(offset, 16))
+    return {
+        "descriptor_index": index,
+        **descriptor_fields(shape, flags)._asdict(),
+        "logical_offset": page_address(location, tables.logical_size),
+    }
+
+
 def inventory(stream: BinaryIO) -> Counter[Descriptor]:
     tables = read_tables(stream)
     table_bytes = tables.records * 16
@@ -126,9 +148,7 @@ def inventory(stream: BinaryIO) -> Counter[Descriptor]:
         batch = tables.metadata.read(16 + offset, min(4096, table_bytes - offset))
         for shape, flags, location in struct.iter_unpack("<III4x", batch):
             page_address(location, tables.logical_size)
-            item = Descriptor((shape & 0x3fff) + 1, ((shape >> 14) & 0x3fff) + 1,
-                              (flags >> 3) & 127, flags >> 24)
-            counts[item] += 1
+            counts[descriptor_fields(shape, flags)] += 1
     return counts
 
 
@@ -143,9 +163,8 @@ def iter_boundaries(tables: Tables) -> Iterator[Boundary]:
 
 
 def descriptor_interval(tables: Tables, index: int) -> tuple[int, Boundary, Boundary]:
-    if not 0 <= index < tables.records:
-        raise ValueError("Descriptor index outside the ETPF table")
-    location, = struct.unpack("<I", tables.metadata.read(16 + index * 16 + 8, 4))
+    offset = descriptor_offset(tables, index)
+    location, = struct.unpack("<I", tables.metadata.read(offset + 8, 4))
     address = page_address(location, tables.logical_size)
     selected: tuple[Boundary, Boundary] | None = None
     for left, right in pairwise(iter_boundaries(tables)):
@@ -200,6 +219,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archives", metavar="archive", type=Path, nargs="+")
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--descriptor", type=int, metavar="INDEX",
+                      help="Report the metadata and logical page offset of a zero-based descriptor")
     mode.add_argument("--raw-page-map", type=int, metavar="INDEX",
                       help="Report offsets of a zero-based descriptor's first 4 KiB page in a verified raw range")
     mode.add_argument("--zlib-segment", type=int, metavar="INDEX",
@@ -228,7 +249,9 @@ if __name__ == "__main__":
             if len(args.archives) != 1:
                 parser.error("Multiple archives require --lookup-key")
             with archive.open("rb") as file:
-                if args.zlib_segment is not None:
+                if args.descriptor is not None:
+                    print(json.dumps(describe_descriptor(file, args.descriptor), indent=2))
+                elif args.zlib_segment is not None:
                     print(json.dumps(asdict(zlib_segment(file, args.zlib_segment)), indent=2))
                 elif args.raw_page_map is None:
                     counts = inventory(file)

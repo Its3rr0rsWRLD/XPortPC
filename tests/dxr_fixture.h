@@ -19,5 +19,8 @@ bool supported(ID3D12Device* device);
 D3D12_RAYTRACING_INSTANCE_DESC instance(UINT id, UINT mask, float translateX = 0);
 std::vector<bvh_fixture::Word> trace(ID3D12Device* device, const std::vector<Vertex>& vertices,
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances, const std::vector<Ray>& rays,
-    const SceneUpdate* update = nullptr);
+    const SceneUpdate* update = nullptr,
+    // When set, each triangle becomes its own geometry with these flags and
+    // ray_candidates.hlsl traces the rays.
+    const std::vector<D3D12_RAYTRACING_GEOMETRY_FLAGS>* triangleGeometries = nullptr);
 }

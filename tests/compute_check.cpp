@@ -101,8 +101,14 @@ static ComPtr<ID3D12DescriptorHeap> bind_tables(ID3D12Device* device, ID3D12Grap
     return heap;
 }
 
+struct StoreCase {
+    UINT groups;
+    std::array<UINT, capacity> expected;
+};
+
 static void run_compute(ID3D12Device* device, bool tables, D3D12_SHADER_BYTECODE shader,
-                        D3D12_SHADER_BYTECODE rootBytes)
+                        D3D12_SHADER_BYTECODE rootBytes, bool conversion_pair = false,
+                        const StoreCase* store = nullptr)
 {
     ComPtr<ID3D12RootSignature> signature;
     check(device->CreateRootSignature(0, rootBytes.pShaderBytecode, rootBytes.BytecodeLength, IID_PPV_ARGS(&signature)),
@@ -132,7 +138,7 @@ static void run_compute(ID3D12Device* device, bool tables, D3D12_SHADER_BYTECODE
         list->SetComputeRootUnorderedAccessView(1, output->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstants(2, static_cast<UINT>(constants.size()), constants.data(), 0);
     }
-    list->Dispatch(capacity / 64, 1, 1);
+    list->Dispatch(store ? store->groups : capacity / 64, 1, 1);
     transition(list.Get(), output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list->CopyBufferRegion(readback.Get(), 0, output.Get(), 0, bytes);
     commands.submit_and_wait(device);
@@ -142,13 +148,22 @@ static void run_compute(ID3D12Device* device, bool tables, D3D12_SHADER_BYTECODE
     const auto* words = static_cast<const UINT*>(mapped);
     UINT mismatches = 0;
     constexpr UINT key = constants[13] + 3 * constants[14] + 5 * constants[15];
+    if (conversion_pair)
+        std::printf("immediate_uint=0x%08x immediate_int=0x%08x\n", words[0], words[1]);
+    const UINT active = conversion_pair ? 2 : count;
     for (UINT i = 0; i < capacity; ++i) {
-        const UINT expected = i < count ? (input_word(i) * 33u) ^ (key + i * constants[1]) : sentinel;
-        if (words[i] != expected) ++mismatches;
+        const UINT expected = store ? store->expected[i] : i >= active ? sentinel : conversion_pair ? (i == 0 ? 0xffffffffu : 0x7fffffffu)
+            : (input_word(i) * 33u) ^ (key + i * constants[1]);
+        if (words[i] != expected) {
+            if (!mismatches)
+                std::fprintf(stderr, "word=%u expected=%08x actual=%08x\n", i, expected, words[i]);
+            ++mismatches;
+        }
     }
     readback->Unmap(0, &no_writes);
-    std::printf("layout=%s output_words=%u guard_words=%u mismatches=%u\n",
-                tables ? "tables" : "root", count, capacity - count, mismatches);
+    if (store) std::printf("groups=%u compared_words=%u mismatches=%u\n", store->groups, capacity, mismatches);
+    else std::printf("layout=%s output_words=%u guard_words=%u mismatches=%u\n",
+                tables ? "tables" : "root", active, capacity - active, mismatches);
     if (mismatches) throw std::runtime_error("Compute readback differs from CPU reference");
 }
 
@@ -159,7 +174,7 @@ void check_compute(ID3D12Device* device, bool tables)
     run_compute(device, tables, shader, shader);
 }
 
-void check_compute_file(ID3D12Device* device, const char* path)
+void check_compute_file(ID3D12Device* device, const char* path, bool conversion_pair, const char* reference)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) throw std::runtime_error(std::string("Could not open compute shader: ") + path);
@@ -170,7 +185,17 @@ void check_compute_file(ID3D12Device* device, const char* path)
     if (!file.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
         throw std::runtime_error(std::string("Could not read compute shader: ") + path);
     const D3D12_SHADER_BYTECODE shader{bytes.data(), bytes.size()};
-    run_compute(device, false, shader, shader);
+    if (reference) {
+        StoreCase store{};
+        std::ifstream file(reference, std::ios::binary);
+        file.read(reinterpret_cast<char*>(&store.groups), sizeof(store.groups));
+        file.read(reinterpret_cast<char*>(store.expected.data()), sizeof(store.expected));
+        if (!file || file.peek() != std::char_traits<char>::eof() || !store.groups || store.groups > 5)
+            throw std::runtime_error("Invalid compute store reference");
+        run_compute(device, false, shader, {compute_root, sizeof(compute_root)}, false, &store);
+    } else {
+        run_compute(device, false, shader, shader, conversion_pair);
+    }
 }
 
 void check_bvh_root_roundtrip(ID3D12Device* device)

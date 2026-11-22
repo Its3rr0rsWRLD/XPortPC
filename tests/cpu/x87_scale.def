@@ -1,0 +1,9 @@
+EXPORTS
+    scale_m80
+    scale_to_m64
+    scale_to_m32
+    scale_f64
+    scale_by_i32
+    scale_twice
+    xtract_scale
+    scale_depth8

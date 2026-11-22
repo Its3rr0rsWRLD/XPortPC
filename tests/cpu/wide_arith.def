@@ -1,0 +1,18 @@
+EXPORTS
+    div32
+    idiv32
+    div64
+    udiv128
+    idiv64
+    mul64
+    imul64_1
+    mul32
+    imul32
+    mul8
+    mul16
+    widen
+    sign_dx
+    mul_carry
+    base_clobber
+    index_clobber
+    guest_rdx

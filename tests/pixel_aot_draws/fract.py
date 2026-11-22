@@ -13,16 +13,30 @@ FRACT_INPUTS = (-2.0 ** -30, -0.25, 2.75, -2.0 ** -23)
 FRACT_CLAMP = struct.unpack("<f", struct.pack("<I", 0x3f7fffff))[0]
 
 
+def fract_values():
+    # The e64 lanes take |x| and -|x| (from R0Y00/Xbox2Windows#457 by descent81): ignoring either modifier gives 0.75.
+    return with_constants([
+        "v_fract_f32_e32 v12, s44",
+        "v_fract_f32_e64 v13, |s45|",
+        "v_fract_f32_e64 v14, -|s46|",
+        "v_fract_f32_e32 v15, s47",
+    ])
+
+
+def binary_fixtures():
+    return [(fract_values(), translate)]
+
+
 def check_fract_draw(directory, compiler, renderer, backend):
     source = directory / "fract.hlsl"
     shader = directory / "fract.cso"
     case = directory / "fract.case"
-    program = with_constants([f"v_fract_f32_e32 v{12 + i}, s{44 + i}" for i in range(4)])
-    source.write_text(translate(program), encoding="ascii")
+    source.write_text(translate(fract_values()), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
     constants = bytearray(256)
     struct.pack_into("<4f", constants, 12, *FRACT_INPUTS)
-    expected = [min(single(x - math.floor(x)), FRACT_CLAMP) for x in FRACT_INPUTS]
+    a, b, c, d = FRACT_INPUTS
+    expected = [min(single(x - math.floor(x)), FRACT_CLAMP) for x in (a, abs(b), -abs(c), d)]
     assert expected[0] == FRACT_CLAMP and single(FRACT_INPUTS[0] - math.floor(FRACT_INPUTS[0])) == 1.0
     draw = [renderer, backend, "--check-pixel-case", shader, case]
     case.write_bytes(constants + struct.pack("<4f", *map(half_rtz, expected)) * 64)

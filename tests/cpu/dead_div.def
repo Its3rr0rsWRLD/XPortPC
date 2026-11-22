@@ -1,0 +1,6 @@
+EXPORTS
+    div32_dead
+    idiv32_dead
+    udiv128_dead
+    idiv64_dead
+    div_skip

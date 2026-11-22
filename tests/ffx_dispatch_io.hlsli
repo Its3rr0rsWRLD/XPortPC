@@ -1,4 +1,5 @@
 #include "../src/rgb9e5.hlsli"
+#include "../src/ffx_float_to_int.hlsli"
 
 #define SCRATCH_ROOT "UAV(u11)"
 #define PRODUCER_ROOT "DescriptorTable(UAV(u2), UAV(u1), UAV(u6)), SRV(t3), SRV(t9), UAV(u11), UAV(u12)"

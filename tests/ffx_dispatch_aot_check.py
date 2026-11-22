@@ -1,5 +1,6 @@
 """Source-built instruction regressions for the dispatch translator."""
 from pathlib import Path
+import math
 import re
 import struct
 import subprocess
@@ -113,6 +114,75 @@ SALU_HELPERS = {
 }
 
 
+# Input binary32, expected unsigned word, expected signed word.
+CONVERSIONS = (
+    (0x00000000, 0, 0), (0x80000000, 0, 0), (1, 0, 0), (0x80000001, 0, 0),
+    (0x3fc00000, 1, 1), (0xc0300000, 0, 0xfffffffe),
+    (0x7fc01234, 0, 0), (0xffc01234, 0, 0),
+    (0x7f800000, 0xffffffff, 0x7fffffff), (0xff800000, 0, 0x80000000),
+    (0x4effffff, 0x7fffff80, 0x7fffff80), (0x4f000000, 0x80000000, 0x7fffffff),
+    (0x4f7fffff, 0xffffff00, 0x7fffffff), (0x4f800000, 0xffffffff, 0x7fffffff),
+    (0xceffffff, 0, 0x80000080), (0xcf000000, 0, 0x80000000), (0xcf000001, 0, 0x80000000),
+    (0x7f7fffff, 0xffffffff, 0x7fffffff), (0xff7fffff, 0, 0x80000000),
+)
+
+
+def truncate_word(bits, low, high):
+    value, = struct.unpack("<f", struct.pack("<I", bits))
+    return 0 if math.isnan(value) else int(min(high, max(low, value))) & 0xffffffff
+
+
+def check_conversion_readback(host, backend):
+    helpers = (Path(__file__).resolve().parents[1] / "src/ffx_float_to_int.hlsli").read_text()
+    inputs = ", ".join(f"0x{bits:08x}u" for bits, _, _ in CONVERSIONS)
+    unsigned = alu("v_cvt_u32_f32_e32", ["v1", "v0"], "")
+    signed = alu("v_cvt_i32_f32_e32", ["v2", "v0"], "")
+    shader = f"""{helpers}
+RWStructuredBuffer<uint> outWords : register(u0);
+static const uint inputs[{len(CONVERSIONS)}] = {{{inputs}}};
+[numthreads(1,1,1)] void main(uint3 group : SV_GroupID) {{
+    uint v0 = inputs[group.x], v1, v2;
+    {unsigned}
+    {signed}
+    outWords[2 * group.x] = v1;
+    outWords[2 * group.x + 1] = v2;
+}}
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "convert.hlsl"
+        source.write_text(shader, encoding="ascii")
+        output = subprocess.check_output([host, source, backend, str(len(CONVERSIONS)), "2"], text=True)
+    adapter, *rows = output.splitlines()
+    print(adapter)
+    assert len(rows) == len(CONVERSIONS)
+    for (bits, u, i), row in zip(CONVERSIONS, rows):
+        actual = tuple(map(int, row.split()))
+        assert actual == (u, i), (hex(bits), actual, (u, i))
+    print(f"{len(rows)} signed/unsigned pairs matched")
+
+
+def check_immediate_conversion(compiler, renderer, backend):
+    helpers = (Path(__file__).resolve().parents[1] / "src/ffx_float_to_int.hlsli").read_text()
+    unsigned = alu("v_cvt_u32_f32_e32", ["v1", "0x7f800000"], "")
+    signed = alu("v_cvt_i32_f32_e32", ["v2", "0x7f800000"], "")
+    shader = f"""{helpers}
+RWByteAddressBuffer output : register(u0);
+[RootSignature("SRV(t0), UAV(u0), RootConstants(num32BitConstants=16,b0)")]
+[numthreads(1,1,1)] void main(uint3 id : SV_DispatchThreadID) {{
+    if (id.x != 0) return;
+    uint v1, v2;
+    {unsigned}
+    {signed}
+    output.Store2(0, uint2(v1, v2));
+}}
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        source, binary = Path(tmp) / "immediate.hlsl", Path(tmp) / "immediate.cso"
+        source.write_text(shader, encoding="ascii")
+        subprocess.run([compiler, "-T", "cs_6_0", "-E", "main", "-Fo", binary, source], check=True)
+        subprocess.run([renderer, backend, "--ffx-immediate-conversion", binary], check=True)
+
+
 def eval_generated(shader, init):
     env = {f"s{i}": 0 for i in range(32)}
     env.update({f"v{i}": 0 for i in range(32)})
@@ -121,6 +191,8 @@ def eval_generated(shader, init):
         asint=asint, min=min, max=max,
         reversebits=lambda x: int(f"{x & 0xffffffff:032b}"[::-1], 2),
         mul_high=lambda a, b: ((a & 0xffffffff) * (b & 0xffffffff)) >> 32,
+        cvt_i32_f32=lambda bits: truncate_word(bits, -(1 << 31), (1 << 31) - 1),
+        cvt_u32_f32=lambda bits: truncate_word(bits, 0, (1 << 32) - 1),
         **init,
     )
     for raw in shader.splitlines():
@@ -435,6 +507,7 @@ def main(assembler, objcopy, library):
         source, obj, binary = (root / ("fixture." + ext) for ext in ("s", "o", "bin"))
         source.write_text("v_pk_add_u16 v4, v0, 1\n"
                           "image_load v[5:6], v4, s[24:31] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm a16 d16\n"
+                          "v_cvt_u32_f32_e32 v8, v7\nv_cvt_i32_f32_e32 v9, v7\n"
                           "s_endpgm\n", encoding="ascii")
         subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-filetype=obj",
                         source, "-o", obj], check=True)
@@ -450,9 +523,20 @@ def main(assembler, objcopy, library):
     hlsl = translate("rcas", instructions, code)
     assert "0xffffu >> 16" in hlsl and "0xffffffffu" not in hlsl
     assert "load16(uint2(v4 & 65535u, v4>>16))" in hlsl
+    conversions = [(pc, line) for pc, line in instructions if line.startswith(("v_cvt_u32_f32", "v_cvt_i32_f32"))]
+    assert len(conversions) == 2
+    for shader in (translate("rcas", conversions, code), predecessor("pass25", conversions, b"")):
+        for bits, unsigned, signed in CONVERSIONS:
+            env = eval_generated(shader, {"v7": bits})
+            assert (env["v8"], env["v9"]) == (unsigned, signed), hex(bits)
     check_bfe(assembler, objcopy, library)
     check_salu_sopk_and_scc(assembler, objcopy, library)
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:])
+    if sys.argv[1:2] == ["--immediate"]:
+        check_immediate_conversion(*sys.argv[2:])
+    elif sys.argv[1:2] == ["--readback"]:
+        check_conversion_readback(*sys.argv[2:])
+    else:
+        main(*sys.argv[1:])

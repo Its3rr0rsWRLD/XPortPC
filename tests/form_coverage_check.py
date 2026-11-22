@@ -262,6 +262,17 @@ def check_shader_records():
         ("SOP2", "s_lshl_b64"), ("SOP2", "s_lshr_b64"), ("SOP2", "s_ashr_i64"),
         ("SOP2", "s_bfm_b64"), ("SOP2", "s_bfe_u32"), ("SOP2", "s_bfe_i32"),
     }
+    sopc_forms = {
+        ("SOPC", "s_cmp_eq_i32"), ("SOPC", "s_cmp_lg_i32"),
+        ("SOPC", "s_cmp_gt_i32"), ("SOPC", "s_cmp_ge_i32"),
+        ("SOPC", "s_cmp_lt_i32"), ("SOPC", "s_cmp_le_i32"),
+        ("SOPC", "s_cmp_eq_u32"), ("SOPC", "s_cmp_lg_u32"),
+        ("SOPC", "s_cmp_gt_u32"), ("SOPC", "s_cmp_ge_u32"),
+        ("SOPC", "s_cmp_lt_u32"), ("SOPC", "s_cmp_le_u32"),
+        ("SOPC", "s_cmp_eq_u64"), ("SOPC", "s_cmp_lg_u64"),
+        ("SOPC", "s_bitcmp0_b32"), ("SOPC", "s_bitcmp1_b32"),
+        ("SOPC", "s_bitcmp0_b64"), ("SOPC", "s_bitcmp1_b64"),
+    }
     rejected_forms = {
         "s_and_saveexec_b64", "s_or_saveexec_b64", "s_andn2_saveexec_b64",
         # Removed as lowered (draw family salu_rest): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
@@ -288,6 +299,7 @@ def check_shader_records():
         covered = fc.gfx_forms(pixel.ACCEPTED, fc.load_reference(name))
         assert scalar64_forms <= covered, (name, scalar64_forms - covered)
         assert salu_rest_forms <= covered, (name, salu_rest_forms - covered)
+        assert sopc_forms <= covered, (name, sopc_forms - covered)
 
 
 def check_parsing():
@@ -428,6 +440,8 @@ def check_avx2_regs():
         for form in expected_avx2:
             assert f"AVX2 {form}" in only_skip["blocked_by_skip"]
         assert only_fail["groups"]["AVX2"] == {"covered": 0, "total": 28}
+        assert only_fail["blocked_by_skip"] == []
+
 def check_avx_int_regs():
     """avx_int_regs.asm covers 90 surviving AVX packed-integer forms in docs/coverage/x64_zen2.tsv group AVX."""
     expected_avx_int = {

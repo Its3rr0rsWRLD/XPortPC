@@ -329,10 +329,10 @@ def check_rejections():
         "fmul st, st(1) with one value": (attempt(f"{fld} d8 c9 {fstp} c3"), "x87 stack underflow"),
         "fmul st(2), st with two values": (attempt(f"{fld} {fld} dc ca {fstp} {fstp} c3"), "x87 stack underflow"),
         "fmulp with one value": (attempt(f"{fld} de c9 {fstp} c3"), "x87 stack underflow"),
-        "fimul m32": (attempt(f"{fld} da 09 {fstp} c3"), "unsupported x87 operation"),
-        "fimul m16": (attempt(f"{fld} de 09 {fstp} c3"), "unsupported x87 operation"),
+        "fldenv": (attempt(f"{fld} d9 21 {fstp} c3"), "unsupported x87 operation"),
+        "fdecstp": (attempt(f"{fld} d9 f6 {fstp} c3"), "unsupported x87 operation"),
         "fcomp st(1)": (attempt(f"{fld} {fld} d8 d9 {fstp} c3"), "unsupported x87 operation"),
-        "fiadd m32": (attempt(f"{fld} da 01 {fstp} c3"), "unsupported x87 operation"),
+        "fincstp": (attempt(f"{fld} d9 f7 {fstp} c3"), "unsupported x87 operation"),
     }
     for case, (message, needle) in rejected.items():
         if message is None or needle not in message:

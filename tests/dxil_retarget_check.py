@@ -155,6 +155,25 @@ def _inject_xb2_into_container(blob: bytes, *, abbreviate_name: bool = False) ->
 
 
 def check_pure_python_controls() -> None:
+    # 0. VBR operands are limited to the unsigned 64-bit range.
+    for value in (0, 1, (1 << 64) - 1):
+        writer = rt.BitWriter()
+        writer.write_vbr(value, 32)
+        encoded = writer.finish()
+        reader = rt.BitReader(encoded)
+        assert reader.read_vbr(32) == value
+        assert reader.bitpos == len(encoded) * 8
+
+    for value in (1 << 64, (1 << 65) - 1):
+        writer = rt.BitWriter()
+        writer.write_vbr(value, 32)
+        try:
+            rt.BitReader(writer.finish()).read_vbr(32)
+        except ValueError as exc:
+            assert str(exc) == "VBR integer exceeds 64 bits"
+        else:
+            raise AssertionError(f"read_vbr accepted an out-of-range value {value:#x}")
+
     # 1. Identity round-trip + retarget across unabbreviated/abbreviated/blob combinations
     for abbrev_triple in (False, True):
         for abbrev_md in (False, True):

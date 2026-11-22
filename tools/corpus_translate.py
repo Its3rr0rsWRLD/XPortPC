@@ -23,8 +23,9 @@ interpolation base, the four sampler words and the offsets of the constant and s
 read off the program, the way a caller with the title's pipeline layout would supply them:
 - interp_sgpr: the entry SGPR copied (through s_mov_b32) into m0;
 - texture_sgpr: the low SGPR of the address pair of the first s_load_dwordx8 (the descriptor table);
-- sampler: the words of the first image_sample's sampler registers if s_mov_b32 / s_movk_i32 set them all to
-  constants, else zeros (a sampler loaded from memory then refuses as an unknown binding);
+- sampler: None for a program without image_sample (bound with no texture or sampler); else the words of the
+  first image_sample's sampler registers if s_mov_b32 / s_movk_i32 set them all to constants, else zeros (a sampler
+  loaded from memory then refuses as an unknown binding);
 - constant_descriptor: the offset of the first s_load_dwordx4 from the descriptor table, if any;
 - second_texture_offset: with exactly two image_sample instructions, the offset of a second, different
   s_load_dwordx8 from the table.
@@ -152,7 +153,9 @@ def binding_contract(program):
         table = next(free)
     if interp is None or interp == table:
         interp = next(n for n in free if n != table)
-    if sampler is None or None in sampler:
+    if samples == 0:
+        sampler = None  # no image_sample: bound without a texture or sampler (lower(sampler=None))
+    elif sampler is None or None in sampler:
         sampler = [0, 0, 0, 0]
     second = None
     if samples == 2:
@@ -168,7 +171,8 @@ def binding_contract(program):
 CONTRACT = ("Texture address differs from binding contract", "Unresolved constant buffer binding",
             "Texture and constant descriptors overlap", "Second texture descriptor must have a distinct aligned offset",
             "Unexpected sample count or missing color export", "Unsupported image or sampler binding",
-            "Descriptor table word is not a tracked descriptor", "Read of unset scalar register")
+            "Descriptor table word is not a tracked descriptor", "Read of unset scalar register",
+            "Second texture requires a sampler")
 
 
 class _Dispatch:
