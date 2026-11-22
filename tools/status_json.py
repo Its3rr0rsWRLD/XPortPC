@@ -22,6 +22,8 @@ CORPUS = Path("docs/coverage/corpus-gfx1013.tsv")
 PARTS = Path("docs/status-parts.json")
 STATES = ("done", "partial", "not_started")
 ADAPTERS = ["NVIDIA GeForce RTX 4070 Ti", "WARP"]
+STAGES = ("pixel", "vertex", "compute", "other")
+STAGES_SUPPORTED = ["pixel"]  # shader stages the converter handles today; edit by hand when another lands
 
 
 class InputError(Exception):
@@ -69,8 +71,17 @@ def read_corpus(root):
     covered, total = int(uses[1]), int(uses[2])
     if total == 0:
         raise InputError(f"{path} reports zero instruction uses")
+    stages = {}
+    for m in re.finditer(r"Stage (\w+): shaders (\d+); all_covered (\d+); translatable_bound (\d+)\.", text):
+        stages[m[1]] = {"shaders": int(m[2]), "all_covered": int(m[3]), "translatable_bound": int(m[4])}
+    if set(stages) != set(STAGES):
+        raise InputError(f"{path} lacks '# Stage <name>: ...' lines for {', '.join(STAGES)}")
+    blocking = [{"form": m[1], "shaders": int(m[2])}
+                for m in re.finditer(r"Blocking form (\S+): (\d+) shaders", text)][:5]
     return {"corpus_shaders": int(shaders[1]), "uses_covered": covered, "uses_total": total,
-            "uses_percent": round(100 * covered / total, 1)}
+            "uses_percent": round(100 * covered / total, 1)}, \
+           {"shaders": int(shaders[1]), "stages": {k: stages[k] for k in STAGES},
+            "uses_percent": round(100 * covered / total, 1), "blocking_forms": blocking}
 
 
 def read_parts(root):
@@ -104,11 +115,17 @@ def build(junit, coverage, root=ROOT):
         raise InputError(f"{coverage} lacks gfx1013 or x64_zen2 data: {error}")
     tests = read_junit(junit)
     tests["adapters"] = ADAPTERS
+    if forms["forms_total"] <= 0:
+        raise InputError(f"{coverage} reports zero gfx1013 forms")
+    forms["forms_percent"] = round(100 * forms["forms_covered"] / forms["forms_total"], 1)
+    legacy, corpus = read_corpus(root)  # legacy fields stay in gfx1013 so a schema-1 page still works
     return {
-        "schema": 1,
+        "schema": 2,
         "commit": read_git(root),
         "tests": tests,
-        "gfx1013": {**forms, **read_corpus(root)},
+        "gfx1013": {**forms, **legacy},
+        "corpus": corpus,
+        "stages_supported": list(STAGES_SUPPORTED),
         "x64": cpu,
         "parts": read_parts(root),
     }

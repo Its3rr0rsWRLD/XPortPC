@@ -15,7 +15,11 @@ form_coverage record file (<build>/form_coverage/<test>.txt); several files may 
 
 The header comments carry the corpus summary: shader counts per stage, the share of shaders with a branch
 (s_cbranch_*, s_branch), a loop (a branch to a block at or before itself), or an exec-mask write, and the
-share of instruction uses whose form is covered. Python standard library only.
+share of instruction uses whose form is covered. Per-shader measures follow, one stable line per stage:
+"# Stage pixel: shaders 250; all_covered 39; translatable_bound 16." all_covered counts shaders whose every form is
+covered (needs --covered); translatable_bound counts those that also have no branch and no exec-mask change (an
+instruction writing exec other than "s_wqm_b64 exec, exec"). "# Blocking form <name>: <n> shaders" lines list the
+forms that are the only uncovered form in a pixel shader, most shaders first (top 10). Python standard library only.
 """
 import argparse
 import re
@@ -35,6 +39,7 @@ def parse(path):
     """(mnemonics, branch, loop, exec) of one ISA dump. Lines: '\\tmnemonic operands ; hex', 'BBn:' labels."""
     mnemonics, branch, loop, execw = [], False, False, False
     block = 0
+    parse.exec_change = False
     for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         m = LABEL.match(raw)
         if m:
@@ -59,10 +64,16 @@ def parse(path):
         first = operands.split(",", 1)[0].strip()
         if mnemonic.startswith("v_cmpx"):
             execw = True
+            parse.exec_change = True
         if mnemonic.startswith("s_") and (first in ("exec", "exec_lo", "exec_hi") or "saveexec" in mnemonic
                                           or "wrexec" in mnemonic):
             execw = True
+            if not (mnemonic == "s_wqm_b64" and [o.strip() for o in operands.split(",")[:2]] == ["exec", "exec"]):
+                parse.exec_change = True
     return mnemonics, branch, loop, execw
+
+
+parse.exec_change = False  # set by the last parse(): any exec write except "s_wqm_b64 exec, exec"
 
 
 def main(argv):
@@ -85,11 +96,13 @@ def main(argv):
 
     shaders = Counter()
     flags = defaultdict(Counter)
+    all_covered, bound, blocking = Counter(), Counter(), Counter()
     uses = defaultdict(Counter)       # form -> Counter of "uses:stage"
     users = defaultdict(Counter)      # form -> Counter of "shaders:stage"
     for stage in STAGES:
         for path in sorted((args.isa_dir / stage).glob("*.s")):
             mnemonics, branch, loop, execw = parse(path)
+            exec_change = parse.exec_change
             shaders[stage] += 1
             for key, on in (("branch", branch), ("loop", loop), ("exec", execw)):
                 flags[stage][key] += on
@@ -102,6 +115,14 @@ def main(argv):
                     seen.add(form)
             for form in seen:
                 users[form][stage] += 1
+            if covered is not None:
+                missing = [f for f in seen if f not in covered]
+                if not missing:
+                    all_covered[stage] += 1
+                    if not branch and not exec_change:
+                        bound[stage] += 1
+                elif len(missing) == 1 and stage == "pixel":
+                    blocking[missing[0][1]] += 1
 
     total_uses = sum(sum(c.values()) for c in uses.values())
     covered_uses = sum(sum(c.values()) for f, c in uses.items() if covered is not None and f in covered)
@@ -115,6 +136,12 @@ def main(argv):
     if covered is not None:
         lines.append(f"# Uses of covered forms: {covered_uses} of {total_uses} ({100 * covered_uses / max(total_uses, 1):.1f}%)"
                      f"; reference forms covered: {len(covered)}.")
+    if covered is not None:
+        for stage in STAGES:
+            lines.append(f"# Stage {stage}: shaders {shaders[stage]}; all_covered {all_covered[stage]}; "
+                         f"translatable_bound {bound[stage]}.")
+        for name, k in sorted(blocking.items(), key=lambda kv: (-kv[1], kv[0]))[:10]:
+            lines.append(f"# Blocking form {name}: {k} shaders")
     header = ["form", "encoding", "shaders_using", "total_uses"]
     for s in STAGES:
         header += [f"{s}_shaders", f"{s}_uses"]
@@ -127,7 +154,7 @@ def main(argv):
             row += [users[form][s], c[s]]
         row.append("" if covered is None else ("yes" if form in covered else "no"))
         rows.append(row)
-    rows.sort(key=lambda r: (-r[2], -r[3], r[0]))
+    rows.sort(key=lambda r: (-r[2], -r[3], r[0], r[1]))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n" + "\t".join(header) + "\n")

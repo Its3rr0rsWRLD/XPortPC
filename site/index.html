@@ -3,130 +3,275 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
 <title>XPortPC status</title>
 <meta name="description" content="What works and what does not yet in XPortPC, which runs Xbox Series X|S programs on Windows PCs.">
 <style>
 :root {
-  --paper: #eff2ef; --ink: #121b17; --muted: #53625b; --rule: #c6cfc9;
-  --accent: #1d3bd0; --accent-ink: #ffffff; --cell-off: #d5dcd7; --warn: #8a4b00;
-  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  color-scheme: dark;
+  --bg: #0a0c0b; --raise: #111513; --raise2: #181d1a; --line: #263029; --line2: #36423a;
+  --ink: #e8f0ea; --muted: #94a59b; --accent: #52dc86; --accent-ink: #04150a; --accent-dim: #1b4a30;
+  --amber: #e3ae4a; --cell-off: #1b221e; --grid: rgba(120, 160, 135, 0.07); --glow: rgba(82, 220, 134, 0.10);
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --paper: #0e1411; --ink: #e5ece8; --muted: #91a299; --rule: #2a3530;
-    --accent: #93a6ff; --accent-ink: #0e1411; --cell-off: #1d2722; --warn: #e0b36a; }
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #eef2ef; --raise: #f8faf8; --raise2: #e4eae6; --line: #c9d3cc; --line2: #a9b7ae;
+    --ink: #101a14; --muted: #4c5c53; --accent: #0a7a3a; --accent-ink: #ffffff; --accent-dim: #b7dcc4;
+    --amber: #8a5600; --cell-off: #d6dfd9; --grid: rgba(20, 70, 40, 0.07); --glow: rgba(10, 122, 58, 0.09);
+  }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.55 var(--sans);
-  font-variant-numeric: tabular-nums; }
-.wrap { max-width: 62rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
-a { color: var(--accent); text-underline-offset: 0.18em; }
-a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
-h1, h2 { font-family: var(--serif); font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-h1 { font-size: clamp(2.25rem, 7vw, 3.5rem); line-height: 1.05; }
-h2 { font-size: 1.5rem; line-height: 1.2; }
-.lede { max-width: 38rem; margin: 1rem 0 0; font-size: 1.125rem; line-height: 1.6; }
-.repo { display: inline-block; margin-top: 0.75rem; }
-section { margin-top: 4rem; }
-section > p.sub { max-width: 40rem; margin: 0.5rem 0 0; color: var(--muted); }
-#notice { display: none; margin-top: 2rem; padding: 0.75rem 1rem; border-left: 4px solid var(--warn); color: var(--ink); max-width: 40rem; }
+body {
+  margin: 0; color: var(--ink); font: 1rem/1.55 var(--sans); background-color: var(--bg);
+  background-image:
+    radial-gradient(60rem 28rem at 12% -6%, var(--glow), transparent 70%),
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: auto, 40px 40px, 40px 40px;
+  background-position: 0 0, -1px -1px, -1px -1px;
+}
+.wrap { max-width: 70rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; line-height: 1.25; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.muted { color: var(--muted); }
+.fine { color: var(--muted); font-size: 0.9375rem; }
+
+/* Masthead */
+.mast { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 2rem;
+  padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+.mast h1 { font-family: var(--mono); font-size: 1.125rem; letter-spacing: 0; }
+.mast p { margin: 0; color: var(--muted); font-size: 0.9375rem; max-width: 40rem; }
+#notice { display: none; margin: 1.25rem 0 0; padding: 0.75rem 1rem; border: 1px solid var(--amber); border-left-width: 4px;
+  background: var(--raise); max-width: 44rem; }
 #notice.on { display: block; }
 
-/* Hero: one cell per instruction form. */
-.hero { display: grid; gap: 2rem; margin-top: 3.5rem; }
-.big { font-family: var(--serif); font-size: clamp(4.5rem, 20vw, 9rem); line-height: 0.9; font-weight: 600;
-  letter-spacing: -0.03em; margin: 0; }
-.big small { font-size: 0.28em; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 0.25em; }
-.label { margin: 0.75rem 0 0; max-width: 34rem; }
-.field { display: grid; grid-template-columns: repeat(auto-fill, minmax(7px, 1fr)); gap: 2px; margin: 0; }
-.field i { aspect-ratio: 1; background: var(--cell-off); }
-.field i.on { background: var(--accent); }
-.share { font-family: var(--serif); font-size: clamp(2.5rem, 10vw, 4rem); line-height: 1; font-weight: 600; margin: 0; }
-.share-label { margin: 0.5rem 0 0; max-width: 34rem; }
-.fine { color: var(--muted); font-size: 0.9375rem; }
-@media (min-width: 52rem) { .hero { grid-template-columns: 1fr 1fr; align-items: start; gap: 3rem; } .field { grid-column: 1 / -1; } }
+section { margin-top: 4.5rem; }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1.5rem; margin-bottom: 1.25rem; }
+.head p { margin: 0; color: var(--muted); max-width: 42rem; }
 
-/* Parts */
-.parts { list-style: none; margin: 1.5rem 0 0; padding: 0; border-top: 1px solid var(--rule); }
-.parts li { display: grid; grid-template-columns: 1.5rem 1fr; column-gap: 0.75rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
-.mark { width: 1rem; height: 1rem; margin-top: 0.3rem; border: 2px solid var(--accent); border-radius: 2px; }
-.mark.done { background: var(--accent); }
-.mark.partial { background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
-.parts .name { font-weight: 600; }
-.parts .state { font-weight: 400; color: var(--muted); margin-left: 0.5rem; }
-.parts li.empty { display: block; }
-.parts .note { grid-column: 2; margin: 0.15rem 0 0; color: var(--muted); max-width: 40rem; }
+/* Hero */
+.hero { margin-top: 3rem; display: grid; gap: 2rem 4rem; }
+.hero .ask { margin: 0; font-size: 1.125rem; font-weight: 500; max-width: 26rem; color: var(--muted); line-height: 1.4; }
+.hero .ask span { display: block; color: var(--ink); font-size: clamp(1.5rem, 5vw, 2.25rem); font-weight: 600; letter-spacing: -0.02em; line-height: 1.12; margin-bottom: 0.5rem; }
+.answer { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 1rem; margin: 0.5rem 0 0; }
+.answer .atmost { font-size: 1.125rem; color: var(--muted); width: 100%; }
+.answer .big { font-size: clamp(5.5rem, 26vw, 10.5rem); line-height: 0.85; font-weight: 700; color: var(--accent); }
+.answer .of { font-size: clamp(1.5rem, 6vw, 2.5rem); font-weight: 500; }
+.answer .pct { font-size: clamp(1.5rem, 6vw, 2.5rem); font-weight: 500; color: var(--muted); }
+.why { margin: 1rem 0 0; max-width: 34rem; }
+@media (min-width: 60rem) { .hero { grid-template-columns: minmax(0, 24rem) minmax(0, 1fr); align-items: end; } }
+
+.strip { display: flex; gap: 2px; align-items: flex-end; height: 3.25rem; margin: 2.5rem 0 0; padding: 0; list-style: none; }
+.strip li { flex: 1 1 0; min-width: 0; background: var(--cell-off); height: 30%; }
+.strip li.mid { height: 62%; background: transparent; box-shadow: inset 0 0 0 1px var(--accent); }
+.strip li.top { height: 100%; background: var(--accent); }
+.key { display: flex; flex-wrap: wrap; gap: 0.25rem 1.5rem; margin: 0.75rem 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.875rem; }
+.key i { display: inline-block; width: 0.6rem; margin-right: 0.45rem; vertical-align: -0.05em; background: var(--cell-off); height: 0.6rem; }
+.key i.mid { background: transparent; box-shadow: inset 0 0 0 1px var(--accent); }
+.key i.top { background: var(--accent); }
+
+/* Stage table */
+.stages { width: 100%; border-collapse: collapse; margin-top: 2rem; }
+.stages caption { text-align: left; color: var(--muted); font-size: 0.9375rem; padding-bottom: 0.5rem; }
+.stages th, .stages td { text-align: left; padding: 0.7rem 0.75rem 0.7rem 0; border-top: 1px solid var(--line); vertical-align: baseline; font-weight: 400; }
+.stages thead th { color: var(--muted); font-size: 0.875rem; border-top: 0; padding-top: 0; }
+.stages tbody th { font-weight: 600; }
+.stages td.r, .stages th.r { text-align: right; }
+.stages .no { color: var(--muted); }
+.stages .tag { display: inline-block; border: 1px dashed var(--line2); padding: 0 0.5rem; border-radius: 3px; font-size: 0.8125rem; color: var(--muted); margin-left: 0.5rem; white-space: nowrap; }
+@media (max-width: 40rem) {
+  .stages thead { position: absolute; left: -9999px; }
+  .stages caption { display: block; width: 100%; }
+  .stages, .stages tbody, .stages tr, .stages th, .stages td { display: block; }
+  .stages tr { border-top: 1px solid var(--line); padding: 0.75rem 0; }
+  .stages th, .stages td { border: 0; padding: 0.1rem 0; text-align: left !important; }
+  .stages td[data-l]::before { content: attr(data-l) ": "; color: var(--muted); }
+}
+
+/* Secondary figures */
+.figs { display: grid; gap: 0; border-top: 1px solid var(--line2); }
+.fig { padding: 1.25rem 0; border-bottom: 1px solid var(--line); }
+.fig .v { font-size: clamp(2rem, 7vw, 2.75rem); font-weight: 600; line-height: 1; margin: 0; }
+.fig .v small { font-size: 0.5em; font-weight: 400; color: var(--muted); margin-left: 0.5rem; }
+.fig h3 { font-size: 1rem; margin: 0.75rem 0 0.25rem; }
+.fig p { margin: 0; color: var(--muted); max-width: 26rem; font-size: 0.9375rem; }
+@media (min-width: 52rem) {
+  .figs { grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
+  .fig { padding: 1.5rem 1.5rem 1.5rem 0; border-bottom: 0; }
+  .fig + .fig { padding-left: 1.5rem; border-left: 1px solid var(--line); }
+}
+
+/* Blocking */
+.block { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line2); }
+.block li { display: grid; grid-template-columns: minmax(0, 1fr) 7rem; gap: 0.25rem 1rem; padding: 0.7rem 0; border-bottom: 1px solid var(--line); align-items: center; }
+.block code { font-family: var(--mono); font-size: 0.9375rem; overflow-wrap: anywhere; }
+.block .n { text-align: right; white-space: nowrap; font-family: var(--mono); }
+.block .bar { grid-column: 1 / -1; height: 4px; background: var(--cell-off); }
+.block .bar b { display: block; height: 100%; background: var(--accent); }
+
+/* Road */
+.road { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; counter-reset: step; }
+.step { position: relative; padding: 0 0 1.5rem 2.25rem; }
+.step:last-child { padding-bottom: 0; }
+.step::before { content: ""; position: absolute; left: 0.6875rem; top: 1.4rem; bottom: 0; width: 0; border-left: 2px solid var(--line2); }
+.step:last-child::before { display: none; }
+.step.done::before { border-left-color: var(--accent); }
+.step button { all: unset; cursor: pointer; display: block; }
+.step button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+.step .node { position: absolute; left: 0; top: 0.15rem; width: 1.5rem; height: 1.5rem; border-radius: 50%; border: 2px solid var(--accent); background: var(--bg); }
+.step.done .node { background: var(--accent); }
+.step.done .node::after { content: ""; position: absolute; left: 0.42rem; top: 0.15rem; width: 0.3rem; height: 0.62rem; border: solid var(--accent-ink); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.step.partial .node { background: linear-gradient(90deg, var(--accent) 50%, var(--bg) 50%); border-color: var(--amber); }
+.step.partial .node { border-color: var(--accent); }
+.step.not_started .node { border: 2px dashed var(--line2); }
+.step .nm { display: block; font-weight: 600; }
+.step .st { display: block; font-size: 0.875rem; color: var(--muted); }
+.step.partial .st { color: var(--amber); }
+.step.done .st { color: var(--accent); }
+.step .note { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9375rem; max-width: 36rem; }
+#detail { display: none; }
+@media (min-width: 60rem) {
+  .road { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .step { padding: 2.25rem 0.75rem 0 0; }
+  .step::before { left: 1.5rem; right: 0; top: 0.8rem; bottom: auto; border-left: 0; border-top: 2px solid var(--line2); width: auto; height: 0; }
+  .step.done::before { border-top-color: var(--accent); }
+  .step .node { top: 0; }
+  .step .note { display: none; }
+  .step.sel button .nm { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 0.3em; text-decoration-thickness: 2px; }
+  #detail { display: block; margin: 1.5rem 0 0; padding: 1rem 1.25rem; background: var(--raise); border: 1px solid var(--line); border-left: 3px solid var(--accent); max-width: 44rem; min-height: 5.5rem; }
+  #detail b { display: block; margin-bottom: 0.25rem; }
+  #detail span { color: var(--muted); }
+}
+
+/* Form field */
+.field-wrap { background: var(--raise); border: 1px solid var(--line); padding: 1.25rem; }
+.readout { min-height: 1.6rem; margin: 0 0 1rem; font-size: 0.9375rem; display: flex; flex-wrap: wrap; gap: 0 1rem; }
+.readout b { font-family: var(--mono); font-weight: 600; }
+.field { display: flex; flex-wrap: wrap; gap: 1.25rem 1.5rem; align-items: flex-start; }
+.grp { cursor: default; padding: 0.35rem; margin: -0.35rem; border-radius: 4px; }
+.grp h3 { font-family: var(--mono); font-size: 0.75rem; font-weight: 500; color: var(--muted); letter-spacing: 0; margin: 0 0 0.35rem; display: flex; gap: 0.5rem; }
+.grp h3 span { color: var(--ink); }
+.cells { display: flex; flex-wrap: wrap; gap: 2px; }
+.cells i { width: 7px; height: 7px; box-shadow: inset 0 0 0 1px var(--line2); background: transparent; }
+.cells i.on { background: var(--accent); box-shadow: none; }
+.grp:hover, .grp.pick { background: var(--raise2); }
+.fade { animation: fadein 0.9s ease-out both; }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+.legend { display: flex; gap: 1.5rem; margin: 1rem 0 0; font-size: 0.875rem; color: var(--muted); }
+.legend i { display: inline-block; width: 0.6rem; height: 0.6rem; margin-right: 0.45rem; box-shadow: inset 0 0 0 1px var(--line2); }
+.legend i.on { background: var(--accent); box-shadow: none; }
 
 /* Groups */
-.groups { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 0.5rem 3rem; }
+.groups { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem 3rem; }
 @media (min-width: 52rem) { .groups { grid-template-columns: 1fr 1fr; } }
-.groups li { display: grid; grid-template-columns: 5.5rem 1fr auto; align-items: center; gap: 0.75rem; }
-.bar { height: 0.75rem; background: var(--cell-off); position: relative; }
-.bar b { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
-.n { text-align: right; min-width: 6.5rem; color: var(--muted); font-size: 0.9375rem; }
-.cpu { margin-top: 2rem; display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: center; max-width: 30rem; }
+.groups li { display: grid; grid-template-columns: 4.75rem 1fr 7.5rem; align-items: center; gap: 0.75rem; font-size: 0.9375rem; }
+.groups .lbl { font-family: var(--mono); }
+.bar2 { height: 0.6rem; background: var(--cell-off); position: relative; }
+.bar2 b { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+.groups .c { text-align: right; color: var(--muted); font-family: var(--mono); font-size: 0.875rem; }
+.cpu { margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
 
 /* Tests */
-dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1.5rem; margin: 1.5rem 0 0; }
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.6rem 2rem; margin: 0; padding: 1.25rem; background: var(--raise); border: 1px solid var(--line); max-width: 36rem; }
 dl.facts dt { color: var(--muted); }
 dl.facts dd { margin: 0; }
+.pass-bar { height: 6px; background: var(--cell-off); margin-top: 0.4rem; max-width: 16rem; }
+.pass-bar b { display: block; height: 100%; background: var(--accent); }
 
-footer { margin-top: 5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); color: var(--muted); max-width: 40rem; }
+footer { margin-top: 5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); max-width: 42rem; font-size: 0.9375rem; }
 footer p { margin: 0 0 0.5rem; }
 footer strong { color: var(--ink); }
-.empty { color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .fade { animation: none; } }
 </style>
 </head>
 <body>
 <div class="wrap">
-<header>
+<header class="mast">
   <h1>XPortPC</h1>
-  <p class="lede">Runs Xbox Series X|S programs on Windows PCs: native x64 loading, console library shims, and an RDNA shader converter to DirectX 12.</p>
-  <a class="repo" href="https://github.com/Its3rr0rsWRLD/XPortPC">Source on GitHub</a>
+  <p>Runs Xbox Series X|S programs on Windows PCs. <a href="https://github.com/Its3rr0rsWRLD/XPortPC">Source on GitHub</a></p>
 </header>
 
 <p id="notice" role="status"></p>
 
-<div class="hero">
+<main>
+<section class="hero" style="margin-top:3rem" aria-labelledby="h-hero">
   <div>
-    <p class="big" id="forms"><span id="forms-n">&ndash;</span><small id="forms-of"></small></p>
-    <p class="label">GPU instruction forms covered, out of all gfx1013 forms in the reference list.</p>
+    <h2 id="h-hero" class="ask"><span>Real pixel shaders XPortPC could convert today</span>Counted in a corpus of open-source shaders compiled for the console GPU, gfx1013.</h2>
   </div>
   <div>
-    <p class="share" id="share">&ndash;</p>
-    <p class="share-label">of instruction uses covered, counted in <span id="corpus">the corpus of</span> open-source shaders compiled for gfx1013.</p>
-    <p class="fine">Common instructions are used far more often than rare ones, so the second number is much higher than the first. Neither measures how close a game is to running.</p>
+    <p class="answer num" id="answer" hidden><span class="atmost">at most</span><span class="big" id="b-n">&ndash;</span><span class="of" id="b-of"></span><span class="pct" id="b-pct"></span></p>
+    <p class="why" id="why">Status data has not loaded yet.</p>
   </div>
-  <div class="field" id="field" role="img" aria-label="One cell per instruction form. Filled cells are covered."></div>
-</div>
+</section>
 
-<section aria-labelledby="h-parts">
-  <h2 id="h-parts">Parts of the converter</h2>
-  <p class="sub">Done, partial or not started. This lists results, not current work.</p>
-  <ul class="parts" id="parts"><li class="empty">Part status is not available.</li></ul>
+<ul class="strip" id="strip" aria-hidden="true"></ul>
+<ul class="key" id="key" hidden>
+  <li><i class="top"></i>No test missing, no branches</li>
+  <li><i class="mid"></i>No test missing, but has branches or exec changes</li>
+  <li><i></i>At least one form without a test</li>
+</ul>
+
+<table class="stages" id="stages" hidden>
+  <caption>Every shader stage in the corpus. Only supported stages can convert anything today.</caption>
+  <thead><tr><th scope="col">Stage</th><th scope="col" class="r">Shaders</th><th scope="col" class="r">Every form tested</th><th scope="col" class="r">And no branches</th><th scope="col" class="r">Convertible today</th></tr></thead>
+  <tbody id="stages-body"></tbody>
+</table>
+
+<section aria-labelledby="h-figs">
+  <div class="head"><h2 id="h-figs">Other measures</h2><p>Each one counts something different. None of them says how close a game is to running.</p></div>
+  <div class="figs">
+    <div class="fig"><p class="v num" id="f1">&ndash;</p><h3>Instruction forms with a passing test</h3><p>Out of every gfx1013 form in the reference list, counted by form, not by how often it appears.</p></div>
+    <div class="fig"><p class="v num" id="f2">&ndash;</p><h3>Instructions whose form has a test</h3><p>Counted per instruction across all real shaders, not per shader. Common instructions repeat thousands of times, so this reads high.</p></div>
+    <div class="fig"><p class="v num" id="f3">&ndash;</p><h3>x64 CPU forms with a passing test</h3><p>Out of the Zen 2 forms in the CPU reference list.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="h-block">
+  <div class="head"><h2 id="h-block">What is blocking the most shaders</h2><p>Each form below is the only form without a test in this many pixel shaders. Testing it would unlock those shaders, up to the branch limit above.</p></div>
+  <ul class="block" id="block"><li><span class="muted">Not available.</span></li></ul>
+</section>
+
+<section aria-labelledby="h-road">
+  <div class="head"><h2 id="h-road">The road to a running title</h2><p>Each part must work before a title can run. This lists results, not current work.</p></div>
+  <ol class="road" id="road"><li class="muted">Part status is not available.</li></ol>
+  <div id="detail" aria-live="polite"></div>
+</section>
+
+<section aria-labelledby="h-field">
+  <div class="head"><h2 id="h-field">Every instruction form</h2><p>One cell for each of the gfx1013 forms in the reference list, grouped by encoding. A lit cell has a passing test.</p></div>
+  <div class="field-wrap">
+    <p class="readout" id="readout" aria-live="polite"><span class="muted">Hover or focus a group to see its counts.</span></p>
+    <div class="field" id="field"><span class="muted" id="field-empty">Coverage data is not available.</span></div>
+    <p class="legend" id="legend" hidden><span><i class="on"></i>Has a passing test</span><span><i></i>No test yet</span></p>
+  </div>
 </section>
 
 <section aria-labelledby="h-groups">
-  <h2 id="h-groups">Coverage by instruction group</h2>
-  <p class="sub">Forms covered by a passing test, per encoding group.</p>
+  <div class="head"><h2 id="h-groups">Coverage by group</h2><p>Forms with a passing test, per encoding group.</p></div>
   <ul class="groups" id="groups"></ul>
   <div class="cpu" id="cpu" hidden>
-    <span>x64 CPU</span><span class="bar" aria-hidden="true"><b id="cpu-bar"></b></span><span class="n" id="cpu-n"></span>
+    <ul class="groups" style="grid-template-columns:1fr"><li><span class="lbl">x64 CPU</span><span class="bar2" aria-hidden="true"><b id="cpu-bar"></b></span><span class="c" id="cpu-n"></span></li></ul>
   </div>
-  <p class="fine" id="groups-empty">Coverage data is not available.</p>
 </section>
 
 <section aria-labelledby="h-tests">
-  <h2 id="h-tests">Tests</h2>
+  <div class="head"><h2 id="h-tests">Tests</h2></div>
   <dl class="facts">
-    <dt>Passing</dt><dd id="t-pass">Not available</dd>
+    <dt>Passing</dt><dd id="t-pass">Not available<div class="pass-bar" id="t-bar" hidden><b></b></div></dd>
     <dt>Adapters</dt><dd id="t-adapters">Not available</dd>
-    <dt>Last update</dt><dd id="t-time">Not available</dd>
+    <dt>Last run</dt><dd id="t-time">Not available</dd>
     <dt>Commit</dt><dd id="t-commit">Not available</dd>
   </dl>
 </section>
+</main>
 
 <footer>
   <p><strong>Never includes games.</strong> The tests build their own fixtures; no console, SDK or game files are needed or shipped.</p>
@@ -139,6 +284,18 @@ footer strong { color: var(--ink); }
   var REPO = "https://github.com/Its3rr0rsWRLD/XPortPC";
   var STALE_DAYS = 14;
   var STATE = { done: "Done", partial: "Partial", not_started: "Not started" };
+  var STAGE_NAME = { pixel: "Pixel", vertex: "Vertex", compute: "Compute", other: "Other" };
+  // The road: label, and which status-parts.json entries (matched by name prefix) feed it.
+  var ROAD = [
+    { name: "CPU code", match: ["CPU patch layer"] },
+    { name: "System libraries", match: ["System libraries"] },
+    { name: "Console Direct3D 12", match: ["Console Direct3D 12"] },
+    { name: "Shaders", match: ["Shader converter"] },
+    { name: "Memory", match: ["GPU memory"] },
+    { name: "Launcher", match: ["Native launcher"] },
+    { name: "Running a title", match: ["Running a title"] }
+  ];
+  var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   var $ = function (id) { return document.getElementById(id); };
   var nf = new Intl.NumberFormat("en-US");
   function el(tag, cls, text) {
@@ -147,70 +304,201 @@ footer strong { color: var(--ink); }
     if (text !== undefined) e.textContent = text;
     return e;
   }
+  function isNum() { return Array.prototype.every.call(arguments, function (v) { return typeof v === "number" && isFinite(v); }); }
+  function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + "%" : "n/a"; }
   function stamp(iso) {
     var d = new Date(iso);
     if (isNaN(d)) return String(iso);
     return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
   }
-  function isNum() { return Array.prototype.every.call(arguments, function (v) { return typeof v === "number" && isFinite(v); }); }
-
-  function render(s) {
-    var g = s.gfx1013 || {}, t = s.tests || {}, c = s.commit || {};
-    if (isNum(g.forms_covered, g.forms_total)) {
-      $("forms-n").textContent = nf.format(g.forms_covered);
-      $("forms-of").textContent = "of " + nf.format(g.forms_total);
+  function countUp(node, to, fmt) {
+    if (reduce || !window.requestAnimationFrame) { node.textContent = fmt(to); return; }
+    var t0 = null, dur = 900;
+    function tick(t) {
+      if (t0 === null) t0 = t;
+      var k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      node.textContent = fmt(to * e);
+      if (k < 1) requestAnimationFrame(tick); else node.textContent = fmt(to);
     }
-    if (isNum(g.uses_percent)) $("share").textContent = g.uses_percent.toFixed(1) + "%";
-    if (isNum(g.corpus_shaders)) $("corpus").textContent = nf.format(g.corpus_shaders);
+    requestAnimationFrame(tick);
+  }
+  function whole(v) { return nf.format(Math.round(v)); }
 
-    var groups = Array.isArray(g.groups) ? g.groups.filter(function (x) { return isNum(x.covered, x.total) && x.total > 0; }) : [];
-    if (groups.length) {
-      var field = $("field");
-      groups.forEach(function (x) {
-        for (var i = 0; i < x.total; i++) field.appendChild(el("i", i < x.covered ? "on" : ""));
+  function hero(s) {
+    var corpus = s.corpus, sup = Array.isArray(s.stages_supported) ? s.stages_supported : [];
+    var px = corpus && corpus.stages && corpus.stages.pixel;
+    if (!px || !isNum(px.shaders, px.all_covered, px.translatable_bound) || sup.indexOf("pixel") < 0) {
+      $("why").textContent = px && sup.indexOf("pixel") < 0
+        ? "The pixel stage is not supported yet, so no real pixel shader converts today."
+        : "This status file predates per-shader counts, so the headline figure is not available. The measures below still apply.";
+      return;
+    }
+    var n = px.translatable_bound;
+    $("answer").hidden = false;
+    countUp($("b-n"), n, whole);
+    $("b-of").textContent = "of " + nf.format(px.shaders);
+    $("b-pct").textContent = "(" + pct(n, px.shaders) + ")";
+    $("answer").setAttribute("aria-label", "At most " + n + " of " + px.shaders + " real pixel shaders, " + pct(n, px.shaders));
+    $("why").textContent = "An upper bound, not a promise. These shaders have a passing test for every instruction form and no branches or exec-mask changes. Resource bindings and the rest of the pipeline still have to work.";
+
+    var strip = $("strip");
+    var order = [["top", px.translatable_bound], ["mid", px.all_covered - px.translatable_bound], ["", px.shaders - px.all_covered]];
+    order.forEach(function (o) { for (var i = 0; i < o[1]; i++) strip.appendChild(el("li", o[0])); });
+    $("key").hidden = false;
+    if (!reduce) strip.classList.add("fade");
+  }
+
+  function stages(s) {
+    var corpus = s.corpus, sup = Array.isArray(s.stages_supported) ? s.stages_supported : [];
+    if (!corpus || !corpus.stages) return;
+    var body = $("stages-body");
+    ["pixel", "vertex", "compute", "other"].forEach(function (k) {
+      var st = corpus.stages[k];
+      if (!st || !isNum(st.shaders, st.all_covered, st.translatable_bound)) return;
+      var ok = sup.indexOf(k) >= 0;
+      var tr = el("tr");
+      var th = el("th", "", STAGE_NAME[k]); th.setAttribute("scope", "row");
+      if (!ok) th.appendChild(el("span", "tag", "stage not supported yet"));
+      tr.appendChild(th);
+      [["Shaders", nf.format(st.shaders)], ["Every form tested", nf.format(st.all_covered)], ["And no branches", nf.format(st.translatable_bound)]].forEach(function (c) {
+        var td = el("td", "r num" + (ok ? "" : " no"), c[1]); td.setAttribute("data-l", c[0]); tr.appendChild(td);
       });
-      var list = $("groups");
-      groups.slice().sort(function (a, b) { return b.total - a.total; }).forEach(function (x) {
-        var li = el("li");
-        li.appendChild(el("span", "", x.name));
-        var bar = el("span", "bar"); bar.setAttribute("aria-hidden", "true");
-        var fill = el("b"); fill.style.width = (100 * x.covered / x.total) + "%"; bar.appendChild(fill);
-        li.appendChild(bar);
-        li.appendChild(el("span", "n", x.covered + " of " + nf.format(x.total)));
-        list.appendChild(li);
-      });
-      $("groups-empty").hidden = true;
-    } else { $("field").hidden = true; }
+      var last = el("td", "r num", ok ? "up to " + nf.format(st.translatable_bound) : "0"); last.setAttribute("data-l", "Convertible today");
+      tr.appendChild(last);
+      body.appendChild(tr);
+    });
+    $("stages").hidden = false;
+  }
+
+  function figures(s) {
+    var g = s.gfx1013 || {};
+    if (isNum(g.forms_covered, g.forms_total)) {
+      var f = $("f1"); f.textContent = ""; f.appendChild(document.createTextNode(nf.format(g.forms_covered)));
+      f.appendChild(el("small", "", "of " + nf.format(g.forms_total) + " · " + (isNum(g.forms_percent) ? g.forms_percent : 100 * g.forms_covered / g.forms_total).toFixed(1) + "%"));
+    }
+    var up = s.corpus && isNum(s.corpus.uses_percent) ? s.corpus.uses_percent : g.uses_percent;
+    if (isNum(up)) $("f2").textContent = up.toFixed(1) + "%";
     if (s.x64 && isNum(s.x64.covered, s.x64.total) && s.x64.total > 0) {
+      var x = $("f3"); x.textContent = ""; x.appendChild(document.createTextNode(nf.format(s.x64.covered)));
+      x.appendChild(el("small", "", "of " + nf.format(s.x64.total)));
       $("cpu").hidden = false;
       $("cpu-bar").style.width = (100 * s.x64.covered / s.x64.total) + "%";
-      $("cpu-n").textContent = s.x64.covered + " of " + nf.format(s.x64.total);
-      $("groups-empty").hidden = true;
+      $("cpu-n").textContent = nf.format(s.x64.covered) + " of " + nf.format(s.x64.total);
     }
+  }
 
-    if (Array.isArray(s.parts) && s.parts.length) {
-      var ul = $("parts"); ul.textContent = "";
-      s.parts.forEach(function (p) {
-        var li = el("li");
-        var m = el("span", "mark " + (STATE[p.state] ? p.state : "")); m.setAttribute("aria-hidden", "true");
-        li.appendChild(m);
-        var head = el("span", "name", p.name);
-        head.appendChild(el("span", "state", STATE[p.state] || ""));
-        li.appendChild(head);
-        li.appendChild(el("p", "note", p.note));
-        ul.appendChild(li);
-      });
+  function blocking(s) {
+    var list = s.corpus && Array.isArray(s.corpus.blocking_forms) ? s.corpus.blocking_forms.filter(function (b) { return b && typeof b.form === "string" && isNum(b.shaders); }) : [];
+    if (!list.length) return;
+    var ul = $("block"); ul.textContent = "";
+    var max = Math.max.apply(null, list.map(function (b) { return b.shaders; }));
+    list.forEach(function (b) {
+      var li = el("li");
+      li.appendChild(el("code", "", b.form));
+      li.appendChild(el("span", "n", nf.format(b.shaders) + (b.shaders === 1 ? " shader" : " shaders")));
+      var bar = el("div", "bar"); bar.setAttribute("aria-hidden", "true");
+      var fill = el("b"); fill.style.width = (100 * b.shaders / max) + "%"; bar.appendChild(fill);
+      li.appendChild(bar);
+      ul.appendChild(li);
+    });
+  }
+
+  function road(s) {
+    if (!Array.isArray(s.parts) || !s.parts.length) return;
+    var steps = [];
+    ROAD.forEach(function (r) {
+      var ps = s.parts.filter(function (p) { return r.match.some(function (m) { return p.name.indexOf(m) === 0; }); });
+      if (!ps.length) return;
+      var states = ps.map(function (p) { return p.state; });
+      var st = states.every(function (x) { return x === "done"; }) ? "done"
+        : states.every(function (x) { return x === "not_started"; }) ? "not_started" : "partial";
+      var note = ps.length === 1 ? ps[0].note : ps.map(function (p) { return p.name.replace(/^Shader converter: /, "").replace(/^./, function (c) { return c.toUpperCase(); }) + " (" + (STATE[p.state] || "").toLowerCase() + "): " + p.note; }).join(" ");
+      steps.push({ name: r.name, state: st, note: note });
+    });
+    if (!steps.length) return;
+    var ol = $("road"); ol.textContent = "";
+    var detail = $("detail"), nodes = [];
+    function select(i) {
+      nodes.forEach(function (n, j) { n.classList.toggle("sel", i === j); });
+      detail.textContent = "";
+      detail.appendChild(el("b", "", steps[i].name + ": " + STATE[steps[i].state]));
+      detail.appendChild(el("span", "", steps[i].note));
     }
+    steps.forEach(function (p, i) {
+      var li = el("li", "step " + p.state);
+      var b = el("button"); b.type = "button";
+      b.appendChild(el("span", "node")).setAttribute("aria-hidden", "true");
+      b.appendChild(el("span", "nm", p.name));
+      b.appendChild(el("span", "st", STATE[p.state]));
+      b.addEventListener("click", function () { select(i); });
+      b.addEventListener("mouseenter", function () { select(i); });
+      b.addEventListener("focus", function () { select(i); });
+      li.appendChild(b);
+      li.appendChild(el("p", "note", p.note));
+      ol.appendChild(li); nodes.push(li);
+    });
+    var first = 0;
+    for (var i = 0; i < steps.length; i++) if (steps[i].state !== "done") { first = i; break; }
+    select(first);
+  }
 
-    if (isNum(t.passed, t.total)) {
-      $("t-pass").textContent = nf.format(t.passed) + " of " + nf.format(t.total) +
+  function field(s) {
+    var g = s.gfx1013 || {};
+    var groups = Array.isArray(g.groups) ? g.groups.filter(function (x) { return isNum(x.covered, x.total) && x.total > 0; }) : [];
+    if (!groups.length) return;
+    var host = $("field"); host.textContent = "";
+    var readout = $("readout");
+    var byTotal = groups.slice().sort(function (a, b) { return b.total - a.total || (a.name < b.name ? -1 : 1); });
+    var picked = null;
+    function show(x) {
+      readout.textContent = "";
+      var b = el("b", "", x.name); readout.appendChild(b);
+      readout.appendChild(el("span", "num", nf.format(x.covered) + " of " + nf.format(x.total) + " forms have a passing test (" + pct(x.covered, x.total) + ")"));
+    }
+    byTotal.forEach(function (x) {
+      var d = el("div", "grp"); d.tabIndex = 0;
+      d.setAttribute("role", "group");
+      d.setAttribute("aria-label", x.name + ": " + x.covered + " of " + x.total + " forms covered");
+      var h = el("h3"); h.appendChild(el("span", "", x.name)); h.appendChild(document.createTextNode(x.covered + "/" + x.total));
+      d.appendChild(h);
+      var cells = el("div", "cells");
+      cells.style.width = (Math.min(x.total, Math.max(8, Math.ceil(Math.sqrt(x.total * 2.2)))) * 9) + "px";
+      for (var i = 0; i < x.total; i++) cells.appendChild(el("i", i < x.covered ? "on" : ""));
+      d.appendChild(cells);
+      function on() { if (picked) picked.classList.remove("pick"); picked = d; d.classList.add("pick"); show(x); }
+      d.addEventListener("mouseenter", on); d.addEventListener("focus", on);
+      host.appendChild(d);
+    });
+    $("legend").hidden = false;
+    if (!reduce) host.classList.add("fade");
+
+    var list = $("groups");
+    byTotal.forEach(function (x) {
+      var li = el("li");
+      li.appendChild(el("span", "lbl", x.name));
+      var bar = el("span", "bar2"); bar.setAttribute("aria-hidden", "true");
+      var fill = el("b"); fill.style.width = (100 * x.covered / x.total) + "%"; bar.appendChild(fill);
+      li.appendChild(bar);
+      li.appendChild(el("span", "c", nf.format(x.covered) + " of " + nf.format(x.total)));
+      list.appendChild(li);
+    });
+  }
+
+  function tests(s) {
+    var t = s.tests || {}, c = s.commit || {};
+    if (isNum(t.passed, t.total) && t.total > 0) {
+      var d = $("t-pass");
+      d.textContent = nf.format(t.passed) + " of " + nf.format(t.total) +
         (t.failed ? ", " + t.failed + " failed" : "") + (t.skipped ? ", " + t.skipped + " skipped" : "");
+      var bar = el("div", "pass-bar"); bar.setAttribute("aria-hidden", "true");
+      var fill = el("b"); fill.style.width = (100 * t.passed / t.total) + "%"; bar.appendChild(fill);
+      d.appendChild(bar);
     }
     if (Array.isArray(t.adapters) && t.adapters.length) $("t-adapters").textContent = t.adapters.join(" and ");
     var when = t.run_at || c.time;
     if (when) {
       var tm = el("time", "", stamp(when)); tm.setAttribute("datetime", when);
-      var d = $("t-time"); d.textContent = ""; d.appendChild(tm);
+      var dd = $("t-time"); dd.textContent = ""; dd.appendChild(tm);
       var age = (Date.now() - new Date(when).getTime()) / 864e5;
       if (age > STALE_DAYS) {
         var n = $("notice");
@@ -219,18 +507,21 @@ footer strong { color: var(--ink); }
       }
     }
     if (c.short && /^[0-9a-f]{7,40}$/.test(c.full || "")) {
-      var a = el("a", "", c.short); a.href = REPO + "/commit/" + c.full;
-      var dd = $("t-commit"); dd.textContent = ""; dd.appendChild(a);
+      var a = el("a", "num", c.short); a.href = REPO + "/commit/" + c.full;
+      var cc = $("t-commit"); cc.textContent = ""; cc.appendChild(a);
     }
   }
 
-  function fail(msg) {
-    var n = $("notice"); n.textContent = msg; n.className = "on";
-  }
+  function render(s) { [hero, stages, figures, blocking, road, field, tests].forEach(function (f) { f(s || {}); }); }
+
+  function fail(msg) { var n = $("notice"); n.textContent = msg; n.className = "on"; }
   fetch("status.json", { cache: "no-store" })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(render)
-    .catch(function () { fail("Status data could not be loaded, so no numbers are shown. See the repository for the current state."); });
+    .catch(function () {
+      $("why").textContent = "No numbers are shown because the status data could not be loaded.";
+      fail("Status data could not be loaded, so no numbers are shown. See the repository for the current state.");
+    });
 })();
 </script>
 </body>

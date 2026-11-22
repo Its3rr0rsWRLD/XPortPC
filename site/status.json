@@ -1,8 +1,8 @@
 {
-  "schema": 1,
+  "schema": 2,
   "commit": {
-    "short": "97869da",
-    "full": "97869da433d07c68fe52773a985d05d172e1f636",
+    "short": "1fd888d",
+    "full": "1fd888d02b677139817de081b685536c2c6deef5",
     "time": "2026-11-21T20:31:30-06:00"
   },
   "tests": {
@@ -126,11 +126,59 @@
         "total": 190
       }
     ],
+    "forms_percent": 13.1,
     "corpus_shaders": 544,
     "uses_covered": 46389,
     "uses_total": 51291,
     "uses_percent": 90.4
   },
+  "corpus": {
+    "shaders": 544,
+    "stages": {
+      "pixel": {
+        "shaders": 250,
+        "all_covered": 39,
+        "translatable_bound": 38
+      },
+      "vertex": {
+        "shaders": 244,
+        "all_covered": 21,
+        "translatable_bound": 21
+      },
+      "compute": {
+        "shaders": 27,
+        "all_covered": 1,
+        "translatable_bound": 1
+      },
+      "other": {
+        "shaders": 23,
+        "all_covered": 1,
+        "translatable_bound": 1
+      }
+    },
+    "uses_percent": 90.4,
+    "blocking_forms": [
+      {
+        "form": "v_cvt_pkrtz_f16_f32_e64",
+        "shaders": 38
+      },
+      {
+        "form": "v_interp_mov_f32",
+        "shaders": 2
+      },
+      {
+        "form": "s_lshl_b32",
+        "shaders": 1
+      },
+      {
+        "form": "v_madmk_f32",
+        "shaders": 1
+      }
+    ]
+  },
+  "stages_supported": [
+    "pixel"
+  ],
   "x64": {
     "covered": 59,
     "total": 948

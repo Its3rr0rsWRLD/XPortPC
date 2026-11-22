@@ -4,6 +4,14 @@
 # Shaders with exec: 188 of 544 (34.6%); pixel 162/250, vertex 1/244, compute 10/27, other 15/23.
 # Instruction uses: 51291; forms seen 281; forms in reference 1968.
 # Uses of covered forms: 46389 of 51291 (90.4%); reference forms covered: 258.
+# Stage pixel: shaders 250; all_covered 39; translatable_bound 38.
+# Stage vertex: shaders 244; all_covered 21; translatable_bound 21.
+# Stage compute: shaders 27; all_covered 1; translatable_bound 1.
+# Stage other: shaders 23; all_covered 1; translatable_bound 1.
+# Blocking form v_cvt_pkrtz_f16_f32_e64: 38 shaders
+# Blocking form v_interp_mov_f32: 2 shaders
+# Blocking form s_lshl_b32: 1 shaders
+# Blocking form v_madmk_f32: 1 shaders
 form	encoding	shaders_using	total_uses	pixel_shaders	pixel_uses	vertex_shaders	vertex_uses	compute_shaders	compute_uses	other_shaders	other_uses	covered_now
 s_endpgm	SOPP	544	556	250	262	244	244	27	27	23	23	yes
 exp	EXP	499	935	247	293	244	626	0	0	8	16	yes
@@ -185,8 +193,8 @@ v_mov_b32_dpp	DPP16	3	12	3	12	0	0	0	0	0	0	no
 v_mov_b32_dpp	DPP8	3	12	3	12	0	0	0	0	0	0	no
 v_cmp_class_f32	VOPC	3	9	3	9	0	0	0	0	0	0	yes
 v_sqrt_f32_e64	VOP3	3	9	1	1	0	0	0	0	2	8	no
-v_subrev_f32_dpp	DPP8	3	9	3	9	0	0	0	0	0	0	no
 v_subrev_f32_dpp	DPP16	3	9	3	9	0	0	0	0	0	0	no
+v_subrev_f32_dpp	DPP8	3	9	3	9	0	0	0	0	0	0	no
 v_cvt_i32_f32	VOP1	3	8	2	4	1	4	0	0	0	0	no
 ds_write_b128	DS	3	6	0	0	0	0	3	6	0	0	no
 s_sub_i32	SOP2	3	6	0	0	0	0	3	6	0	0	no
