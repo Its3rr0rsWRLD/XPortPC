@@ -1,0 +1,14 @@
+EXPORTS
+    cmova32
+    cmova64
+    cmovae32
+    cmovae64
+    cmovb32
+    cmovb64
+    cmove32
+    cmove64
+    seta_op
+    setae_op
+    setb_op
+    setbe_op
+    setne_op

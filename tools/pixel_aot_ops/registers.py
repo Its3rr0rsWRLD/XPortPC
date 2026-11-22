@@ -45,6 +45,9 @@ def scalar_u32(token, scalar, pending):
         sgpr_name(token)
         if token in pending:
             raise ValueError("Constant read before load completion")
+        if token not in scalar:
+            # An entry SGPR the binding contract does not name, or one never written: its value is unknown.
+            raise ValueError(f"Read of unset scalar register {token}")
         value = scalar[token]
         if isinstance(value, int):
             return f"{value}u"
@@ -96,14 +99,22 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
     if re.fullmatch(r"-\d+", token):
         return f"asfloat({int(token) & 0xffffffff}u)"
     if token.startswith("-"):
+        if token.startswith("--"):
+            raise ValueError(f"Malformed modifier {token}")
         return "(-" + fp_operand(token[1:], scalar, vector, pending, sample_pending, quad_values=quad_values) + ")"
     if absolute := re.fullmatch(r"abs\(([^()|]+)\)|\|([^()|]+)\|", token):
         inner = absolute.group(1) or absolute.group(2)
+        if inner.startswith("-") and not re.fullmatch(r"-\d+(?:\.\d+)?", inner):
+            # LLVM prints |-2.0| for the absolute value of a negative inline constant; |-v1| it never prints.
+            raise ValueError(f"Malformed modifier {token}")
         return f"abs({fp_operand(inner, scalar, vector, pending, sample_pending, quad_values=quad_values)})"
     if re.fullmatch(r"[vs]\d+", token):
         if token in pending:
             raise ValueError("Constant read before load completion")
-        value = (vector if token.startswith("v") else scalar)[token]
+        space = vector if token.startswith("v") else scalar
+        if token not in space:
+            raise ValueError(f"Read of unset {'vector' if token.startswith('v') else 'scalar'} register {token}")
+        value = space[token]
         if quad_values is not None and token.startswith("v"):
             if not isinstance(value, str) or value not in quad_values:
                 raise ValueError("Operand lacks a helper-lane definition")
@@ -112,12 +123,12 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
         if isinstance(value, int):
             return f"asfloat({value}u)"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
-            if sample_pending and value[1].startswith("mem"):
+            if token in sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return f"asfloat({value[1]})"
         if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError("Expected a numeric register")
-        if sample_pending and value.startswith("sample"):
+        if token in sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
         return value
     if re.fullmatch(r"0x[0-9a-f]{1,8}|\d+", token):
@@ -193,8 +204,8 @@ def f16_exponent(token, scalar, vector, pending, sample_pending):
 # of control flow (docs/design/control-flow.md): raw 32-bit bits per register, declared where a branch or loop starts.
 # exw is a masked write of a raw word over a raw word while the lane may be inactive (lowering.masked_writes). dppw is the
 # sum or difference with carry of a DPP instruction (forms/dpp.py), a word that a later export may read as the float of its bits. f16w is a 16-bit result merged into the kept high half
-# of its destination (forms/valu_float_rest.py).
-RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw", "dppw", "f16w")
+# of its destination (forms/valu_float_rest.py). xw is a result of forms/valu_exact.py (ldexp, binary16 fma, 64-bit mad), computed on bit patterns.
+RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw", "dppw", "f16w", "xw")
 
 
 def tracked_word(value):
@@ -233,12 +244,12 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
         if value is None:
             raise ValueError(f"Read of unset vector register {token}")
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
-            if sample_pending and value[1].startswith("mem"):
+            if token in sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return value[1]
         if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError(f"Expected a numeric register: {token}")
-        if sample_pending and value.startswith("sample"):
+        if token in sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
         return f"asuint({value})"
     if re.fullmatch(r"s\d+", token) and token not in scalar:

@@ -10,10 +10,9 @@ carry neg and abs in the VOP3 spelling (abs and neg act on the sign bit of the w
 integer sources take none. clamp and omod exist only on the three-input binary16 forms and the legacy multiply-adds.
 
 Refused, because they cannot be made exact here (each has a must_reject control in tests/pixel_aot_draws/valu_float_rest.py):
-v_fma_f16, v_fmac_f16, v_fmaak_f16, v_fmamk_f16 (a binary16 fused multiply-add needs one rounding of a 22-bit product plus
-an addend; the binary32 route rounds twice), v_div_fmas_f32 (reads VCC), v_div_scale_f32 (writes VCC and special-cases
+v_mad_f16 (not on gfx1013), v_div_fmas_f32 (reads VCC), v_div_scale_f32 (writes VCC and special-cases
 exponent gaps), v_div_fixup_f16 and v_div_fixup_f32 (exponent-gap and NaN rules not established). Also not lowered:
-v_ldexp_f32 (the scale 2^n is not representable at the ends of the exponent range and the denormal result rounds twice),
+v_fma_f16, v_fmac_f16, v_fmaak_f16, v_fmamk_f16 and v_ldexp_f32 are lowered bit-exactly in valu_exact.py,
 v_cvt_norm_*, v_cvt_pknorm_* (rounding mode of the scaled value not established)."""
 import re
 
@@ -30,7 +29,9 @@ MODIFIABLE = {"cvt_flr_i32_f32", "cvt_rpi_i32_f32", "cvt_i16_f16", "cvt_u16_f16"
 PLAIN = r"[vs]\d+|-?\d+|0x[0-9a-f]{1,8}|-?\d+\.\d+"
 MODIFIED = re.compile(r"-[vs]|-?\||-?abs\(")
 
+# SALU_HELPERS are emitted before the preamble helpers (hlsl.HELPERS), so ftz32 is declared forward here.
 SALU_HELPERS["mad_legacy32"] = (
+    "float ftz32(float value);\n"
     "float mad_legacy32(float a, float b, float c) {\n"
     "    precise float product = (ftz32(a) == 0.0f || ftz32(b) == 0.0f) ? 0.0f : ftz32(ftz32(a) * ftz32(b));\n"
     "    precise float sum = product + ftz32(c);\n"

@@ -3,9 +3,12 @@ helper functions a form asks for through `st.helpers`."""
 from pathlib import Path
 
 
-PREAMBLE = """Texture2D<float4> tex : register(t0);
+# The pixel entry's declarations and signature around the stage-neutral numeric helpers. HELPERS is what another stage
+# (tools/vertex_aot.py) emits with its own entry; PREAMBLE is unchanged for the pixel stage.
+PIXEL_DECLARATIONS = """Texture2D<float4> tex : register(t0);
 SamplerState samp : register(s0);
-// v_cmp_class_f32: the ten binary32 classes of LLVM SIInstrFlags::ClassFlags, from the raw encoding:
+"""
+HELPERS = """// v_cmp_class_f32: the ten binary32 classes of LLVM SIInstrFlags::ClassFlags, from the raw encoding:
 // signaling NaN, quiet NaN, -inf, -normal, -denormal, -0, +0, +denormal, +normal, +inf.
 uint class32(float value) {
     uint bits = asuint(value);
@@ -106,7 +109,9 @@ uint fract16(float value) {
     uint h = narrow16(f);
     return h == 0x3c00u ? 0x3bffu : h;
 }
-float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"""
+"""
+PIXEL_ENTRY = "float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"
+PREAMBLE = PIXEL_DECLARATIONS + HELPERS + PIXEL_ENTRY
 
 
 # Title memory for buffer and global loads (see docs/experiments.md). The declarations match the pixel root signature
@@ -116,6 +121,11 @@ TITLE_DECLARATIONS = """StructuredBuffer<TitleRange> title_ranges : register(t2)
 ByteAddressBuffer title_memory[8] : register(t0, space1);
 cbuffer TitleCount : register(b1) { uint title_range_count; };
 """
+# A program that stores or runs atomics binds the same slots as UAVs (u0, space1, the harness's write table) and loads
+# through them too, since one resource cannot be both a shader resource and an unordered-access target in one draw.
+TITLE_RW_DECLARATIONS = TITLE_DECLARATIONS.replace("ByteAddressBuffer title_memory[8] : register(t0, space1);",
+                                                   "RWByteAddressBuffer title_memory[8] : register(u0, space1);")
+assert TITLE_RW_DECLARATIONS != TITLE_DECLARATIONS
 # Buffer resource (V#) on gfx10, as four words w0..w3:
 #   base = w0 | (w1 & 0xffff) << 32, stride = (w1 >> 16) & 0x3fff, num_records = w2, OOB_SELECT = (w3 >> 28) & 3,
 #   SWIZZLE_ENABLE = w1 bit 31, ADD_TID_ENABLE = w3 bit 23.

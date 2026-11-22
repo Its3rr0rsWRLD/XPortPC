@@ -2,14 +2,15 @@
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
 from .control_flow import find_loops, program, split_blocks, word_expr
 from .dispatch import dispatch
-from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP
+from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS
 from .registers import tracked_word
 from . import forms  # noqa: F401  (registers every form)
 
 
 class Lowering:
     """The state of one lower() call. Forms read and write it as `st`; the control-flow walk snapshots and restores
-    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_pending, sample_dest, exported, ended)."""
+    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_dest, vm_issued, exports, exported,
+    ended)."""
 
     def __init__(self, scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words):
         self.scalar = scalar  # SGPR name (and "m0", "vcc") -> tracked value, see registers.py
@@ -20,6 +21,10 @@ class Lowering:
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.uses_memory = False  # emit the title-memory helpers
+        self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
+        self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order
+        self.storage_images = {}  # descriptor-table byte offset of a storage-image T# -> (slot, format); forms/image_writes.py
+        self.declarations = {}  # name -> HLSL declarations and helpers a form needs before the preamble, in insertion order
         self.pending = set()  # SGPRs an outstanding scalar load writes (cleared by lgkmcnt(0))
         self.scc = None  # SCC as an HLSL bool expression, or None when it is not tracked
         self.helpers = set()  # names of SALU_HELPERS (hlsl.py) the program uses
@@ -32,12 +37,45 @@ class Lowering:
         # depends on the interpolated coordinate. An implicit-LOD sample may read only these.
         self.quad_values = {"uv.x": True, "uv.y": True}
         self.samples = 0  # samples taken on the path so far
-        self.sample_pending = False  # a sample or vector memory load is outstanding (cleared by vmcnt(0))
-        self.sample_dest = set()  # VGPRs that load writes
+        # VGPR -> (issue number, kind) of the outstanding sample or vector memory load that writes it. vmcnt(N) completes
+        # all but the newest N of them (from R0Y00/Xbox2Windows#176 by descent81); vmcnt(0) completes all.
+        self.sample_dest = {}
+        self.integer_export = False  # the uncompressed export returns uint4 bit patterns (lower(integer_export=True))
+        self.vm_issued = 0  # vector memory loads and samples issued on the path so far (the vmcnt issue order)
         self.flat_attrs = set()  # attributes read without interpolation
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
-        self.exported = False  # the color export has been emitted
+        self.exports = ()  # exports before the done export on this path: (output name, width, mask, HLSL local)
+        self.exported = False  # the done export has been emitted
+        self.layout = None  # the outputs the done export returns, the same on every path (forms/exp.py)
+        self.signature = None  # (return type, declaration) of main when it is not the preamble's float4 SV_Target0
         self.ended = False  # s_endpgm after the export
+        # Stage hooks (docs/design/compute-stage.md): the stage being lowered, and the high word a descriptor-list
+        # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).
+        self.stage = "pixel"
+        self.descriptor_high = 0
+
+    @property
+    def sample_pending(self):
+        """The outstanding loads' destination VGPRs: truthy while any load is outstanding. The operand readers in
+        registers.py take it as their `sample_pending` argument and refuse a source register that is in it, so a
+        register whose own load has completed is readable while a newer load is still in flight."""
+        return self.sample_dest
+
+    def vm_issue(self, registers, kind):
+        """Record a sample or load of `kind` ("sample", "mubuf", "mtbuf", "flat") that writes `registers`."""
+        self.vm_issued += 1
+        for register in registers:
+            self.sample_dest[register] = (self.vm_issued, kind)
+
+    def vm_wait(self, limit):
+        """s_waitcnt vmcnt(limit): only the newest `limit` loads can remain outstanding. Loads of different kinds are
+        not known to return in order, so while two kinds are outstanding only a wait for all of them (limit 0) completes
+        any. Filtering the current set keeps what earlier, tighter waits already guaranteed."""
+        if limit > 63:
+            raise ValueError("VM wait count exceeds the gfx10 six-bit field")
+        if limit and len({kind for _, kind in self.sample_dest.values()}) > 1:
+            return
+        self.sample_dest = {reg: entry for reg, entry in self.sample_dest.items() if entry[0] > self.vm_issued - limit}
 
     @property
     def mask(self):
@@ -75,7 +113,7 @@ def masked_writes(st, i, ex, before):
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
-          buffer_descriptors=None):
+          buffer_descriptors=None, integer_export=False, storage_images=None):
     """Track descriptor provenance, interpolation and packed exports through register writes."""
     if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
             or len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
@@ -109,6 +147,23 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 or constant_descriptor < offset + 16 and offset < constant_descriptor + 16):
             raise ValueError("Buffer and texture or constant descriptors overlap")
     st = Lowering(scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words)
+    st.integer_export = integer_export
+    # A program whose entire body is s_endpgm exports nothing and reads nothing: an empty void main, the same
+    # signature as a program whose only export is exp null (forms/exp.py), without the texture sample that one has.
+    empty = [line.strip() for line in instructions] == ["s_endpgm"]
+    if empty:
+        st.lines.append("    return;")
+        st.layout, st.signature, st.exported = (), ("void", None), True
+    # storage_images maps the byte offset of a 32-byte image T# in the descriptor table to (slot, format): the harness
+    # binds that image's levels at u(8 * slot), space2 (forms/image_writes.py checks the format where it is written).
+    slots = [entry[0] if isinstance(entry, tuple) and len(entry) == 2 else None for entry in (storage_images or {}).values()]
+    for (offset, entry), slot in zip((storage_images or {}).items(), slots):
+        if (slot not in range(4) or not isinstance(offset, int) or offset < 32 or offset % 32 or slots.count(slot) != 1
+                or any(start < offset + 32 and offset < start + 32 for start in bindings)
+                or any(start < offset + 32 and offset < start + 16 for start in vsharp_words)
+                or constant_descriptor is not None and constant_descriptor < offset + 32 and offset < constant_descriptor + 16):
+            raise ValueError("Invalid storage image offset or slot, or it overlaps another descriptor")
+        st.storage_images[offset] = entry
     blocks, labels = split_blocks(instructions)
     latch_of = find_loops(blocks, labels)
     for i, line in program(st, blocks, labels, latch_of):
@@ -116,13 +171,15 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             raise ValueError("Instruction follows program end")
         if st.exported and line != "s_endpgm":
             raise ValueError("Unexpected instruction after color export")
+        if st.exports and not line.startswith("exp "):
+            raise ValueError("Only exports may follow an export that is not done")
         if st.ex == "true":
             dispatch(st, i, line)
         else:
             ex, before = st.ex, dict(st.vector)
             dispatch(st, i, line)
             masked_writes(st, i, ex, before)
-    if not st.ended or st.samples != (2 if second_texture_offset is not None else 1):
+    if not st.ended or st.samples != (0 if empty else 2 if second_texture_offset is not None else 1):
         raise ValueError("Unexpected sample count or missing color export")
     if st.helpers:
         defs = [body for name, body in SALU_HELPERS.items() if name in st.helpers]
@@ -130,7 +187,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         st.lines[pos:pos] = defs
     if st.uses_memory:
         pos = st.lines.index(PREAMBLE)
-        st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS]
+        declarations = TITLE_RW_DECLARATIONS if st.writes_memory else TITLE_DECLARATIONS
+        st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), declarations, MEMORY_HELPERS,
+                             *st.memory_helpers.values()]
+    if st.declarations:
+        pos = st.lines.index(PREAMBLE)
+        st.lines[pos:pos] = list(st.declarations.values())
     if st.flat_attrs or st.quad_position:
         pos = st.lines.index(PREAMBLE)
         # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.
@@ -138,4 +200,15 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
         st.lines[pos] = (note
                          + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
-    return "\n".join([*st.lines, "}",""])
+    if st.signature:
+        returns, declaration = st.signature
+        pos = st.lines.index(next(line for line in st.lines if "main(" in line and "SV_Target0 {" in line))
+        st.lines[pos] = st.lines[pos].replace("float4 main(", f"{returns} main(", 1).replace(") : SV_Target0 {", ") {", 1)
+        if declaration:
+            st.lines.insert(pos, declaration)
+    text = "\n".join([*st.lines, "}",""])
+    if integer_export:
+        if "return uint4(" not in text:
+            raise ValueError("Integer export requires the uncompressed export form")
+        text = text.replace("float4 main(", "uint4 main(", 1)
+    return text

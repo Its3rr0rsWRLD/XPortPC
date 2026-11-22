@@ -1,0 +1,21 @@
+EXPORTS
+    paddsb_op
+    paddsw_op
+    paddusb_op
+    paddusw_op
+    psubsb_op
+    psubsw_op
+    psubusb_op
+    psubusw_op
+    pmulhw_op
+    pmulhuw_op
+    pmullw_op
+    pmaddwd_op
+    pmuludq_op
+    pminub_op
+    pmaxub_op
+    pminsw_op
+    pmaxsw_op
+    pavgb_op
+    pavgw_op
+    psadbw_op

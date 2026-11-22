@@ -92,8 +92,7 @@ def buffer_load(st, i, m):
     for j, d in enumerate(dsts):
         st.lines.append(f"    uint mem{i}_{j} = buffer_load32({rsrc}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {j}u);")
         st.vector[d] = ("uint", f"mem{i}_{j}")
-    st.sample_dest.update(dsts)
-    st.sample_pending = True
+    st.vm_issue(dsts, "mubuf")
 
 
 @form(r"buffer_load_(" + "|".join(sorted(SUB_DWORD, key=len, reverse=True)) + r") (v\d+), " + OPERANDS)
@@ -107,8 +106,7 @@ def buffer_load_sub(st, i, m):
     raw = f"buffer_load_sub({rsrc}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {SUB_DWORD[op][0]}u)"
     st.lines.append(f"    uint mem{i}_0 = {sub_dword_word(op, raw, old)};")
     st.vector[dst] = ("uint", f"mem{i}_0")
-    st.sample_dest.add(dst)
-    st.sample_pending = True
+    st.vm_issue([dst], "mubuf")
 
 
 @form(r"buffer_load_format_(x|xy|xyz|xyzw) (v\d+|v\[\d+:\d+\]), " + OPERANDS)
@@ -124,5 +122,4 @@ def buffer_load_format(st, i, m):
     for j, d in enumerate(dsts):
         st.lines.append(f"    uint mem{i}_{j} = fmt{i}[{j}];")
         st.vector[d] = ("uint", f"mem{i}_{j}")
-    st.sample_dest.update(dsts)
-    st.sample_pending = True
+    st.vm_issue(dsts, "mubuf")

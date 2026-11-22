@@ -1,16 +1,18 @@
 """Compare the same two-input EXE under the Windows loader, pe_map, and AOT."""
 import ctypes
 from pathlib import Path
+import struct
 import subprocess
 import sys
 
 from exe_entry_check import Observation, check, run
+from cpu_exe_aot import translate
 from native_map_check import Mapper, STATUS
 
 
-def mapped_child(mapper_path, image, io, mix):
+def mapped_child(mapper_path, image, *libraries):
     mapper = Mapper(mapper_path)
-    providers = {p.name.lower(): ctypes.CDLL(str(p)) for p in (io, mix)}
+    providers = {p.name.lower(): ctypes.CDLL(str(p)) for p in libraries}
     base, status, detail, _ = mapper(image, providers)
     if not base or status != STATUS["ok"]:
         raise AssertionError(f"mapping {image.name}: {status}, {detail}")
@@ -23,6 +25,12 @@ def mapped_child(mapper_path, image, io, mix):
         return code.value
     finally:
         mapper.release(base)
+
+
+def run_mapped(mapper_path, native, data, *libraries):
+    child = subprocess.run([sys.executable, "-B", __file__, "--child", mapper_path,
+                            native, *libraries], input=data, capture_output=True, timeout=15)
+    return Observation(child.stderr, child.stdout, child.returncode)
 
 
 def compare(mapper_path, native, lifted, io, mix, bypass=None):
@@ -54,14 +62,65 @@ def compare(mapper_path, native, lifted, io, mix, bypass=None):
                 if getattr(skipped, field) == getattr(original, field):
                     raise AssertionError(f"selector {selector}: {field} missed the bypassed frame")
         check("translated EXE", run(lifted, data), original)
-        child = subprocess.run([sys.executable, "-B", __file__, "--child", mapper_path,
-                                native, io, mix], input=data, capture_output=True, timeout=15)
-        check("mapped EXE", Observation(child.stderr, child.stdout, child.returncode), original)
+        check("mapped EXE", run_mapped(mapper_path, native, data, io, mix), original)
         print(f"selector={selector} arguments={original.arguments.hex()} "
               f"output={original.output.hex()} exit={original.exit_code:#x}")
+
+
+def compare_two_providers(mapper_path, native, lifted, io, mix, second):
+    mapper = Mapper(mapper_path)
+    bindings = {p.name.lower(): ctypes.CDLL(str(p)) for p in (io, mix)}
+    base, status, detail, requests = mapper(native, bindings)
+    if base:
+        mapper.release(base)
+        raise AssertionError("mapped without the second provider")
+    check("missing second provider status", status, STATUS["unresolved"])
+    dll, symbol = requests[-1]
+    check("missing second import", (dll.lower(), symbol), (second.name.lower(), "accumulate_args"))
+    diagnostic = f"unresolved import {dll}!{symbol}"
+    check("missing second provider diagnostic", detail, diagnostic)
+    for extra in ((), ((mix, "accumulate_args"),)):
+        try:
+            translate(native, io, mix, extra)
+        except ValueError as exc:
+            if f"unbound import {dll}!{symbol}" not in str(exc):
+                raise
+        else:
+            raise AssertionError("translated without the correct second provider")
+    print(f"before entry: {diagnostic}")
+
+    invalid_symbols = ("trace-value", "3trace", "_Reserved", "trace__value", "class", "and",
+                       "lifted", "lifted_callee2", "word", "store", "uint64_t", "mix_args")
+    for invalid in invalid_symbols:
+        try:
+            translate(native, io, mix, ((second, invalid),))
+        except ValueError as exc:
+            if "import symbol" not in str(exc) or repr(invalid) not in str(exc):
+                raise
+        else:
+            raise AssertionError(f"accepted invalid import spelling {invalid!r}")
+    print(f"rejected {len(invalid_symbols)} invalid, reserved, and duplicate import symbols before emission")
+
+    for selector, (x, y) in enumerate(((0x1000002fc, 0x100000000), (41, 9))):
+        first_args = (x + 7, y - 3)
+        first_result = first_args[0] - first_args[1] + 11
+        second_args = (first_result + x, x)
+        second_result = sum(second_args) + 17
+        expected = Observation(struct.pack("<4Q", *first_args, *second_args),
+                               struct.pack("<2Q", first_result, second_result),
+                               (second_result + x) & 0xffffffff)
+        data = bytes([selector])
+        check("native EXE", run(native, data), expected)
+        check("translated EXE", run(lifted, data), expected)
+        check("mapped EXE", run_mapped(mapper_path, native, data, io, mix, second), expected)
+        print(f"selector={selector} first={first_args} second={second_args} "
+              f"output={expected.output.hex()} exit={expected.exit_code:#x}")
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "--child":
         sys.exit(mapped_child(*map(Path, sys.argv[2:])))
-    compare(*map(Path, sys.argv[1:]))
+    if sys.argv[1] == "--two-providers":
+        compare_two_providers(*map(Path, sys.argv[2:]))
+    else:
+        compare(*map(Path, sys.argv[1:]))

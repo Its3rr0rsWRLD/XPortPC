@@ -33,7 +33,8 @@ def callee_name(index):
     return "lifted_callee" if index == 0 else f"lifted_callee{index + 1}"
 
 
-def lift_body(start, code, *, caller, bind_import=None, name=None):
+def lift_body(start, code, *, caller, bind_import=None, bind_direct=None, name=None,
+              allow_distinct_imports=False):
     # In this profile only RBX/RSI survive the call. The host compiler owns
     # physical register allocation and emits its own ABI frame for each function.
     frame = 40 if caller else 8
@@ -47,6 +48,7 @@ def lift_body(start, code, *, caller, bind_import=None, name=None):
     pointer = {"r8"}
     lines = []
     target = None
+    imported_symbols = {}
     pos = 0
     while pos < len(body):
         rva = start + len(prologue) + pos
@@ -57,7 +59,7 @@ def lift_body(start, code, *, caller, bind_import=None, name=None):
         r8_move = r8_register_move(body, pos)
         if is_call:
             # Direct calls may repeat or name further targets, and each distinct
-            # target is lifted once. Import calls may repeat one IAT slot only.
+            # target is lifted once. Import slots require an explicit binding.
             if not caller:
                 raise ValueError(f"unexpected additional call at RVA {rva:#x}")
             if target is not None and (target[0] == "import") != via_iat:
@@ -69,12 +71,12 @@ def lift_body(start, code, *, caller, bind_import=None, name=None):
             if via_iat:
                 if bind_import is None:
                     raise ValueError(f"no provider binding for IAT slot RVA {address:#x}")
-                if target is not None:
-                    if target[1] != address:
-                        raise ValueError(f"call to a second IAT slot at RVA {rva:#x}")
-                    symbol = target[2]
-                else:
-                    symbol = bind_import(address)
+                if target is not None and target[1] != address and not allow_distinct_imports:
+                    raise ValueError(f"call to a second IAT slot at RVA {rva:#x}")
+                if address not in imported_symbols:
+                    imported_symbols[address] = bind_import(address)
+                symbol = imported_symbols[address]
+                if target is None:
                     target = ("import", address, symbol)
                 callee = f"::{symbol}"
             else:
@@ -82,7 +84,7 @@ def lift_body(start, code, *, caller, bind_import=None, name=None):
                     target = ("direct", [])
                 if address not in target[1]:
                     target[1].append(address)
-                callee = callee_name(target[1].index(address))
+                callee = bind_direct(address) if bind_direct else callee_name(target[1].index(address))
             reads = {"rcx", "rdx", "r8"}
             statement = f"rax = {callee}(rcx, rdx, r8);"
             write = "rax"

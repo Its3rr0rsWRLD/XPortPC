@@ -362,7 +362,7 @@ def check_rejections():
         "fdivrp with one value": (attempt(f"{fld} de f1 {fstp} c3"), "x87 stack underflow"),
         "fidiv m32": (attempt(f"{fld} da 31 {fstp} c3"), "unsupported x87 operation"),
         "fidivr m16": (attempt(f"{fld} de 39 {fstp} c3"), "unsupported x87 operation"),
-        "fsqrt": (attempt(f"{fld} d9 fa {fstp} c3"), "unsupported x87 operation"),
+        "fnsave": (attempt(f"{fld} dd 31 {fstp} c3"), "unsupported x87 operation"),
         "fprem": (attempt(f"{fld} {fld} d9 f8 {fstp} {fstp} c3"), "unsupported x87 operation"),
         "fiadd m32": (attempt(f"{fld} da 01 {fstp} c3"), "unsupported x87 operation"),
     }

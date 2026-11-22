@@ -17,7 +17,7 @@ same command lines, outputs and CTest names as before.
 | `forms/<family>.py` | the forms of one family and the tables only they use |
 
 Families today: `sopp`, `sop1`, `sop2`, `sopc`, `exec_mask`, `smem`, `valu_f32`, `valu_int`, `valu_f16`, `valu_f64`, `vopc`,
-`sdwa`, `dpp`, `vop3p`, `vintrp`, `mimg`, `mubuf`, `mtbuf`, `flat`, `exp`. A table another module needs is imported from its family
+`sdwa`, `dpp`, `vop3p`, `vintrp`, `mimg`, `mubuf`, `mtbuf`, `flat`, `stores`, `atomics`, `image_writes`, `exp`. A table another module needs is imported from its family
 (`sdwa` uses `ALU` from `valu_f32` and `COMPARE` from `vopc`). `tools/pixel_aot.py` re-exports the names it always
 had (`lower`, `ALU`, `TITLE_LOOKUP`, ...); new code imports from the package.
 
@@ -57,6 +57,8 @@ Each draw family is the module of that name (`class_.py` for `class`): it define
   (the `pixel_aot_controls` test);
 - `binary_fixtures()`: `(program, translator)` pairs that `pixel_aot_check.py binary` assembles with llvm-mc,
   disassembles and lowers again.
+- `binary_checks(directory, assembler, objcopy, library)`: binary-mode checks that need more than that round trip
+  (`exports.py` patches the EN bits of an assembled export).
 
 A module without `draw` contributes only controls or fixtures (`hints.py`, `container.py`). `common.py` holds what
 several families share: the recording `lower()` (which also feeds the form-coverage record), `translate`,

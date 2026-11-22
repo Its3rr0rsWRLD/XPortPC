@@ -1,0 +1,11 @@
+EXPORTS
+    bcast_i128
+    extract_i128_hi
+    insert_i128_hi
+    pblendd256
+    perm2i128_hi
+    perm2i128_zero
+    permd256
+    permps256
+    permq256
+    permpd256

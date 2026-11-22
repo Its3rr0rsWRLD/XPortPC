@@ -1,4 +1,4 @@
-"""Start a CRT-free EXE and its two DLLs with the Windows loader and with pe_map; compare the event logs."""
+"""Compare two-DLL EXE startup and TLS callback observations under Windows and pe_map."""
 
 import argparse
 import ctypes
@@ -29,6 +29,32 @@ def observed(done):
     log = next((line[4:] for line in done.stdout.decode().splitlines() if line.startswith("LOG:")), None)
     return {"log": log, "exit": done.returncode & 0xffffffff,
             "stdout": done.stdout.decode(), "stderr": done.stderr.decode()}
+
+
+def check_tls(loader, result):
+    def read_fields(line, prefix):
+        if not line.startswith(prefix):
+            raise AssertionError(f"{loader}: expected {prefix} in {line!r}")
+        fields = tuple(int(value, 16) for value in line[len(prefix):].split())
+        if len(fields) != 3:
+            raise AssertionError(f"{loader}: expected three fields in {line!r}")
+        return fields
+
+    lines = result["stdout"].splitlines()
+    if len(lines) < 2 or lines[0] != f"LOG:{result['log']}":
+        raise AssertionError(f"{loader}: missing startup log or thread IDs: {result['stdout']!r}")
+    main, first, second = read_fields(lines[1], "THREADS:")
+    if not all((main, first, second)) or len({main, first, second}) != 3:
+        raise AssertionError(f"{loader}: expected distinct main and worker thread IDs: {lines[1]}")
+    # Host threads can trigger a DLL notification too. Compare only the threads this fixture started.
+    thread_ids = {main, first, second}
+    rows = [read_fields(line, "TLS:") for line in lines[2:]]
+    actual = [row for row in rows if row[0] in thread_ids]
+    # PROCESS_ATTACH = 1, THREAD_ATTACH = 2, THREAD_DETACH = 3.
+    expected = [(main, 1, 1), (first, 2, 0), (first, 3, 2), (second, 2, 0), (second, 3, 3)]
+    if actual != expected:
+        raise AssertionError(f"{loader} TLS callback (thread, reason, value): {actual} != {expected}")
+    print(f"{loader} TLS callbacks (thread, reason, value): {actual}")
 
 
 def native(exe, a, b):
@@ -84,7 +110,8 @@ def check_pe_dependencies(exe, a, b):
         raise AssertionError(f"A must not depend on the fixture DLLs: {a_imports}")
     if b_imports.get(A) != {"a_log", "a_value"} or B in b_imports:
         raise AssertionError(f"B must import exactly a_log and a_value from A: {b_imports}")
-    if exe_imports.get(B) != {"b_value"} or not {"a_log", "a_snapshot"} <= exe_imports.get(A, set()):
+    a_exports = {"a_log", "a_snapshot", "a_tls_slot", "a_tls_snapshot"}
+    if exe_imports.get(B) != {"b_value"} or not a_exports <= exe_imports.get(A, set()):
         raise AssertionError(f"the EXE must import from both DLLs: {exe_imports}")
     print(f"PE imports: A none of the fixtures, B -> {sorted(b_imports[A])} of A, "
           f"EXE -> {sorted(exe_imports[A])} of A and {sorted(exe_imports[B])} of B")
@@ -159,15 +186,16 @@ def check(mapper, exe, a, b, b_noinit, a_alt, exe_timeout, exe_create):
         raise AssertionError(f"stderr: native {nat['stderr']!r}, mapped {map_['stderr']!r}")
     if (map_["log"], map_["exit"], map_["started"], map_["failure"]) != (LOG, EXIT, 1, None):
         raise AssertionError(f"mapped launch differs from native: {map_}")
-    if nat["stdout"] != map_["stdout"]:
-        raise AssertionError(f"stdout differs: {nat['stdout']!r} vs {map_['stdout']!r}")
+    check_tls("native", nat)
+    check_tls("mapped", map_)
     if map_["order"] != [A, B, EXE]:
         raise AssertionError(f"dependency order {map_['order']}")
     for event in "abte":  # initializers, TLS callback and entry point ran exactly once
         if map_["log"].count(event) != 1:
             raise AssertionError(f"event {event!r} not logged exactly once in {map_['log']}")
     served = {tuple(r) for r in map_["requests"]}
-    if not {(A, "a_value"), (B, "b_value"), (A, "a_log")} <= served:
+    expected_imports = {(A, "a_value"), (B, "b_value"), (A, "a_log"), (A, "a_tls_slot"), (A, "a_tls_snapshot")}
+    if not expected_imports <= served:
         raise AssertionError(f"import requests {map_['requests']}")
 
     for name, dlls, expected in (("without B's initializer", (a, b_noinit), (LOG_WITHOUT_B, EXIT_WITHOUT_B)),
@@ -176,6 +204,7 @@ def check(mapper, exe, a, b, b_noinit, a_alt, exe_timeout, exe_create):
         for loader, result in zip(("native", "mapped"), controls):
             if (result["log"], result["exit"]) != expected:
                 raise AssertionError(f"{loader} {name}: {result['log']} {result['exit']:#x}")
+            check_tls(f"{loader} {name}", result)
         print(f"control {name}: LOG:{controls[1]['log']} exit {controls[1]['exit']:#x} under both loaders; "
               f"differs from the original in {'the log and ' if expected[0] != LOG else ''}the exit code")
 

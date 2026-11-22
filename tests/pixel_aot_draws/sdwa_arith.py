@@ -65,6 +65,23 @@ SDWA_ARITH = (
         sdwa_arith("sqrt", "v14", ["s46"], "WORD_1"),
         sdwa_arith("rcp", "v15", ["-s47"]),
     ], (4.0, 0.0, 2.25, -1.0), [0.5, 0.5, 0.0, 1.0], ((0, 2.0), (1, 1.0), (2, 1.5), (3, -1.0))),
+    # Round to nearest even: ties go to the even integer (2.5 to 2, 3.5 to 4, -1.5 to -2); the last result's low byte is
+    # placed in BYTE_3 (8388672.0 is an integer, so it is its own rounding).
+    ([
+        sdwa_arith("rndne", "v12", ["s44"]),
+        sdwa_arith("rndne", "v13", ["-s45"]),
+        sdwa_arith("rndne", "v14", ["-|s46|"]),
+        sdwa_arith("rndne", "v15", ["s47"], dst_sel="BYTE_3"),
+    ], (2.5, -3.5, -1.5, 0x4b000040), [2.0, 4.0, -2.0, 2.0], ((0, 3.0), (1, 3.0), (2, -1.0), (3, 0.0))),
+    # v_rcp_iflag_f32 is the reciprocal without the exception flag (powers of two, whose reciprocals are exact): a
+    # source modifier, clamp, and a word kept inside 1.0 (the low word of 0.5 is zero, so the preserved word is 1.0's).
+    ([
+        sdwa_arith("rcp_iflag", "v12", ["s44"]),
+        sdwa_arith("rcp_iflag", "v13", ["-|s45|"]),
+        sdwa_arith("rcp_iflag", "v14", ["s46"], clamp=True),
+        "v_mov_b32_e32 v15, 1.0",
+        sdwa_arith("rcp_iflag", "v15", ["s47"], "WORD_0", "UNUSED_PRESERVE"),
+    ], (4.0, -0.5, 0.5, 2.0), [0.25, -2.0, 1.0, 1.0], ((0, 4.0), (1, 2.0), (2, 2.0), (3, 0.5))),
 )
 
 
@@ -84,6 +101,10 @@ def sdwa_arith_reference(index, inputs):
     if index == 5:
         return [1.0 / math.sqrt(x), as_float((0x3f800000 & ~0xff0000) | ((bits(2.0 ** y) & 0xff) << 16)),
                 as_float((bits(math.sqrt(z)) & 0xffff) << 16), 1.0 / -w]
+    if index == 6:
+        return [float(round(x)), float(round(-y)), float(round(-abs(z))), as_float((bits(float(round(w))) & 0xff) << 24)]
+    if index == 7:
+        return [1.0 / x, 1.0 / -abs(y), min(1.0 / z, 1.0), as_float(0x3f800000 & ~0xffff | (bits(1.0 / w) & 0xffff))]
     product = bits(x * y) & 0xffff
     return [float(product & 0xff), float(product >> 8),
             as_float((0x3f800000 & ~0xff0000) | ((bits(float(math.floor(z))) & 0xff) << 16)), as_float((bits(w * y) & 0xffff) << 16)]
@@ -127,6 +148,14 @@ def controls(directory):
     assert body.count("uint movw") >= 2 and "asfloat(((" not in body, body
     must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", sdwa_arith("add", "v12", ["s44", "v18 mul:2"])]))
     must_reject(translate, with_constants([sdwa_arith("rcp", "v12", ["s44"]).replace("src0_sel:DWORD", "src0_sel:BYTE_1")]))
+    must_reject(translate, with_constants([sdwa_arith("rndne", "v12", ["s44"]).replace("src0_sel:DWORD", "src0_sel:WORD_1")]))
+    must_reject(translate, with_constants([sdwa_arith("rcp_iflag", "v12", ["s44"]).replace("src0_sel:DWORD", "src0_sel:WORD_1")]))
+    must_reject(translate, with_constants([sdwa_arith("rcp_iflag", "v12", ["s44", "s45"])]))
+    # The reciprocal and its iflag form lower alike (the flag has no desktop counterpart).
+    body = translate(with_constants(SDWA_ARITH[7][0])).split("float4 main", 1)[1]
+    assert body.count("1.0f / ") == 4, body
+    must_reject(translate, with_constants([sdwa_arith("rndne", "v12", ["s44", "v13"])]))
+    must_reject(translate, with_constants([sdwa_arith("rndne", "v12", ["s44"], "BYTE_1", "UNUSED_SEXT")]))
     must_reject(translate, with_constants([sdwa_arith("exp", "v12", ["s44"]) + " src1_sel:DWORD"]))
     must_reject(translate, with_constants([sdwa_arith("sqrt", "v12", ["s44"], "BYTE_1", "UNUSED_SEXT")]))
     must_reject(translate, with_constants([sdwa_arith("add", "v12", ["s44", "v13"]).replace("src0_sel:DWORD", "src0_sel:WORD_1")]))

@@ -3,6 +3,7 @@
 width S1[22:16] and SCC = (D != 0). A width of zero gives zero; a field running past bit 63 gives S0 >> offset (the same
 convention as the 32-bit helper). s_cselect_b64 takes S0 when SCC is set and leaves SCC alone."""
 from ..dispatch import form
+from .exec_mask import UniformMask, is_mask, mask_op
 from ..hlsl import SALU_HELPERS
 from ..registers import sgpr_name, sgpr_pair, scalar_u32, scalar_u64
 
@@ -16,6 +17,14 @@ SALU_BIT64 = {
     "nor": "uint2(~({0} | {2}), ~({1} | {3}))",
     "xnor": "uint2(~({0} ^ {2}), ~({1} ^ {3}))",
 }
+
+
+# A source that is EXEC or a lane mask (a compare's or a saved EXEC) makes the operation a lane-mask operation:
+# exec_mask.mask_op, the bool operation on this lane's bits (docs/design/control-flow.md, CF-2 section 3).
+@form(rf"s_({'|'.join(SALU_BIT64)})_b64 (s\[\d+:\d+\]), ([^,]+), ([^,]+)",
+      when=lambda st, m: is_mask(st, m[3]) or is_mask(st, m[4]))
+def lane_mask_b64(st, i, m):
+    mask_op(st, i, *m.groups())
 
 
 @form(rf"s_({'|'.join(SALU_BIT64)})_b64 (s\[\d+:\d+\]), ([^,]+), ([^,]+)")
@@ -129,3 +138,7 @@ def select_64(st, i, m):
     b0, b1 = scalar_u64(src1, st.scalar, st.pending)
     st.lines.append(f"    uint2 salu{i} = {st.scc} ? uint2({a0}, {a1}) : uint2({b0}, {b1});")
     st.scalar[regs[0]], st.scalar[regs[1]] = ("uint", f"salu{i}.x"), ("uint", f"salu{i}.y")
+    if src0 in ("-1", "0") and src1 in ("-1", "0"):
+        # 0 or all ones: still the same data words, and also a lane mask, the same bit for every lane (CF-2b).
+        bit = f"(salu{i}.x != 0u)"
+        st.scalar[regs[0]], st.scalar[regs[1]] = (UniformMask(st.scalar[r], bit) for r in regs)

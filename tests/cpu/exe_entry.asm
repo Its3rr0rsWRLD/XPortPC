@@ -1,8 +1,15 @@
 ; A CRT-free PE entry. The existing call_mix (direct.asm, IMPORT_MIX)
 ; calls the named DLL import and records the two actual arguments and its output.
+IFDEF TWO_PROVIDERS
+EXTERN call_twice:PROC
+ELSE
 EXTERN call_mix:PROC
+ENDIF
 IFDEF FRAME_SELECTOR
 EXTERN call_bare:PROC
+ENDIF
+IFDEF NESTED_TARGET
+EXTERN call_nested:PROC
 ENDIF
 IFDEF TWO_TARGETS
 EXTERN call_alt:PROC
@@ -49,7 +56,11 @@ wide_input:
     mov rdx, 100000000h
 dispatch:
     lea r8, [rsp+32]
-IFDEF SWAP_TARGETS
+IFDEF TWO_PROVIDERS
+    call call_twice
+ELSEIFDEF NESTED_TARGET
+    call call_nested
+ELSEIFDEF SWAP_TARGETS
     call call_alt
 ELSE
     call call_mix

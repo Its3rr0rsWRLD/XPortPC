@@ -274,3 +274,98 @@ static inline X87Value x87_subr(X87Value a, X87Value b) { return x87_sub(b, a); 
 // and pseudo-denormals keep their bits.
 static inline X87Value x87_chs(X87Value v) { v.se ^= 0x8000; return v; }
 static inline X87Value x87_abs(X87Value v) { v.se &= 0x7fff; return v; }
+
+// FILD: a 16-, 32- or 64-bit two's-complement integer converts exactly, and zero gives +0. The precision
+// control does not apply to loads.
+static inline X87Value x87_from_integer(int64_t n) {
+    if (n == 0) return {0, 0};
+    const bool negative = n < 0;
+    const uint64_t magnitude = negative ? 0 - static_cast<uint64_t>(n) : static_cast<uint64_t>(n);
+    const int shift = x87_clz(magnitude);
+    return {magnitude << shift, static_cast<uint16_t>((negative ? 0x8000 : 0) | (16383 + 63 - shift))};
+}
+
+// FIST, FISTP and FISTTP: ST(0) rounded to an integer (to nearest-even, or toward zero when chop is set)
+// as two's-complement bits in the low `bits` bits. A NaN, an infinity, an unsupported encoding or a
+// rounded value outside the destination range gives the integer indefinite (only the sign bit set), the
+// masked invalid-operation response. The precision control does not apply.
+static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop) {
+    const uint64_t indefinite = 1ull << (bits - 1);
+    const uint64_t mask = bits == 64 ? ~0ull : (1ull << bits) - 1;
+    if (x87_unsupported(v) || x87_exp(v) == 0x7fff) return indefinite;
+    if (v.sig == 0) return 0;
+    const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
+    if (shift < 0) return indefinite;
+    uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
+    if (!chop && shift > 0 && shift <= 64) {  // a value below one half (shift > 64) rounds to 0
+        const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
+        const uint64_t half = 1ull << (shift - 1);
+        if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;
+    }
+    if (magnitude > indefinite - (x87_sign(v) ? 0 : 1)) return indefinite;
+    return (x87_sign(v) ? 0 - magnitude : magnitude) & mask;
+}
+
+// FCOMI, FUCOMI and their P forms: 0 if a < b, 1 if equal, 2 if a > b and 3 if unordered (a NaN or an
+// unsupported encoding; with the invalid operation masked, FCOMI and FUCOMI give the same result). The
+// comparison uses all 64 significand bits, +0 equals -0, and a pseudo-denormal equals the normal value
+// with the same significand at biased exponent 1.
+static inline int x87_compare(X87Value a, X87Value b) {
+    if (x87_unsupported(a) || x87_unsupported(b) || x87_is_nan(a) || x87_is_nan(b)) return 3;  // unordered
+    const bool za = x87_is_zero(a), zb = x87_is_zero(b);
+    if (za && zb) return 1;  // signed zeros
+    if (za) return x87_sign(b) ? 2 : 0;
+    if (zb) return x87_sign(a) ? 0 : 2;
+    if (x87_sign(a) != x87_sign(b)) return x87_sign(a) ? 0 : 2;
+    const X87Unpacked ua = x87_unpack(a), ub = x87_unpack(b);  // infinities unpack above every finite value
+    if (ua.e == ub.e && ua.sig == ub.sig) return 1;
+    const bool less = ua.e != ub.e ? ua.e < ub.e : ua.sig < ub.sig;
+    return less != x87_sign(a) ? 0 : 2;
+}
+
+// FSQRT: the exact square root rounded to the arithmetic format (53 significand bits, to nearest-even).
+// sqrt(-0) is -0 and sqrt(+inf) is +inf; a NaN is quieted; any other negative operand, and an unsupported
+// encoding, gives the indefinite. The root of sig * 2^(e - 63) is isqrt(sig * 2^t) * 2^((e - 63 - t) / 2)
+// with t = 63 or 64 chosen to make the exponent even, which puts the 64-bit root in [2^63, 2^64); a
+// nonzero remainder becomes the sticky bit. The result never leaves the extended normal range.
+static inline X87Value x87_sqrt(X87Value a) {
+    if (x87_unsupported(a)) return x87_indefinite;
+    if (x87_is_nan(a)) return x87_quiet(a);
+    if (x87_is_zero(a)) return a;
+    if (x87_sign(a)) return x87_indefinite;
+    if (x87_is_inf(a)) return a;
+    const X87Unpacked x = x87_unpack(a);
+    const int t = (x.e & 1) ? 64 : 63;
+    const uint64_t r_hi = t == 64 ? x.sig : x.sig >> 1, r_lo = t == 64 ? 0 : x.sig << 63;  // R = sig * 2^t
+    uint64_t q = 0, sq_hi = 0, sq_lo = 0;
+    for (uint64_t bit = x87_integer_bit; bit != 0; bit >>= 1) {
+        const uint64_t c = q | bit;
+        uint64_t hi;
+        const uint64_t lo = _umul128(c, c, &hi);
+        if (hi < r_hi || (hi == r_hi && lo <= r_lo)) { q = c; sq_hi = hi; sq_lo = lo; }
+    }
+    const uint64_t sticky = sq_hi != r_hi || sq_lo != r_lo;  // sqrt sticky
+    const X87Rounded r = x87_round(false, (x.e - 63 - t) / 2 + 63, q, sticky, x87_arith, x87_rc);  // sqrt round
+    return {r.sig, static_cast<uint16_t>(r.biased)};
+}
+
+// FRNDINT: ST(0) rounded to an integral value to nearest-even, kept in the extended format. The precision
+// control does not apply. Zeros, infinities and values of 2^63 and above are already integral; a value
+// that rounds to zero keeps its sign; a NaN is quieted and an unsupported encoding gives the indefinite.
+static inline X87Value x87_rndint(X87Value v) {
+    if (x87_unsupported(v)) return x87_indefinite;
+    if (x87_is_nan(v)) return x87_quiet(v);
+    if (x87_exp(v) == 0x7fff || v.sig == 0) return v;
+    const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
+    if (shift <= 0) return v;
+    uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
+    if (shift <= 64) {  // a value below one half (shift > 64) rounds to 0
+        const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
+        const uint64_t half = 1ull << (shift - 1);
+        if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;  // rndint round
+    }
+    const uint16_t sign = v.se & 0x8000;
+    if (magnitude == 0) return {0, sign};
+    const int lead = x87_clz(magnitude);
+    return {magnitude << lead, static_cast<uint16_t>(sign | (16383 + 63 - lead))};
+}

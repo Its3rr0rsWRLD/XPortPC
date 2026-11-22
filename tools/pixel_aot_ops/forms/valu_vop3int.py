@@ -1,5 +1,5 @@
 """VOP3-only integer and bit forms: v_bfi_b32, v_alignbit_b32, v_alignbyte_b32, v_perm_b32, the sum-of-absolute-differences
-family (v_sad_u8, v_sad_hi_u8, v_sad_u16, v_sad_u32, v_msad_u8), v_lerp_u8, v_mad_u64_u32 and the 64-bit shifts
+family (v_sad_u8, v_sad_hi_u8, v_sad_u16, v_sad_u32, v_msad_u8), v_lerp_u8 and the 64-bit shifts
 v_lshlrev_b64, v_lshrrev_b64 and v_ashrrev_i64.
 
 Semantics: AMD RDNA 2 ISA guide, VOP3 pseudocode, in uint words (no value passes through a float type). None takes source
@@ -13,9 +13,8 @@ everywhere), and none has an e32 encoding.
   + |S0.hi16 - S1.hi16|; V_SAD_U32 D = S2 + |S0 - S1| (unsigned difference); V_MSAD_U8 is V_SAD_U8 but a byte whose S1
   (reference) byte is zero adds nothing. All wrap modulo 2^32.
 - V_LERP_U8 D.byte[i] = (S0.byte[i] + S1.byte[i] + S2.byte[i][0]) >> 1: the rounding bit is bit 0 of each byte of S2.
-- V_MAD_U64_U32 {carry, D.u64} = S0.u32 * S1.u32 + S2.u64 (65-bit sum); the carry goes per lane to the lane mask like
-  v_add_co_u32. A 64-bit source is v[N:M], s[N:M] (even) or an inline constant 0..64. The signed v_mad_i64_i32 is not lowered: what
-  its carry out holds is not established here. v_cvt_pk_u8_f32 is not lowered: its float-to-byte rounding is not established.
+- V_MAD_U64_U32 and V_MAD_I64_I32 are lowered in valu_exact.py (one lowering only; its carry goes to the lane mask).
+  v_cvt_pk_u8_f32 is not lowered: its float-to-byte rounding is not established.
 - V_LSHLREV_B64 D = S1.u64 << S0[5:0]; V_LSHRREV_B64 the logical and V_ASHRREV_I64 the arithmetic right shift; the count is a
   32-bit source (S0), the value a 64-bit source (S1).
 """
@@ -114,7 +113,7 @@ def pair_destination(token, st):
     if not pair:
         raise ValueError(f"Expected a 64-bit vector register pair, got {token}")
     names = [f"v{n}" for n in registers(pair[1], pair[2], 2)]
-    if st.sample_dest.intersection(names):
+    if st.sample_dest.keys() & set(names):
         raise ValueError("Write overlaps an outstanding sample")
     return names
 
@@ -141,24 +140,4 @@ def shift64(st, i, m):
         out_lo = (f"({n} >= 32u ? asuint(asint({high}) >> {s}) : (({low} >> {s}) | (({high} << 1u) << (31u - {s}))))")
         out_hi = f"({n} >= 32u ? {sign} : asuint(asint({high}) >> {s}))"
     st.lines += [f"    uint valu{i}l = {out_lo};", f"    uint valu{i}h = {out_hi};"]
-    st.vector[names[0]], st.vector[names[1]] = ("uint", f"valu{i}l"), ("uint", f"valu{i}h")
-
-
-@form(rf"v_mad_u64_u32(?:_e64)? (v\[\d+:\d+\]), {LANE_MASK}, ([^,\s]+), ([^,\s]+), ([^,\s]+)")
-def mad_u64(st, i, m):
-    dst, carry, first, second, third = m.groups()
-    regs = lane_mask(carry)
-    if st.ex != "true" or st.pending.intersection(regs):
-        raise ValueError("Invalid integer operation")
-    names = pair_destination(dst, st)
-    a, b = (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second))
-    clo, chi = pair_operand(third, st)
-    st.helpers.add("mul_hi_u32")
-    st.lines += [f"    uint mda{i} = {a};", f"    uint mdb{i} = {b};", f"    uint mdl{i} = {clo};", f"    uint mdh{i} = {chi};",
-                 f"    uint mpl{i} = mda{i} * mdb{i};", f"    uint mph{i} = mul_hi_u32(mda{i}, mdb{i});",
-                 f"    uint valu{i}l = mpl{i} + mdl{i};", f"    uint mt{i} = mph{i} + mdh{i};",
-                 f"    uint valu{i}h = mt{i} + (valu{i}l < mpl{i} ? 1u : 0u);",
-                 f"    bool cmp{i} = mt{i} < mph{i} || valu{i}h < mt{i};"]
-    for j, reg in enumerate(regs):
-        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.vector[names[0]], st.vector[names[1]] = ("uint", f"valu{i}l"), ("uint", f"valu{i}h")

@@ -1,0 +1,12 @@
+EXPORTS
+    mul32_op
+    mul64_op
+    div32_op
+    div64_op
+    idiv32_op
+    idiv64_op
+    xadd32_op
+    xadd64_op
+    cmpxchg32_op
+    cmpxchg64_op
+    xadd64_mem

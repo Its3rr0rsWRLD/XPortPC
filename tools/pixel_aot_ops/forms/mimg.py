@@ -26,12 +26,20 @@ def store_results(st, i, dests, values, d16):
         st.vector[d] = ("uint", f"mem_d16_{i}_{k}")
 
 
-@form(r"image_sample v\[(\d+):(\d+)\], v\[(\d+):(\d+)\], s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] dmask:0xf dim:SQ_RSRC_IMG_2D( d16)?")
+@form(r"image_sample v\[(\d+):(\d+)\], v\[(\d+):(\d+)\], s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] dmask:0x([7f]) dim:SQ_RSRC_IMG_2D( d16)?")
 def sample(st, i, m):
+    # dmask 0x7 is an RGB-only read (R0Y00/Xbox2Windows#303 by Vonsek): three destination VGPRs, and the fourth VGPR
+    # of the usual v[N:N+3] block is left alone. A d16 read of three channels would leave half a register undefined,
+    # so it is refused with the other odd counts (store_results).
     operands = m.groups()
-    d16 = operands[8] is not None
+    rgb = operands[8] == "7"
+    d16 = operands[9] is not None
+    if rgb and d16:
+        raise ValueError("A d16 image read needs an even number of channels")
     dest, coords, image, state = [registers(*operands[k:k+2], width)
-                                  for k, width in zip((0,2,4,6), (2 if d16 else 4,2,8,4))]
+                                  for k, width in zip((0,2,4,6), (3 if rgb else 2 if d16 else 4,2,8,4))]
+    if any(f"v{n}" in st.sample_dest for n in dest):
+        raise ValueError("Write overlaps an outstanding sample")
     descriptor = [st.scalar.get(f"s{n}") for n in image]
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
     if (st.ex != "true" or any(f"s{n}" in st.pending for n in (*image, *state))
@@ -44,10 +52,9 @@ def sample(st, i, m):
         raise ValueError("Unsupported texture coordinate")
     st.lines.append(f"    float4 sample{i} = {texture}.Sample(samp, float2({', '.join(uv)}));")
     st.samples += 1
-    st.sample_pending = True
     names = [f"v{n}" for n in dest]
-    store_results(st, i, names, [f"sample{i}.{c}" for c in "xyzw"], d16)
-    st.sample_dest.update(names)
+    store_results(st, i, names, [f"sample{i}.{c}" for c in "xyzw"[:3 if rgb else 4]], d16)
+    st.vm_issue(names, "sample")
 
 
 @form(r"image_(load|load_mip|get_resinfo|gather4|gather4_lz_o|gather4_lz) (v\d+|v\[\d+:\d+\]), (v\d+|v\[\d+:\d+\]), "
@@ -120,13 +127,12 @@ def load_query_gather(st, i, m):
         st.helpers.add("image_load")
         st.lines.append(f"    float4 sample{i} = image_load2d({texture}, {x}, {y}, {level});")
         results = [f"sample{i}.{c}" for c in "xyzw"]
-    st.sample_pending = True
     if results is None:
         for d, c in zip(dests, channels):
             st.vector[d] = ("uint", f"mem_info{i}.{'xyzw'[c]}")
     else:
         store_results(st, i, dests, [results[c] for c in ([0, 1, 2, 3] if gather else channels)], d16)
-    st.sample_dest.update(dests)
+    st.vm_issue(dests, "sample")
 
 
 @form(r"image_sample_(lz_o|lz|l_o|l|b|d) (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\]), s\[(\d+):(\d+)\], "
@@ -201,6 +207,5 @@ def sample_level(st, i, m):
             call = (f"{texture}.SampleLevel(samp, image_offset_uv({texture}, float2({x}, {y}), level{i}, {offset}), "
                     f"level{i})")
     st.lines.append(f"    float4 sample{i} = {call};")
-    st.sample_pending = True
     store_results(st, i, dests, [f"sample{i}.{'xyzw'[c]}" for c in channels], d16)
-    st.sample_dest.update(dests)
+    st.vm_issue(dests, "sample")

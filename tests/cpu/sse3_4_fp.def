@@ -1,0 +1,24 @@
+EXPORTS
+    addsubps_op
+    addsubpd_op
+    haddps_op
+    haddpd_op
+    hsubps_op
+    hsubpd_op
+    movddup_op
+    movsldup_op
+    movshdup_op
+    lddqu_op
+    blendps_op
+    blendpd_op
+    blendvps_op
+    blendvpd_op
+    dpps_op
+    dppd_op
+    roundps_nearest_op
+    roundps_floor_op
+    roundpd_ceil_op
+    roundpd_trunc_op
+    roundss_op
+    roundsd_op
+    extractps_op

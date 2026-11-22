@@ -1,0 +1,274 @@
+# End-to-end translation of the corpus pixel shaders (tools/corpus_translate.py; inputs
+# tests/corpus/isa/pixel, sources and licenses tests/corpus/README.md). all_covered is the site's measure
+# (every form covered by a test); translated means lower() accepted the whole program and produced HLSL.
+# Pixel: shaders 250; translated 0; all_covered 197; all_covered_translated 0.
+# Refusal reasons, most shaders first: shaders (all_covered shaders), kind, place, reason.
+# Reason 65 (52)	contract	smem.scalar_load	Unresolved constant buffer binding
+# Reason 55 (53)	refused	vintrp.interpolate	Unknown interpolation context
+# Reason 52 (45)	contract	smem.texture_descriptor	Texture address differs from binding contract
+# Reason 21 (10)	no_form	dispatch	no form matches v_interp_p1_f32_e32
+# Reason 14 (10)	contract	lowering.lower	Texture and constant descriptors overlap
+# Reason 11 (3)	crash	sop1.move_32	KeyError: 's3'
+# Reason 11 (11)	refused	exp.export	Unsupported export
+# Reason 4 (4)	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset
+# Reason 3 (2)	crash	sopc.compare_32	KeyError: 's3'
+# Reason 3 (2)	refused	vintrp.interpolate_move	Unknown interpolation context
+# Reason 2 (2)	crash	sopc.compare_32	KeyError: 's6'
+# Reason 2 (2)	no_form	dispatch	no form matches s_endpgm
+# Reason 2 (0)	refused	valu_f32.move	Expected a numeric register
+# Reason 1 (0)	crash	sop2.bitfield_extract	KeyError: 's2'
+# Reason 1 (0)	crash	valu_f32.arithmetic	KeyError: 's2'
+# Reason 1 (0)	no_form	dispatch	no form matches v_readfirstlane_b32
+# Reason 1 (1)	refused	exp.pack_e64	Unsupported pack operand s2
+# Reason 1 (0)	refused	valu_f32.arithmetic	Expected a numeric register
+# Columns: shader, all_covered (0/1), status, kind, place, reason, first refused instruction.
+sascha__base__textoverlay.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__base__uioverlay.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__bloom__colorpass.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__bloom__gaussblur.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__bloom__phongpass.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr0.w
+sascha__bloom__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__bufferdeviceaddress__cube.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__computecloth__cloth.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__computecloth__sphere.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__computecullandlod__indirectdraw.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__computenbody__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
+sascha__computeparticles__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
+sascha__computeraytracing__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__computeshader__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__conditionalrender__model.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__conservativeraster__fullscreen.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__conservativeraster__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__conservativeraster__triangleoverlay.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v1, v1, v0, v0 done compr vm
+sascha__debugprintf__toon.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__debugutils__colorpass.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__debugutils__postprocess.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__debugutils__toon.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__deferred__deferred.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__deferred__mrt.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	5: s_load_dwordx8 s[8:15], s[2:3], 0x80
+sascha__deferredmultisampling__deferred.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__deferredmultisampling__mrt.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	5: s_load_dwordx8 s[8:15], s[2:3], 0x80
+sascha__deferredshadows__deferred.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__deferredshadows__mrt.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	5: s_load_dwordx8 s[8:15], s[2:3], 0x80
+sascha__descriptorbuffer__cube.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__descriptorheap__cube.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	2: s_mov_b32 s0, s3
+sascha__descriptorindexing__descriptorindexing.frag.s	0	refused	refused	valu_f32.move	Expected a numeric register	11: v_mov_b32_e32 v22, v2
+sascha__descriptorsets__cube.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__deviceaddresscommands__cube.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__displacement__base.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+sascha__distancefieldfonts__bitmap.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__distancefieldfonts__sdf.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__dynamicrendering__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__dynamicrenderinglocalread__scene.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__dynamicuniformbuffer__base.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__fragmentshaderbarycentrics__scene.frag.s	0	refused	crash	sop2.bitfield_extract	KeyError: 's2'	1: s_bfe_u32 s2, s2, 0x20016
+sascha__gears__gears.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v7, v0, attr2.w
+sascha__geometryshader__base.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__geometryshader__mesh.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__gltfloading__mesh.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__gltfscenerendering__scene.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__gltfskinning__skinnedmodel.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__graphicspipelinelibrary__uber.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__hdr__bloom.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x60
+sascha__hdr__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__hdr__gbuffer.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__imgui__scene.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__imgui__ui.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__indirectdraw__ground.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__indirectdraw__indirectdraw.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__indirectdraw__skysphere.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	5: v_interp_p1_f32_e32 v0, v0, attr0.x
+sascha__inlineuniformblocks__pbr.frag.s	0	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__inputattachments__attachmentwrite.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr1.x
+sascha__instancing__instancing.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__instancing__planet.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__instancing__starfield.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__multisampling__mesh.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__multisamplingalphatocoverage__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__multithreading__phong.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__multithreading__starsphere.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr0.z
+sascha__multiview__multiview.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__multiview__viewdisplay.frag.s	0	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__negativeviewportheight__quad.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__occlusionquery__mesh.frag.s	0	refused	refused	vintrp.interpolate_move	Unknown interpolation context	3: v_interp_mov_f32_e32 v2, p0, attr3.x
+sascha__occlusionquery__occluder.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__occlusionquery__simple.frag.s	1	refused	refused	exp.export	Unsupported export	2: exp mrt0 v0, v0, v0, v0 done compr vm
+sascha__offscreen__mirror.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	5: v_interp_p1_f32_e32 v4, v0, attr0.z
+sascha__offscreen__phong.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v9, v0, attr2.w
+sascha__offscreen__quad.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__oit__color.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	1: s_load_dwordx2 s[0:1], s[0:1], null
+sascha__oit__geometry.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+sascha__parallaxmapping__parallax.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	3: s_load_dwordx4 s[8:11], s[2:3], 0xd0
+sascha__particlesystem__normalmap.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__particlesystem__particle.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	3: v_interp_p1_f32_e32 v2, v0, attr1.w
+sascha__pbrbasic__pbr.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+sascha__pbribl__genbrdflut.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	4: v_interp_p1_f32_e32 v2, v0, attr0.x
+sascha__pbribl__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	4: v_interp_p1_f32_e32 v4, v0, attr0.z
+sascha__pbribl__pbribl.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+sascha__pbribl__prefilterenvmap.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+sascha__pbribl__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__pbrtexture__genbrdflut.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	4: v_interp_p1_f32_e32 v2, v0, attr0.x
+sascha__pbrtexture__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	4: v_interp_p1_f32_e32 v4, v0, attr0.z
+sascha__pbrtexture__pbrtexture.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x1a0
+sascha__pbrtexture__prefilterenvmap.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+sascha__pbrtexture__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__pipelines__phong.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr1.x
+sascha__pipelines__toon.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__pipelines__wireframe.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__pipelinestatistics__scene.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__pushconstants__pushconstants.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__pushdescriptors__cube.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__radialblur__colorpass.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	7: v_interp_p1_f32_e32 v0, v0, attr0.z
+sascha__radialblur__phongpass.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	5: v_interp_p1_f32_e32 v2, v0, attr0.w
+sascha__radialblur__radialblur.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__renderheadless__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__screenshot__mesh.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__shaderobjects__phong.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr1.x
+sascha__shadowmapping__offscreen.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+sascha__shadowmapping__quad.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__shadowmapping__scene.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	3: v_interp_p1_f32_e32 v2, v0, attr2.y
+sascha__shadowmappingcascade__debugshadowmap.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__shadowmappingcascade__depthpass.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__shadowmappingcascade__scene.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[6:7], null
+sascha__shadowmappingomni__cubemapdisplay.frag.s	0	refused	refused	valu_f32.arithmetic	Expected a numeric register	8: v_mul_f32_e32 v3, 0x40400000, v2
+sascha__shadowmappingomni__offscreen.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__shadowmappingomni__scene.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__specializationconstants__uber.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__sphericalenvmapping__sem.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__ssao__blur.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	5: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__ssao__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__ssao__gbuffer.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[0:1], null
+sascha__ssao__ssao.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__stencilbuffer__outline.frag.s	1	refused	refused	exp.export	Unsupported export	2: exp mrt0 v0, v0, v0, v0 done compr vm
+sascha__stencilbuffer__toon.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__subpasses__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v8, v0, attr1.z
+sascha__terraintessellation__skysphere.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__terraintessellation__terrain.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__tessellation__base.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__textoverlay__mesh.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__textoverlay__text.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+sascha__texture3d__texture3d.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__texture__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__texturearray__instancing.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__texturecubemap__reflect.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__texturecubemap__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__texturecubemaparray__reflect.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__texturecubemaparray__skybox.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+sascha__texturemipmapgen__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx4 s[4:7], s[2:3], 0x40
+sascha__texturesparseresidency__sparseresidency.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+sascha__triangle__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__variablerateshading__scene.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[0:1], null
+sascha__vertexattributes__scene.frag.s	1	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s6, s3
+sascha__viewportarray__scene.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__vulkanscene__logo.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v8, v0, attr0.w
+sascha__vulkanscene__mesh.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v9, v0, attr2.w
+sascha__vulkanscene__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__16bit_arithmetic__visualize.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__async_compute__composite.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__async_compute__shadow.frag.s	1	refused	no_form	dispatch	no form matches s_endpgm	1: s_endpgm
+vksamples__buffer_device_address__glsl__render.frag.s	1	refused	refused	vintrp.interpolate_move	Unknown interpolation context	3: v_interp_mov_f32_e32 v0, p0, attr0.y
+vksamples__color_write_enable__glsl__triangle_separate_channels.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__compute_nbody__glsl__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
+vksamples__conditional_rendering__glsl__model.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__conservative_rasterization__glsl__fullscreen.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__conservative_rasterization__glsl__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__conservative_rasterization__glsl__triangleoverlay.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v1, v1, v0, v0 done compr vm
+vksamples__debug_utils__glsl__bloom.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x60
+vksamples__debug_utils__glsl__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__debug_utils__glsl__gbuffer.frag.s	1	refused	crash	sopc.compare_32	KeyError: 's6'	2: s_cmp_eq_i32 s6, 0
+vksamples__deferred__geometry.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__descriptor_buffer_basic__glsl__cube.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__descriptor_heap__glsl__cube.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	2: s_mov_b32 s0, s3
+vksamples__descriptor_indexing__glsl__nonuniform-quads.frag.s	0	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__descriptor_indexing__glsl__update-after-bind-quads.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__device_fault__glsl__render.frag.s	1	refused	refused	vintrp.interpolate_move	Unknown interpolation context	3: v_interp_mov_f32_e32 v0, p0, attr0.y
+vksamples__dynamic_blending__glsl__blending.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__dynamic_line_rasterization__glsl__base.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand s2	1: v_cvt_pkrtz_f16_f32_e64 v0, s2, s3
+vksamples__dynamic_line_rasterization__glsl__grid.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	4: v_interp_p1_f32_e32 v3, v0, attr1.x
+vksamples__dynamic_multisample_rasterization__glsl__model.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	4: v_interp_p1_f32_e32 v2, v0, attr0.w
+vksamples__dynamic_primitive_clipping__glsl__primitive_clipping.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__dynamic_rendering__glsl__gbuffer.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__dynamic_rendering_local_read__glsl__scene_opaque.frag.s	1	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v8, v0, attr0.w
+vksamples__dynamic_uniform_buffers__glsl__base.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__extended_dynamic_state2__glsl__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__extended_dynamic_state2__glsl__baseline.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v9, v0, attr0.x
+vksamples__extended_dynamic_state2__glsl__tess.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+vksamples__fragment_density_map__sky.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+vksamples__fragment_density_map__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__fragment_shader_barycentric__glsl__object.frag.s	0	refused	crash	sopc.compare_32	KeyError: 's3'	3: s_cmp_eq_i32 s3, 0
+vksamples__fragment_shader_barycentric__glsl__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__fragment_shading_rate__glsl__scene.frag.s	1	refused	crash	sopc.compare_32	KeyError: 's3'	3: s_cmp_eq_i32 s3, 0
+vksamples__fragment_shading_rate_dynamic__scene.frag.s	1	refused	crash	sopc.compare_32	KeyError: 's3'	3: s_cmp_eq_i32 s3, 0
+vksamples__graphics_pipeline_library__glsl__uber.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__gshader_to_mshader__glsl__gshader_to_mshader.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+vksamples__gshader_to_mshader__glsl__gshader_to_mshader_base.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__gshader_to_mshader__glsl__gshader_to_mshader_mesh.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__hdr__glsl__bloom.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x60
+vksamples__hdr__glsl__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__hdr__glsl__gbuffer.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__hello_triangle_1_3__glsl__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__hello_triangle__glsl__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__imgui.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__instancing__glsl__instancing.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__instancing__glsl__planet.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__instancing__glsl__starfield.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__logic_op_dynamic_state__glsl__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__logic_op_dynamic_state__glsl__baseline.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v9, v0, attr0.x
+vksamples__mobile_nerf__merged.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__mobile_nerf__merged_morpheus.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__mobile_nerf__raster.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__mobile_nerf__raster_combo.frag.s	1	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s5, s3
+vksamples__mobile_nerf__raster_morpheus.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__mobile_nerf__raster_morpheus_combo.frag.s	1	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+vksamples__multi_draw_indirect__multi_draw_indirect.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	7: v_readfirstlane_b32 s1, v2
+vksamples__oit_depth_peeling__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__oit_depth_peeling__combine.frag.s	0	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__oit_depth_peeling__gather.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	3: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__oit_depth_peeling__gather_first.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.x
+vksamples__oit_linked_lists__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__oit_linked_lists__combine.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	3: s_load_dwordx4 s[4:7], s[2:3], 0x40
+vksamples__oit_linked_lists__gather.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	3: s_load_dwordx4 s[4:7], s[2:3], 0x50
+vksamples__open_cl_interop__glsl__texture_display.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__patch_control_points__glsl__tess.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__postprocessing__chromatic_aberration.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__postprocessing__outline.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x80
+vksamples__postprocessing__outline_ms_depth.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x80
+vksamples__profiles__glsl__profiles.frag.s	0	refused	refused	valu_f32.move	Expected a numeric register	11: v_mov_b32_e32 v22, v2
+vksamples__push_descriptors__glsl__cube.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__rasterization_order_attachment_access__glsl__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__render_octomap__glsl__gltf.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__render_octomap__glsl__render.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__render_octomap__glsl__splat.frag.s	0	refused	no_form	dispatch	no form matches v_interp_p1_f32_e32	2: v_interp_p1_f32_e32 v2, v0, attr1.w
+vksamples__separate_image_sampler__glsl__separate_image_sampler.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
+vksamples__shader_debugprintf__glsl__scene.frag.s	1	refused	crash	sopc.compare_32	KeyError: 's6'	2: s_cmp_eq_i32 s6, 0
+vksamples__shader_object__basic_n_dot_l.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__shader_object__basic_normals.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__shader_object__basic_pos.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__shader_object__basic_uv.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	3: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__shader_object__material_n_dot_l.frag.s	1	refused	refused	exp.export	Unsupported export	2: exp mrt0 v0, v0, v0, v0 done compr vm
+vksamples__shader_object__material_normals.frag.s	1	refused	refused	exp.export	Unsupported export	3: exp mrt0 v0, v0, v1, v1 done compr vm
+vksamples__shader_object__material_reflective.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	3: s_load_dwordx8 s[8:15], s[2:3], 0x80
+vksamples__shader_object__material_scene.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__shader_object__material_texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__shader_object__post_process_brighten.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__shader_object__post_process_color_cycle.frag.s	0	refused	crash	sop1.move_32	KeyError: 's3'	1: s_mov_b32 s0, s3
+vksamples__shader_object__post_process_edge_detection.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__shader_object__post_process_grayscale.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__shader_object__post_process_invert.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__shader_object__post_process_quantize.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__shader_object__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__shader_object__terrain.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x80
+vksamples__shader_quad_control__glsl__quad_control.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	3: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__shadows__shadowmap.frag.s	1	refused	no_form	dispatch	no form matches s_endpgm	1: s_endpgm
+vksamples__sparse_image__glsl__sparse.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx4 s[4:7], s[2:3], 0x70
+vksamples__swapchain_present_timing__glsl__circle.frag.s	0	refused	crash	valu_f32.arithmetic	KeyError: 's2'	1: v_mad_f32 v2, s2, neg(0.5), v2
+vksamples__synchronization_2__glsl__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
+vksamples__tensor_and_data_graph__glsl__blit.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__terrain_tessellation__glsl__skysphere.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__terrain_tessellation__glsl__terrain.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__texture_compression_basisu__glsl__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__texture_loading__glsl__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
+vksamples__texture_mipmap_generation__glsl__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx4 s[4:7], s[2:3], 0x40
+vksamples__timeline_semaphore__glsl__render.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__triangle.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	2: v_interp_p1_f32_e32 v2, v0, attr0.y
+vksamples__uioverlay__uioverlay.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
+vksamples__vertex_dynamic_state__glsl__gbuffer.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20

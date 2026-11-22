@@ -448,8 +448,12 @@ int main(int argc, char** argv)
             check_bc7_pixel(device.Get(), argv[3], argv[4], argc == 6 ? argv[5] : nullptr);
         } else if (argc == 5 && (operation == "--dual-pixel" || operation == "--dual-pixel-swapped")) {
             check_dual_pixel(device.Get(), argv[3], argv[4], operation == "--dual-pixel-swapped");
+        } else if (argc == 5 && operation == "--check-pixel-outputs") {
+            check_pixel_outputs(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case") {
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
+        } else if (argc == 5 && operation == "--check-compute-case") {
+            check_translated_compute(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case-mips") {
             check_translated_pixel_mips(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case-f64") {
@@ -457,6 +461,8 @@ int main(int argc, char** argv)
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
         } else if (operation == "--check-pixel-quad-lod") {
             check_pixel_quad_lod(device.Get(), argv[3]);
+        } else if (argc == 5 && operation == "--check-vertex-case") {
+            check_translated_vertex(device.Get(), argv[3], argv[4]);
         } else if (operation == "--check-pixel") {
             if (argc != 5 || (std::string_view(argv[4]) != "rgba" && std::string_view(argv[4]) != "bgra"))
                 throw std::runtime_error("Expected --check-pixel <pixel.cso> rgba|bgra");

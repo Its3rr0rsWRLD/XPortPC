@@ -1,0 +1,19 @@
+EXPORTS
+    paddb_op
+    paddw_op
+    paddd_op
+    paddq_op
+    psubb_op
+    psubw_op
+    psubd_op
+    psubq_op
+    pand_op
+    pandn_op
+    por_op
+    pxor_op
+    pcmpeqb_op
+    pcmpeqw_op
+    pcmpeqd_op
+    pcmpgtb_op
+    pcmpgtw_op
+    pcmpgtd_op

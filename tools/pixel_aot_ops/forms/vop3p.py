@@ -217,6 +217,9 @@ def fma_mix_source(token, high, select, scalar, vector, pending, sample_pending)
             negate, body = True, body[1:]
         if len(body) > 2 and body.startswith("|") and body.endswith("|"):
             absolute, body = True, body[1:-1]
+        if body.startswith("-") and not (absolute and re.fullmatch(r"-0\.5|-1\.0|-2\.0|-4\.0", body)):
+            # LLVM prints |-2.0| and -|-2.0| for a negative inline constant under abs, and never --x or |-v1|.
+            raise ValueError(f"Malformed modifier {token}")
         constant = re.fullmatch(r"-?0\.5|-?1\.0|-?2\.0|-?4\.0|0|0\.15915494", body)
     if constant:
         text = constant.group(0)

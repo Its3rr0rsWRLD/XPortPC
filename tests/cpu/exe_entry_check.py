@@ -66,6 +66,31 @@ def compare(native, lifted, inverted_native, inverted_lifted, *, targets=False):
         check("empty stdin", run(program, b""), Observation(b"", b"", 2))
 
 
+def compare_nested(native, lifted, bypass, bypass_lifted):
+    references = [
+        Observation(struct.pack("<QQ", 0x100000303, 0xfffffffc), struct.pack("<Q", 0x312), 0xfffff9f1),
+        Observation(struct.pack("<QQ", 48, 5), struct.pack("<Q", 54), 0x57),
+    ]
+    bypass_references = [
+        Observation(struct.pack("<QQ", 0x1000002fc, 0xffffffff), struct.pack("<Q", 0x308), 0x308),
+        Observation(struct.pack("<QQ", 41, 8), struct.pack("<Q", 44), 44),
+    ]
+    for selector, expected in enumerate(references):
+        data = bytes([selector])
+        check(f"nested native selector {selector}", run(native, data), expected)
+        check(f"nested AOT selector {selector}", run(lifted, data), expected)
+        direct = run(bypass, data)
+        check(f"bypass native selector {selector}", direct, bypass_references[selector])
+        check(f"bypass AOT selector {selector}", run(bypass_lifted, data), direct)
+        for field in Observation._fields:
+            if getattr(direct, field) == getattr(expected, field):
+                raise AssertionError(f"selector {selector}: {field} missed the bypass")
+        print(f"selector={selector} nested output={expected.output.hex()} exit={expected.exit_code:#x} "
+              "(bypass detected)")
+    for program in (native, lifted):
+        check("empty stdin", run(program, b""), Observation(b"", b"", 2))
+
+
 def check_header_guards(native, io_provider, mix_provider):
     native_path, io_path, mix_path = map(Path, (native, io_provider, mix_provider))
     expected = translate(native_path, io_path, mix_path)
@@ -105,6 +130,8 @@ def check_header_guards(native, io_provider, mix_provider):
 if __name__ == "__main__":
     if sys.argv[1] == "--targets":
         compare(*sys.argv[2:], targets=True)
+    elif sys.argv[1] == "--nested":
+        compare_nested(*sys.argv[2:])
     else:
         compare(*sys.argv[1:5])
         if len(sys.argv) > 5:

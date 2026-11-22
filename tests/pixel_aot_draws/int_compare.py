@@ -373,8 +373,6 @@ def controls(directory):
                  "v_cmpx_eq_i32_e32 vcc_lo, s44, v18", "v_cmpx_lt_u32_e64 s52, v18, s44", "v_cmpx_ne_u32_e64 exec_lo, v18, s44",
                  "v_cmp_eq_i32_e64 exec_lo, v18, s44",
                  "v_cmp_lt_u64_e64 s52, v[18:19], s[44:45]",
-                 "v_cmp_eq_i32_sdwa vcc_lo, s44, v18 src0_sel:DWORD src1_sel:DWORD",
-                 "v_max_i32_sdwa v19, s44, v18 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD",
                  "v_min_u32_dpp v19, v18, v18 row_shl:1 row_mask:0xf bank_mask:0xf",
                  "v_add_co_u32 v19, s52, s44, v18 clamp", "v_sub_co_u32 v19, vcc_lo, s44, v18 clamp",
                  "v_add_co_ci_u32_e32 v19, vcc_lo, s44, v18, vcc_lo", "v_sub_co_ci_u32_e64 v19, s52, s44, v18, s53",

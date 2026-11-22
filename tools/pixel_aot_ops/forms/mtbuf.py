@@ -33,5 +33,4 @@ def tbuffer_load_format(st, i, m):
     for j, d in enumerate(dsts):
         st.lines.append(f"    uint mem{i}_{j} = fmt{i}[{j}];")
         st.vector[d] = ("uint", f"mem{i}_{j}")
-    st.sample_dest.update(dsts)
-    st.sample_pending = True
+    st.vm_issue(dsts, "mtbuf")
