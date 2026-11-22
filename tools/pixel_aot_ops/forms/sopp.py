@@ -36,9 +36,11 @@ def wait_vmcnt(st, i, m):
 def wait_counters(st, i, m):
     # The counters named by one s_waitcnt, as the disassembler spells them (vmcnt expcnt lgkmcnt). Like the
     # two forms above, only a count of 0 is accepted: a nonzero count leaves loads in flight that lower() does
-    # not model. expcnt(0) waits for exports, and the only export is the last instruction.
+    # not model. expcnt waits for exports, which lower() emits as the return of main, so any count of its three-bit
+    # field orders nothing in the translation (from R0Y00/Xbox2Windows#271 by Rachel Amber).
     fields = re.findall(r"(\w+)\((\d+)\)", m[1])
-    if len({name for name, _ in fields}) != len(fields) or any(int(count) for _, count in fields):
+    if len({name for name, _ in fields}) != len(fields) or any(
+            int(count) > 7 if name == "expcnt" else int(count) for name, count in fields):
         raise ValueError("Only zero wait counts without repeats are supported")
     if any(name == "lgkmcnt" for name, _ in fields):
         st.pending.clear()
@@ -46,7 +48,14 @@ def wait_counters(st, i, m):
         st.vm_wait(0)
 
 
-@form(r"s_waitcnt_(vmcnt|expcnt|lgkmcnt|vscnt) null, (0x[0-9a-f]+|\d+)")
+@form(r"s_waitcnt_expcnt (?:(?:null|s\d+), )?(0x[0-7]|[0-7])")
+def wait_export_counter(st, i, m):
+    # Exports are the return of main, so a wait for them orders nothing and its count, SGPR plus a three-bit
+    # immediate, need not be known (from R0Y00/Xbox2Windows#271 by Rachel Amber).
+    pass
+
+
+@form(r"s_waitcnt_(vmcnt|lgkmcnt|vscnt) null, (0x[0-9a-f]+|\d+)")
 def wait_split_counter(st, i, m):
     # The split forms wait until the counter is at most SGPR + immediate, and null reads as 0. They clear the
     # same state as the combined forms and accept a count of 0 only.
@@ -62,7 +71,6 @@ def wait_split_counter(st, i, m):
         st.pending.clear()
     elif op == "vmcnt":
         st.vm_wait(0)
-    # expcnt(0) waits for exports; the only export is the last instruction.
 
 
 @form(r"s_waitcnt_depctr (?:0x[0-9a-f]{1,4}|(?:depctr_(?:hold_cnt|sa_sdst|va_vdst|va_sdst|va_ssrc|va_vcc|vm_vsrc)\(\d+\) ?)+)")

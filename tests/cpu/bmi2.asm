@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_bmi2
 ; Source-owned differential fixture for BMI2 instructions
 ; (BZHI, MULX, PDEP, PEXT, RORX, SARX, SHLX, SHRX) in 32-bit and 64-bit forms.
 .code

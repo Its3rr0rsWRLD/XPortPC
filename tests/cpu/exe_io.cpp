@@ -29,11 +29,16 @@ static bool start_test_worker()
     return started;
 }
 
-extern "C" __declspec(dllexport) std::uint32_t read_selector()
+static bool prepare_test_worker(const wchar_t* flag)
 {
     wchar_t value[2];
-    if (GetEnvironmentVariableW(L"CPU_EXE_TEST_LIVE_WORKER", value, 2) == 1 &&
-        value[0] == L'1' && !start_test_worker()) {
+    return GetEnvironmentVariableW(flag, value, 2) != 1 ||
+        value[0] != L'1' || start_test_worker();
+}
+
+extern "C" __declspec(dllexport) std::uint32_t read_selector()
+{
+    if (!prepare_test_worker(L"CPU_EXE_TEST_LIVE_WORKER")) {
         // Distinguish a failed test setup from empty stdin.
         ExitProcess(3);
     }
@@ -58,6 +63,9 @@ extern "C" __declspec(dllexport) std::uint32_t emit_trace(const std::uint64_t* w
 
 extern "C" __declspec(dllexport) DWORD finish_exe(const void* image_base, DWORD code)
 {
+    // The console fixture uses UCRT stdin rather than read_selector.
+    if (!prepare_test_worker(L"CPU_CRC_TEST_LIVE_WORKER"))
+        code = 3;
     if (image_base == GetModuleHandleW(nullptr))
         ExitProcess(code);
     return code;

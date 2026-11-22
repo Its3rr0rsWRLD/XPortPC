@@ -62,7 +62,7 @@ OPS = {
     "med3_i32": "median_i(asint({0}),asint({1}),asint({2}))",
     "bfe_u32": "bfe_u({0},{1},{2})", "bfe_i32": "bfe_i({0},{1},{2})",
     "cvt_f32_i32": "asuint(float(asint({0})))", "cvt_f32_u32": "asuint(float({0}))",
-    "cvt_i32_f32": "uint(int(asfloat({0})))", "cvt_u32_f32": "uint(asfloat({0}))",
+    "cvt_i32_f32": "cvt_i32_f32({0})", "cvt_u32_f32": "cvt_u32_f32({0})",
     "cvt_pk_u8_f32": "insert_byte({2},{1},uint(round(clamp(asfloat({0}),0.0,255.0))))",
     "dot4_i32_i8": "idot({0},{1},{2})", "dot4c_i32_i8": "idot({0},{1},{d})",
     "pack_b32_f16": "({0}&65535u)|({1}<<16)",

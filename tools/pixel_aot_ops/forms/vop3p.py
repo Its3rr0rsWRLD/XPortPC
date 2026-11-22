@@ -5,7 +5,7 @@ import re
 import struct
 
 from ..dispatch import form
-from ..hlsl import PREAMBLE, SALU_HELPERS
+from ..hlsl import SALU_HELPERS
 from ..registers import F16_CONSTANT, tracked_word, word_of
 
 # Mixed-precision fused multiply-add: v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16 (VOP3P encoding).
@@ -195,7 +195,7 @@ def need_fma_mix(st):
     """Emit FMA_MIX_HELPERS once (fma_mix_round, fma_mix_sat and fm_f16_word are shared with v_pk_fma_f16)."""
     if "fma_mix" not in st.helpers:
         st.helpers.add("fma_mix")
-        st.lines.insert(st.lines.index(PREAMBLE), FMA_MIX_HELPERS)
+        st.lines.insert(st.lines.index(st.preamble), FMA_MIX_HELPERS)
 
 
 def fma_mix_source(token, high, select, scalar, vector, pending, sample_pending):

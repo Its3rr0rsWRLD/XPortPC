@@ -2,15 +2,31 @@
 from ..dispatch import form
 
 
-@form(r"v_interp_p([12])_f32_e32 (v\d+), (v\d+), attr0\.([xy])")
+@form(r"v_interp_p([12])_f32_e32 (v\d+), (v\d+), attr0\.([xyzw])")
 def interpolate(st, i, m):
+    # P0 + I * P10 (p1, from the I barycentric in v0) then + J * P20 (p2, from J in v1) of attribute 0, read from the
+    # slot m0 addresses: the pair is TEXCOORD0's component as the rasterizer interpolates it.
+    # In whole-quad mode (after s_wqm_b64 exec, exec), the coordinate a sample's implicit level differentiates: x and
+    # y only, and the result is a quad value (lowering.Lowering.quad_values).
+    # At the entry mask with no sampler bound (lower(sampler=None)), any of the four components, as an ordinary
+    # per-lane value; TEXCOORD0 is then declared float4 (from R0Y00/Xbox2Windows#484 by Royoo). The two halves must
+    # be in the same mode, so the partial value records it.
     phase, dst, src, component = m.groups()
-    if not st.wqm or st.ex != "true" or st.scalar.get("m0") != "interp_base":
+    entry = not st.wqm and st.ex == "true" and not st.bindings
+    if ((not entry and (not st.wqm or st.ex != "true" or component not in "xy"))
+            or st.scalar.get("m0") != "interp_base"):
         raise ValueError("Unknown interpolation context")
-    if phase == "1" and st.vector[src] == "bary_i":
-        st.vector[dst] = ("partial", component)
-    elif phase == "2" and st.vector[src] == "bary_j" and st.vector[dst] == ("partial", component):
-        st.vector[dst] = f"uv.{component}"
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    if phase == "1" and st.vector.get(src) == "bary_i":
+        st.vector[dst] = ("partial", component, entry)
+    elif phase == "2" and st.vector.get(src) == "bary_j" and st.vector.get(dst) == ("partial", component, entry):
+        if entry:
+            st.attribute_input = True
+            st.vector[dst] = f"alu{i}"
+            st.lines.append(f"    float alu{i} = uv.{component};")
+        else:
+            st.vector[dst] = f"uv.{component}"
     else:
         raise ValueError("Unpaired interpolation")
 

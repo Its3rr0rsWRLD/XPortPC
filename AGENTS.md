@@ -20,8 +20,9 @@ otherwise.
 
 - Never add game files, dumps, DLLs, EXEs, torrents, distribution links or
   credentials to the repository, issues or pull requests.
-- Keep the title-neutral wording used by the project. Do not name the case-study
-  title or claim that a game runs.
+- The GitHub repository description and the opening paragraph of README.md may
+  name the case-study title when describing static recompilation research. Keep
+  other public wording title-neutral. Do not claim that a game runs.
 - Use only source-built fixtures, synthetic inputs or public samples with a
   known revision and license.
 - Keep generated output under `out/` and local inputs under `game-files/`.

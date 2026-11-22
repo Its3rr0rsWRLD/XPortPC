@@ -1,0 +1,300 @@
+"""Specialize a sampled, coverage-only gfx1013 PS for a supplied descriptor snapshot."""
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+from pixel_aot import container_code, disassemble
+from resource_inventory import parts
+
+
+def regs(token, bank, width):
+    match = re.fullmatch(bank + r"\[(\d+):(\d+)\]", token)
+    if not match:
+        raise ValueError("Invalid register range")
+    lo, hi = map(int, match.groups())
+    if hi - lo + 1 != width or (bank == "s" and (lo % min(width, 4) or hi > 105)):
+        raise ValueError("Unexpected register alignment or width")
+    return [f"{bank}{i}" for i in range(lo, hi + 1)]
+
+
+def coverage_exit(tail, scalar):
+    # For nonempty survivors, expand them to quads, intersect with the original
+    # WQM mask, then remove helpers. For no survivors both exits export zero lanes.
+    if len(tail) != 11:
+        raise ValueError("Unexpected coverage exit extent")
+    lines = [line.replace("null,", "null") for _, line in tail]
+    pair = r"(s\[\d+:\d+\])"
+    keep = re.fullmatch(r"s_andn2_b64 " + pair + r", \1, exec", lines[0])
+    jump = re.fullmatch(r"s_cbranch_scc0 (-?\d+)", lines[1])
+    quad = re.fullmatch(r"s_wqm_b64 " + pair + ", " + pair, lines[2])
+    intersect = re.fullmatch("s_and_b64 exec, " + pair + ", " + pair, lines[3])
+    if not (keep and jump and quad and intersect):
+        raise ValueError("Unverified coverage branch")
+    saved, expanded, original_quad = keep[1], quad[1], intersect[1]
+    if (
+        len({saved, expanded, original_quad}) != 3
+        or quad[2] != saved
+        or intersect[2] != expanded
+    ):
+        raise ValueError("Overlapping or unrelated mask operands")
+    for token, kind in ((saved, "entry"), (original_quad, "quad")):
+        if [scalar.get(r) for r in regs(token, "s", 2)] != [(kind, 0), (kind, 1)]:
+            raise ValueError("Original execution mask was overwritten")
+    intersect_live = "s_and_b64 exec, exec, " + saved
+    null = "exp null off, off, off, off done vm"
+    if tail[1][0] + 4 + 4 * int(jump[1]) != tail[7][0] or lines[4:] != [
+        intersect_live,
+        null,
+        "s_endpgm",
+        intersect_live,
+        "s_mov_b64 exec, " + saved,
+        null,
+        "s_endpgm",
+    ]:
+        raise ValueError("Unverified coverage export or branch target")
+
+
+def lower(decoded, bindings):
+    # Locations are keyed by low table-pointer register and byte offset. A
+    # descriptor may refer to a static selector, a desktop CB slice, one SRV,
+    # or the fixture's point-clamp sampler.
+    scalar = {}
+    slots = {}
+    selector_byte = bindings["selector_byte"]
+    if (
+        type(selector_byte) != int
+        or not 0 <= selector_byte <= 0xFFFFFFFC
+        or selector_byte % 4
+    ):
+        raise ValueError(
+            "Selector byte address must be an aligned unsigned word offset"
+        )
+    for table, offset, kind, value in bindings["descriptors"]:
+        width = 32 if kind == "texture" else 16
+        if (
+            type(table) != int
+            or not 0 <= table <= 105
+            or type(offset) != int
+            or not 0 <= offset <= 0xFFFFFFFF - width + 1
+            or offset % 4
+            or kind not in ("texture", "cb", "selector", "sampler")
+            or type(value) != int
+            or not 0
+            <= value
+            <= {"texture": 1, "cb": 63, "selector": 0xFFFFFFFF, "sampler": 0}[kind]
+        ):
+            raise ValueError("Invalid descriptor mapping")
+        for (reg, start), (other, _) in slots.items():
+            if (
+                reg == table
+                and start < offset + width
+                and offset < start + (32 if other == "texture" else 16)
+            ):
+                raise ValueError("Overlapping descriptors")
+        slots[table, offset] = (kind, value)
+        scalar[f"s{table}"] = ("table", table)
+    for reg, value in bindings["words"]:
+        if (
+            type(reg) != int
+            or not 0 <= reg <= 105
+            or type(value) != int
+            or not 0 <= value <= 0xFFFFFFFF
+            or f"s{reg}" in scalar
+        ):
+            raise ValueError("Invalid entry word")
+        scalar[f"s{reg}"] = value
+    interp = bindings["interp"]
+    if type(interp) != int or not 0 <= interp <= 105 or f"s{interp}" in scalar:
+        raise ValueError("Invalid interpolation entry")
+    scalar[f"s{interp}"] = "interpolation"
+    vector = {"v0": "i", "v1": "j"}
+    mask = "entry"
+    pending = set()
+    pending_sample = set()
+    samples = 0
+
+    def read(token):
+        if token == "null":
+            return 0
+        if token in pending:
+            raise ValueError("Scalar load consumed before wait")
+        if token.startswith("s"):
+            return scalar[token]
+        return int(token, 0)
+
+    def write(dest, values, load=False):
+        if pending.intersection(dest):
+            raise ValueError("Overlapping outstanding scalar load")
+        scalar.update(zip(dest, values, strict=True))
+        if load:
+            pending.update(dest)
+
+    for i, (_, line) in enumerate(decoded):
+        op, _, operands = line.partition(" ")
+        args = operands.split(", ")
+        if op in ("s_nop", "s_inst_prefetch", "v_nop"):
+            continue
+        if line == "s_waitcnt lgkmcnt(0)":
+            pending.clear()
+        elif line == "s_waitcnt vmcnt(0)":
+            pending_sample.clear()
+        elif op == "s_mov_b32":
+            write([args[0]], [read(args[1])])
+        elif op == "s_mov_b64" and args[1] == "exec":
+            write(regs(args[0], "s", 2), [(mask, 0), (mask, 1)])
+        elif line == "s_wqm_b64 exec, exec" and mask == "entry":
+            mask = "quad"
+        elif op in ("s_load_dwordx4", "s_load_dwordx8"):
+            count = 4 if op.endswith("x4") else 8
+            lo, hi = map(read, regs(args[1], "s", 2))
+            offset = read(args[2])
+            if (
+                not isinstance(lo, tuple)
+                or lo[0] != "table"
+                or hi != 0
+                or type(offset) != int
+            ):
+                raise ValueError("Unbound descriptor address")
+            descriptor = slots[lo[1], offset]
+            if (count == 8) != (descriptor[0] == "texture"):
+                raise ValueError("Descriptor width mismatch")
+            write(
+                regs(args[0], "s", count), [(descriptor, j) for j in range(count)], True
+            )
+        elif op == "s_buffer_load_dword":
+            parts = list(map(read, regs(args[1], "s", 4)))
+            (kind, value), _ = parts[0]
+            if parts != [((kind, value), j) for j in range(4)]:
+                raise ValueError("Incomplete buffer descriptor")
+            offset = read(args[2])
+            if type(offset) != int or offset < 0 or offset % 4:
+                raise ValueError("Unresolved buffer offset")
+            if kind == "selector" and offset == selector_byte:
+                word = value
+            elif kind == "cb" and 0 <= value + offset // 4 < 64:
+                index = value + offset // 4
+                word = ("float", f"params[{index // 4}].{'xyzw'[index % 4]}")
+            else:
+                raise ValueError("Unbound scalar read")
+            write([args[0]], [word], True)
+        elif op == "s_lshl_b32":
+            value, shift = map(read, args[1:])
+            if type(value) != int or type(shift) != int:
+                raise ValueError("Descriptor index requires specialization")
+            write([args[0]], [(value << (shift & 31)) & 0xFFFFFFFF])
+        elif op in ("v_interp_p1_f32_e32", "v_interp_p2_f32_e32"):
+            dst, src, attr = args
+            if (
+                mask != "quad"
+                or scalar.get("m0") != "interpolation"
+                or attr not in ("attr0.x", "attr0.y")
+                or dst in pending_sample
+                or src in pending_sample
+            ):
+                raise ValueError("Invalid interpolation inputs")
+            if op.startswith("v_interp_p1") and vector.get(src) == "i":
+                vector[dst] = ("partial", attr)
+            elif (
+                op.startswith("v_interp_p2")
+                and vector.get(src) == "j"
+                and vector.get(dst) == ("partial", attr)
+            ):
+                vector[dst] = "uv." + attr[-1]
+            else:
+                raise ValueError("Unmatched interpolation pair")
+        elif op == "image_sample":
+            match = re.fullmatch(
+                r"(v\d+), (v\[\d+:\d+\]), (s\[\d+:\d+\]), (s\[\d+:\d+\]) dmask:0x([1248]) dim:SQ_RSRC_IMG_2D",
+                operands,
+            )
+            if not match or mask != "quad" or samples:
+                raise ValueError("Unsupported sample")
+            coords = regs(match[2], "v", 2)
+            if [vector.get(v) for v in coords] != ["uv.x", "uv.y"]:
+                raise ValueError("Unresolved sample coordinates")
+            texture = list(map(read, regs(match[3], "s", 8)))
+            descriptor, _ = texture[0]
+            if (
+                descriptor[0] != "texture"
+                or texture != [(descriptor, j) for j in range(8)]
+                or list(map(read, regs(match[4], "s", 4)))
+                != [(("sampler", 0), j) for j in range(4)]
+            ):
+                raise ValueError("Unbound texture or sampler")
+            channel = int(match[5]).bit_length() - 1
+            vector[match[1]] = (
+                "sample",
+                f"tex{descriptor[1]}.Sample(samp,uv).{'rgba'[channel]}",
+            )
+            pending_sample.add(match[1])
+            samples += 1
+        elif op == "v_mul_legacy_f32_e32":
+            dst, src, v = args
+            scale, value = read(src), vector[v]
+            if (
+                dst in pending_sample
+                or v in pending_sample
+                or not isinstance(scale, tuple)
+                or scale[0] != "float"
+                or not isinstance(value, tuple)
+                or value[0] != "sample"
+            ):
+                raise ValueError("Unresolved sampled product")
+            vector[dst] = ("product", scale[1], value[1])
+        elif op == "v_cmpx_gt_f32_e32":
+            limit, product = read(args[0]), vector[args[1]]
+            if (
+                pending
+                or pending_sample
+                or samples != 1
+                or mask != "quad"
+                or not isinstance(limit, tuple)
+                or limit[0] != "float"
+                or not isinstance(product, tuple)
+                or product[0] != "product"
+            ):
+                raise ValueError("Unresolved coverage predicate")
+            coverage_exit(decoded[i + 1 :], scalar)
+            _, scale, sampled = product
+            return f"""Texture2D<float4> tex0 : register(t0);
+Texture2D<float4> tex1 : register(t1);
+SamplerState samp : register(s0);
+cbuffer Constants : register(b0) {{ float4 params[16]; }};
+void main(float2 uv : TEXCOORD0) {{
+    float alpha = {sampled};
+    precise float product = ({scale} == 0 || alpha == 0) ? 0.0f : {scale} * alpha;
+    if ({limit[1]} > product) discard;
+}}
+"""
+        else:
+            raise ValueError(f"Unsupported coverage instruction {op}")
+    raise ValueError("Missing coverage exit")
+
+
+def translate(blob, bindings, llvm):
+    code = container_code(parts(blob)[b"DXIL"], stage=0, llvm=llvm)
+    return lower(disassemble(code, llvm, offsets=True), bindings)
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("container", type=Path)
+    p.add_argument("--bindings", type=Path, required=True)
+    p.add_argument("--llvm", required=True)
+    p.add_argument("--output", type=Path, required=True)
+    a = p.parse_args()
+    if a.output.suffix.lower() != ".hlsl" or a.output.resolve() in (
+        a.container.resolve(),
+        a.bindings.resolve(),
+    ):
+        p.error("Expected a separate HLSL output")
+    try:
+        source = translate(
+            a.container.read_bytes(), json.loads(a.bindings.read_text()), a.llvm
+        )
+    except (ValueError, KeyError, TypeError, IndexError) as error:
+        p.error(f"Unsupported coverage input: {error}")
+    a.output.parent.mkdir(parents=True, exist_ok=True)
+    a.output.write_text(source, encoding="ascii")

@@ -21,15 +21,36 @@ def shader_record(blob: bytes, name: bytes) -> bytes:
             + struct.pack("<4I", len(payload), 0, len(payload), len(blob)) + payload)
 
 
-def envelope(code: bytes, name: bytes = b"fixture", *, private_data: bytes | None = None) -> bytes:
-    program_start = 256
+def envelope(code: bytes, name: bytes = b"fixture", *, private_data: bytes | None = None, directory_end=None,
+             compute_width=None, mesh_limits=None) -> bytes:
+    """A named record holding `code` as the native program of a DXBC container. directory_end=(extent, end field)
+    gives the FSSM image the v0x101 section directory with that code extent (from R0Y00/Xbox2Windows#477 by Royoo);
+    compute_width makes it a compute program with a PSV0 thread-group width (#483), and mesh_limits a mesh program with
+    those output limits (#491)."""
+    program_start = 288 if directory_end is not None else 256
     image = bytearray(program_start) + code
     image[:4] = b"FSSM"
     struct.pack_into("<I", image, 192, program_start - 40)
+    if directory_end is not None:
+        extent, end_field = directory_end
+        struct.pack_into("<I", image, 4, 0x101)
+        struct.pack_into("<Q", image, 200, extent)
+        struct.pack_into("<Q", image, 232, end_field)
     native = b"XBCH" + bytes(12) + struct.pack("<II", len(image), 0) + zlib.compress(image)
     program = (bytes(24) + b"XDAT" + struct.pack("<II", 1, 0)
                + struct.pack("<III", 13, 48, len(native)) + native)
+    if compute_width is not None:
+        program = program[:2] + struct.pack("<H", 13 if mesh_limits else 5) + program[4:]
     sections = [b"DXIL" + struct.pack("<I", len(program)) + program]
+    if compute_width is not None:
+        psv = bytearray(52)
+        struct.pack_into("<I", psv, 0, 48)
+        psv[28] = 13 if mesh_limits else 5
+        if mesh_limits:
+            psv[31] = 2
+            struct.pack_into("<HH", psv, 16, *mesh_limits)
+        struct.pack_into("<3I", psv, 40, compute_width, 1, 1)
+        sections.append(b"PSV0" + struct.pack("<I", len(psv)) + psv)
     if private_data is not None:
         sections.append(b"PRIV" + struct.pack("<I", len(private_data)) + private_data)
     offset = 32 + 4 * len(sections)
@@ -39,6 +60,47 @@ def envelope(code: bytes, name: bytes = b"fixture", *, private_data: bytes | Non
         offset += len(section)
     blob = b"DXBC" + bytes(16) + struct.pack("<3I", 1, offset, len(sections)) + offsets + b"".join(sections)
     return shader_record(blob, name)
+
+
+def check_program_extent(directory, library):
+    """The FSSM v0x101 code extent and two-exit programs (from R0Y00/Xbox2Windows#477 by Royoo). A conditional jumps
+    over the early exit; the alternate block starts with a two-dword instruction (s_mov_b32 with a literal operand)."""
+    branch = bytes.fromhex("010084bf")
+    end = bytes.fromhex("000081bf")
+    mov = bytes.fromhex("ff0380be 01000000")
+    pad = bytes.fromhex("00009fbf")
+    code = branch + end + mov + end
+    padding = pad * 5
+    base = 288 - 40
+    extent = 40 + len(code) + len(padding)
+    archive = directory / "bounded.rpf"
+
+    def extract(body, size=extent, limit=base + extent):
+        archive.write_bytes(envelope(body, directory_end=(size, limit)))
+        return native_program(archive, "fixture", llvm=library)[1]
+
+    jump_over_nop = bytes.fromhex("010082bf 000080bf")
+    assert extract(jump_over_nop + code + padding[8:]) == jump_over_nop + code
+    must_reject(extract, bytes.fromhex("010082bf 810380be") + code + padding[8:])
+    assert extract(code + padding + end) == code  # marker in metadata
+    # A terminator in metadata cannot stand in for one missing inside the section.
+    must_reject(extract, bytes(len(code)) + padding + end)
+    assert extract(code + padding + pad * 4, limit=0xdeadbeefdeadbeef) == code
+    must_reject(extract, code + padding, extent, base + extent + 4)
+    must_reject(extract, code + padding[:-4])
+    must_reject(extract, code + padding, extent, 0xdeadbeefdeadbeef)
+    must_reject(extract, code + padding[:4] + bytes(16) + end)
+    must_reject(extract, bytes.fromhex("020084bf") + code[4:] + padding)  # target inside literal
+    must_reject(extract, bytes.fromhex("000080bf") + code[4:] + padding)  # disconnected block
+    must_reject(extract, bytes.fromhex("040084bf") + code[4:] + padding)  # target in padding
+    must_reject(extract, branch + bytes.fromhex("ff0380be") + end + bytes.fromhex("000080bf") + end + padding)
+    # Without a disassembler a second exit is never accepted.
+    archive.write_bytes(envelope(code + padding, directory_end=(extent, base + extent)))
+    must_reject(native_program, archive, "fixture")
+
+
+def binary_checks(directory, assembler, objcopy, library):
+    check_program_extent(directory, library)
 
 
 def check_container_selector(directory: Path, code: bytes, library: str | None = None) -> None:

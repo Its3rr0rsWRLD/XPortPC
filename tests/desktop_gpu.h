@@ -10,17 +10,22 @@ HRESULT check_feature(ID3D12Device* device, D3D12_FEATURE feature, void* data, U
 Microsoft::WRL::ComPtr<ID3D12Resource> resource(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc,
     D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear = nullptr);
 void check_compute(ID3D12Device* device, bool tables);
-void check_compute_file(ID3D12Device* device, const char* path);
+void check_compute_file(ID3D12Device* device, const char* path, bool conversion_pair, const char* reference = nullptr);
 void check_ffx_device_init(ID3D12Device* device);
 void check_ffx_recurrent(ID3D12Device* device);
 void check_dual_uav(ID3D12Device* device);
+bool check_mesh_entry_draw(ID3D12Device*, const char*, const char*, const char*, bool);
 void check_texture_mips(ID3D12Device* device);
+void check_depth_mask_draw(ID3D12Device*, const char*, const char*, const char*, bool);
+void check_sampled_coverage(ID3D12Device*, const char*, const char*);
 void check_dual_pixel(ID3D12Device*, const char*, const char*, bool);
 // A malformed case file: the checker exits 2, like other bad arguments.
 struct BadCase : std::runtime_error { using std::runtime_error::runtime_error; };
-void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference = nullptr);
+void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference = nullptr,
+                            UINT8 writeMask = D3D12_COLOR_WRITE_ENABLE_ALL);
 void check_translated_compute(ID3D12Device* device, const char* shader, const char* reference);
 void check_translated_pixel_mips(ID3D12Device* device, const char* path, const char* reference);
+void check_attribute_pixel(ID3D12Device* device, const char* shader, const char* reference, bool rg);
 void check_pixel_quad_lod(ID3D12Device* device, const char* shader);
 void check_pixel_outputs(ID3D12Device* device, const char* path, const char* reference);
 // A translated vertex shader drawn as a point list, its stream output compared with a case (tests/vertex_aot_render.cpp).
@@ -40,10 +45,12 @@ bool check_bvh_waves(ID3D12Device* device, bool force64);
 bool check_gpu_alias(ID3D12Device* device);
 bool check_gpu_alias_lookup(ID3D12Device* device);
 bool check_gpu_alias_lookup_writes(ID3D12Device* device);
+bool check_gpu_alias_registry(ID3D12Device* device);
 bool check_wave_shuffle(ID3D12Device* device);
 bool check_ray_query(ID3D12Device* device);
 bool check_dxr_update(ID3D12Device* device);
 bool check_dxr_facing(ID3D12Device* device);
+bool check_dxr_opacity(ID3D12Device* device, bool warp);
 
 Microsoft::WRL::ComPtr<ID3D12Resource> make_buffer(ID3D12Device* device, UINT64 length, D3D12_HEAP_TYPE heap,
     D3D12_RESOURCE_STATES state, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE);

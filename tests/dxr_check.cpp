@@ -1,4 +1,5 @@
 #include "dxr_fixture.h"
+#include "ray_candidates.h"
 #include "ray_query.h"
 #include <algorithm>
 #include <array>
@@ -38,22 +39,33 @@ D3D12_RAYTRACING_INSTANCE_DESC instance(UINT id, UINT mask, float translateX) {
 
 std::vector<bvh_fixture::Word> trace(ID3D12Device* device, const std::vector<Vertex>& vertices,
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances, const std::vector<Ray>& rays,
-    const SceneUpdate* update) {
+    const SceneUpdate* update, const std::vector<D3D12_RAYTRACING_GEOMETRY_FLAGS>* triangleGeometries) {
     ComPtr<ID3D12Device5> dxr;
     check(device->QueryInterface(IID_PPV_ARGS(&dxr)), "Get DXR device");
     auto vertexBuffer = bvh_fixture::upload(device, vertices);
     auto rayBuffer = bvh_fixture::upload(device, rays);
-    D3D12_RAYTRACING_GEOMETRY_DESC geometry{};
-    geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-    geometry.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-    geometry.Triangles.VertexBuffer = {vertexBuffer->GetGPUVirtualAddress(), sizeof(Vertex)};
-    geometry.Triangles.VertexCount = static_cast<UINT>(vertices.size());
-    geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+    const auto addGeometry = [&](UINT first, UINT count, D3D12_RAYTRACING_GEOMETRY_FLAGS flags) {
+        D3D12_RAYTRACING_GEOMETRY_DESC geometry{};
+        geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        geometry.Flags = flags;
+        geometry.Triangles.VertexBuffer = {vertexBuffer->GetGPUVirtualAddress() + first * sizeof(Vertex), sizeof(Vertex)};
+        geometry.Triangles.VertexCount = count;
+        geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        geometries.push_back(geometry);
+    };
+    if (triangleGeometries) {
+        if (update || triangleGeometries->size() * 3 != vertices.size())
+            throw std::runtime_error("Per-triangle geometries need one flags entry per triangle and no update");
+        for (UINT i = 0; i < triangleGeometries->size(); ++i) addGeometry(3 * i, 3, (*triangleGeometries)[i]);
+    } else {
+        addGeometry(0, static_cast<UINT>(vertices.size()), D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE);
+    }
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bottom{}, top{};
     bottom.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     bottom.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    bottom.Inputs.NumDescs = 1;
-    bottom.Inputs.pGeometryDescs = &geometry;
+    bottom.Inputs.NumDescs = static_cast<UINT>(geometries.size());
+    bottom.Inputs.pGeometryDescs = geometries.data();
     top.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     top.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     top.Inputs.NumDescs = static_cast<UINT>(instances.size());
@@ -85,11 +97,15 @@ std::vector<bvh_fixture::Word> trace(ID3D12Device* device, const std::vector<Ver
     auto initial = bvh_fixture::upload(device, std::vector<bvh_fixture::Row>(rays.size(), sentinel));
     auto results = make_buffer(device, result_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, writable);
     auto readback = make_buffer(device, result_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    // Per-triangle geometries are traced by the shader that handles non-opaque candidates.
+    const D3D12_SHADER_BYTECODE shader = triangleGeometries
+        ? D3D12_SHADER_BYTECODE{ray_candidates, sizeof(ray_candidates)} : D3D12_SHADER_BYTECODE{ray_query, sizeof(ray_query)};
     ComPtr<ID3D12RootSignature> root;
-    check(device->CreateRootSignature(0, ray_query, sizeof(ray_query), IID_PPV_ARGS(&root)), "Create ray query root");
+    check(device->CreateRootSignature(0, shader.pShaderBytecode, shader.BytecodeLength, IID_PPV_ARGS(&root)),
+          "Create ray query root");
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = root.Get();
-    pso.CS = {ray_query, sizeof(ray_query)};
+    pso.CS = shader;
     ComPtr<ID3D12PipelineState> pipeline;
     check(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline)), "Create ray query pipeline");
     ComputeCommands commands(device, pipeline.Get());
@@ -111,7 +127,7 @@ std::vector<bvh_fixture::Word> trace(ID3D12Device* device, const std::vector<Ver
         auto descriptors = update->instances;
         for (auto& desc : descriptors) desc.AccelerationStructure = bottom.DestAccelerationStructureData;
         updatedInstances = bvh_fixture::upload(device, descriptors);
-        geometry.Triangles.VertexBuffer.StartAddress = updatedVertices->GetGPUVirtualAddress();
+        geometries[0].Triangles.VertexBuffer.StartAddress = updatedVertices->GetGPUVirtualAddress();
         top.Inputs.InstanceDescs = updatedInstances->GetGPUVirtualAddress();
         bottom.Inputs.Flags = top.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
         bottom.SourceAccelerationStructureData = bottom.DestAccelerationStructureData;

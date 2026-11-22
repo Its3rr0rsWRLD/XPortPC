@@ -208,27 +208,29 @@ VOP1_OPS = {
 }
 
 VOP2_OPS = {
-    0x01: ("v_add_f32_e32", "Vector add float32"),
-    0x02: ("v_sub_f32_e32", "Vector subtract float32"),
-    0x03: ("v_subrev_f32_e32", "Vector reverse subtract float32"),
-    0x04: ("v_mul_legacy_f32_e32", "Vector multiply zero-preserving float32"),
-    0x05: ("v_mul_f32_e32", "Vector multiply float32"),
-    0x07: ("v_min_f32_e32", "Vector minimum float32"),
-    0x08: ("v_max_f32_e32", "Vector maximum float32"),
-    0x09: ("v_min_i32", "Vector minimum int32"),
-    0x0a: ("v_max_i32", "Vector maximum int32"),
-    0x0b: ("v_min_u32", "Vector minimum uint32"),
-    0x0c: ("v_max_u32", "Vector maximum uint32"),
-    0x0d: ("v_lshrrev_b32_e32", "Vector shift right logical"),
-    0x0e: ("v_ashrrev_i32_e32", "Vector shift right arithmetic"),
-    0x0f: ("v_lshlrev_b32_e32", "Vector shift left logical"),
-    0x10: ("v_and_b32_e32", "Vector bitwise AND"),
-    0x11: ("v_or_b32_e32", "Vector bitwise OR"),
-    0x12: ("v_xor_b32_e32", "Vector bitwise XOR"),
-    0x14: ("v_add_nc_u32_e32", "Vector add uint32 without carry"),
-    0x15: ("v_sub_nc_u32_e32", "Vector sub uint32 without carry"),
-    0x1b: ("v_fmac_f32_e32", "Vector fused multiply-accumulate float32"),
-    0x2f: ("v_cvt_pkrtz_f16_f32_e32", "Pack two float32 into float16 pair (round toward zero)"),
+    0x01: ("v_cndmask_b32_e32", "Vector conditional mask select"),
+    0x03: ("v_add_f32_e32", "Vector add float32"),
+    0x04: ("v_sub_f32_e32", "Vector subtract float32"),
+    0x05: ("v_subrev_f32_e32", "Vector reverse subtract float32"),
+    0x07: ("v_mul_legacy_f32_e32", "Vector multiply zero-preserving float32"),
+    0x08: ("v_mul_f32_e32", "Vector multiply float32"),
+    0x0f: ("v_min_f32_e32", "Vector minimum float32"),
+    0x10: ("v_max_f32_e32", "Vector maximum float32"),
+    0x11: ("v_min_i32_e32", "Vector minimum int32"),
+    0x12: ("v_max_i32_e32", "Vector maximum int32"),
+    0x13: ("v_min_u32_e32", "Vector minimum uint32"),
+    0x14: ("v_max_u32_e32", "Vector maximum uint32"),
+    0x16: ("v_lshrrev_b32_e32", "Vector shift right logical"),
+    0x18: ("v_ashrrev_i32_e32", "Vector shift right arithmetic"),
+    0x1a: ("v_lshlrev_b32_e32", "Vector shift left logical"),
+    0x1b: ("v_and_b32_e32", "Vector bitwise AND"),
+    0x1c: ("v_or_b32_e32", "Vector bitwise OR"),
+    0x1d: ("v_xor_b32_e32", "Vector bitwise XOR"),
+    0x25: ("v_add_nc_u32_e32", "Vector add uint32 without carry"),
+    0x26: ("v_sub_nc_u32_e32", "Vector sub uint32 without carry"),
+    0x27: ("v_subrev_nc_u32_e32", "Vector reverse sub uint32 without carry"),
+    0x2b: ("v_fmac_f32_e32", "Vector fused multiply-accumulate float32"),
+    0x2f: ("v_cvt_pkrtz_f16_f32_e32", "Convert two float32 to packed float16 (round to zero)"),
 }
 
 EXP_TARGETS = {
@@ -353,7 +355,10 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         src0 = w0 & 0x1ff
         op_info = VOP2_OPS.get(op, (f"v_vop2_{op:02x}", "Unknown VOP2"))
         op_name, comment = op_info
-        asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}, v{vsrc1}"
+        if op_name == "v_cndmask_b32_e32":
+            asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}, v{vsrc1}, vcc_lo"
+        else:
+            asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}, v{vsrc1}"
         return (4, op_name, asm, comment)
 
     # 7. VINTRP: [31:26] == 0b110010 (0xc8000000)

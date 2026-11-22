@@ -21,7 +21,7 @@ def inspect_root(data: bytes | bytearray) -> tuple[int, int]:
         return start, start + size
 
     block_map, = struct.unpack_from("<Q", data, 8)
-    span(block_map, 1)
+    block_map_ptr = span(block_map, 1)
     index, = struct.unpack_from("<I", data, 32)
     schema_ptr, _, blocks_ptr = struct.unpack_from("<3Q", data, 40)
     schema_count, _, block_count = struct.unpack_from("<3H", data, 72)
@@ -33,9 +33,9 @@ def inspect_root(data: bytes | bytearray) -> tuple[int, int]:
     if not size:
         raise ValueError("Empty root instance")
     root = span(ptr, size)
-    extents = sorted((schemas, blocks, root))
+    extents = sorted((block_map_ptr, schemas, blocks, root))
     if any(left[1] > right[0] for left, right in zip(extents, extents[1:])):
-        raise ValueError("Overlapping schema, block directory or root instance")
+        raise ValueError("Overlapping schema, block directory, block map pointer or root instance")
 
     sizes = [struct.unpack_from("<I", data, pos + 24)[0] for pos in range(*schemas, 32)
              if struct.unpack_from("<I", data, pos)[0] == kind]

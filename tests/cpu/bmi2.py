@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import pefile
+from iced_x86 import Decoder
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_leaf_aot import export_rva

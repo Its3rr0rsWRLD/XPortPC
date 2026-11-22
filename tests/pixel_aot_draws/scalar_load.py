@@ -266,11 +266,16 @@ def check_scalar_load_controls() -> None:
         assert shape(translate(make(*X16, regs=group(64), **waits))) == shape(translate(make(*X16, regs=group(64))))
     # Nonzero counts are refused in every spelling the plain forms refuse (the lone s_waitcnt vmcnt(N) is the one
     # partial wait, see dual_texture partial controls), and so are repeats and SGPR operands.
-    for wait in ("s_waitcnt_vmcnt null, 0x1", "s_waitcnt_lgkmcnt null, 0x2", "s_waitcnt_expcnt null, 0x1",
-                 "s_waitcnt_vmcnt null, 0xffff", "s_waitcnt vmcnt(1) lgkmcnt(0)", "s_waitcnt vmcnt(0) lgkmcnt(1)", "s_waitcnt expcnt(1)",
+    for wait in ("s_waitcnt_vmcnt null, 0x1", "s_waitcnt_lgkmcnt null, 0x2",
+                 "s_waitcnt_vmcnt null, 0xffff", "s_waitcnt vmcnt(1) lgkmcnt(0)", "s_waitcnt vmcnt(0) lgkmcnt(1)",
                  "s_waitcnt lgkmcnt(0) lgkmcnt(0)", "s_waitcnt vmcnt(0) vmcnt(0)"):
         for slot in ("lgkm", "vm"):
             refuses(translate, "Only zero wait counts", make(*X16, regs=group(64), **{slot: wait}))
+    # A nonzero export-counter wait is accepted (exports are the return of main, so it orders nothing: R0Y00/
+    # Xbox2Windows#271), but it completes no load either, so in place of the load's wait the program is refused.
+    for wait in ("s_waitcnt_expcnt null, 0x1", "s_waitcnt expcnt(1)"):
+        for slot in ("lgkm", "vm"):
+            must_reject(translate, make(*X16, regs=group(64), **{slot: wait}))
     for wait in ("s_waitcnt_vmcnt s5, 0x0", "s_waitcnt_lgkmcnt exec_lo, 0x0", "s_waitcnt_vscnt s5, 0x0",
                  "s_waitcnt_expcnt vcc_lo, 0x0", "s_waitcnt_vscnt null, 0x10000", "s_waitcnt_depctr 0x10000",
                  "s_waitcnt_depctr", "s_waitcnt_depctr depctr_bogus(0)", "s_waitcnt_depctr 0xffe3 0xffe3"):

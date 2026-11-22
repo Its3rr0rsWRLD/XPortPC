@@ -76,7 +76,10 @@ class BitReader:
         high = 1 << (width - 1)
         while True:
             piece = self.read(width)
-            value |= (piece & mask) << shift
+            payload = piece & mask
+            if payload.bit_length() > 64 - shift:
+                raise ValueError("VBR integer exceeds 64 bits")
+            value |= payload << shift
             if not (piece & high):
                 return value
             shift += width - 1

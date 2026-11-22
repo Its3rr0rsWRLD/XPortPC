@@ -1,10 +1,19 @@
 """lower(): one pass over a gfx1013 pixel program that tracks every register symbolically and emits HLSL. The forms
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
+import re
+
 from .control_flow import find_loops, program, split_blocks, word_expr
 from .dispatch import dispatch
-from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS
+from .hlsl import (MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS,
+                   UNSAMPLED_PREAMBLE)
 from .registers import tracked_word
 from . import forms  # noqa: F401  (registers every form)
+
+
+# What may come between the done export and s_endpgm: an export-counter wait and the scheduling hints s_nop and
+# s_inst_prefetch, none of which changes a result (from R0Y00/Xbox2Windows#271 by Rachel Amber).
+AFTER_EXPORT = re.compile(r"s_waitcnt_expcnt (?:(?:null|s\d+), )?(?:0x[0-7]|[0-7])|s_waitcnt expcnt\([0-7]\)"
+                          r"|(?:s_inst_prefetch|s_nop) (?:0x[0-9a-f]+|\d+)")
 
 
 class Lowering:
@@ -15,9 +24,10 @@ class Lowering:
     def __init__(self, scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words):
         self.scalar = scalar  # SGPR name (and "m0", "vcc") -> tracked value, see registers.py
         self.vector = vector  # VGPR name -> tracked value
-        self.lines = lines  # the HLSL text so far; the PREAMBLE entry marks where helper definitions go
+        self.lines = lines  # the HLSL text so far; the preamble entry marks where helper definitions go
+        self.preamble = PREAMBLE  # that entry: PREAMBLE, or UNSAMPLED_PREAMBLE for a program bound without a sampler
         self.bindings = bindings  # descriptor-table byte offset of a T# -> HLSL texture name
-        self.sampler = sampler  # the four sampler descriptor words bound to s0
+        self.sampler = sampler  # the four sampler descriptor words bound to s0; () when no sampler is bound
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.uses_memory = False  # emit the title-memory helpers
@@ -43,6 +53,8 @@ class Lowering:
         self.integer_export = False  # the uncompressed export returns uint4 bit patterns (lower(integer_export=True))
         self.vm_issued = 0  # vector memory loads and samples issued on the path so far (the vmcnt issue order)
         self.flat_attrs = set()  # attributes read without interpolation
+        # attr0 interpolated in all four components at the entry mask (forms/vintrp.py): TEXCOORD0 is declared float4.
+        self.attribute_input = False
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
         self.exports = ()  # exports before the done export on this path: (output name, width, mask, HLSL local)
         self.exported = False  # the done export has been emitted
@@ -114,20 +126,28 @@ def masked_writes(st, i, ex, before):
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
           buffer_descriptors=None, integer_export=False, storage_images=None):
-    """Track descriptor provenance, interpolation and packed exports through register writes."""
-    if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
-            or len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
-        raise ValueError("Invalid scalar inputs or sampler descriptor words")
+    """Track descriptor provenance, interpolation and packed exports through register writes.
+
+    sampler is the four words of the sampler bound to s0, or None for a program bound without a texture and sampler
+    (from R0Y00/Xbox2Windows#480 by Royoo): it then must take no sample, declares neither, and may interpolate attr0
+    at the entry mask in all four components (forms/vintrp.py, from R0Y00/Xbox2Windows#484 by Royoo)."""
+    if texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105:
+        raise ValueError("Invalid scalar inputs")
+    if sampler is not None and (len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
+        raise ValueError("Invalid sampler descriptor words")
     scalar = {f"s{texture_sgpr}": "texture_ptr", f"s{interp_sgpr}": "interp_base"}
     vector = {"v0": "bary_i", "v1": "bary_j"}
-    lines = [PREAMBLE]
+    preamble = PREAMBLE if sampler is not None else UNSAMPLED_PREAMBLE
+    lines = [preamble]
     if constant_descriptor is not None:
         if constant_descriptor < 0 or constant_descriptor % 4:
             raise ValueError("Invalid constant descriptor offset")
         # uint4, not float4: the words are raw data and must never be typed as floats (see docs/experiments.md).
         lines.insert(0, "cbuffer Constants : register(b0) { uint4 params[16]; };")
-    bindings = {0: "tex"}
+    bindings = {} if sampler is None else {0: "tex"}
     if second_texture_offset is not None:
+        if sampler is None:
+            raise ValueError("Second texture requires a sampler")
         if second_texture_offset < 32 or second_texture_offset % 32:
             raise ValueError("Second texture descriptor must have a distinct aligned offset")
         bindings[second_texture_offset] = "tex1"
@@ -146,7 +166,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         if (any(start < offset + 16 and offset < start + 32 for start in bindings)
                 or constant_descriptor < offset + 16 and offset < constant_descriptor + 16):
             raise ValueError("Buffer and texture or constant descriptors overlap")
-    st = Lowering(scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words)
+    st = Lowering(scalar, vector, lines, bindings, () if sampler is None else tuple(sampler), constant_descriptor,
+                  vsharp_words)
+    st.preamble = preamble
     st.integer_export = integer_export
     # A program whose entire body is s_endpgm exports nothing and reads nothing: an empty void main, the same
     # signature as a program whose only export is exp null (forms/exp.py), without the texture sample that one has.
@@ -169,7 +191,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     for i, line in program(st, blocks, labels, latch_of):
         if st.ended:
             raise ValueError("Instruction follows program end")
-        if st.exported and line != "s_endpgm":
+        if st.exported and line != "s_endpgm" and not AFTER_EXPORT.fullmatch(line):
             raise ValueError("Unexpected instruction after color export")
         if st.exports and not line.startswith("exp "):
             raise ValueError("Only exports may follow an export that is not done")
@@ -179,27 +201,30 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             ex, before = st.ex, dict(st.vector)
             dispatch(st, i, line)
             masked_writes(st, i, ex, before)
-    if not st.ended or st.samples != (0 if empty else 2 if second_texture_offset is not None else 1):
+    if not st.ended or st.samples != (0 if empty else len(bindings)):
         raise ValueError("Unexpected sample count or missing color export")
     if st.helpers:
         defs = [body for name, body in SALU_HELPERS.items() if name in st.helpers]
-        pos = st.lines.index(PREAMBLE)
+        pos = st.lines.index(st.preamble)
         st.lines[pos:pos] = defs
     if st.uses_memory:
-        pos = st.lines.index(PREAMBLE)
+        pos = st.lines.index(st.preamble)
         declarations = TITLE_RW_DECLARATIONS if st.writes_memory else TITLE_DECLARATIONS
         st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), declarations, MEMORY_HELPERS,
                              *st.memory_helpers.values()]
     if st.declarations:
-        pos = st.lines.index(PREAMBLE)
+        pos = st.lines.index(st.preamble)
         st.lines[pos:pos] = list(st.declarations.values())
     if st.flat_attrs or st.quad_position:
-        pos = st.lines.index(PREAMBLE)
+        pos = st.lines.index(st.preamble)
         # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.
         inputs = "".join(f", nointerpolation float4 attr{n} : TEXCOORD{n}" for n in sorted(st.flat_attrs))
         note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
         st.lines[pos] = (note
-                         + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
+                         + st.preamble.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
+    if st.attribute_input:
+        pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
+        st.lines[pos] = st.lines[pos].replace("main(float2 uv : TEXCOORD0", "main(float4 uv : TEXCOORD0", 1)
     if st.signature:
         returns, declaration = st.signature
         pos = st.lines.index(next(line for line in st.lines if "main(" in line and "SV_Target0 {" in line))

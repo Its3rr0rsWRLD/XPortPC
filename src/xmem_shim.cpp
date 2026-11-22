@@ -5,8 +5,12 @@
 //     zeroed 64-byte buffer and test the 32-bit result.
 //   XMemGetWorkingSetStatistics(selector, output): the seven AMD callers test the 32-bit
 //     result and use zero when it fails.
+// Graphics allocations go through era_title_gpu, which registers them with era_query and, once a
+// D3D12 device is attached to the registry, gives them desktop GPU addresses. The exports are
+// unchanged; nothing here loads D3D12.
 #include "era_heap.h"
 #include "era_query.h"
+#include "era_title_gpu.h"
 
 #include <cstdint>
 
@@ -33,7 +37,7 @@ extern "C" void* XMemAlloc(SIZE_T bytes, ULONGLONG attributes)
 {
     void* allocation = era_heap::allocate(bytes, attributes);
     // Desktop policy: graphics memory types count as GPU-intended for XMemVirtualQuery.
-    if (allocation && is_graphics(attributes) && !era_query::register_gpu_region(allocation, bytes)) {
+    if (allocation && is_graphics(attributes) && !era_title_gpu::track(allocation, bytes)) {
         era_heap::release_with_attributes(allocation, attributes);
         return nullptr;
     }
@@ -43,7 +47,7 @@ extern "C" void* XMemAlloc(SIZE_T bytes, ULONGLONG attributes)
 extern "C" void XMemFree(void* allocation, ULONGLONG attributes)
 {
     if (allocation && is_graphics(attributes)) {
-        era_query::unregister_gpu_region(allocation);
+        era_title_gpu::untrack(allocation);
     }
     era_heap::release_with_attributes(allocation, attributes);
 }

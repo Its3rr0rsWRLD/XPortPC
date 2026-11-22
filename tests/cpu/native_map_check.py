@@ -13,7 +13,10 @@ import pefile
 from direct_check import input_pairs, observe, reference, register_probe
 
 Resolver = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32)
-STATUS = {"ok": 0, "format": 2, "unresolved": 5, "unsupported": 6, "init_failed": 9}  # MapStatus in tools/pe_map.cpp
+STATUS = {
+    "ok": 0, "format": 2, "relocation": 4, "unresolved": 5,
+    "unsupported": 6, "function_table": 8, "init_failed": 9,
+}  # MapStatus in tools/pe_map.cpp
 kernel = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_void_p]
 kernel.GetProcAddress.restype = ctypes.c_void_p
@@ -35,12 +38,15 @@ class Mapper:
         self.export = lib.pe_map_export
         self.export.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.export.restype = ctypes.c_void_p
+        self.resolved = lib.pe_map_export_resolved
+        self.resolved.argtypes = [ctypes.c_void_p, ctypes.c_char_p, Resolver]
+        self.resolved.restype = ctypes.c_void_p
         self.release = lib.pe_map_release
         self.release.argtypes = [ctypes.c_void_p]
         self.release.restype = ctypes.c_int  # 1 released, 0 unknown or already released
 
     def __call__(self, image, bindings):
-        """Map image; bindings maps a lower-case DLL name to the module that serves its imports."""
+        """Map image; bindings maps a DLL name to a host module or a dictionary of mapped export addresses."""
         requests = []
 
         def resolve(dll, name, ordinal):
@@ -48,6 +54,8 @@ class Mapper:
             module = bindings.get(dll.decode().casefold())
             if module is None:
                 return None
+            if isinstance(module, dict):
+                return module.get(name if name else ordinal)
             return kernel.GetProcAddress(module._handle, name if name else ordinal)
 
         callback = Resolver(resolve)
@@ -391,6 +399,65 @@ def check_unreadable_export(mapper, image):
     print(f"{image.name}: export lookup returns null when the export section has no read access")
 
 
+def check_reloc_and_pdata_bounds(mapper, image, provider):
+    """Record native loader observations and check the mapper against its supported directory bounds."""
+    with pefile.PE(str(image)) as pe:
+        relocs = pe.OPTIONAL_HEADER.DATA_DIRECTORY[5]
+        reloc_size = relocs.get_field_absolute_offset("Size")
+        block_size = pe.get_offset_from_rva(relocs.VirtualAddress) + 4
+        orig_block_len = pe.get_dword_at_rva(relocs.VirtualAddress + 4)
+        pdata = pe.OPTIONAL_HEADER.DATA_DIRECTORY[3]
+        pdata_size = pdata.get_field_absolute_offset("Size")
+        export_rva = next(e.address for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name == b"call_mix")
+    bindings = {provider.name.casefold(): ctypes.CDLL(str(provider))}
+    cases = (
+        ("reloc Size=4", [(reloc_size, 4)], "relocation", "bad relocation block", False),
+        ("reloc trailing +4", [(reloc_size, relocs.Size + 4)], "relocation", "bad relocation block", False),
+        ("reloc odd SizeOfBlock leaving 1 byte", [(block_size, orig_block_len - 1)],
+         "relocation", "bad relocation block", False),
+        ("reloc odd SizeOfBlock matching Size", [(block_size, orig_block_len - 1), (reloc_size, orig_block_len - 1)],
+         "relocation", "bad relocation block", False),
+        ("pdata Size=0 with non-zero RVA", [(pdata_size, 0)], "ok", "", True),
+        ("pdata Size=11", [(pdata_size, 11)], "function_table", "cannot register .pdata", True),
+        ("pdata Size=20", [(pdata_size, 20)], "function_table", "cannot register .pdata", True),
+    )
+    preferred, _, _, _ = describe(image)
+    for name, edits, expected, message, want_requests in cases:
+        data = bytearray(image.read_bytes())
+        for offset, value in edits:
+            struct.pack_into("<I", data, offset, value)
+        with TemporaryDirectory() as temp:
+            copy = Path(temp) / image.name
+            copy.write_bytes(data)
+            (Path(temp) / provider.name).write_bytes(provider.read_bytes())
+            ctypes.set_last_error(0)
+            module = kernel.LoadLibraryExW(str(copy), None, LOAD_SEARCH)
+            err = ctypes.get_last_error()
+            try:
+                found = None
+                if module:
+                    image_base = ctypes.c_uint64()
+                    found = bool(lookup_entry(module + export_rva, ctypes.byref(image_base), None))
+                print(f"{name}: Windows build {sys.getwindowsversion().build}, module={module}, "
+                      f"preferred={preferred:#x}, error={err}, function_entry={found}")
+            finally:
+                if module:
+                    kernel.FreeLibrary(module)
+            base, status, detail, requests = mapper(copy, bindings)
+        if base:
+            try:
+                if expected == "ok":
+                    owner = ctypes.c_uint64()
+                    if lookup_entry(base + export_rva, ctypes.byref(owner), None):
+                        raise AssertionError(f"{name}: unexpectedly registered an unwind entry")
+            finally:
+                mapper.release(base)
+        if bool(base) != (expected == "ok") or status != STATUS[expected] or detail != message or bool(requests) != want_requests:
+            raise AssertionError(f"{name}: {base=} {status=} {detail=} {requests=}")
+    print(f"{image.name}: compared trailing relocation bytes, odd SizeOfBlock and unaligned .pdata "
+          "under LoadLibraryExW and pe_map")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mapper", type=Path)
@@ -422,6 +489,7 @@ def main():
         raise AssertionError("relocation fixture must have exactly one DIR64 entry")
     check_mapping(mapper, "relocated", original, provider, "mix_args", probe, natives)
     check_mapping(mapper, "relocated with altered shim", original, provider, "mix_args", probe, [], altered)
+    check_reloc_and_pdata_bounds(mapper, original, provider)
     image, *providers = args.two
     check_import_walk(mapper, image, providers)
 

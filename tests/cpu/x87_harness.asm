@@ -8,7 +8,10 @@
 ; word in bits 32 to 47, as they were when fn returned. The native and translated functions both run
 ; through it.
 ;
-; x87_call_envonly is the same with FNSTENV/FNINIT and FLDENV, which keep TOP and the tags but not the
+; x87_call_flags(fn, input, output, flags) is x87_call with the arithmetic flags loaded from AH = flags
+; by SAHF just before the call (bit 0 CF, bit 6 ZF), so that a native function sees the caller's flags.
+;
+; x87_call_envonly is x87_call with FNSTENV/FNINIT and FLDENV, which keep TOP and the tags but not the
 ; register values. It exists only as a control for x87_seeded.
 ;
 ; x87_seeded(harness, fn, io, probe) checks that a harness preserves a live caller value. It saves its own
@@ -40,6 +43,33 @@ x87_call PROC FRAME
     add rsp, 200
     ret
 x87_call ENDP
+
+x87_call_flags PROC FRAME
+    sub rsp, 200
+    .allocstack 200
+    .endprolog
+    fnsave [rsp+72]
+    mov word ptr [rsp+32], 027Fh
+    fldcw word ptr [rsp+32]
+    mov r10, rcx
+    mov rcx, rdx
+    mov rdx, r8
+    mov eax, r9d
+    shl eax, 8
+    sahf
+    call r10
+    fnstenv [rsp+40]
+    movzx eax, word ptr [rsp+40]
+    movzx edx, word ptr [rsp+44]
+    shl edx, 16
+    or eax, edx
+    movzx edx, word ptr [rsp+48]
+    shl rdx, 32
+    or rax, rdx
+    frstor [rsp+72]
+    add rsp, 200
+    ret
+x87_call_flags ENDP
 
 x87_call_envonly PROC FRAME
     sub rsp, 104

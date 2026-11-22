@@ -33,7 +33,6 @@ provably active outside whole-quad mode (CF-2a)."""
 import re
 
 from ..dispatch import form
-from ..hlsl import PREAMBLE
 from ..registers import registers, vector_u32, vgprs
 from .atomics import OPS, ORDERED, REFUSED, returned
 
@@ -106,7 +105,7 @@ def lane_varying(st, expression):
     value it calls varying may still repeat across lanes, which the lowering cannot see."""
     definitions = {}
     for text in st.lines:
-        if text != PREAMBLE:
+        if text != st.preamble:
             for m in DEFINITION.finditer(text):
                 definitions.setdefault(m[1], []).append(m[2])
     seen = set()

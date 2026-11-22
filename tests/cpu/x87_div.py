@@ -360,11 +360,11 @@ def check_rejections():
         "fdiv m32 on an empty stack": (attempt(f"d8 31 {fld} {fstp} c3"), "x87 stack underflow"),
         "fdivr st(2), st with two values": (attempt(f"{fld} {fld} dc f2 {fstp} {fstp} c3"), "x87 stack underflow"),
         "fdivrp with one value": (attempt(f"{fld} de f1 {fstp} c3"), "x87 stack underflow"),
-        "fidiv m32": (attempt(f"{fld} da 31 {fstp} c3"), "unsupported x87 operation"),
-        "fidivr m16": (attempt(f"{fld} de 39 {fstp} c3"), "unsupported x87 operation"),
+        "fldenv": (attempt(f"{fld} d9 21 {fstp} c3"), "unsupported x87 operation"),
+        "fdecstp": (attempt(f"{fld} d9 f6 {fstp} c3"), "unsupported x87 operation"),
         "fnsave": (attempt(f"{fld} dd 31 {fstp} c3"), "unsupported x87 operation"),
         "fprem": (attempt(f"{fld} {fld} d9 f8 {fstp} {fstp} c3"), "unsupported x87 operation"),
-        "fiadd m32": (attempt(f"{fld} da 01 {fstp} c3"), "unsupported x87 operation"),
+        "fincstp": (attempt(f"{fld} d9 f7 {fstp} c3"), "unsupported x87 operation"),
     }
     for case, (message, needle) in rejected.items():
         if message is None or needle not in message:

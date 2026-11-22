@@ -1,6 +1,22 @@
 $ErrorActionPreference = 'Stop'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath
+$installations = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath
+if (-not $installations) {
+    # CMake and Ninja can come from a package manager instead of the VS CMake
+    # component; the instance then only needs the x64 C++ toolset. An instance
+    # with only that toolset is "incomplete" to vswhere, so the fallback also
+    # lists incomplete installations (-all, newest first).
+    $installations = & $vswhere -all -sort -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+}
+# Prefer the newest instance that actually ships the developer shell launcher,
+# so an incomplete installation without a usable environment is not selected.
+$installation = $null
+foreach ($candidate in $installations) {
+    if (Test-Path -LiteralPath (Join-Path $candidate 'Common7\Tools\Launch-VsDevShell.ps1')) {
+        $installation = $candidate
+        break
+    }
+}
 if (-not $installation) {
     throw 'Install Visual Studio Build Tools with x64 C++ and CMake tools.'
 }

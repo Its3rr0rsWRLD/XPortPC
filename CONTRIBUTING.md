@@ -55,8 +55,21 @@ docs: add a contributor guide for non-Windows hosts
 
 Do not rename existing pull requests or issues. Issue titles remain free-form; the issue forms and labels carry the classification. A title check is not enforced by a bot in this change.
 
-Reviewers reproduce the smallest relevant case, check the origin of any new fixtures and compare behavior before and after the change. Maintainers merge through a PR after the Windows check passes and review conversations are resolved. Record remaining questions in a linked issue so the next contributor can pick them up.
-
 When a PR changes a public capability or build requirement, update the relevant README row or first-build step in that PR. Put reproduction details in `docs/experiments.md`. Link an existing issue for unresolved behavior, or open one if another contributor can test it. The release tag identifies the exact standalone package a hardware reporter used.
+
+### Who reviews and merges a PR?
+
+R0Y00 owns the repository and currently serves as Maintainer. Route each PR by the behavior it changes.
+
+| Change | Who reviews it | What to check |
+|---|---|---|
+| CPU translation or PE loading | CPU Reviewer | Instruction semantics, calling conventions, loader behavior, and comparisons with the original fixture. |
+| Shader translation or GPU compatibility | GPU Reviewer | Generated DXIL, D3D12 behavior, and relevant WARP or hardware results. Check that capability skips are reported separately. |
+| A shared CPU/GPU interface | Both reviewers, each on their side of the interface | Verify that the producer and consumer agree. Bring changes to the interface contract, compatibility guarantees, or overall architecture to the owner for a decision. |
+| Documentation, hardware reports, or independent build fixes | A Maintainer familiar with the change | Check the source, original log, or reproduction command as appropriate. |
+
+To accept a review invitation, reply on the PR. Reproduce the smallest relevant case, check the origin of new fixtures, and compare behavior before and after the change. Give your verdict and the commit you reviewed. If you request a change, follow up on the author's next revision and say whether it addresses the finding. While an invitation is pending, the Maintainer can review or find another reviewer. Independent PRs continue in parallel.
+
+The Maintainer uses the reviewer's verdict once it covers the current head and all review conversations are resolved. Merge through the PR when the required `Build and test on Windows` check passes. If review is complete and the check is still running, enable GitHub auto-merge. Record remaining follow-up work in a linked issue.
 
 The [code of conduct](CODE_OF_CONDUCT.md) applies to issues and reviews. Use the [security reporting instructions](SECURITY.md) for a vulnerability in project code or release tooling.

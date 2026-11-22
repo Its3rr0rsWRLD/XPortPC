@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 
+import bcpack_mode6_vector as mode6
 from pixel_aot_check import assembly, translate
 from bc7_tiles import linearize_4k_s
 
@@ -145,6 +146,9 @@ def main():
             return result.returncode
         assert output.read_bytes() == expected
         check_all_modes(work, renderer, backend, shader)
+        vector = work / "bcpack-mode6.case"
+        vector.write_bytes(struct.pack("<4sII", b"BC7C", 4, 4) + mode6.BLOCK + mode6.RGBA)
+        subprocess.run([renderer, backend, "--check-bc7", shader, vector], check=True)
         lower = work / "mip1.case"
         header, rows, expected = fixture(10, 9)
         lower.write_bytes(header + rows + expected)

@@ -63,6 +63,8 @@ bool export_checks()
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(GetProcAddress(module, "XMemAlloc")), &owner) ||
         owner != module) return false;
+    // Routing graphics memory through era_title_gpu must not make xmem.dll load D3D12.
+    if (GetModuleHandleW(L"d3d12.dll")) return false;
     std::printf("exports=%u\n", found);
     return true;
 }

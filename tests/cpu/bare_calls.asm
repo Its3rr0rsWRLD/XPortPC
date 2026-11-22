@@ -7,6 +7,11 @@
 ; labels. The register probe seeds RBX and RSI.
 .data
 thunk_slot dq 0
+IFDEF IMAGE_SELECTOR
+PUBLIC selector_bias, selector_result
+selector_bias dq 5
+selector_result dq -1
+ENDIF
 
 .code
 PUBLIC bare_mix_inner, bare_mix_end, bare_low_end, fake_thunk_end
@@ -16,6 +21,11 @@ bare_mix PROC
 bare_mix_inner::
     mov rax, rcx
     sub rax, rdx
+IFDEF IMAGE_SELECTOR
+    add rax, selector_bias
+    mov selector_result, rax
+    mov rax, selector_result
+ENDIF
     ret
 bare_mix ENDP
 bare_mix_end LABEL BYTE

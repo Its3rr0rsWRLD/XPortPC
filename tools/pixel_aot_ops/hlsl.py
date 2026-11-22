@@ -112,6 +112,9 @@ uint fract16(float value) {
 """
 PIXEL_ENTRY = "float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"
 PREAMBLE = PIXEL_DECLARATIONS + HELPERS + PIXEL_ENTRY
+# A program bound without a sampler (lower(sampler=None), from R0Y00/Xbox2Windows#480 by Royoo) takes no texture sample
+# and declares neither the texture nor the sampler.
+UNSAMPLED_PREAMBLE = HELPERS + PIXEL_ENTRY
 
 
 # Title memory for buffer and global loads (see docs/experiments.md). The declarations match the pixel root signature

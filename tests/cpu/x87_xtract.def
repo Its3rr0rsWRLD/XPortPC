@@ -1,0 +1,9 @@
+EXPORTS
+    xtract_m80
+    xtract_to_m64
+    xtract_to_m32
+    xtract_f64
+    xtract_f32
+    xtract_twice
+    xtract_sum
+    xtract_depth8
