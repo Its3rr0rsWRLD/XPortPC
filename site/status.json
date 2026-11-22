@@ -1,0 +1,185 @@
+{
+  "schema": 1,
+  "commit": {
+    "short": "97869da",
+    "full": "97869da433d07c68fe52773a985d05d172e1f636",
+    "time": "2026-11-21T20:31:30-06:00"
+  },
+  "tests": {
+    "passed": 211,
+    "failed": 0,
+    "skipped": 3,
+    "total": 214,
+    "run_at": "2026-11-21T20:28:46",
+    "adapters": [
+      "NVIDIA GeForce RTX 4070 Ti",
+      "WARP"
+    ]
+  },
+  "gfx1013": {
+    "forms_covered": 258,
+    "forms_total": 1968,
+    "groups": [
+      {
+        "name": "DPP16",
+        "covered": 0,
+        "total": 101
+      },
+      {
+        "name": "DPP8",
+        "covered": 0,
+        "total": 101
+      },
+      {
+        "name": "DS",
+        "covered": 0,
+        "total": 154
+      },
+      {
+        "name": "EXP",
+        "covered": 1,
+        "total": 1
+      },
+      {
+        "name": "FLAT",
+        "covered": 4,
+        "total": 130
+      },
+      {
+        "name": "MIMG",
+        "covered": 5,
+        "total": 111
+      },
+      {
+        "name": "MTBUF",
+        "covered": 0,
+        "total": 16
+      },
+      {
+        "name": "MUBUF",
+        "covered": 4,
+        "total": 72
+      },
+      {
+        "name": "SDWA",
+        "covered": 29,
+        "total": 220
+      },
+      {
+        "name": "SMEM",
+        "covered": 4,
+        "total": 84
+      },
+      {
+        "name": "SOP1",
+        "covered": 6,
+        "total": 65
+      },
+      {
+        "name": "SOP2",
+        "covered": 11,
+        "total": 51
+      },
+      {
+        "name": "SOPC",
+        "covered": 0,
+        "total": 18
+      },
+      {
+        "name": "SOPK",
+        "covered": 1,
+        "total": 27
+      },
+      {
+        "name": "SOPP",
+        "covered": 6,
+        "total": 37
+      },
+      {
+        "name": "VINTRP",
+        "covered": 2,
+        "total": 3
+      },
+      {
+        "name": "VOP1",
+        "covered": 21,
+        "total": 81
+      },
+      {
+        "name": "VOP2",
+        "covered": 32,
+        "total": 50
+      },
+      {
+        "name": "VOP3",
+        "covered": 98,
+        "total": 427
+      },
+      {
+        "name": "VOP3P",
+        "covered": 0,
+        "total": 29
+      },
+      {
+        "name": "VOPC",
+        "covered": 34,
+        "total": 190
+      }
+    ],
+    "corpus_shaders": 544,
+    "uses_covered": 46389,
+    "uses_total": 51291,
+    "uses_percent": 90.4
+  },
+  "x64": {
+    "covered": 59,
+    "total": 948
+  },
+  "parts": [
+    {
+      "name": "Shader converter: instruction forms",
+      "state": "partial",
+      "note": "Counts and shares are in the figures above."
+    },
+    {
+      "name": "Shader converter: control flow",
+      "state": "not_started",
+      "note": "Branches, loops and exec masks."
+    },
+    {
+      "name": "Shader converter: other stages",
+      "state": "not_started",
+      "note": "Vertex, compute and other stages."
+    },
+    {
+      "name": "GPU memory loads",
+      "state": "partial",
+      "note": "Buffer, global and image loads are done; stores and LDS are not started."
+    },
+    {
+      "name": "Console Direct3D 12 layer (d3d12_xs)",
+      "state": "not_started",
+      "note": "Not started."
+    },
+    {
+      "name": "System libraries",
+      "state": "partial",
+      "note": "Desktop xmem.dll (graphics and heap memory) only."
+    },
+    {
+      "name": "Native launcher",
+      "state": "done",
+      "note": "Maps a program and resolves imports through shims, Windows or logged stubs; tested with source-built programs."
+    },
+    {
+      "name": "CPU patch layer",
+      "state": "not_started",
+      "note": "No CPU code is patched yet."
+    },
+    {
+      "name": "Running a title",
+      "state": "not_started",
+      "note": "No title runs yet."
+    }
+  ]
+}
