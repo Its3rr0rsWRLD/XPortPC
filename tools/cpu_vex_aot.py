@@ -138,6 +138,7 @@ def lift(start, code):
     instruction = Instruction()
     lines = []
     returned = False
+    defined = set()
     while decoder.can_decode:
         decoder.decode_out(instruction)
         rva = instruction.ip
@@ -170,6 +171,18 @@ def lift(start, code):
                          f"{operand(instruction, 1, rva)}, {instruction.immediate8}u);")
         else:
             raise ValueError(f"unsupported instruction {instruction} at RVA {rva:#x}")
+        if op in MOVES or op in BINARY or op in SHIFTS:
+            zeroing = (op == M.VPXOR and instruction.op1_kind == K.REGISTER
+                       and instruction.op2_kind == K.REGISTER
+                       and instruction.op1_register == instruction.op2_register)
+            if zeroing:
+                lines[-1] = f"{destination(instruction, rva)} = V{{}};"
+            else:
+                for index in range(1, instruction.op_count):
+                    if instruction.op_kind(index) == K.REGISTER and instruction.op_register(index) not in defined:
+                        raise ValueError(f"undefined XMM source at RVA {rva:#x}")
+            if instruction.op0_kind == K.REGISTER:
+                defined.add(instruction.op0_register)
     if not returned:
         raise ValueError(f"missing ret at RVA {start + len(code):#x}")
     return lines

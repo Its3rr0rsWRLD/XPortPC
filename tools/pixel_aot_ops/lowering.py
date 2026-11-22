@@ -4,7 +4,7 @@ import re
 
 from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, POISON_MESSAGE, find_loops, poisoned_operands, program,
                            split_blocks, word_expr)
-from .dispatch import dispatch
+from .dispatch import GUARDS, dispatch
 from .hlsl import (MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS,
                    UNSAMPLED_PREAMBLE)
 from .registers import tracked_word
@@ -227,6 +227,8 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         # CF-2c: an instruction that names a scalar register poisoned by a skipped region must overwrite it, not read it.
         poisoned = poisoned_operands(st.scalar, line)
         try:
+            for guard in GUARDS:
+                guard(st, i, line)
             if st.ex == "true":
                 dispatch(st, i, line)
             else:

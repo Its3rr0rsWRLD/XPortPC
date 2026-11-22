@@ -1,0 +1,7 @@
+EXPORTS
+    fnstcw_only
+    fstcw_only
+    fnstcw_values
+    wait_values
+    fnstcw_edges
+    fstcw_depth8

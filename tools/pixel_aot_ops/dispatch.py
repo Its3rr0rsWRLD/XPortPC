@@ -15,6 +15,9 @@ one for every instruction they lower), so the order between modules never decide
 import re
 
 FORMS = []  # (family module, compiled pattern, when, handler)
+# Checks lower() runs on every instruction before its form, for state a form leaves for later instructions (the binary16
+# rounding mode of forms/sopk.py). A guard raises ValueError to refuse the instruction.
+GUARDS = []
 
 
 def form(pattern, *, when=None):

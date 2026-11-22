@@ -29,6 +29,9 @@ def check_denominators():
         reference = fc.load_reference(name)
         assert {group for group, _ in reference} == ENCODINGS, name
         assert ("SOPP", "s_endpgm") in reference and ("EXP", "exp") in reference
+        assert ("SOPK", "s_addk_i32") in reference and ("SOPK", "s_mulk_i32") in reference
+        assert fc.gfx_forms({"s_addk_i32", "s_mulk_i32"}, reference) == {
+            ("SOPK", "s_addk_i32"), ("SOPK", "s_mulk_i32")}
     gfx1013, rdna2 = fc.load_reference("gfx1013.tsv"), fc.load_reference("rdna2.tsv")
     assert ("SMEM", "s_atomic_add") in gfx1013 and ("SMEM", "s_atomic_add") not in rdna2
     # The LLVM syntax-doc parser: short headings, operand-less instructions, and the trailing index.
@@ -157,7 +160,7 @@ def check_scalar_float():
     # The reference files a mnemonic under its oldest encoding, so these three sit outside both groups.
     assert groups["MMX"] == {"movd", "movq", "pxor"} and "movsd" in groups["Integer"]
     with tempfile.TemporaryDirectory() as tmp:
-        sample = sample_repo(tmp, {"scalar_float": "f PROC\n    xorps xmm0, xmm0\n    cvtsi2sd xmm0, ecx\n"
+        sample = sample_repo(tmp, {"scalar_float": "; coverage: source cpu_aot_scalar_float\nf PROC\n    xorps xmm0, xmm0\n    cvtsi2sd xmm0, ecx\n"
                                                    "    ucomisd xmm0, xmm1\n    jp short l\nl:  ret\nf ENDP\nEND\n"})
         passed = fc.measure({"cpu_aot_scalar_float": "pass"}, sample)["x64_zen2"]
         skipped = fc.measure({"cpu_aot_scalar_float": "skip"}, sample)["x64_zen2"]
@@ -252,6 +255,19 @@ def check_shader_records():
         pixel.check_controls(Path(tmp))
     assert {"s_nop", "s_clause", "s_setprio", "s_sleep", "image_sample"} <= pixel.ACCEPTED
     assert "s_branch" in pixel.ACCEPTED and "s_code_end" not in pixel.ACCEPTED
+    # The mode-register fixture records the immediate write; the register forms reach only rejections.
+    assert ("SOPK", "s_setreg_imm32_b32") in gfx and "s_setreg_imm32_b32" in pixel.ACCEPTED
+    assert not {"s_setreg_b32", "s_getreg_b32"} & pixel.ACCEPTED
+    # The trigonometry fixture covers both encodings of v_sin_f32 and v_cos_f32 once its test passes.
+    trig = {("VOP1", "v_sin_f32"), ("VOP1", "v_cos_f32"), ("VOP3", "v_sin_f32_e64"), ("VOP3", "v_cos_f32_e64")}
+    assert trig <= gfx and trig <= fc.gfx_forms(pixel.ACCEPTED, gfx)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = sample_repo(Path(tmp) / "repo", {})
+        words = {"v_sin_f32_e32", "v_sin_f32_e64", "v_cos_f32_e32", "v_cos_f32_e64"}
+        assert words <= pixel.ACCEPTED
+        covered = fc.measure({"pixel_aot_warp": "pass"}, root, {"pixel_aot_warp": set(pixel.ACCEPTED)})
+        without = fc.measure({"pixel_aot_warp": "pass"}, root, {"pixel_aot_warp": pixel.ACCEPTED - words})
+        assert covered["gfx1013"]["covered"] == without["gfx1013"]["covered"] + len(trig)
     # Every newly lowered 64-bit SOP1/SOP2 and 32-bit BFE form is counted in both gfx1013 and rdna2,
     # while rejected neighbors (exec save/restore, #257 ops, 64-bit BFE/cselect) stay out of covered.
     scalar64_forms = {
@@ -260,7 +276,9 @@ def check_shader_records():
         ("SOP2", "s_andn2_b64"), ("SOP2", "s_orn2_b64"),
         ("SOP2", "s_nand_b64"), ("SOP2", "s_nor_b64"), ("SOP2", "s_xnor_b64"),
         ("SOP2", "s_lshl_b64"), ("SOP2", "s_lshr_b64"), ("SOP2", "s_ashr_i64"),
-        ("SOP2", "s_bfm_b64"), ("SOP2", "s_bfe_u32"), ("SOP2", "s_bfe_i32"),
+        ("SOP2", "s_bfm_b32"), ("SOP2", "s_bfm_b64"), ("SOP2", "s_bfe_u32"), ("SOP2", "s_bfe_i32"),
+        ("SOP2", "s_cselect_b64"),
+        ("SOP2", "s_bfe_u64"), ("SOP2", "s_bfe_i64"),
     }
     sopc_forms = {
         ("SOPC", "s_cmp_eq_i32"), ("SOPC", "s_cmp_lg_i32"),
@@ -273,6 +291,21 @@ def check_shader_records():
         ("SOPC", "s_bitcmp0_b32"), ("SOPC", "s_bitcmp1_b32"),
         ("SOPC", "s_bitcmp0_b64"), ("SOPC", "s_bitcmp1_b64"),
     }
+    vop2_forms = {
+        ("VOP2", "v_lshrrev_b32"), ("VOP2", "v_ashrrev_i32"), ("VOP2", "v_lshlrev_b32"),
+        ("VOP2", "v_and_b32"), ("VOP2", "v_or_b32"), ("VOP2", "v_xor_b32"),
+        ("VOP2", "v_add_nc_u32"), ("VOP2", "v_sub_nc_u32"), ("VOP2", "v_subrev_nc_u32"),
+    }
+    mul24_forms = {
+        ("VOP2", "v_mul_i32_i24"), ("VOP3", "v_mul_i32_i24_e64"),
+        ("VOP2", "v_mul_u32_u24"), ("VOP3", "v_mul_u32_u24_e64"),
+        ("VOP2", "v_mul_hi_i32_i24"), ("VOP3", "v_mul_hi_i32_i24_e64"),
+        ("VOP2", "v_mul_hi_u32_u24"), ("VOP3", "v_mul_hi_u32_u24_e64"),
+    }
+    sop2_lshl_add_forms = {
+        ("SOP2", "s_lshl1_add_u32"), ("SOP2", "s_lshl2_add_u32"),
+        ("SOP2", "s_lshl3_add_u32"), ("SOP2", "s_lshl4_add_u32"),
+    }
     rejected_forms = {
         # Removed as lowered (draw family cf2_exec, CF-2b): the ten *_saveexec_b64 forms and every v_cmpx_* e32/e64.
         # Removed as lowered (draw family salu_rest): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
@@ -281,6 +314,7 @@ def check_shader_records():
         # the saveexec/wrexec family, s_getpc/s_setpc/s_swappc_b64, s_rfe_b64, s_movrel*.
         "s_wqm_b32", "s_quadmask_b32", "s_quadmask_b64", "s_and_saveexec_b32", "s_getpc_b64", "s_setpc_b64",
         "s_swappc_b64", "s_rfe_b64", "s_movrels_b32", "s_movreld_b32",
+        "s_lshl0_add_u32", "s_lshl5_add_u32",
     }
     # The forms lowered by the salu_rest draws are counted in both gfx1013 and rdna2.
     salu_rest_forms = {
@@ -307,6 +341,47 @@ def check_shader_records():
                 and not form[1].endswith(("f64", "i64", "u64", "f64_e64", "i64_e64", "u64_e64"))}
         assert len(cmpx) == 124 and saveexec | cmpx <= covered, (name, (saveexec | cmpx) - covered)
         assert sopc_forms <= covered, (name, sopc_forms - covered)
+        assert vop2_forms <= covered, (name, vop2_forms - covered)
+        assert mul24_forms <= covered, (name, mul24_forms - covered)
+        assert sop2_lshl_add_forms <= covered, (name, sop2_lshl_add_forms - covered)
+    # Integer comparisons: e32 counts as VOPC and e64 as VOP3, for every 16- and 32-bit predicate the
+    # translator lowers; the rejected exec-writing, 64-bit and f16 class neighbours stay out.
+    int_compares = {f"v_cmp_{op}_{kind}" for op in ("eq", "ne", "lt", "le", "gt", "ge")
+                    for kind in ("i16", "u16", "i32", "u32")}
+    int_compares |= {f"v_cmp_{op}_{kind}" for op in ("f", "t") for kind in ("i32", "u32")}
+    compare_forms = {("VOPC", form) for form in int_compares} | {("VOP3", f"{form}_e64") for form in int_compares}
+    assert len(compare_forms) == 56
+    # (The v_cmpx_* forms (cf2_exec) and the f16 comparisons (f16_cmp) are lowered here, so they are not neighbours.)
+    compare_neighbours = {"v_cmp_lt_i64", "v_cmp_lt_u64"}
+    for name in ("gfx1013.tsv", "rdna2.tsv"):
+        reference = fc.load_reference(name)
+        assert compare_forms | {("VOPC", n) for n in compare_neighbours} <= reference, name
+        covered = fc.gfx_forms(pixel.ACCEPTED, reference)
+        assert compare_forms <= covered, (name, sorted(compare_forms - covered))
+        assert not {form for _, form in covered} & (compare_neighbours | {f"{n}_e64" for n in compare_neighbours})
+    # The scalar ALU fixture counts its SOP1, SOP2, SOPK and SOPC forms; the neighbours the controls
+    # reject (s_cmp_lt_u64, s_getreg_b32) stay out. (s_addc_u32 is lowered here, by salu_rest.)
+    scalar = {"s_movk_i32", "s_cmovk_i32", "s_not_b32", "s_add_u32", "s_sub_u32", "s_add_i32", "s_sub_i32",
+              "s_mul_i32", "s_min_u32", "s_max_u32", "s_min_i32", "s_max_i32", "s_and_b32", "s_or_b32",
+              "s_xor_b32", "s_andn2_b32", "s_orn2_b32", "s_lshl_b32", "s_lshr_b32", "s_ashr_i32",
+              "s_cselect_b32", *(f"s_cmp_{r}_{t}32" for r in ("eq", "lg", "gt", "ge", "lt", "le") for t in "iu"),
+              *(f"s_cmpk_{r}_{t}32" for r in ("eq", "lg", "gt", "ge", "lt", "le") for t in "iu")}
+    for name in ("gfx1013.tsv", "rdna2.tsv"):
+        forms = fc.gfx_forms(pixel.ACCEPTED, fc.load_reference(name))
+        assert {form for _, form in forms} >= scalar, sorted(scalar - {form for _, form in forms})
+        assert not {"s_cmp_lt_u64", "s_getreg_b32"} & {f for _, f in forms}
+        assert {group for group, form in forms if form in scalar} == {"SOP1", "SOP2", "SOPC", "SOPK"}
+    # The rounding fixture covers both encodings of v_ceil_f32 and v_rndne_f32 once its test passes.
+    rounding = {("VOP1", "v_ceil_f32"), ("VOP1", "v_rndne_f32"),
+                ("VOP3", "v_ceil_f32_e64"), ("VOP3", "v_rndne_f32_e64")}
+    assert rounding <= gfx and rounding <= fc.gfx_forms(pixel.ACCEPTED, gfx)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = sample_repo(Path(tmp) / "repo", {})
+        words = {"v_ceil_f32_e32", "v_ceil_f32_e64", "v_rndne_f32_e32", "v_rndne_f32_e64"}
+        assert words <= pixel.ACCEPTED
+        covered = fc.measure({"pixel_aot_warp": "pass"}, root, {"pixel_aot_warp": set(pixel.ACCEPTED)})
+        without = fc.measure({"pixel_aot_warp": "pass"}, root, {"pixel_aot_warp": pixel.ACCEPTED - words})
+        assert covered["gfx1013"]["covered"] == without["gfx1013"]["covered"] + len(rounding)
 
 
 def check_parsing():
@@ -349,6 +424,20 @@ def check_parsing():
     assert full["x64_zen2"]["covered"] == full["gfx1013"]["covered"] == 0
     unmatched = full["x64_zen2"]["fixture_forms_not_in_reference"]
     assert {"delta", "local", "plane_request"}.isdisjoint(unmatched), unmatched
+
+
+def check_gaps():
+    reference = {("VOP1", "v_a"), ("VOP3", "v_a_e64"), ("VOP3", "v_b_e64"), ("VOP1", "v_c")}
+    fixtures = {"passing": ({"v_a_e32"}, "pass"),
+                "skipping": ({"v_a_e32", "v_a_e64"}, "skip"),
+                "failing": ({"v_a_e64", "v_b_e64"}, "fail")}
+    measured = fc.summarize(reference, fixtures, fc.gfx_forms, include_gaps=True)
+    assert measured.pop("gaps") == [
+        ("VOP1", "v_c", "unobserved"),
+        ("VOP3", "v_a_e64", "skipped"),
+        ("VOP3", "v_b_e64", "observed_without_pass"),
+    ]
+    assert measured == fc.summarize(reference, fixtures, fc.gfx_forms)
 
 
 def check_dashboard():
@@ -580,6 +669,7 @@ if __name__ == "__main__":
     check_cpu_records()
     check_shader_records()
     check_parsing()
+    check_gaps()
     check_dashboard()
     check_avx2_regs()
     check_avx_int_regs()

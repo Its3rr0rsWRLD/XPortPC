@@ -1,0 +1,16 @@
+EXPORTS
+    cw_add
+    cw_sub
+    cw_mul
+    cw_div
+    cw_sqrt
+    cw_memory
+    cw_iarith
+    cw_stores
+    cw_rndint
+    cw_scale
+    cw_constants
+    cw_fnstcw
+    cw_msvc
+    cw_branch
+    cw_writes

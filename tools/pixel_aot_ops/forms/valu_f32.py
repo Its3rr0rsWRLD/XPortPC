@@ -14,6 +14,8 @@ ALU = {
     "sqrt": (1, "sqrt({0})"), "rsq": (1, "rsqrt({0})"),
     "floor": (1, "floor({0})"), "ceil": (1, "ceil({0})"), "fract": (1, "fract32({0})"),
     "trunc": (1, "trunc({0})"), "rndne": (1, "round({0})"),  # HLSL round is DXIL Round_ne: ties to even
+    # v_sin_f32 and v_cos_f32 take revolutions (from R0Y00/Xbox2Windows#357 by dnn): see sin32 below.
+    "sin": (1, "sin32({0})"), "cos": (1, "cos32({0})"),
     "add": (2, "({0} + {1})"), "mul": (2, "({0} * {1})"),
     "max": (2, "max({0}, {1})"), "min": (2, "min({0}, {1})"), "sub": (2, "({0} - {1})"),
     "subrev": (2, "({1} - {0})"),
@@ -33,6 +35,18 @@ VOP3_ONLY = ("fma", "mad", "min3", "max3", "med3")
 # including the denormal-flushing mad and mac, still refuse it.
 OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
 OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3")
+
+# v_sin_f32 and v_cos_f32 compute sin(2 * pi * x) and cos(2 * pi * x). Removing the nearest integer is exact in binary32
+# and keeps the radian argument within [-pi, pi], where D3D bounds the sin and cos error; x * 2 * pi on the unreduced input
+# would round away the fraction of a large argument. Inputs of at most half a turn pass unchanged, so -0 keeps its sign.
+# An infinity reduces to NaN. D3D bounds the result only to 0.0008 absolute, so the draws (trig) quantize it.
+SALU_HELPERS["turns"] = (
+    "float turns(float value) {\n"
+    "    return abs(value) > 0.5f ? value - round(value) : value;\n"
+    "}"
+)
+SALU_HELPERS["sin32"] = "float sin32(float value) {\n    return sin(turns(value) * 6.28318548f);\n}"
+SALU_HELPERS["cos32"] = "float cos32(float value) {\n    return cos(turns(value) * 6.28318548f);\n}"
 
 SALU_HELPERS["med3_f32"] = (
     "float med3_f32(float a, float b, float c) {\n"
@@ -101,7 +115,7 @@ def move(st, i, m):
         st.lines.append(f"    precise float alu{i} = {value};")
 
 
-@form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
+@form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|sin|cos|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
       r"|min3|max3|med3)_f32(_e32|_e64)? (v\d+), (.+?)( clamp)?( mul:2| mul:4| div:2)?")
 def arithmetic(st, i, m):
     op, suffix, dst, operands, clamp, omod = m.groups()
@@ -139,6 +153,8 @@ def arithmetic(st, i, m):
     expression = template.format(*values)
     if op == "med3":
         st.helpers.add("med3_f32")
+    if op in ("sin", "cos"):
+        st.helpers.update(("turns", f"{op}32"))
     if omod:
         expression = f"({expression} * {OMOD[omod]})"
     if clamp:

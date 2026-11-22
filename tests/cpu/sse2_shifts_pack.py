@@ -111,14 +111,21 @@ def ref_vec(name: str, a: bytes, b: bytes) -> bytes:
 
 
 def check_controls() -> None:
-    # 64-bit MMX packsswb mm0, mm1 (0F 63 C1) followed by ret (C3) must be rejected.
-    mmx = list(Decoder(64, b"\x0f\x63\xc1\xc3", ip=0x1000))
-    try:
-        lower(mmx, [], {}, {}, {})
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected 64-bit MMX packsswb to be rejected")
+    controls = (
+        ("MMX packsswb", "0f 63 c1 c3", "unsupported query operation"),
+        ("memory packsswb", "66 0f 63 02 c3", "unsupported SSE2 source operand"),
+        ("memory psllw", "66 0f f1 02 c3", "unsupported SSE2 shift source"),
+        ("memory pshufd", "66 0f 70 02 1b c3", "unsupported SSE2 source operand"),
+    )
+    for label, code, diagnostic in controls:
+        instructions = list(Decoder(64, bytes.fromhex(code), ip=0x1000))
+        try:
+            lower(instructions, [], {}, {}, {})
+        except ValueError as exc:
+            if not str(exc).startswith(f"{diagnostic} at 0x1000"):
+                raise AssertionError(f"{label}: unexpected diagnostic {exc}") from exc
+        else:
+            raise AssertionError(f"accepted {label}")
 
 
 def check(native_dll: Path, lifted_dll: Path) -> None:

@@ -1,16 +1,19 @@
 // Extended-precision helpers for the opt-in x87 profile of tools/ffx_version_query.lower().
 //
 // A value is exact: a sign, a 15-bit biased exponent and a 64-bit significand with an explicit integer
-// bit. The profile fixes the control word at 0x027F: 53-bit precision, round to nearest-even, every
-// exception masked. Arithmetic results round to 53 significand bits within the extended exponent range;
-// stores round again into the destination format. The status word is not modelled.
+// bit. Every rounding helper takes the control word cw. Its precision control (bits 8 and 9) selects 24,
+// 53 or 64 significand bits for arithmetic results, within the extended exponent range, and its rounding
+// control (bits 10 and 11) the direction. Stores round again into the destination format. Every
+// exception is masked and the status word is not modelled.
 #include <intrin.h>
 
 struct X87Value { uint64_t sig; uint16_t se; };  // se = sign << 15 | biased exponent
 
 static const X87Value x87_indefinite{0xc000000000000000ull, 0xffff};
 static const uint64_t x87_integer_bit = 0x8000000000000000ull;
-static const unsigned x87_rc = 0;  // control word 0x027F: round to nearest-even
+// The rounding control: 0 to nearest-even, 1 toward negative infinity, 2 toward positive infinity and 3
+// toward zero.
+static inline unsigned x87_rounding(uint16_t cw) { return (cw >> 10) & 3u; }
 
 static inline unsigned x87_exp(X87Value v) { return v.se & 0x7fffu; }
 static inline bool x87_sign(X87Value v) { return (v.se >> 15) != 0; }
@@ -59,6 +62,14 @@ struct X87Format { int precision, bias, emax; };
 static const X87Format x87_f32{24, 127, 0xfe};
 static const X87Format x87_f64{53, 1023, 0x7fe};
 static const X87Format x87_arith{53, 16383, 0x7ffe};  // precision control 53 bits, extended exponent range
+static const X87Format x87_arith24{24, 16383, 0x7ffe};
+static const X87Format x87_arith64{64, 16383, 0x7ffe};
+// The arithmetic format of a control word: PC 00 gives 24 bits, 10 gives 53 and 11 gives 64. The reserved
+// PC 01 never reaches a helper, because the profile rejects a control word that sets it.
+static inline X87Format x87_format(uint16_t cw) {
+    const unsigned pc = (cw >> 8) & 3u;
+    return pc == 0 ? x87_arith24 : pc == 3 ? x87_arith64 : x87_arith;
+}
 
 // Round sign * (hi:lo / 2^127) * 2^e, with hi:lo normalized (bit 127 set) and the sticky bit in bit 0 of
 // lo. The result significand keeps its precision bits at the top of a 64-bit word. A result below the
@@ -133,7 +144,7 @@ static inline X87Value x87_operand_f64(uint64_t bits) { return x87_from_binary(b
 
 // Stores to m32 and m64 round into the destination's precision and range. A NaN is quieted and its
 // significand truncated; an invalid operand stores the destination's indefinite.
-static inline uint64_t x87_to_binary(X87Value v, X87Format format, int fraction_bits) {
+static inline uint64_t x87_to_binary(X87Value v, X87Format format, int fraction_bits, uint16_t cw) {
     const int sign_bit = fraction_bits == 23 ? 31 : 63;
     const uint64_t sign = static_cast<uint64_t>(x87_sign(v)) << sign_bit;
     const uint64_t exponent_all = static_cast<uint64_t>(format.emax + 1) << fraction_bits;
@@ -144,11 +155,11 @@ static inline uint64_t x87_to_binary(X87Value v, X87Format format, int fraction_
     if (x87_is_inf(v)) return sign | exponent_all;
     if (x87_is_zero(v)) return sign;
     const X87Unpacked u = x87_unpack(v);
-    const X87Rounded r = x87_round(u.sign, u.e, u.sig, 0, format, x87_rc);
+    const X87Rounded r = x87_round(u.sign, u.e, u.sig, 0, format, x87_rounding(cw));
     return sign | (static_cast<uint64_t>(r.biased) << fraction_bits) | ((r.sig >> (63 - fraction_bits)) & fraction_mask);
 }
-static inline uint32_t x87_to_f32(X87Value v) { return static_cast<uint32_t>(x87_to_binary(v, x87_f32, 23)); }
-static inline uint64_t x87_to_f64(X87Value v) { return x87_to_binary(v, x87_f64, 52); }
+static inline uint32_t x87_to_f32(X87Value v, uint16_t cw) { return static_cast<uint32_t>(x87_to_binary(v, x87_f32, 23, cw)); }
+static inline uint64_t x87_to_f64(X87Value v, uint16_t cw) { return x87_to_binary(v, x87_f64, 52, cw); }
 
 // m80 loads and stores copy all 80 bits, including NaNs and unnormals.
 static inline X87Value x87_from_m80(uint64_t sig, uint16_t se) { return {sig, se}; }
@@ -172,8 +183,9 @@ static inline bool x87_special_operands(X87Value a, X87Value b, X87Value* out) {
 }
 
 // FADD: the exact sum rounded to the arithmetic format. Addends far apart keep their low bits in the
-// sticky bit; an exact zero sum is +0 unless both addends are -0.
-static inline X87Value x87_add(X87Value a, X87Value b) {
+// sticky bit. An exact zero sum of addends with different signs is +0, or -0 when rounding toward
+// negative infinity; two zeros of the same sign keep it.
+static inline X87Value x87_add(X87Value a, X87Value b, uint16_t cw) {
     X87Value out;
     if (x87_special_operands(a, b, &out)) return out;
     const bool ia = x87_is_inf(a), ib = x87_is_inf(b);
@@ -182,10 +194,11 @@ static inline X87Value x87_add(X87Value a, X87Value b) {
         return ia ? a : b;
     }
     const bool za = x87_is_zero(a), zb = x87_is_zero(b);
-    if (za && zb) return {0, static_cast<uint16_t>(x87_sign(a) && x87_sign(b) ? 0x8000 : 0)};
+    const uint16_t zero_sign = x87_rounding(cw) == 1 ? 0x8000 : 0;  // x + (-x) and +0 + -0
+    if (za && zb) return {0, static_cast<uint16_t>(x87_sign(a) == x87_sign(b) ? a.se & 0x8000 : zero_sign)};
     X87Unpacked x = x87_unpack(za ? b : a), y = x87_unpack(zb ? a : b);
     if (za || zb) {  // x + 0 still rounds to the arithmetic precision
-        const X87Rounded r = x87_round(x.sign, x.e, x.sig, 0, x87_arith, x87_rc);
+        const X87Rounded r = x87_round(x.sign, x.e, x.sig, 0, x87_format(cw), x87_rounding(cw));
         return {r.sig, static_cast<uint16_t>((x.sign ? 0x8000 : 0) | r.biased)};
     }
     if (x.e < y.e || (x.e == y.e && x.sig < y.sig)) { const X87Unpacked t = x; x = y; y = t; }
@@ -204,19 +217,19 @@ static inline X87Value x87_add(X87Value a, X87Value b) {
     } else {
         const unsigned char borrow = _subborrow_u64(0, lo, ylo, &lo);
         _subborrow_u64(borrow, hi, yhi, &hi);
-        if (hi == 0 && lo == 0) return {0, 0};  // x + (-x) is +0 when rounding to nearest
+        if (hi == 0 && lo == 0) return {0, zero_sign};  // x + (-x)
         const int shift = hi != 0 ? x87_clz(hi) : 64 + x87_clz(lo);
         if (shift >= 64) { hi = lo << (shift - 64); lo = 0; }
         else if (shift != 0) { hi = (hi << shift) | (lo >> (64 - shift)); lo <<= shift; }
         e -= shift;
     }
-    const X87Rounded r = x87_round(x.sign, e, hi, lo, x87_arith, x87_rc);
+    const X87Rounded r = x87_round(x.sign, e, hi, lo, x87_format(cw), x87_rounding(cw));
     return {r.sig, static_cast<uint16_t>((x.sign ? 0x8000 : 0) | r.biased)};
 }
 
 // FMUL: the exact product rounded to the arithmetic format. The sign is the exclusive or of the operand
 // signs, also for zero and infinite results; infinity times zero is invalid and gives the indefinite.
-static inline X87Value x87_mul(X87Value a, X87Value b) {
+static inline X87Value x87_mul(X87Value a, X87Value b, uint16_t cw) {
     X87Value out;
     if (x87_special_operands(a, b, &out)) return out;
     const bool sign = x87_sign(a) != x87_sign(b);
@@ -230,15 +243,16 @@ static inline X87Value x87_mul(X87Value a, X87Value b) {
     int e = x.e + y.e;
     if (hi & x87_integer_bit) ++e;
     else { hi = (hi << 1) | (lo >> 63); lo <<= 1; }
-    const X87Rounded r = x87_round(sign, e, hi, lo, x87_arith, x87_rc);
+    const X87Rounded r = x87_round(sign, e, hi, lo, x87_format(cw), x87_rounding(cw));
     return {r.sig, static_cast<uint16_t>(s | r.biased)};
 }
 
-// FDIV: the quotient rounded to the arithmetic format. A 64-bit quotient of the significands and a sticky
-// bit for a nonzero remainder are enough to round to 53 bits. The sign is the exclusive or of the operand
+// FDIV: the quotient rounded to the arithmetic format. A 64-bit quotient of the significands, the next
+// quotient bit (bit 63 of lo) and a sticky bit for any further remainder are enough to round to every
+// precision. The sign is the exclusive or of the operand
 // signs. Zero by zero and infinity by infinity are invalid and give the indefinite; a finite nonzero value
 // by zero gives infinity (the masked divide-by-zero response); a finite value by infinity gives zero.
-static inline X87Value x87_div(X87Value a, X87Value b) {
+static inline X87Value x87_div(X87Value a, X87Value b, uint16_t cw) {
     X87Value out;
     if (x87_special_operands(a, b, &out)) return out;
     const bool sign = x87_sign(a) != x87_sign(b);
@@ -252,23 +266,24 @@ static inline X87Value x87_div(X87Value a, X87Value b) {
     const bool shift = x.sig >= y.sig;
     uint64_t remainder;
     const uint64_t q = _udiv128(shift ? x.sig >> 1 : x.sig, shift ? x.sig << 63 : 0, y.sig, &remainder);
-    const uint64_t lo = remainder != 0;  // sticky
-    const X87Rounded r = x87_round(sign, x.e - y.e - (shift ? 0 : 1), q, lo, x87_arith, x87_rc);
+    const bool round = remainder >= y.sig - remainder;  // 2 * remainder >= divisor
+    const uint64_t lo = (round ? x87_integer_bit : 0) | (round ? remainder != y.sig - remainder : remainder != 0);  // div sticky
+    const X87Rounded r = x87_round(sign, x.e - y.e - (shift ? 0 : 1), q, lo, x87_format(cw), x87_rounding(cw));
     return {r.sig, static_cast<uint16_t>(s | r.biased)};
 }
 // FDIVR: the same division with the operands exchanged.
-static inline X87Value x87_divr(X87Value a, X87Value b) { return x87_div(b, a); }
+static inline X87Value x87_divr(X87Value a, X87Value b, uint16_t cw) { return x87_div(b, a, cw); }
 
 // FSUB: a - b as a + (-b). A NaN or invalid operand is selected before the negation, so a NaN result keeps
 // its own sign; x - x is +0, as x + (-x) is.
-static inline X87Value x87_sub(X87Value a, X87Value b) {
+static inline X87Value x87_sub(X87Value a, X87Value b, uint16_t cw) {
     X87Value out;
     if (x87_special_operands(a, b, &out)) return out;
     b.se ^= 0x8000;
-    return x87_add(a, b);
+    return x87_add(a, b, cw);
 }
 // FSUBR: the same subtraction with the operands exchanged.
-static inline X87Value x87_subr(X87Value a, X87Value b) { return x87_sub(b, a); }
+static inline X87Value x87_subr(X87Value a, X87Value b, uint16_t cw) { return x87_sub(b, a, cw); }
 
 // FCHS and FABS change only the sign bit, of every encoding: NaNs stay signaling or quiet, and unnormals
 // and pseudo-denormals keep their bits.
@@ -285,11 +300,12 @@ static inline X87Value x87_from_integer(int64_t n) {
     return {magnitude << shift, static_cast<uint16_t>((negative ? 0x8000 : 0) | (16383 + 63 - shift))};
 }
 
-// FIST, FISTP and FISTTP: ST(0) rounded to an integer (to nearest-even, or toward zero when chop is set)
+// FIST, FISTP and FISTTP: ST(0) rounded to an integer (in the direction of the rounding control, or toward
+// zero when chop is set)
 // as two's-complement bits in the low `bits` bits. A NaN, an infinity, an unsupported encoding or a
 // rounded value outside the destination range gives the integer indefinite (only the sign bit set), the
 // masked invalid-operation response. The precision control does not apply.
-static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop) {
+static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop, uint16_t cw) {
     const uint64_t indefinite = 1ull << (bits - 1);
     const uint64_t mask = bits == 64 ? ~0ull : (1ull << bits) - 1;
     if (x87_unsupported(v) || x87_exp(v) == 0x7fff) return indefinite;
@@ -297,10 +313,15 @@ static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop) {
     const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
     if (shift < 0) return indefinite;
     uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
-    if (!chop && shift > 0 && shift <= 64) {  // a value below one half (shift > 64) rounds to 0
-        const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
-        const uint64_t half = 1ull << (shift - 1);
-        if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;
+    const unsigned rc = chop ? 3u : x87_rounding(cw);
+    if (shift > 0) {
+        const uint64_t rest = shift >= 64 ? v.sig : v.sig & ((1ull << shift) - 1);  // the fraction bits
+        if (rc != 0) {  // up in magnitude when the direction is away from zero
+            if (rest != 0 && rc == (x87_sign(v) ? 1u : 2u)) ++magnitude;
+        } else if (shift <= 64) {  // to nearest; a value below one half (shift > 64) rounds to 0
+            const uint64_t half = 1ull << (shift - 1);
+            if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;
+        }
     }
     if (magnitude > indefinite - (x87_sign(v) ? 0 : 1)) return indefinite;
     return (x87_sign(v) ? 0 - magnitude : magnitude) & mask;
@@ -323,12 +344,13 @@ static inline int x87_compare(X87Value a, X87Value b) {
     return less != x87_sign(a) ? 0 : 2;
 }
 
-// FSQRT: the exact square root rounded to the arithmetic format (53 significand bits, to nearest-even).
+// FSQRT: the exact square root rounded to the arithmetic format.
 // sqrt(-0) is -0 and sqrt(+inf) is +inf; a NaN is quieted; any other negative operand, and an unsupported
 // encoding, gives the indefinite. The root of sig * 2^(e - 63) is isqrt(sig * 2^t) * 2^((e - 63 - t) / 2)
-// with t = 63 or 64 chosen to make the exponent even, which puts the 64-bit root in [2^63, 2^64); a
-// nonzero remainder becomes the sticky bit. The result never leaves the extended normal range.
-static inline X87Value x87_sqrt(X87Value a) {
+// with t = 63 or 64 chosen to make the exponent even, which puts the 64-bit root q in [2^63, 2^64). The
+// next root bit is set when the remainder exceeds q (an exact half cannot occur), and any nonzero
+// remainder sets the sticky bit. The result never leaves the extended normal range.
+static inline X87Value x87_sqrt(X87Value a, uint16_t cw) {
     if (x87_unsupported(a)) return x87_indefinite;
     if (x87_is_nan(a)) return x87_quiet(a);
     if (x87_is_zero(a)) return a;
@@ -344,22 +366,29 @@ static inline X87Value x87_sqrt(X87Value a) {
         const uint64_t lo = _umul128(c, c, &hi);
         if (hi < r_hi || (hi == r_hi && lo <= r_lo)) { q = c; sq_hi = hi; sq_lo = lo; }
     }
-    const uint64_t sticky = sq_hi != r_hi || sq_lo != r_lo;  // sqrt sticky
-    const X87Rounded r = x87_round(false, (x.e - 63 - t) / 2 + 63, q, sticky, x87_arith, x87_rc);  // sqrt round
+    uint64_t rem_lo, rem_hi;  // R - q * q
+    _subborrow_u64(_subborrow_u64(0, r_lo, sq_lo, &rem_lo), r_hi, sq_hi, &rem_hi);
+    const uint64_t sticky = ((rem_hi != 0 || rem_lo > q) ? x87_integer_bit : 0) | (sq_hi != r_hi || sq_lo != r_lo);  // sqrt sticky
+    const X87Rounded r = x87_round(false, (x.e - 63 - t) / 2 + 63, q, sticky, x87_format(cw), x87_rounding(cw));  // sqrt round
     return {r.sig, static_cast<uint16_t>(r.biased)};
 }
 
-// FRNDINT: ST(0) rounded to an integral value to nearest-even, kept in the extended format. The precision
+// FRNDINT: ST(0) rounded to an integral value in the direction of the rounding control, kept in the
+// extended format. The precision
 // control does not apply. Zeros, infinities and values of 2^63 and above are already integral; a value
 // that rounds to zero keeps its sign; a NaN is quieted and an unsupported encoding gives the indefinite.
-static inline X87Value x87_rndint(X87Value v) {
+static inline X87Value x87_rndint(X87Value v, uint16_t cw) {
     if (x87_unsupported(v)) return x87_indefinite;
     if (x87_is_nan(v)) return x87_quiet(v);
     if (x87_exp(v) == 0x7fff || v.sig == 0) return v;
     const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
     if (shift <= 0) return v;
     uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
-    if (shift <= 64) {  // a value below one half (shift > 64) rounds to 0
+    const unsigned rc = x87_rounding(cw);
+    if (rc != 0) {  // up in magnitude when the direction is away from zero and the value is not integral
+        const uint64_t rest = shift >= 64 ? v.sig : v.sig & ((1ull << shift) - 1);
+        if (rest != 0 && rc == (x87_sign(v) ? 1u : 2u)) ++magnitude;
+    } else if (shift <= 64) {  // to nearest; a value below one half (shift > 64) rounds to 0
         const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
         const uint64_t half = 1ull << (shift - 1);
         if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;  // rndint round
@@ -392,7 +421,7 @@ static inline X87Value x87_xtract(X87Value v, X87Value& exponent) {
 // infinite ST(0) is otherwise unchanged. NaN and unsupported operands follow x87_special_operands. n is
 // clamped to +-2^20, far beyond the exponent range, before it is added to the exponent.
 static const X87Format x87_scale_format{64, 16383, 0x7ffe};
-static inline X87Value x87_scale(X87Value a, X87Value b) {
+static inline X87Value x87_scale(X87Value a, X87Value b, uint16_t cw) {
     X87Value out;
     if (x87_special_operands(a, b, &out)) return out;
     const uint16_t s = a.se & 0x8000;
@@ -408,6 +437,6 @@ static inline X87Value x87_scale(X87Value a, X87Value b) {
         n = x87_sign(b) ? -magnitude : magnitude;  // scale truncate
     }
     const X87Unpacked x = x87_unpack(a);
-    const X87Rounded r = x87_round(x.sign, x.e + n, x.sig, 0, x87_scale_format, x87_rc);  // scale round
+    const X87Rounded r = x87_round(x.sign, x.e + n, x.sig, 0, x87_scale_format, x87_rounding(cw));  // scale round
     return {r.sig, static_cast<uint16_t>(s | r.biased)};
 }

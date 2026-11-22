@@ -187,7 +187,9 @@ class DXContainerPartOffsets(unittest.TestCase):
         for tail in (b"", b"\x00\x01"):
             with self.subTest(tail=tail):
                 data = make_record(pixel, name=b"first", tail=tail, extra_stored=len(second)) + second
-                result = scene_records(data)
+                observed = []
+                result = scene_records(data, observe=lambda kind, blob, _: observed.append((kind, blob)))
+                self.assertEqual(observed, [(0, pixel), (5, compute)])
                 self.assertEqual(result["records"], 2)
                 self.assertEqual(result["stages"], {"pixel": 1, "compute": 1})
                 self.assertEqual(result["framed_bitcode"], 2)

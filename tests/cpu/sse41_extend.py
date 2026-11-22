@@ -1,6 +1,7 @@
 """Compare native and translated 128-bit SSE4.1 pmovsx/pmovzx instructions."""
 import ctypes
 from pathlib import Path
+import struct
 import sys
 
 import pefile

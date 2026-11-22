@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse41_42_misc
 ; Source-owned differential fixture for 16 SSSE3/SSE4.1/SSE4.2 integer, insert/extract, ptest, and crc32 instructions.
 .code
 

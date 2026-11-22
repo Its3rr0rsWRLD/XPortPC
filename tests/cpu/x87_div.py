@@ -60,12 +60,12 @@ CONTROLS = {
     # The quotient rounds in the binary64 exponent range, as host double arithmetic would.
     "double": (base.ARITH, "x87_arith{53, 1023, 0x7fe}"),
     # A nonzero remainder is ignored when rounding.
-    "nosticky": (re.compile(r"const uint64_t lo = remainder != 0;"), "const uint64_t lo = 0;"),
+    "nosticky": (re.compile(r"const uint64_t lo = [^;]*;  // div sticky"), "const uint64_t lo = 0;  // div sticky"),
     # A finite nonzero value by zero gives the indefinite instead of infinity.
     "divzero": (re.compile(r"if \(ia \|\| zb\) return"), "if (zb) return x87_indefinite; if (ia) return"),
     # FDIVR divides in the FDIV order.
-    "reverse": (re.compile(r"x87_divr\(X87Value a, X87Value b\) \{ return x87_div\(b, a\); \}"),
-                "x87_divr(X87Value a, X87Value b) { return x87_div(a, b); }"),
+    "reverse": (re.compile(r"x87_divr\(X87Value a, X87Value b, uint16_t cw\) \{ return x87_div\(b, a, cw\); \}"),
+                "x87_divr(X87Value a, X87Value b, uint16_t cw) { return x87_div(a, b, cw); }"),
     # A zero quotient (zero dividend or infinite divisor) is always +0.
     "zerosign": (re.compile(r"if \(ib \|\| za\) return \{0, s\};"), "if (ib || za) return {0, 0};"),
     # m32 and m64 operands are quieted before the NaN rules see them, as a plain load would.

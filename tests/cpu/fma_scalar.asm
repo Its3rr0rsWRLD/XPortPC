@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_fma_scalar
 ; Source-owned differential fixture for all 24 scalar FMA3 instructions (ss/sd).
 ; Each export loads YMM0=[rcx], YMM1=[rdx], YMM2=[r8], runs the FMA, and stores YMM0 to [r9].
 .code

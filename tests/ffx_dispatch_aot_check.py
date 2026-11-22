@@ -490,6 +490,50 @@ def check_salu_sopk_and_scc(assembler, objcopy, library):
     assert network(ref_ins, taps, b"", 24) == [0x10000000 ^ 54, 0xabcdef00 ^ 0x7ffe, 3, 4]
 
 
+def check_modifiers(assembler, objcopy, library):
+    def assemble_and_translate(body):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, obj, binary = (root / ("mod." + ext) for ext in ("s", "o", "bin"))
+            source.write_text(f"{body}\ns_endpgm\n", encoding="ascii")
+            subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-filetype=obj",
+                            source, "-o", obj], check=True)
+            subprocess.run([objcopy, "-O", "binary", "--only-section=.text", obj, binary], check=True)
+            code = binary.read_bytes()
+        instructions = disassemble(code, library, offsets=True)
+        return translate("consumer", instructions, code)
+
+    mul2 = assemble_and_translate("v_mul_f32_e64 v0, v1, v2 mul:2")
+    assert "2.0*(" in mul2
+    pk_clamp = assemble_and_translate("v_pk_add_f16 v0, v1, v2 op_sel:[1,0] clamp")
+    assert "saturate(" in pk_clamp
+    for bad_asm in (
+        "v_add_f32_e64 v0, v1, v2 clamp",
+        "v_mul_f32_e64 v0, v1, v2 mul:4",
+        "v_mul_f32_e64 v0, v1, v2 div:2",
+        "v_mul_f32_e64 v0, v1, v2 clamp mul:2",
+        "v_add_nc_u32_e64 v0, v1, v2 clamp",
+        "v_pk_add_u16 v0, v1, v2 clamp",
+    ):
+        try:
+            assemble_and_translate(bad_asm)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Expected modifier rejection for: {bad_asm}")
+    for bad_line in (
+        "v_pk_add_f16 v0, v1, v2 op_sel:[1,0,1]",
+        "v_pk_add_f16 v0, v1, v2 mul:2",
+        "v_pk_add_f16 v0, v1, v2 clamp clamp",
+    ):
+        try:
+            translate("consumer", [(0, bad_line), (8, "s_endpgm")], b"\0" * 12)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Expected packed modifier rejection for: {bad_line}")
+
+
 def main(assembler, objcopy, library):
     # A signed i8 dot product, replicated low half, clamp and byte insert
     # have independent integer answers on these source-owned test operands.
@@ -531,6 +575,7 @@ def main(assembler, objcopy, library):
             assert (env["v8"], env["v9"]) == (unsigned, signed), hex(bits)
     check_bfe(assembler, objcopy, library)
     check_salu_sopk_and_scc(assembler, objcopy, library)
+    check_modifiers(assembler, objcopy, library)
 
 
 if __name__ == "__main__":

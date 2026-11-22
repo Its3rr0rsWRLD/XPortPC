@@ -1,0 +1,14 @@
+EXPORTS
+    call_keep
+    call_twice
+    outer_call
+    pass_result
+    read_then_call
+    call_then_read
+    low_result
+    thunk_call
+    thunk_tail
+    outer_tail
+    clobber_read
+    table_after_call
+    call_guest_arg

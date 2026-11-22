@@ -1,0 +1,25 @@
+EXPORTS
+    fcom_st1
+    fcomp_st1
+    fucom_st1
+    fucomp_st1
+    fcompp_pair
+    fucompp_pair
+    fcom_st2
+    fucomp_st2
+    fcom_st0
+    fucomp_st0
+    fcom_m32
+    fcomp_m32
+    fcom_m64
+    fcomp_m64
+    fucom_st7
+    fcom_fcomi
+    fucom_fucomip
+    two_records
+    joined
+    split
+    byte_record
+    byte_parity
+    split_sticky
+    status_word

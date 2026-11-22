@@ -132,13 +132,15 @@ def check_rejections():
     # EVEX scalar-broadcast vpsllvd ymm0, ymm1, dword ptr [rdx]{1to8} (62 f2 75 38 47 02) must be rejected.
     insns = list(Decoder(64, bytes.fromhex("62 f2 75 38 47 02 c3"), ip=0x1000))
     assert insns[0].is_broadcast
-    try:
-        lower(insns, [], {}, {}, {})
-    except ValueError as exc:
-        if not str(exc).startswith("unsupported query operation at 0x1000"):
-            raise AssertionError(f"unexpected diagnostic {exc}") from exc
-    else:
-        raise AssertionError("accepted EVEX broadcast vpsllvd")
+    unsupported_register = list(Decoder(64, bytes.fromhex("c4 e2 79 78 db c3"), ip=0x1000))
+    for candidate in (insns, unsupported_register):
+        try:
+            lower(candidate, [], {}, {}, {})
+        except ValueError as exc:
+            if not str(exc).startswith("unsupported query operation at 0x1000"):
+                raise AssertionError(f"unexpected diagnostic {exc}") from exc
+        else:
+            raise AssertionError(f"accepted unsupported instruction {candidate[0]}")
 
 
 if __name__ == "__main__":

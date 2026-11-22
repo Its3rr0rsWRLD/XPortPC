@@ -160,6 +160,20 @@ def export_keys(rows):
     return keys
 
 
+def _parse_forwarded_ordinal(digits):
+    """Parse a forwarded ordinal as an ASCII decimal integer in 1..65535, or return None."""
+    if not digits:
+        return None
+    value = 0
+    for ch in digits:
+        if ch < "0" or ch > "9":
+            return None
+        value = value * 10 + (ord(ch) - ord("0"))
+        if value > 0xFFFF:
+            return None
+    return value if value >= 1 else None
+
+
 def resolve_desktop(dll, symbol, importer, contracts, system_exports, package_exports=None, known_dlls=()):
     """Follow export forwarders without loading any DLL.
 
@@ -212,6 +226,12 @@ def resolve_desktop(dll, symbol, importer, contracts, system_exports, package_ex
         if not separator or not module or not name:
             status = "invalid_forwarder"
             break
+        if name.startswith("#"):
+            ordinal = _parse_forwarded_ordinal(name[1:])
+            if ordinal is None:
+                status = "invalid_forwarder"
+                break
+            name = f"#{ordinal}"
         dll, symbol, importer = module.lower() + ".dll", name, Path(host).name.lower()
     return dict(status=status, chain=chain)
 

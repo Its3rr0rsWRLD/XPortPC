@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse2_int
 ; Source-owned differential fixture for 18 baseline 128-bit SSE2 packed integer ALU instructions.
 .code
 

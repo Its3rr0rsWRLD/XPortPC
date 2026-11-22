@@ -135,6 +135,10 @@ SOP2_OPS = {
     0x21: ("s_lshr_b64", "Scalar logical shift right 64-bit"),
     0x22: ("s_ashr_i32", "Scalar arithmetic shift right 32-bit"),
     0x26: ("s_mul_i32", "Scalar multiply signed 32-bit"),
+    0x2e: ("s_lshl1_add_u32", "Scalar shift left 1 and add 32-bit"),
+    0x2f: ("s_lshl2_add_u32", "Scalar shift left 2 and add 32-bit"),
+    0x30: ("s_lshl3_add_u32", "Scalar shift left 3 and add 32-bit"),
+    0x31: ("s_lshl4_add_u32", "Scalar shift left 4 and add 32-bit"),
 }
 
 SOPK_OPS = {
@@ -186,6 +190,49 @@ SMEM_OPS = {
     0x0c: "s_buffer_load_dwordx16",
 }
 
+SMEM_WIDTHS = {
+    0x00: (1, 2), 0x01: (2, 2), 0x02: (4, 2), 0x03: (8, 2), 0x04: (16, 2),
+    0x08: (1, 4), 0x09: (2, 4), 0x0a: (4, 4), 0x0b: (8, 4), 0x0c: (16, 4),
+}
+
+MIMG_OPS = {
+    0x00: ("image_load", False, 0),
+    0x01: ("image_load_mip", False, 1),
+    0x08: ("image_store", False, 0),
+    0x09: ("image_store_mip", False, 1),
+    0x0e: ("image_get_resinfo", False, 0),
+    0x20: ("image_sample", True, 0),
+    0x21: ("image_sample_cl", True, 1),
+    0x22: ("image_sample_d", True, 0),
+    0x24: ("image_sample_l", True, 1),
+    0x25: ("image_sample_b", True, 1),
+    0x26: ("image_sample_b_cl", True, 2),
+    0x27: ("image_sample_lz", True, 0),
+    0x28: ("image_sample_c", True, 1),
+    0x2c: ("image_sample_c_l", True, 2),
+    0x2d: ("image_sample_c_b", True, 2),
+    0x2f: ("image_sample_c_lz", True, 1),
+    0x30: ("image_sample_o", True, 1),
+    0x34: ("image_sample_l_o", True, 2),
+    0x35: ("image_sample_b_o", True, 2),
+    0x37: ("image_sample_lz_o", True, 1),
+    0x40: ("image_gather4", True, 0),
+    0x44: ("image_gather4_l", True, 1),
+    0x47: ("image_gather4_lz", True, 0),
+    0x60: ("image_get_lod", True, 0),
+}
+
+MIMG_DIMS = {
+    0: ("SQ_RSRC_IMG_1D", 1, 2),
+    1: ("SQ_RSRC_IMG_2D", 2, 4),
+    2: ("SQ_RSRC_IMG_3D", 3, 6),
+    3: ("SQ_RSRC_IMG_CUBE", 3, 4),
+    4: ("SQ_RSRC_IMG_1D_ARRAY", 2, 2),
+    5: ("SQ_RSRC_IMG_2D_ARRAY", 3, 4),
+    6: ("SQ_RSRC_IMG_2D_MSAA", 3, 4),
+    7: ("SQ_RSRC_IMG_2D_MSAA_ARRAY", 4, 4),
+}
+
 VOP1_OPS = {
     0x00: ("v_nop", "Vector no-op"),
     0x01: ("v_mov_b32_e32", "Vector copy 32-bit"),
@@ -196,16 +243,216 @@ VOP1_OPS = {
     0x08: ("v_cvt_i32_f32_e32", "Convert float32 to int32"),
     0x0a: ("v_cvt_f16_f32_e32", "Convert float32 to float16"),
     0x0b: ("v_cvt_f32_f16_e32", "Convert float16 to float32"),
+    0x20: ("v_fract_f32_e32", "Fractional part float32"),
+    0x21: ("v_trunc_f32_e32", "Truncate toward zero float32"),
+    0x22: ("v_ceil_f32_e32", "Ceiling float32"),
+    0x23: ("v_rndne_f32_e32", "Round to nearest even float32"),
+    0x24: ("v_floor_f32_e32", "Floor float32"),
     0x25: ("v_exp_f32_e32", "Exponent 2^x float32"),
     0x27: ("v_log_f32_e32", "Logarithm log2(x) float32"),
     0x2a: ("v_rcp_f32_e32", "Reciprocal 1/x float32"),
     0x2e: ("v_rsq_f32_e32", "Reciprocal square root 1/sqrt(x)"),
     0x33: ("v_sqrt_f32_e32", "Square root sqrt(x) float32"),
+    0x34: ("v_frexp_mant_f32_e32", "Vector extract float32 mantissa"),
     0x35: ("v_sin_f32_e32", "Sine float32"),
     0x36: ("v_cos_f32_e32", "Cosine float32"),
     0x37: ("v_not_b32_e32", "Vector bitwise NOT"),
     0x38: ("v_bfrev_b32_e32", "Vector bit-reverse"),
 }
+
+VOPC_OPS = {
+    0x00: ("v_cmp_f_f32_e32", "Vector compare v_cmp_f_f32"),
+    0x01: ("v_cmp_lt_f32_e32", "Vector compare v_cmp_lt_f32"),
+    0x02: ("v_cmp_eq_f32_e32", "Vector compare v_cmp_eq_f32"),
+    0x03: ("v_cmp_le_f32_e32", "Vector compare v_cmp_le_f32"),
+    0x04: ("v_cmp_gt_f32_e32", "Vector compare v_cmp_gt_f32"),
+    0x05: ("v_cmp_lg_f32_e32", "Vector compare v_cmp_lg_f32"),
+    0x06: ("v_cmp_ge_f32_e32", "Vector compare v_cmp_ge_f32"),
+    0x07: ("v_cmp_o_f32_e32", "Vector compare v_cmp_o_f32"),
+    0x08: ("v_cmp_u_f32_e32", "Vector compare v_cmp_u_f32"),
+    0x09: ("v_cmp_nge_f32_e32", "Vector compare v_cmp_nge_f32"),
+    0x0a: ("v_cmp_nlg_f32_e32", "Vector compare v_cmp_nlg_f32"),
+    0x0b: ("v_cmp_ngt_f32_e32", "Vector compare v_cmp_ngt_f32"),
+    0x0c: ("v_cmp_nle_f32_e32", "Vector compare v_cmp_nle_f32"),
+    0x0d: ("v_cmp_neq_f32_e32", "Vector compare v_cmp_neq_f32"),
+    0x0e: ("v_cmp_nlt_f32_e32", "Vector compare v_cmp_nlt_f32"),
+    0x0f: ("v_cmp_tru_f32_e32", "Vector compare v_cmp_tru_f32"),
+    0x10: ("v_cmpx_f_f32_e32", "Vector compare v_cmpx_f_f32"),
+    0x11: ("v_cmpx_lt_f32_e32", "Vector compare v_cmpx_lt_f32"),
+    0x12: ("v_cmpx_eq_f32_e32", "Vector compare v_cmpx_eq_f32"),
+    0x13: ("v_cmpx_le_f32_e32", "Vector compare v_cmpx_le_f32"),
+    0x14: ("v_cmpx_gt_f32_e32", "Vector compare v_cmpx_gt_f32"),
+    0x15: ("v_cmpx_lg_f32_e32", "Vector compare v_cmpx_lg_f32"),
+    0x16: ("v_cmpx_ge_f32_e32", "Vector compare v_cmpx_ge_f32"),
+    0x17: ("v_cmpx_o_f32_e32", "Vector compare v_cmpx_o_f32"),
+    0x18: ("v_cmpx_u_f32_e32", "Vector compare v_cmpx_u_f32"),
+    0x19: ("v_cmpx_nge_f32_e32", "Vector compare v_cmpx_nge_f32"),
+    0x1a: ("v_cmpx_nlg_f32_e32", "Vector compare v_cmpx_nlg_f32"),
+    0x1b: ("v_cmpx_ngt_f32_e32", "Vector compare v_cmpx_ngt_f32"),
+    0x1c: ("v_cmpx_nle_f32_e32", "Vector compare v_cmpx_nle_f32"),
+    0x1d: ("v_cmpx_neq_f32_e32", "Vector compare v_cmpx_neq_f32"),
+    0x1e: ("v_cmpx_nlt_f32_e32", "Vector compare v_cmpx_nlt_f32"),
+    0x1f: ("v_cmpx_tru_f32_e32", "Vector compare v_cmpx_tru_f32"),
+    0x20: ("v_cmp_f_f64_e32", "Vector compare v_cmp_f_f64"),
+    0x21: ("v_cmp_lt_f64_e32", "Vector compare v_cmp_lt_f64"),
+    0x22: ("v_cmp_eq_f64_e32", "Vector compare v_cmp_eq_f64"),
+    0x23: ("v_cmp_le_f64_e32", "Vector compare v_cmp_le_f64"),
+    0x24: ("v_cmp_gt_f64_e32", "Vector compare v_cmp_gt_f64"),
+    0x25: ("v_cmp_lg_f64_e32", "Vector compare v_cmp_lg_f64"),
+    0x26: ("v_cmp_ge_f64_e32", "Vector compare v_cmp_ge_f64"),
+    0x27: ("v_cmp_o_f64_e32", "Vector compare v_cmp_o_f64"),
+    0x28: ("v_cmp_u_f64_e32", "Vector compare v_cmp_u_f64"),
+    0x29: ("v_cmp_nge_f64_e32", "Vector compare v_cmp_nge_f64"),
+    0x2a: ("v_cmp_nlg_f64_e32", "Vector compare v_cmp_nlg_f64"),
+    0x2b: ("v_cmp_ngt_f64_e32", "Vector compare v_cmp_ngt_f64"),
+    0x2c: ("v_cmp_nle_f64_e32", "Vector compare v_cmp_nle_f64"),
+    0x2d: ("v_cmp_neq_f64_e32", "Vector compare v_cmp_neq_f64"),
+    0x2e: ("v_cmp_nlt_f64_e32", "Vector compare v_cmp_nlt_f64"),
+    0x2f: ("v_cmp_tru_f64_e32", "Vector compare v_cmp_tru_f64"),
+    0x30: ("v_cmpx_f_f64_e32", "Vector compare v_cmpx_f_f64"),
+    0x31: ("v_cmpx_lt_f64_e32", "Vector compare v_cmpx_lt_f64"),
+    0x32: ("v_cmpx_eq_f64_e32", "Vector compare v_cmpx_eq_f64"),
+    0x33: ("v_cmpx_le_f64_e32", "Vector compare v_cmpx_le_f64"),
+    0x34: ("v_cmpx_gt_f64_e32", "Vector compare v_cmpx_gt_f64"),
+    0x35: ("v_cmpx_lg_f64_e32", "Vector compare v_cmpx_lg_f64"),
+    0x36: ("v_cmpx_ge_f64_e32", "Vector compare v_cmpx_ge_f64"),
+    0x37: ("v_cmpx_o_f64_e32", "Vector compare v_cmpx_o_f64"),
+    0x38: ("v_cmpx_u_f64_e32", "Vector compare v_cmpx_u_f64"),
+    0x39: ("v_cmpx_nge_f64_e32", "Vector compare v_cmpx_nge_f64"),
+    0x3a: ("v_cmpx_nlg_f64_e32", "Vector compare v_cmpx_nlg_f64"),
+    0x3b: ("v_cmpx_ngt_f64_e32", "Vector compare v_cmpx_ngt_f64"),
+    0x3c: ("v_cmpx_nle_f64_e32", "Vector compare v_cmpx_nle_f64"),
+    0x3d: ("v_cmpx_neq_f64_e32", "Vector compare v_cmpx_neq_f64"),
+    0x3e: ("v_cmpx_nlt_f64_e32", "Vector compare v_cmpx_nlt_f64"),
+    0x3f: ("v_cmpx_tru_f64_e32", "Vector compare v_cmpx_tru_f64"),
+    0x80: ("v_cmp_f_i32_e32", "Vector compare v_cmp_f_i32"),
+    0x81: ("v_cmp_lt_i32_e32", "Vector compare v_cmp_lt_i32"),
+    0x82: ("v_cmp_eq_i32_e32", "Vector compare v_cmp_eq_i32"),
+    0x83: ("v_cmp_le_i32_e32", "Vector compare v_cmp_le_i32"),
+    0x84: ("v_cmp_gt_i32_e32", "Vector compare v_cmp_gt_i32"),
+    0x85: ("v_cmp_ne_i32_e32", "Vector compare v_cmp_ne_i32"),
+    0x86: ("v_cmp_ge_i32_e32", "Vector compare v_cmp_ge_i32"),
+    0x87: ("v_cmp_t_i32_e32", "Vector compare v_cmp_t_i32"),
+    0x88: ("v_cmp_class_f32_e32", "Vector compare v_cmp_class_f32"),
+    0x89: ("v_cmp_lt_i16_e32", "Vector compare v_cmp_lt_i16"),
+    0x8a: ("v_cmp_eq_i16_e32", "Vector compare v_cmp_eq_i16"),
+    0x8b: ("v_cmp_le_i16_e32", "Vector compare v_cmp_le_i16"),
+    0x8c: ("v_cmp_gt_i16_e32", "Vector compare v_cmp_gt_i16"),
+    0x8d: ("v_cmp_ne_i16_e32", "Vector compare v_cmp_ne_i16"),
+    0x8e: ("v_cmp_ge_i16_e32", "Vector compare v_cmp_ge_i16"),
+    0x8f: ("v_cmp_class_f16_e32", "Vector compare v_cmp_class_f16"),
+    0x90: ("v_cmpx_f_i32_e32", "Vector compare v_cmpx_f_i32"),
+    0x91: ("v_cmpx_lt_i32_e32", "Vector compare v_cmpx_lt_i32"),
+    0x92: ("v_cmpx_eq_i32_e32", "Vector compare v_cmpx_eq_i32"),
+    0x93: ("v_cmpx_le_i32_e32", "Vector compare v_cmpx_le_i32"),
+    0x94: ("v_cmpx_gt_i32_e32", "Vector compare v_cmpx_gt_i32"),
+    0x95: ("v_cmpx_ne_i32_e32", "Vector compare v_cmpx_ne_i32"),
+    0x96: ("v_cmpx_ge_i32_e32", "Vector compare v_cmpx_ge_i32"),
+    0x97: ("v_cmpx_t_i32_e32", "Vector compare v_cmpx_t_i32"),
+    0x98: ("v_cmpx_class_f32_e32", "Vector compare v_cmpx_class_f32"),
+    0x99: ("v_cmpx_lt_i16_e32", "Vector compare v_cmpx_lt_i16"),
+    0x9a: ("v_cmpx_eq_i16_e32", "Vector compare v_cmpx_eq_i16"),
+    0x9b: ("v_cmpx_le_i16_e32", "Vector compare v_cmpx_le_i16"),
+    0x9c: ("v_cmpx_gt_i16_e32", "Vector compare v_cmpx_gt_i16"),
+    0x9d: ("v_cmpx_ne_i16_e32", "Vector compare v_cmpx_ne_i16"),
+    0x9e: ("v_cmpx_ge_i16_e32", "Vector compare v_cmpx_ge_i16"),
+    0x9f: ("v_cmpx_class_f16_e32", "Vector compare v_cmpx_class_f16"),
+    0xa0: ("v_cmp_f_i64_e32", "Vector compare v_cmp_f_i64"),
+    0xa1: ("v_cmp_lt_i64_e32", "Vector compare v_cmp_lt_i64"),
+    0xa2: ("v_cmp_eq_i64_e32", "Vector compare v_cmp_eq_i64"),
+    0xa3: ("v_cmp_le_i64_e32", "Vector compare v_cmp_le_i64"),
+    0xa4: ("v_cmp_gt_i64_e32", "Vector compare v_cmp_gt_i64"),
+    0xa5: ("v_cmp_ne_i64_e32", "Vector compare v_cmp_ne_i64"),
+    0xa6: ("v_cmp_ge_i64_e32", "Vector compare v_cmp_ge_i64"),
+    0xa7: ("v_cmp_t_i64_e32", "Vector compare v_cmp_t_i64"),
+    0xa8: ("v_cmp_class_f64_e32", "Vector compare v_cmp_class_f64"),
+    0xa9: ("v_cmp_lt_u16_e32", "Vector compare v_cmp_lt_u16"),
+    0xaa: ("v_cmp_eq_u16_e32", "Vector compare v_cmp_eq_u16"),
+    0xab: ("v_cmp_le_u16_e32", "Vector compare v_cmp_le_u16"),
+    0xac: ("v_cmp_gt_u16_e32", "Vector compare v_cmp_gt_u16"),
+    0xad: ("v_cmp_ne_u16_e32", "Vector compare v_cmp_ne_u16"),
+    0xae: ("v_cmp_ge_u16_e32", "Vector compare v_cmp_ge_u16"),
+    0xb0: ("v_cmpx_f_i64_e32", "Vector compare v_cmpx_f_i64"),
+    0xb1: ("v_cmpx_lt_i64_e32", "Vector compare v_cmpx_lt_i64"),
+    0xb2: ("v_cmpx_eq_i64_e32", "Vector compare v_cmpx_eq_i64"),
+    0xb3: ("v_cmpx_le_i64_e32", "Vector compare v_cmpx_le_i64"),
+    0xb4: ("v_cmpx_gt_i64_e32", "Vector compare v_cmpx_gt_i64"),
+    0xb5: ("v_cmpx_ne_i64_e32", "Vector compare v_cmpx_ne_i64"),
+    0xb6: ("v_cmpx_ge_i64_e32", "Vector compare v_cmpx_ge_i64"),
+    0xb7: ("v_cmpx_t_i64_e32", "Vector compare v_cmpx_t_i64"),
+    0xb8: ("v_cmpx_class_f64_e32", "Vector compare v_cmpx_class_f64"),
+    0xb9: ("v_cmpx_lt_u16_e32", "Vector compare v_cmpx_lt_u16"),
+    0xba: ("v_cmpx_eq_u16_e32", "Vector compare v_cmpx_eq_u16"),
+    0xbb: ("v_cmpx_le_u16_e32", "Vector compare v_cmpx_le_u16"),
+    0xbc: ("v_cmpx_gt_u16_e32", "Vector compare v_cmpx_gt_u16"),
+    0xbd: ("v_cmpx_ne_u16_e32", "Vector compare v_cmpx_ne_u16"),
+    0xbe: ("v_cmpx_ge_u16_e32", "Vector compare v_cmpx_ge_u16"),
+    0xc0: ("v_cmp_f_u32_e32", "Vector compare v_cmp_f_u32"),
+    0xc1: ("v_cmp_lt_u32_e32", "Vector compare v_cmp_lt_u32"),
+    0xc2: ("v_cmp_eq_u32_e32", "Vector compare v_cmp_eq_u32"),
+    0xc3: ("v_cmp_le_u32_e32", "Vector compare v_cmp_le_u32"),
+    0xc4: ("v_cmp_gt_u32_e32", "Vector compare v_cmp_gt_u32"),
+    0xc5: ("v_cmp_ne_u32_e32", "Vector compare v_cmp_ne_u32"),
+    0xc6: ("v_cmp_ge_u32_e32", "Vector compare v_cmp_ge_u32"),
+    0xc7: ("v_cmp_t_u32_e32", "Vector compare v_cmp_t_u32"),
+    0xc8: ("v_cmp_f_f16_e32", "Vector compare v_cmp_f_f16"),
+    0xc9: ("v_cmp_lt_f16_e32", "Vector compare v_cmp_lt_f16"),
+    0xca: ("v_cmp_eq_f16_e32", "Vector compare v_cmp_eq_f16"),
+    0xcb: ("v_cmp_le_f16_e32", "Vector compare v_cmp_le_f16"),
+    0xcc: ("v_cmp_gt_f16_e32", "Vector compare v_cmp_gt_f16"),
+    0xcd: ("v_cmp_lg_f16_e32", "Vector compare v_cmp_lg_f16"),
+    0xce: ("v_cmp_ge_f16_e32", "Vector compare v_cmp_ge_f16"),
+    0xcf: ("v_cmp_o_f16_e32", "Vector compare v_cmp_o_f16"),
+    0xd0: ("v_cmpx_f_u32_e32", "Vector compare v_cmpx_f_u32"),
+    0xd1: ("v_cmpx_lt_u32_e32", "Vector compare v_cmpx_lt_u32"),
+    0xd2: ("v_cmpx_eq_u32_e32", "Vector compare v_cmpx_eq_u32"),
+    0xd3: ("v_cmpx_le_u32_e32", "Vector compare v_cmpx_le_u32"),
+    0xd4: ("v_cmpx_gt_u32_e32", "Vector compare v_cmpx_gt_u32"),
+    0xd5: ("v_cmpx_ne_u32_e32", "Vector compare v_cmpx_ne_u32"),
+    0xd6: ("v_cmpx_ge_u32_e32", "Vector compare v_cmpx_ge_u32"),
+    0xd7: ("v_cmpx_t_u32_e32", "Vector compare v_cmpx_t_u32"),
+    0xd8: ("v_cmpx_f_f16_e32", "Vector compare v_cmpx_f_f16"),
+    0xd9: ("v_cmpx_lt_f16_e32", "Vector compare v_cmpx_lt_f16"),
+    0xda: ("v_cmpx_eq_f16_e32", "Vector compare v_cmpx_eq_f16"),
+    0xdb: ("v_cmpx_le_f16_e32", "Vector compare v_cmpx_le_f16"),
+    0xdc: ("v_cmpx_gt_f16_e32", "Vector compare v_cmpx_gt_f16"),
+    0xdd: ("v_cmpx_lg_f16_e32", "Vector compare v_cmpx_lg_f16"),
+    0xde: ("v_cmpx_ge_f16_e32", "Vector compare v_cmpx_ge_f16"),
+    0xdf: ("v_cmpx_o_f16_e32", "Vector compare v_cmpx_o_f16"),
+    0xe0: ("v_cmp_f_u64_e32", "Vector compare v_cmp_f_u64"),
+    0xe1: ("v_cmp_lt_u64_e32", "Vector compare v_cmp_lt_u64"),
+    0xe2: ("v_cmp_eq_u64_e32", "Vector compare v_cmp_eq_u64"),
+    0xe3: ("v_cmp_le_u64_e32", "Vector compare v_cmp_le_u64"),
+    0xe4: ("v_cmp_gt_u64_e32", "Vector compare v_cmp_gt_u64"),
+    0xe5: ("v_cmp_ne_u64_e32", "Vector compare v_cmp_ne_u64"),
+    0xe6: ("v_cmp_ge_u64_e32", "Vector compare v_cmp_ge_u64"),
+    0xe7: ("v_cmp_t_u64_e32", "Vector compare v_cmp_t_u64"),
+    0xe8: ("v_cmp_u_f16_e32", "Vector compare v_cmp_u_f16"),
+    0xe9: ("v_cmp_nge_f16_e32", "Vector compare v_cmp_nge_f16"),
+    0xea: ("v_cmp_nlg_f16_e32", "Vector compare v_cmp_nlg_f16"),
+    0xeb: ("v_cmp_ngt_f16_e32", "Vector compare v_cmp_ngt_f16"),
+    0xec: ("v_cmp_nle_f16_e32", "Vector compare v_cmp_nle_f16"),
+    0xed: ("v_cmp_neq_f16_e32", "Vector compare v_cmp_neq_f16"),
+    0xee: ("v_cmp_nlt_f16_e32", "Vector compare v_cmp_nlt_f16"),
+    0xef: ("v_cmp_tru_f16_e32", "Vector compare v_cmp_tru_f16"),
+    0xf0: ("v_cmpx_f_u64_e32", "Vector compare v_cmpx_f_u64"),
+    0xf1: ("v_cmpx_lt_u64_e32", "Vector compare v_cmpx_lt_u64"),
+    0xf2: ("v_cmpx_eq_u64_e32", "Vector compare v_cmpx_eq_u64"),
+    0xf3: ("v_cmpx_le_u64_e32", "Vector compare v_cmpx_le_u64"),
+    0xf4: ("v_cmpx_gt_u64_e32", "Vector compare v_cmpx_gt_u64"),
+    0xf5: ("v_cmpx_ne_u64_e32", "Vector compare v_cmpx_ne_u64"),
+    0xf6: ("v_cmpx_ge_u64_e32", "Vector compare v_cmpx_ge_u64"),
+    0xf7: ("v_cmpx_t_u64_e32", "Vector compare v_cmpx_t_u64"),
+    0xf8: ("v_cmpx_u_f16_e32", "Vector compare v_cmpx_u_f16"),
+    0xf9: ("v_cmpx_nge_f16_e32", "Vector compare v_cmpx_nge_f16"),
+    0xfa: ("v_cmpx_nlg_f16_e32", "Vector compare v_cmpx_nlg_f16"),
+    0xfb: ("v_cmpx_ngt_f16_e32", "Vector compare v_cmpx_ngt_f16"),
+    0xfc: ("v_cmpx_nle_f16_e32", "Vector compare v_cmpx_nle_f16"),
+    0xfd: ("v_cmpx_neq_f16_e32", "Vector compare v_cmpx_neq_f16"),
+    0xfe: ("v_cmpx_nlt_f16_e32", "Vector compare v_cmpx_nlt_f16"),
+    0xff: ("v_cmpx_tru_f16_e32", "Vector compare v_cmpx_tru_f16"),
+}
+
 
 VOP2_OPS = {
     0x01: ("v_cndmask_b32_e32", "Vector conditional mask select"),
@@ -226,19 +473,464 @@ VOP2_OPS = {
     0x1b: ("v_and_b32_e32", "Vector bitwise AND"),
     0x1c: ("v_or_b32_e32", "Vector bitwise OR"),
     0x1d: ("v_xor_b32_e32", "Vector bitwise XOR"),
+    0x20: ("v_madmk_f32", "Vector multiply-add (non-fused) with literal multiplier"),
+    0x21: ("v_madak_f32", "Vector multiply-add (non-fused) with literal addend"),
     0x25: ("v_add_nc_u32_e32", "Vector add uint32 without carry"),
     0x26: ("v_sub_nc_u32_e32", "Vector sub uint32 without carry"),
     0x27: ("v_subrev_nc_u32_e32", "Vector reverse sub uint32 without carry"),
     0x2b: ("v_fmac_f32_e32", "Vector fused multiply-accumulate float32"),
+    0x2c: ("v_fmamk_f32", "Vector fused multiply-add with literal multiplier"),
+    0x2d: ("v_fmaak_f32", "Vector fused multiply-add with literal addend"),
     0x2f: ("v_cvt_pkrtz_f16_f32_e32", "Convert two float32 to packed float16 (round to zero)"),
+}
+
+VOP3P_OPS = {
+    0x00: ("v_pk_mad_i16", "Multiply-add signed 16-bit packed"),
+    0x01: ("v_pk_mul_lo_u16", "Multiply low unsigned 16-bit packed"),
+    0x02: ("v_pk_add_i16", "Add signed 16-bit packed"),
+    0x03: ("v_pk_sub_i16", "Subtract signed 16-bit packed"),
+    0x04: ("v_pk_lshlrev_b16", "Logical shift left reverse 16-bit packed"),
+    0x05: ("v_pk_lshrrev_b16", "Logical shift right reverse 16-bit packed"),
+    0x06: ("v_pk_ashrrev_i16", "Arithmetic shift right reverse 16-bit packed"),
+    0x07: ("v_pk_max_i16", "Maximum signed 16-bit packed"),
+    0x08: ("v_pk_min_i16", "Minimum signed 16-bit packed"),
+    0x09: ("v_pk_mad_u16", "Multiply-add unsigned 16-bit packed"),
+    0x0a: ("v_pk_add_u16", "Add unsigned 16-bit packed"),
+    0x0b: ("v_pk_sub_u16", "Subtract unsigned 16-bit packed"),
+    0x0c: ("v_pk_max_u16", "Maximum unsigned 16-bit packed"),
+    0x0d: ("v_pk_min_u16", "Minimum unsigned 16-bit packed"),
+    0x0e: ("v_pk_fma_f16", "Fused multiply-add float16 packed"),
+    0x0f: ("v_pk_add_f16", "Add float16 packed"),
+    0x10: ("v_pk_mul_f16", "Multiply float16 packed"),
+    0x11: ("v_pk_min_f16", "Minimum float16 packed"),
+    0x12: ("v_pk_max_f16", "Maximum float16 packed"),
+    0x13: ("v_dot2_f32_f16", "Dot product 2-element float16 accumulate to float32"),
+    0x14: ("v_dot2_i32_i16", "Dot product 2-element signed 16-bit accumulate to int32"),
+    0x15: ("v_dot2_u32_u16", "Dot product 2-element unsigned 16-bit accumulate to uint32"),
+    0x16: ("v_dot4_i32_i8", "Dot product 4-element signed 8-bit accumulate to int32"),
+    0x17: ("v_dot4_u32_u8", "Dot product 4-element unsigned 8-bit accumulate to uint32"),
+    0x18: ("v_dot8_i32_i4", "Dot product 8-element signed 4-bit accumulate to int32"),
+    0x19: ("v_dot8_u32_u4", "Dot product 8-element unsigned 4-bit accumulate to uint32"),
+    0x20: ("v_fma_mix_f32", "Fused multiply-add mixed precision to float32"),
+    0x21: ("v_fma_mixlo_f16", "Fused multiply-add mixed precision to float16 low"),
+    0x22: ("v_fma_mixhi_f16", "Fused multiply-add mixed precision to float16 high"),
+}
+
+VOP3P_3SRC = {
+    0x00, 0x09, 0x0e, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x20, 0x21, 0x22,
 }
 
 EXP_TARGETS = {
     0: "mrt0", 1: "mrt1", 2: "mrt2", 3: "mrt3",
     4: "mrt4", 5: "mrt5", 6: "mrt6", 7: "mrt7",
-    8: "z", 9: "null",
+    8: "mrtz", 9: "null",
     12: "pos0", 13: "pos1", 14: "pos2", 15: "pos3",
+    **{32 + i: f"param{i}" for i in range(32)},
 }
+
+# GFX1013 / RDNA 2 MUBUF opcodes: op -> (mnemonic, vdata_width, comment)
+MUBUF_OPS = {
+    0x00: ("buffer_load_format_x", 1, "Untyped/typed buffer format load 1 dword"),
+    0x01: ("buffer_load_format_xy", 2, "Untyped/typed buffer format load 2 dwords"),
+    0x02: ("buffer_load_format_xyz", 3, "Untyped/typed buffer format load 3 dwords"),
+    0x03: ("buffer_load_format_xyzw", 4, "Untyped/typed buffer format load 4 dwords"),
+    0x04: ("buffer_store_format_x", 1, "Buffer format store 1 dword"),
+    0x05: ("buffer_store_format_xy", 2, "Buffer format store 2 dwords"),
+    0x06: ("buffer_store_format_xyz", 3, "Buffer format store 3 dwords"),
+    0x07: ("buffer_store_format_xyzw", 4, "Buffer format store 4 dwords"),
+    0x08: ("buffer_load_ubyte", 1, "Buffer load unsigned byte"),
+    0x09: ("buffer_load_sbyte", 1, "Buffer load signed byte"),
+    0x0a: ("buffer_load_ushort", 1, "Buffer load unsigned 16-bit"),
+    0x0b: ("buffer_load_sshort", 1, "Buffer load signed 16-bit"),
+    0x0c: ("buffer_load_dword", 1, "Buffer load 1 dword"),
+    0x0d: ("buffer_load_dwordx2", 2, "Buffer load 2 dwords"),
+    0x0e: ("buffer_load_dwordx4", 4, "Buffer load 4 dwords"),
+    0x0f: ("buffer_load_dwordx3", 3, "Buffer load 3 dwords"),
+    0x18: ("buffer_store_byte", 1, "Buffer store byte"),
+    0x19: ("buffer_store_byte_d16_hi", 1, "Buffer store byte from high 16-bit lane"),
+    0x1a: ("buffer_store_short", 1, "Buffer store 16-bit short"),
+    0x1b: ("buffer_store_short_d16_hi", 1, "Buffer store 16-bit short from high lane"),
+    0x1c: ("buffer_store_dword", 1, "Buffer store 1 dword"),
+    0x1d: ("buffer_store_dwordx2", 2, "Buffer store 2 dwords"),
+    0x1e: ("buffer_store_dwordx4", 4, "Buffer store 4 dwords"),
+    0x1f: ("buffer_store_dwordx3", 3, "Buffer store 3 dwords"),
+    0x20: ("buffer_load_ubyte_d16", 1, "Buffer load unsigned byte to low 16 bits"),
+    0x21: ("buffer_load_ubyte_d16_hi", 1, "Buffer load unsigned byte to high 16 bits"),
+    0x22: ("buffer_load_sbyte_d16", 1, "Buffer load signed byte to low 16 bits"),
+    0x23: ("buffer_load_sbyte_d16_hi", 1, "Buffer load signed byte to high 16 bits"),
+    0x24: ("buffer_load_short_d16", 1, "Buffer load 16-bit short to low 16 bits"),
+    0x25: ("buffer_load_short_d16_hi", 1, "Buffer load 16-bit short to high 16 bits"),
+    0x30: ("buffer_atomic_swap", 1, "Buffer atomic swap 32-bit"),
+    0x31: ("buffer_atomic_cmpswap", 2, "Buffer atomic compare-and-swap 32-bit"),
+    0x32: ("buffer_atomic_add", 1, "Buffer atomic add 32-bit"),
+    0x33: ("buffer_atomic_sub", 1, "Buffer atomic subtract 32-bit"),
+    0x35: ("buffer_atomic_smin", 1, "Buffer atomic signed min 32-bit"),
+    0x36: ("buffer_atomic_umin", 1, "Buffer atomic unsigned min 32-bit"),
+    0x37: ("buffer_atomic_smax", 1, "Buffer atomic signed max 32-bit"),
+    0x38: ("buffer_atomic_umax", 1, "Buffer atomic unsigned max 32-bit"),
+    0x39: ("buffer_atomic_and", 1, "Buffer atomic bitwise AND 32-bit"),
+    0x3a: ("buffer_atomic_or", 1, "Buffer atomic bitwise OR 32-bit"),
+    0x3b: ("buffer_atomic_xor", 1, "Buffer atomic bitwise XOR 32-bit"),
+    0x3c: ("buffer_atomic_inc", 1, "Buffer atomic increment 32-bit"),
+    0x3d: ("buffer_atomic_dec", 1, "Buffer atomic decrement 32-bit"),
+    0x3e: ("buffer_atomic_fcmpswap", 2, "Buffer atomic float32 compare-and-swap"),
+    0x3f: ("buffer_atomic_fmin", 1, "Buffer atomic float32 min"),
+    0x40: ("buffer_atomic_fmax", 1, "Buffer atomic float32 max"),
+    0x50: ("buffer_atomic_swap_x2", 2, "Buffer atomic swap 64-bit"),
+    0x51: ("buffer_atomic_cmpswap_x2", 4, "Buffer atomic compare-and-swap 64-bit"),
+    0x52: ("buffer_atomic_add_x2", 2, "Buffer atomic add 64-bit"),
+    0x53: ("buffer_atomic_sub_x2", 2, "Buffer atomic subtract 64-bit"),
+    0x55: ("buffer_atomic_smin_x2", 2, "Buffer atomic signed min 64-bit"),
+    0x56: ("buffer_atomic_umin_x2", 2, "Buffer atomic unsigned min 64-bit"),
+    0x57: ("buffer_atomic_smax_x2", 2, "Buffer atomic signed max 64-bit"),
+    0x58: ("buffer_atomic_umax_x2", 2, "Buffer atomic unsigned max 64-bit"),
+    0x59: ("buffer_atomic_and_x2", 2, "Buffer atomic bitwise AND 64-bit"),
+    0x5a: ("buffer_atomic_or_x2", 2, "Buffer atomic bitwise OR 64-bit"),
+    0x5b: ("buffer_atomic_xor_x2", 2, "Buffer atomic bitwise XOR 64-bit"),
+    0x5c: ("buffer_atomic_inc_x2", 2, "Buffer atomic increment 64-bit"),
+    0x5d: ("buffer_atomic_dec_x2", 2, "Buffer atomic decrement 64-bit"),
+    0x5e: ("buffer_atomic_fcmpswap_x2", 4, "Buffer atomic float64 compare-and-swap"),
+    0x5f: ("buffer_atomic_fmin_x2", 2, "Buffer atomic float64 min"),
+    0x60: ("buffer_atomic_fmax_x2", 2, "Buffer atomic float64 max"),
+    0x71: ("buffer_gl0_inv", 0, "Invalidate GL0 vector cache"),
+    0x72: ("buffer_gl1_inv", 0, "Invalidate GL1 vector cache"),
+    0x80: ("buffer_load_format_d16_x", 1, "Buffer format load 1 packed 16-bit channel"),
+    0x81: ("buffer_load_format_d16_xy", 1, "Buffer format load 2 packed 16-bit channels"),
+    0x82: ("buffer_load_format_d16_xyz", 2, "Buffer format load 3 packed 16-bit channels"),
+    0x83: ("buffer_load_format_d16_xyzw", 2, "Buffer format load 4 packed 16-bit channels"),
+    0x84: ("buffer_store_format_d16_x", 1, "Buffer format store 1 packed 16-bit channel"),
+    0x85: ("buffer_store_format_d16_xy", 1, "Buffer format store 2 packed 16-bit channels"),
+    0x86: ("buffer_store_format_d16_xyz", 2, "Buffer format store 3 packed 16-bit channels"),
+    0x87: ("buffer_store_format_d16_xyzw", 2, "Buffer format store 4 packed 16-bit channels"),
+}
+
+# GFX1013 / RDNA 2 MTBUF opcodes: op -> (mnemonic, vdata_width, comment)
+MTBUF_OPS = {
+    0x00: ("tbuffer_load_format_x", 1, "Typed buffer load 1 channel"),
+    0x01: ("tbuffer_load_format_xy", 2, "Typed buffer load 2 channels"),
+    0x02: ("tbuffer_load_format_xyz", 3, "Typed buffer load 3 channels"),
+    0x03: ("tbuffer_load_format_xyzw", 4, "Typed buffer load 4 channels"),
+    0x04: ("tbuffer_store_format_x", 1, "Typed buffer store 1 channel"),
+    0x05: ("tbuffer_store_format_xy", 2, "Typed buffer store 2 channels"),
+    0x06: ("tbuffer_store_format_xyz", 3, "Typed buffer store 3 channels"),
+    0x07: ("tbuffer_store_format_xyzw", 4, "Typed buffer store 4 channels"),
+    0x08: ("tbuffer_load_format_d16_x", 1, "Typed buffer load 1 packed 16-bit channel"),
+    0x09: ("tbuffer_load_format_d16_xy", 1, "Typed buffer load 2 packed 16-bit channels"),
+    0x0a: ("tbuffer_load_format_d16_xyz", 2, "Typed buffer load 3 packed 16-bit channels"),
+    0x0b: ("tbuffer_load_format_d16_xyzw", 2, "Typed buffer load 4 packed 16-bit channels"),
+    0x0c: ("tbuffer_store_format_d16_x", 1, "Typed buffer store 1 packed 16-bit channel"),
+    0x0d: ("tbuffer_store_format_d16_xy", 1, "Typed buffer store 2 packed 16-bit channels"),
+    0x0e: ("tbuffer_store_format_d16_xyz", 2, "Typed buffer store 3 packed 16-bit channels"),
+    0x0f: ("tbuffer_store_format_d16_xyzw", 2, "Typed buffer store 4 packed 16-bit channels"),
+}
+
+# GFX1013 MTBUF 7-bit format identifiers; format 1 (BUF_FMT_8_UNORM) is LLVM's omitted default.
+MTBUF_FORMATS = {
+    0: "BUF_FMT_INVALID",
+    2: "BUF_FMT_8_SNORM",
+    3: "BUF_FMT_8_USCALED",
+    4: "BUF_FMT_8_SSCALED",
+    5: "BUF_FMT_8_UINT",
+    6: "BUF_FMT_8_SINT",
+    7: "BUF_FMT_16_UNORM",
+    8: "BUF_FMT_16_SNORM",
+    9: "BUF_FMT_16_USCALED",
+    10: "BUF_FMT_16_SSCALED",
+    11: "BUF_FMT_16_UINT",
+    12: "BUF_FMT_16_SINT",
+    13: "BUF_FMT_16_FLOAT",
+    14: "BUF_FMT_8_8_UNORM",
+    15: "BUF_FMT_8_8_SNORM",
+    16: "BUF_FMT_8_8_USCALED",
+    17: "BUF_FMT_8_8_SSCALED",
+    18: "BUF_FMT_8_8_UINT",
+    19: "BUF_FMT_8_8_SINT",
+    20: "BUF_FMT_32_UINT",
+    21: "BUF_FMT_32_SINT",
+    22: "BUF_FMT_32_FLOAT",
+    23: "BUF_FMT_16_16_UNORM",
+    24: "BUF_FMT_16_16_SNORM",
+    25: "BUF_FMT_16_16_USCALED",
+    26: "BUF_FMT_16_16_SSCALED",
+    27: "BUF_FMT_16_16_UINT",
+    28: "BUF_FMT_16_16_SINT",
+    29: "BUF_FMT_16_16_FLOAT",
+    30: "BUF_FMT_10_11_11_UNORM",
+    31: "BUF_FMT_10_11_11_SNORM",
+    32: "BUF_FMT_10_11_11_USCALED",
+    33: "BUF_FMT_10_11_11_SSCALED",
+    34: "BUF_FMT_10_11_11_UINT",
+    35: "BUF_FMT_10_11_11_SINT",
+    36: "BUF_FMT_10_11_11_FLOAT",
+    37: "BUF_FMT_11_11_10_UNORM",
+    38: "BUF_FMT_11_11_10_SNORM",
+    39: "BUF_FMT_11_11_10_USCALED",
+    40: "BUF_FMT_11_11_10_SSCALED",
+    41: "BUF_FMT_11_11_10_UINT",
+    42: "BUF_FMT_11_11_10_SINT",
+    43: "BUF_FMT_11_11_10_FLOAT",
+    44: "BUF_FMT_10_10_10_2_UNORM",
+    45: "BUF_FMT_10_10_10_2_SNORM",
+    46: "BUF_FMT_10_10_10_2_USCALED",
+    47: "BUF_FMT_10_10_10_2_SSCALED",
+    48: "BUF_FMT_10_10_10_2_UINT",
+    49: "BUF_FMT_10_10_10_2_SINT",
+    50: "BUF_FMT_2_10_10_10_UNORM",
+    51: "BUF_FMT_2_10_10_10_SNORM",
+    52: "BUF_FMT_2_10_10_10_USCALED",
+    53: "BUF_FMT_2_10_10_10_SSCALED",
+    54: "BUF_FMT_2_10_10_10_UINT",
+    55: "BUF_FMT_2_10_10_10_SINT",
+    56: "BUF_FMT_8_8_8_8_UNORM",
+    57: "BUF_FMT_8_8_8_8_SNORM",
+    58: "BUF_FMT_8_8_8_8_USCALED",
+    59: "BUF_FMT_8_8_8_8_SSCALED",
+    60: "BUF_FMT_8_8_8_8_UINT",
+    61: "BUF_FMT_8_8_8_8_SINT",
+    62: "BUF_FMT_32_32_UINT",
+    63: "BUF_FMT_32_32_SINT",
+    64: "BUF_FMT_32_32_FLOAT",
+    65: "BUF_FMT_16_16_16_16_UNORM",
+    66: "BUF_FMT_16_16_16_16_SNORM",
+    67: "BUF_FMT_16_16_16_16_USCALED",
+    68: "BUF_FMT_16_16_16_16_SSCALED",
+    69: "BUF_FMT_16_16_16_16_UINT",
+    70: "BUF_FMT_16_16_16_16_SINT",
+    71: "BUF_FMT_16_16_16_16_FLOAT",
+    72: "BUF_FMT_32_32_32_UINT",
+    73: "BUF_FMT_32_32_32_SINT",
+    74: "BUF_FMT_32_32_32_FLOAT",
+    75: "BUF_FMT_32_32_32_32_UINT",
+    76: "BUF_FMT_32_32_32_32_SINT",
+    77: "BUF_FMT_32_32_32_32_FLOAT",
+}
+
+
+def _format_vgpr_range(reg: int, width: int) -> str:
+    """Format a VGPR operand covering `width` consecutive 32-bit registers."""
+    return f"v{reg}" if width == 1 else f"v[{reg}:{reg + width - 1}]"
+
+
+def _format_srsrc4(srsrc: int) -> str:
+    """Format a 4-SGPR buffer resource descriptor (s[n:n+3] or ttmp[n:n+3])."""
+    if 108 <= srsrc <= 120:
+        t = srsrc - 108
+        return f"ttmp[{t}:{t + 3}]"
+    return f"s[{srsrc}:{srsrc + 3}]"
+
+
+def _format_buffer_operands_and_mods(
+    w0: int,
+    w1: int,
+    vdata_width: int,
+    *,
+    format_mod: str | None = None,
+    allow_lds: bool = False,
+    allow_tfe: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Decode operands and modifiers shared by MUBUF and MTBUF encodings."""
+    imm_offset = w0 & 0xfff
+    offen = (w0 >> 12) & 1
+    idxen = (w0 >> 13) & 1
+    glc = (w0 >> 14) & 1
+    dlc = (w0 >> 15) & 1
+    lds = ((w0 >> 16) & 1) if allow_lds else 0
+
+    vaddr = w1 & 0xff
+    vdata = (w1 >> 8) & 0xff
+    srsrc = ((w1 >> 16) & 0x1f) * 4
+    slc = (w1 >> 22) & 1
+    tfe = (w1 >> 23) & 1
+    soffset = (w1 >> 24) & 0xff
+
+    vaddr_str = f"v[{vaddr}:{vaddr + 1}]" if (idxen and offen) else (f"v{vaddr}" if (idxen or offen) else "off")
+    srsrc_str = _format_srsrc4(srsrc)
+    soffset_str = decode_s_reg(soffset)
+
+    if lds:
+        operands = [vaddr_str, srsrc_str, soffset_str]
+    else:
+        operands = [_format_vgpr_range(vdata, vdata_width), vaddr_str, srsrc_str, soffset_str]
+
+    mods = []
+    if format_mod is not None:
+        mods.append(format_mod)
+    if idxen:
+        mods.append("idxen")
+    if offen:
+        mods.append("offen")
+    if imm_offset:
+        mods.append(f"offset:{imm_offset}")
+    if glc:
+        mods.append("glc")
+    if slc:
+        mods.append("slc")
+    if dlc:
+        mods.append("dlc")
+    if lds:
+        mods.append("lds")
+    if allow_tfe and tfe:
+        mods.append("tfe")
+    return operands, mods
+
+# GFX1013 / RDNA 2 FLAT/GLOBAL/SCRATCH base opcodes:
+# op -> (suffix, kind, vdst_width, vdata_width, description)
+FLAT_BASE_OPS = {
+    0x08: ("load_ubyte", "load", 1, 0, "load unsigned byte"),
+    0x09: ("load_sbyte", "load", 1, 0, "load signed byte"),
+    0x0a: ("load_ushort", "load", 1, 0, "load unsigned 16-bit"),
+    0x0b: ("load_sshort", "load", 1, 0, "load signed 16-bit"),
+    0x0c: ("load_dword", "load", 1, 0, "load 1 dword"),
+    0x0d: ("load_dwordx2", "load", 2, 0, "load 2 dwords"),
+    0x0e: ("load_dwordx4", "load", 4, 0, "load 4 dwords"),
+    0x0f: ("load_dwordx3", "load", 3, 0, "load 3 dwords"),
+    0x18: ("store_byte", "store", 0, 1, "store byte"),
+    0x19: ("store_byte_d16_hi", "store", 0, 1, "store byte from high 16-bit lane"),
+    0x1a: ("store_short", "store", 0, 1, "store 16-bit short"),
+    0x1b: ("store_short_d16_hi", "store", 0, 1, "store 16-bit short from high lane"),
+    0x1c: ("store_dword", "store", 0, 1, "store 1 dword"),
+    0x1d: ("store_dwordx2", "store", 0, 2, "store 2 dwords"),
+    0x1e: ("store_dwordx4", "store", 0, 4, "store 4 dwords"),
+    0x1f: ("store_dwordx3", "store", 0, 3, "store 3 dwords"),
+    0x20: ("load_ubyte_d16", "load", 1, 0, "load unsigned byte to low 16 bits"),
+    0x21: ("load_ubyte_d16_hi", "load", 1, 0, "load unsigned byte to high 16 bits"),
+    0x22: ("load_sbyte_d16", "load", 1, 0, "load signed byte to low 16 bits"),
+    0x23: ("load_sbyte_d16_hi", "load", 1, 0, "load signed byte to high 16 bits"),
+    0x24: ("load_short_d16", "load", 1, 0, "load 16-bit short to low 16 bits"),
+    0x25: ("load_short_d16_hi", "load", 1, 0, "load 16-bit short to high 16 bits"),
+    0x30: ("atomic_swap", "atomic", 1, 1, "atomic swap 32-bit"),
+    0x31: ("atomic_cmpswap", "atomic", 1, 2, "atomic compare-and-swap 32-bit"),
+    0x32: ("atomic_add", "atomic", 1, 1, "atomic add 32-bit"),
+    0x33: ("atomic_sub", "atomic", 1, 1, "atomic subtract 32-bit"),
+    0x35: ("atomic_smin", "atomic", 1, 1, "atomic signed min 32-bit"),
+    0x36: ("atomic_umin", "atomic", 1, 1, "atomic unsigned min 32-bit"),
+    0x37: ("atomic_smax", "atomic", 1, 1, "atomic signed max 32-bit"),
+    0x38: ("atomic_umax", "atomic", 1, 1, "atomic unsigned max 32-bit"),
+    0x39: ("atomic_and", "atomic", 1, 1, "atomic bitwise AND 32-bit"),
+    0x3a: ("atomic_or", "atomic", 1, 1, "atomic bitwise OR 32-bit"),
+    0x3b: ("atomic_xor", "atomic", 1, 1, "atomic bitwise XOR 32-bit"),
+    0x3c: ("atomic_inc", "atomic", 1, 1, "atomic increment 32-bit"),
+    0x3d: ("atomic_dec", "atomic", 1, 1, "atomic decrement 32-bit"),
+    0x3e: ("atomic_fcmpswap", "atomic", 1, 2, "atomic float32 compare-and-swap"),
+    0x3f: ("atomic_fmin", "atomic", 1, 1, "atomic float32 min"),
+    0x40: ("atomic_fmax", "atomic", 1, 1, "atomic float32 max"),
+    0x50: ("atomic_swap_x2", "atomic", 2, 2, "atomic swap 64-bit"),
+    0x51: ("atomic_cmpswap_x2", "atomic", 2, 4, "atomic compare-and-swap 64-bit"),
+    0x52: ("atomic_add_x2", "atomic", 2, 2, "atomic add 64-bit"),
+    0x53: ("atomic_sub_x2", "atomic", 2, 2, "atomic subtract 64-bit"),
+    0x55: ("atomic_smin_x2", "atomic", 2, 2, "atomic signed min 64-bit"),
+    0x56: ("atomic_umin_x2", "atomic", 2, 2, "atomic unsigned min 64-bit"),
+    0x57: ("atomic_smax_x2", "atomic", 2, 2, "atomic signed max 64-bit"),
+    0x58: ("atomic_umax_x2", "atomic", 2, 2, "atomic unsigned max 64-bit"),
+    0x59: ("atomic_and_x2", "atomic", 2, 2, "atomic bitwise AND 64-bit"),
+    0x5a: ("atomic_or_x2", "atomic", 2, 2, "atomic bitwise OR 64-bit"),
+    0x5b: ("atomic_xor_x2", "atomic", 2, 2, "atomic bitwise XOR 64-bit"),
+    0x5c: ("atomic_inc_x2", "atomic", 2, 2, "atomic increment 64-bit"),
+    0x5d: ("atomic_dec_x2", "atomic", 2, 2, "atomic decrement 64-bit"),
+    0x5e: ("atomic_fcmpswap_x2", "atomic", 2, 4, "atomic float64 compare-and-swap"),
+    0x5f: ("atomic_fmin_x2", "atomic", 2, 2, "atomic float64 min"),
+    0x60: ("atomic_fmax_x2", "atomic", 2, 2, "atomic float64 max"),
+}
+
+FLAT_OPS = {
+    op: (f"flat_{suffix}", kind, vdst_width, vdata_width, f"Flat memory {desc}")
+    for op, (suffix, kind, vdst_width, vdata_width, desc) in FLAT_BASE_OPS.items()
+}
+GLOBAL_OPS = {
+    op: (f"global_{suffix}", kind, vdst_width, vdata_width, f"Global memory {desc}")
+    for op, (suffix, kind, vdst_width, vdata_width, desc) in FLAT_BASE_OPS.items()
+}
+SCRATCH_OPS = {
+    op: (f"scratch_{suffix}", kind, vdst_width, vdata_width, f"Scratch memory {desc}")
+    for op, (suffix, kind, vdst_width, vdata_width, desc) in FLAT_BASE_OPS.items()
+    if kind in ("load", "store")
+}
+FLAT_SEGMENT_TABLES = {
+    0: ("flat", FLAT_OPS),
+    1: ("scratch", SCRATCH_OPS),
+    2: ("global", GLOBAL_OPS),
+}
+
+
+def _decode_flat_family(w0: int, w1: int) -> tuple[int, str, str, str]:
+    """Decode one 64-bit FLAT, SCRATCH, or GLOBAL memory instruction."""
+    op = (w0 >> 18) & 0x7f
+    slc = (w0 >> 17) & 1
+    glc = (w0 >> 16) & 1
+    seg = (w0 >> 14) & 0x3
+    lds = (w0 >> 13) & 1
+    dlc = (w0 >> 12) & 1
+    raw_off = w0 & 0xfff
+
+    addr = w1 & 0xff
+    data_reg = (w1 >> 8) & 0xff
+    saddr = (w1 >> 16) & 0x7f
+    vdst = (w1 >> 24) & 0xff
+
+    if seg not in FLAT_SEGMENT_TABLES:
+        return (8, f"flat_seg{seg}_{op:02x}", f"flat_seg{seg}_{op:02x}", f"Unknown FLAT segment {seg}")
+
+    seg_name, ops_table = FLAT_SEGMENT_TABLES[seg]
+    if op not in ops_table:
+        return (8, f"{seg_name}_op_{op:02x}", f"{seg_name}_op_{op:02x}", f"Unknown {seg_name.upper()} opcode")
+
+    op_name, kind, vdst_width, vdata_width, comment = ops_table[op]
+    if seg == 0:
+        # FLAT uses a 12-bit unsigned offset field in GFX10 machine encoding.
+        imm_off = raw_off
+        vaddr_str = _format_vgpr_range(addr, 2)
+        saddr_str = None
+    else:
+        # GLOBAL and SCRATCH use a 12-bit signed offset.
+        imm_off = raw_off - 0x1000 if raw_off >= 0x800 else raw_off
+        if seg == 2:
+            if saddr == 0x7d:
+                vaddr_str = _format_vgpr_range(addr, 2)
+                saddr_str = "off"
+            else:
+                vaddr_str = f"v{addr}"
+                saddr_str = decode_s_reg64(saddr)
+        else:
+            if saddr == 0x7d:
+                vaddr_str = f"v{addr}"
+                saddr_str = "off"
+            else:
+                vaddr_str = "off"
+                saddr_str = decode_s_reg(saddr)
+
+    operands = []
+    if kind == "load":
+        if not (lds and seg in (1, 2)):
+            operands.append(_format_vgpr_range(vdst, vdst_width))
+        operands.append(vaddr_str)
+    elif kind == "store":
+        operands.append(vaddr_str)
+        operands.append(_format_vgpr_range(data_reg, vdata_width))
+    else:
+        if glc:
+            operands.append(_format_vgpr_range(vdst, vdst_width))
+        operands.append(vaddr_str)
+        operands.append(_format_vgpr_range(data_reg, vdata_width))
+
+    if saddr_str is not None:
+        operands.append(saddr_str)
+
+    mods = []
+    if imm_off != 0:
+        mods.append(f"offset:{imm_off}")
+    if glc:
+        mods.append("glc")
+    if slc:
+        mods.append("slc")
+    if dlc:
+        mods.append("dlc")
+    if lds and seg in (1, 2) and kind == "load":
+        mods.append("lds")
+
+    asm = f"{op_name} {', '.join(operands)}"
+    if mods:
+        asm += f" {' '.join(mods)}"
+    return (8, op_name, asm, comment)
 
 
 def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
@@ -281,8 +973,17 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         ssrc0 = w0 & 0xff
         op_info = SOP1_OPS.get(op, (f"s_sop1_{op:02x}", "Unknown SOP1"))
         op_name, comment = op_info
-        asm = f"{op_name} {decode_s_reg(sdst)}, {decode_s_reg(ssrc0)}"
-        return (4, op_name, asm, comment)
+        length = 4
+        if ssrc0 == 255:
+            if offset + 8 > len(data):
+                return (4, "sop1_truncated", f"{op_name} <truncated>", "Incomplete SOP1 literal")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            src0_str = f"0x{literal:x}"
+            length = 8
+        else:
+            src0_str = decode_s_reg(ssrc0)
+        asm = f"{op_name} {decode_s_reg(sdst)}, {src0_str}"
+        return (length, op_name, asm, comment)
 
     # SOPC: [31:23] == 0b101111110 (0xbf000000)
     # Must run before the SOPK prefix check, which would otherwise consume these words.
@@ -331,8 +1032,17 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         ssrc0 = w0 & 0xff
         op_info = SOP2_OPS.get(op, (f"s_sop2_{op:02x}", "Unknown SOP2"))
         op_name, comment = op_info
-        asm = f"{op_name} {decode_s_reg(sdst)}, {decode_s_reg(ssrc0)}, {decode_s_reg(ssrc1)}"
-        return (4, op_name, asm, comment)
+        length = 4
+        literal = None
+        if ssrc0 == 255 or ssrc1 == 255:
+            if offset + 8 > len(data):
+                return (4, "sop2_truncated", f"{op_name} <truncated>", "Incomplete SOP2 literal")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            length = 8
+        src0_str = f"0x{literal:x}" if ssrc0 == 255 and literal is not None else decode_s_reg(ssrc0)
+        src1_str = f"0x{literal:x}" if ssrc1 == 255 and literal is not None else decode_s_reg(ssrc1)
+        asm = f"{op_name} {decode_s_reg(sdst)}, {src0_str}, {src1_str}"
+        return (length, op_name, asm, comment)
 
     # 5. VOP1: [31:25] == 0b0111111 (0x7e000000)
     if (w0 & 0xfe000000) == 0x7e000000:
@@ -341,13 +1051,61 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         src0 = w0 & 0x1ff
         op_info = VOP1_OPS.get(op, (f"v_vop1_{op:02x}", "Unknown VOP1"))
         op_name, comment = op_info
+        length = 4
+        if src0 == 255:
+            if offset + 8 > len(data):
+                return (4, "vop1_truncated", f"{op_name} <truncated>", "Incomplete VOP1 literal")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            src0_str = f"0x{literal:x}"
+            length = 8
+        else:
+            src0_str = decode_v_reg(src0)
         if op_name == "v_nop":
             asm = "v_nop"
         else:
-            asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}"
-        return (4, op_name, asm, comment)
+            asm = f"{op_name} v{vdst}, {src0_str}"
+        return (length, op_name, asm, comment)
 
-    # 6. VOP2: [31] == 0
+    # 6. VOPC: [31:25] == 0b0111110 (0x7c000000)
+    if (w0 & 0xfe000000) == 0x7c000000:
+        op = (w0 >> 17) & 0xff
+        vsrc1 = (w0 >> 9) & 0xff
+        src0 = w0 & 0x1ff
+        op_info = VOPC_OPS.get(op, (f"v_vopc_{op:02x}", "Unknown VOPC"))
+        op_name, comment = op_info
+        length = 4
+        literal = None
+        if src0 in (249, 255):
+            extension = "SDWA" if src0 == 249 else "literal"
+            if offset + 8 > len(data):
+                return (4, "vopc_truncated", f"{op_name} <truncated>", f"Incomplete VOPC {extension}")
+            if src0 == 249:
+                return (8, "vopc_sdwa", f"{op_name} <unsupported SDWA>", "VOPC SDWA is not decoded")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            length = 8
+        wide0 = op_name.endswith(("_f64_e32", "_i64_e32", "_u64_e32"))
+        wide1 = wide0 and "_class_" not in op_name
+        if literal is not None:
+            src0_str = f"0x{literal:x}"
+        elif wide0:
+            if src0 >= 256:
+                vreg = src0 - 256
+                src0_str = f"v[{vreg}:{vreg + 1}]" if vreg < 255 else "<invalid VGPR pair>"
+            else:
+                src0_str = decode_s_reg64(src0)
+        else:
+            src0_str = decode_v_reg(src0)
+        if wide1:
+            src1_str = f"v[{vsrc1}:{vsrc1 + 1}]" if vsrc1 < 255 else "<invalid VGPR pair>"
+        else:
+            src1_str = f"v{vsrc1}"
+        if op_name.startswith("v_cmpx_"):
+            asm = f"{op_name} {src0_str}, {src1_str}"
+        else:
+            asm = f"{op_name} vcc_lo, {src0_str}, {src1_str}"
+        return (length, op_name, asm, comment)
+
+    # 7. VOP2: [31] == 0
     if (w0 & 0x80000000) == 0:
         op = (w0 >> 25) & 0x3f
         vdst = (w0 >> 17) & 0xff
@@ -355,18 +1113,31 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         src0 = w0 & 0x1ff
         op_info = VOP2_OPS.get(op, (f"v_vop2_{op:02x}", "Unknown VOP2"))
         op_name, comment = op_info
+        has_literal = src0 == 255 or op in (0x20, 0x21, 0x2c, 0x2d)
+        length = 4
+        literal = None
+        if has_literal:
+            if offset + 8 > len(data):
+                return (4, "vop2_truncated", f"{op_name} <truncated>", "Incomplete VOP2 literal")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            length = 8
+        src0_str = f"0x{literal:x}" if src0 == 255 and literal is not None else decode_v_reg(src0)
         if op_name == "v_cndmask_b32_e32":
-            asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}, v{vsrc1}, vcc_lo"
+            asm = f"{op_name} v{vdst}, {src0_str}, v{vsrc1}, vcc_lo"
+        elif op in (0x20, 0x2c):
+            asm = f"{op_name} v{vdst}, {src0_str}, 0x{literal:x}, v{vsrc1}"
+        elif op in (0x21, 0x2d):
+            asm = f"{op_name} v{vdst}, {src0_str}, v{vsrc1}, 0x{literal:x}"
         else:
-            asm = f"{op_name} v{vdst}, {decode_v_reg(src0)}, v{vsrc1}"
-        return (4, op_name, asm, comment)
+            asm = f"{op_name} v{vdst}, {src0_str}, v{vsrc1}"
+        return (length, op_name, asm, comment)
 
-    # 7. VINTRP: [31:26] == 0b110010 (0xc8000000)
+    # 8. VINTRP: [31:26] == 0b110010 (0xc8000000)
     if (w0 & 0xfc000000) == 0xc8000000:
         vdst = (w0 >> 18) & 0xff
         op = (w0 >> 16) & 0x3
-        chan = "xyzw"[(w0 >> 14) & 0x3]
-        attr = (w0 >> 8) & 0x3f
+        attr = (w0 >> 10) & 0x3f
+        chan = "xyzw"[(w0 >> 8) & 0x3]
         vsrc = w0 & 0xff
         op_names = {0: "v_interp_p1_f32_e32", 1: "v_interp_p2_f32_e32", 2: "v_interp_mov_f32_e32"}
         op_name = op_names.get(op, f"v_interp_{op}")
@@ -374,31 +1145,41 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         comment = f"Parameter interpolation stage {op+1} for attribute {attr}.{chan}"
         return (4, op_name, asm, comment)
 
-    # 8. EXP: 64-bit [31:26] == 0b111110 (0xf8000000)
+    # 9. EXP: 64-bit [31:26] == 0b111110 (0xf8000000)
     if (w0 & 0xfc000000) == 0xf8000000:
         if offset + 8 > len(data):
             return (4, "exp_truncated", "exp <truncated>", "Incomplete 64-bit export instruction")
         w1, = struct.unpack_from("<I", data, offset + 4)
-        en = (w0 >> 16) & 0xf
-        target = (w0 >> 20) & 0x3f
-        compr = (w0 >> 24) & 1
-        done = (w0 >> 25) & 1
+        en = w0 & 0xf
+        target = (w0 >> 4) & 0x3f
+        compr = (w0 >> 10) & 1
+        done = (w0 >> 11) & 1
         vm = (w0 >> 12) & 1
-        v0 = w1 & 0xff
-        v1 = (w1 >> 8) & 0xff
-        v2 = (w1 >> 16) & 0xff
-        v3 = (w1 >> 24) & 0xff
+        vs = [(w1 >> (8 * k)) & 0xff for k in range(4)]
+        if compr:
+            lo = f"v{vs[0]}" if en & 0x1 else "off"
+            hi = f"v{vs[1]}" if en & 0x4 else "off"
+            regs = [lo, lo, hi, hi]
+        else:
+            regs = [f"v{vs[k]}" if (en & (1 << k)) else "off" for k in range(4)]
         target_name = EXP_TARGETS.get(target, f"target_{target}")
         flags = []
-        if done: flags.append("done")
-        if compr: flags.append("compr")
-        if vm: flags.append("vm")
+        if done:
+            flags.append("done")
+        if compr:
+            flags.append("compr")
+        if vm:
+            flags.append("vm")
+        # The printed compressed operands use the first bit of each pair.
+        # Keep a non-paired raw mask visible so it cannot masquerade as a supported export.
+        if compr and en not in (0x0, 0x3, 0xc, 0xf):
+            flags.append(f"en:{en:#x}")
         flags_str = " ".join(flags)
-        asm = f"exp {target_name} v{v0}, v{v1}, v{v2}, v{v3} {flags_str}".strip()
+        asm = f"exp {target_name} {', '.join(regs)} {flags_str}".strip()
         comment = f"Export output pixels/attributes to {target_name.upper()}"
         return (8, "exp", asm, comment)
 
-    # 9. SMEM: 64-bit [31:26] == 0b111101 (0xf4000000)
+    # 10. SMEM: 64-bit [31:26] == 0b111101 (0xf4000000)
     if (w0 & 0xfc000000) == 0xf4000000:
         if offset + 8 > len(data):
             return (4, "smem_truncated", "smem <truncated>", "Incomplete 64-bit SMEM instruction")
@@ -407,10 +1188,209 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         sdata = (w0 >> 6) & 0x7f
         sbase = (w0 & 0x3f) * 2
         op_name = SMEM_OPS.get(op, f"s_smem_{op:02x}")
-        offset_val = w1 & 0x1fffff
-        asm = f"{op_name} s[{sdata}:{sdata+3}], s[{sbase}:{sbase+1}], 0x{offset_val:x}"
+        data_width, base_width = SMEM_WIDTHS.get(op, (4, 2))
+        sdata_str = decode_s_reg(sdata) if data_width == 1 else f"s[{sdata}:{sdata + data_width - 1}]"
+        if base_width == 2 and sbase == 106:
+            sbase_str = "vcc"
+        else:
+            sbase_str = f"s[{sbase}:{sbase + base_width - 1}]"
+        soffset = (w1 >> 25) & 0x7f
+        imm_offset = w1 & 0x1fffff
+        if soffset == 125:
+            off_str = f"0x{imm_offset:x}"
+        else:
+            off_str = decode_s_reg(soffset)
+            if imm_offset:
+                off_str += f" offset:0x{imm_offset:x}"
+        mods = []
+        if (w0 >> 16) & 1:
+            mods.append("glc")
+        if (w0 >> 14) & 1:
+            mods.append("dlc")
+        mod_str = (" " + " ".join(mods)) if mods else ""
+        asm = f"{op_name} {sdata_str}, {sbase_str}, {off_str}{mod_str}"
         comment = "Scalar memory load from constant buffer/resource descriptor"
         return (8, op_name, asm, comment)
+
+    # 11. MIMG: 64-bit + optional NSA dwords [31:26] == 0b111100 (0xf0000000)
+    if (w0 & 0xfc000000) == 0xf0000000:
+        nsize = (w0 >> 1) & 0x3
+        length = 8 + 4 * nsize
+        if offset + length > len(data):
+            return (len(data) - offset, "mimg_truncated", "mimg <truncated>", "Incomplete MIMG instruction")
+        w1, = struct.unpack_from("<I", data, offset + 4)
+        op = (w0 >> 18) & 0x7f
+        op_name, has_sampler, extra_addrs = MIMG_OPS.get(op, (f"image_mimg_{op:02x}", False, 0))
+        dmask = (w0 >> 8) & 0xf
+        dim_code = (w0 >> 3) & 0x7
+        dim_name, base_addrs, deriv_addrs = MIMG_DIMS[dim_code]
+        addr_count = base_addrs + extra_addrs + (deriv_addrs if op == 0x22 else 0)
+        d16 = (w1 >> 31) & 1
+        n_data = max(1, bin(dmask).count("1"))
+        if d16:
+            n_data = (n_data + 1) // 2
+        vaddr0 = w1 & 0xff
+        vdata = (w1 >> 8) & 0xff
+        srsrc = ((w1 >> 16) & 0x1f) * 4
+        ssamp = ((w1 >> 21) & 0x1f) * 4
+        r128 = (w0 >> 15) & 1
+        vdata_str = f"v{vdata}" if n_data == 1 else f"v[{vdata}:{vdata + n_data - 1}]"
+        if nsize > 0:
+            extra_bytes = list(data[offset + 8:offset + length])
+            addrs = [vaddr0] + extra_bytes[:max(0, addr_count - 1)]
+            vaddr_str = "[" + ", ".join(f"v{r}" for r in addrs) + "]"
+        else:
+            vaddr_str = f"v{vaddr0}" if addr_count == 1 else f"v[{vaddr0}:{vaddr0 + addr_count - 1}]"
+        srsrc_width = 4 if r128 else 8
+        srsrc_str = f"s[{srsrc}:{srsrc + srsrc_width - 1}]"
+        operands = [vdata_str, vaddr_str, srsrc_str]
+        if has_sampler:
+            operands.append(f"s[{ssamp}:{ssamp + 3}]")
+        mods = [f"dmask:0x{dmask:x}", f"dim:{dim_name}"]
+        if (w0 >> 12) & 1:
+            mods.append("unorm")
+        if (w0 >> 13) & 1:
+            mods.append("glc")
+        if (w0 >> 25) & 1:
+            mods.append("slc")
+        if r128:
+            mods.append("r128")
+        if (w0 >> 14) & 1:
+            mods.append("lwe")
+        if (w0 >> 7) & 1:
+            mods.append("dlc")
+        if d16:
+            mods.append("d16")
+        asm = f"{op_name} {', '.join(operands)} {' '.join(mods)}"
+        comment = "Image memory load/store/sample operation"
+        return (length, op_name, asm, comment)
+
+    # 12. VOP3P: 64-bit [31:23] == 0b110011000 (0xcc000000)
+    if (w0 & 0xff800000) == 0xcc000000:
+        if offset + 8 > len(data):
+            return (4, "vop3p_truncated", "vop3p <truncated>", "Incomplete 64-bit VOP3P instruction")
+        w1, = struct.unpack_from("<I", data, offset + 4)
+        op = (w0 >> 16) & 0x7f
+        clamp = (w0 >> 15) & 1
+        vdst = w0 & 0xff
+        src0 = w1 & 0x1ff
+        src1 = (w1 >> 9) & 0x1ff
+        src2 = (w1 >> 18) & 0x1ff
+
+        op_info = VOP3P_OPS.get(op, (f"v_vop3p_{op:02x}", "Unknown VOP3P"))
+        op_name, comment = op_info
+        is_3src = op in VOP3P_3SRC
+        arity = 3 if is_3src else 2
+
+        length = 8
+        literal = None
+        if src0 == 255 or src1 == 255 or (is_3src and src2 == 255):
+            if offset + 12 > len(data):
+                return (8, "vop3p_truncated", f"{op_name} <truncated>", "Incomplete VOP3P literal")
+            literal, = struct.unpack_from("<I", data, offset + 8)
+            length = 12
+
+        # Check for unmodeled / reserved bits in 2-source VOP3P encodings.
+        # Note: bit 14 of w0 is op_sel_hi[2], which LLVM's MC assembler defaults to 1 (op_sel_hi = 0b111)
+        # for all packed VOP3P instructions regardless of arity, so bit 14 is ignored on 2-source forms.
+        if not is_3src and (src2 != 0 or ((w0 >> 10) & 1) or ((w0 >> 13) & 1) or ((w1 >> 31) & 1)):
+            return (length, f"{op_name}_unsupported", f"{op_name} <unsupported_reserved_bits>", "Reserved bitfields set in 2-source VOP3P encoding")
+
+        def vop3p_operand(reg_id: int) -> str:
+            if reg_id == 255 and literal is not None:
+                return f"0x{literal:x}"
+            return decode_v_reg(reg_id)
+
+        if is_3src:
+            asm = f"{op_name} v{vdst}, {vop3p_operand(src0)}, {vop3p_operand(src1)}, {vop3p_operand(src2)}"
+            op_sel = [(w0 >> 11) & 1, (w0 >> 12) & 1, (w0 >> 13) & 1]
+            op_sel_hi = [(w1 >> 27) & 1, (w1 >> 28) & 1, (w0 >> 14) & 1]
+            neg_lo = [(w1 >> 29) & 1, (w1 >> 30) & 1, (w1 >> 31) & 1]
+            neg_hi = [(w0 >> 8) & 1, (w0 >> 9) & 1, (w0 >> 10) & 1]
+        else:
+            asm = f"{op_name} v{vdst}, {vop3p_operand(src0)}, {vop3p_operand(src1)}"
+            op_sel = [(w0 >> 11) & 1, (w0 >> 12) & 1]
+            op_sel_hi = [(w1 >> 27) & 1, (w1 >> 28) & 1]
+            neg_lo = [(w1 >> 29) & 1, (w1 >> 30) & 1]
+            neg_hi = [(w0 >> 8) & 1, (w0 >> 9) & 1]
+
+        # Architectural defaults:
+        # Standard packed instructions (v_pk_*, v_dot*): default op_sel is all 0, op_sel_hi is all 1, neg_lo/neg_hi all 0.
+        # Mixed-precision FMA (v_fma_mix*): default op_sel and op_sel_hi are all 0 (f32, low half).
+        if op_name.startswith("v_fma_mix"):
+            default_op_sel = [0] * arity
+            default_op_sel_hi = [0] * arity
+        else:
+            default_op_sel = [0] * arity
+            default_op_sel_hi = [1] * arity
+        default_neg_lo = [0] * arity
+        default_neg_hi = [0] * arity
+
+        if op_sel != default_op_sel:
+            asm += f" op_sel:[{','.join(str(b) for b in op_sel)}]"
+        if op_sel_hi != default_op_sel_hi:
+            asm += f" op_sel_hi:[{','.join(str(b) for b in op_sel_hi)}]"
+        if neg_lo != default_neg_lo:
+            asm += f" neg_lo:[{','.join(str(b) for b in neg_lo)}]"
+        if neg_hi != default_neg_hi:
+            asm += f" neg_hi:[{','.join(str(b) for b in neg_hi)}]"
+
+        if clamp:
+            asm += " clamp"
+
+        return (length, op_name, asm, comment)
+
+    # 12. MUBUF: 64-bit [31:26] == 0b111000 (0xe0000000)
+    if (w0 & 0xfc000000) == 0xe0000000:
+        if offset + 8 > len(data):
+            return (4, "mubuf_truncated", "mubuf <truncated>", "Incomplete 64-bit MUBUF instruction")
+        w1, = struct.unpack_from("<I", data, offset + 4)
+        op = (w0 >> 18) & 0xff
+        op_name, vdata_width, comment = MUBUF_OPS.get(
+            op, (f"buffer_mubuf_{op:02x}", 1, "Unknown MUBUF")
+        )
+        if vdata_width == 0:
+            return (8, op_name, op_name, comment)
+        allow_lds = op_name.startswith("buffer_load_") and "_d16" not in op_name
+        allow_tfe = not op_name.startswith("buffer_atomic_")
+        operands, mods = _format_buffer_operands_and_mods(
+            w0, w1, vdata_width, allow_lds=allow_lds, allow_tfe=allow_tfe
+        )
+        asm = f"{op_name} {', '.join(operands)}"
+        if mods:
+            asm += f" {' '.join(mods)}"
+        return (8, op_name, asm, comment)
+
+    # 13. MTBUF: 64-bit [31:26] == 0b111010 (0xe8000000)
+    if (w0 & 0xfc000000) == 0xe8000000:
+        if offset + 8 > len(data):
+            return (4, "mtbuf_truncated", "mtbuf <truncated>", "Incomplete 64-bit MTBUF instruction")
+        w1, = struct.unpack_from("<I", data, offset + 4)
+        fmt = (w0 >> 19) & 0x7f
+        op = ((w0 >> 16) & 0x7) | (((w1 >> 21) & 1) << 3)
+        op_name, vdata_width, comment = MTBUF_OPS.get(
+            op, (f"tbuffer_mtbuf_{op:02x}", 1, "Unknown MTBUF")
+        )
+        if fmt == 1:
+            format_mod = None
+        elif fmt in MTBUF_FORMATS:
+            format_mod = f"format:[{MTBUF_FORMATS[fmt]}]"
+        else:
+            format_mod = f"format:{fmt}"
+        operands, mods = _format_buffer_operands_and_mods(
+            w0, w1, vdata_width, format_mod=format_mod
+        )
+        asm = f"{op_name} {', '.join(operands)}"
+        if mods:
+            asm += f" {' '.join(mods)}"
+        return (8, op_name, asm, comment)
+
+    # 12. FLAT / SCRATCH / GLOBAL: 64-bit [31:26] == 0b110111 (0xdc000000)
+    if (w0 & 0xfc000000) == 0xdc000000:
+        if offset + 8 > len(data):
+            return (4, "flat_truncated", "flat <truncated>", "Incomplete 64-bit FLAT/GLOBAL/SCRATCH instruction")
+        w1, = struct.unpack_from("<I", data, offset + 4)
+        return _decode_flat_family(w0, w1)
 
     # Default fallback: unknown 32-bit word
     return (4, f"word_0x{w0:08x}", f".long 0x{w0:08x}", "Unrecognized RDNA 2 instruction encoding")

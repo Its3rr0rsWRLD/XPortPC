@@ -1,10 +1,12 @@
 #include "bvh_fixture.h"
+#include "desktop_gpu.h"
 #include "pixel_aot_vs.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string_view>
 
 using namespace bvh_fixture;
@@ -73,6 +75,8 @@ struct PixelInput {
     std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
     UINT8 writeMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     std::vector<BYTE> coverage;
+    // An explicit viewport (upstream's case trailer, flags bit 1); one reference color per target pixel.
+    std::optional<D3D12_VIEWPORT> viewport;
 };
 
 // The outputs of a --check-pixel-outputs draw: R32G32B32A32_FLOAT targets 0..N-1, each cleared to -1 and drawn with
@@ -103,13 +107,17 @@ struct Extent {
 
 void draw_verified(ID3D12Device* device, const char* path, const std::vector<PixelInput>& levels,
                    Extent base, UINT firstResident, const std::vector<MipDraw>& draws, const char* capture,
-                   const PixelOutputs* outputs = nullptr)
+                   const PixelOutputs* outputs = nullptr, ID3D12Resource* gpuConstants = nullptr)
 {
     constexpr DXGI_FORMAT targetFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
     const UINT targetCount = outputs ? static_cast<UINT>(outputs->masks.size()) : 1;
     const bool depth = outputs && outputs->depth;
     const auto& input = levels.front();
-    auto cb = upload(device, input.constants);
+    ComPtr<ID3D12Resource> uploadedConstants;
+    if (!gpuConstants) {
+        uploadedConstants = upload(device, input.constants);
+        gpuConstants = uploadedConstants.Get();
+    }
     // Title memory is always bound. Without a memory section the range buffer holds one zeroed range
     // and the count is 0, and every slot views the same small zero buffer.
     std::vector<TitleRangeRecord> rangeRecords = input.memory.ranges;
@@ -397,7 +405,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         list->SetDescriptorHeaps(1, heaps);
         list->SetGraphicsRootSignature(root.Get());
         list->SetGraphicsRootDescriptorTable(0, srvs->GetGPUDescriptorHandleForHeapStart());
-        list->SetGraphicsRootConstantBufferView(1, cb->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(1, gpuConstants->GetGPUVirtualAddress());
         list->SetGraphicsRootShaderResourceView(2, rangeBuffer->GetGPUVirtualAddress());
         auto memoryTable = srvs->GetGPUDescriptorHandleForHeapStart();
         memoryTable.ptr += UINT64(2) * increment;
@@ -419,8 +427,9 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         };
         const float viewportWidth = viewportAxis(width, input.width, base.width);
         const float viewportHeight = viewportAxis(height, input.height, base.height);
-        const D3D12_VIEWPORT viewport{(width - viewportWidth) * 0.5f, (height - viewportHeight) * 0.5f,
-                                      viewportWidth, viewportHeight, 0, 1};
+        const D3D12_VIEWPORT viewport = input.viewport.value_or(
+            D3D12_VIEWPORT{(width - viewportWidth) * 0.5f, (height - viewportHeight) * 0.5f,
+                           viewportWidth, viewportHeight, 0, 1});
         const D3D12_RECT scissor{0,0,LONG(width),LONG(height)};
         list->RSSetViewports(1, &viewport);
         list->RSSetScissorRects(1, &scissor);
@@ -664,7 +673,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                     for (size_t c = 0; c < actual.size(); ++c)
                         std::fprintf(stderr, "channel=%zu expected=%g actual=%g expected_bits=%08x actual_bits=%08x\n",
                                      c, expected[c], actual[c], bits(expected[c]), bits(actual[c]));
-                    throw std::runtime_error("AOT color export differs from CPU reference");
+                    throw PixelMismatch();
                 }
                 if (capture) {
                     for (float value : actual) image.push_back(static_cast<BYTE>(std::lround(value * 255)));
@@ -682,11 +691,49 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
 }
 
 void draw_verified(ID3D12Device* device, const char* path, const std::vector<PixelInput>& levels,
-                   UINT firstResident, UINT sampledLevel, const char* capture)
+                   UINT firstResident, UINT sampledLevel, const char* capture,
+                   ID3D12Resource* gpuConstants = nullptr)
 {
     const auto& top = levels.front();
     draw_verified(device, path, levels, {top.width << firstResident, top.height << firstResident},
-                  firstResident, {{sampledLevel, levels.at(sampledLevel).scale}}, capture);
+                  firstResident, {{sampledLevel, levels.at(sampledLevel).scale}}, capture, gpuConstants);
+}
+
+ComPtr<ID3D12Resource> produce_pixel_constants(ID3D12Device* device, const char* path)
+{
+    std::ifstream file(path, std::ios::binary);
+    const std::vector<char> shader{std::istreambuf_iterator<char>(file), {}};
+    if (shader.empty() || file.bad()) throw std::runtime_error("Cannot read compiled compute producer");
+
+    D3D12_ROOT_PARAMETER parameter{};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC signature{};
+    signature.NumParameters = 1;
+    signature.pParameters = &parameter;
+    ComPtr<ID3DBlob> serialized;
+    check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr),
+          "Serialize compute producer root");
+    ComPtr<ID3D12RootSignature> root;
+    check(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+                                      IID_PPV_ARGS(&root)), "Compute producer root");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = root.Get();
+    desc.CS = {shader.data(), shader.size()};
+    ComPtr<ID3D12PipelineState> pipeline;
+    check(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline)), "Compute producer pipeline");
+
+    auto constants = make_buffer(device, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT,
+                                 D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    ComputeCommands commands(device, pipeline.Get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
+    commands.list->SetComputeRootSignature(root.Get());
+    commands.list->SetComputeRootUnorderedAccessView(0, constants->GetGPUVirtualAddress());
+    commands.list->Dispatch(1, 1, 1);
+    transition(commands.list.Get(), constants.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    commands.submit_and_wait(device);
+    return constants;
 }
 }
 
@@ -818,7 +865,8 @@ PixelInput ramp_input(bool swapRB)
 }
 }
 
-void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference, UINT8 writeMask)
+static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference,
+                        UINT8 writeMask, ID3D12Resource* gpuConstants)
 {
     PixelInput input = ramp_input(swapRB);
     input.writeMask = writeMask;
@@ -846,11 +894,51 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
                 if (mask & 0xf0u) throw BadCase("NaN-class mask names a channel beyond the fourth");
             at += section;
         }
+        if (bytes.size() > at && static_cast<BYTE>(bytes[at]) <= 3u) {
+            // Upstream's case trailer (R0Y00/Xbox2Windows#363 and #552), told apart from the magic-led sections by its
+            // first byte: a flags byte (bit 0: integer target, bit 1: a viewport rectangle of four words follows),
+            // then optionally 64 NaN-class mask bytes, to the end of the file.
+            const UINT flags = static_cast<BYTE>(bytes[at++]);
+            input.integerRT = (flags & 1u) != 0;
+            if (flags & 2u) {
+                std::array<UINT, 4> rect{};
+                if (bytes.size() - at < sizeof(rect)) throw BadCase("Invalid pixel case viewport");
+                std::memcpy(rect.data(), bytes.data() + at, sizeof(rect));
+                at += sizeof(rect);
+                const auto [left, top, width, height] = rect;
+                if (!width || !height || left >= input.width || top >= input.height ||
+                    width > input.width - left || height > input.height - top)
+                    throw BadCase("Invalid pixel case viewport");
+                // Explicit viewport cases provide one reference color per target pixel.
+                input.scale = 1;
+                input.viewport = D3D12_VIEWPORT{float(left), float(top), float(width), float(height), 0, 1};
+            }
+            if (bytes.size() > at) {
+                if (input.integerRT) throw BadCase("NaN-class masks require a floating-point render target");
+                if (bytes.size() - at != 64) throw BadCase("Expected exactly 64 NaN mask bytes after the case trailer fields");
+                input.nanMask.assign(bytes.data() + at, bytes.data() + bytes.size());
+                at = bytes.size();
+            }
+        }
         if (bytes.size() > at) input.memory = parse_memory_section(bytes.data() + at, bytes.size() - at);
     }
     std::vector<PixelInput> levels;
     levels.push_back(std::move(input));
-    draw_verified(device, path, levels, 0, 0, nullptr);
+    draw_verified(device, path, levels, 0, 0, nullptr, gpuConstants);
+}
+
+void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference, UINT8 writeMask)
+{
+    check_pixel(device, path, swapRB, reference, writeMask, nullptr);
+}
+
+void check_compute_to_pixel(ID3D12Device* device, const char* compute, const char* pixel,
+                            const char* reference, const char* previous)
+{
+    auto stale = previous ? produce_pixel_constants(device, previous) : ComPtr<ID3D12Resource>{};
+    auto current = produce_pixel_constants(device, compute);
+    check_pixel(device, pixel, false, reference, D3D12_COLOR_WRITE_ENABLE_ALL,
+                stale ? stale.Get() : current.Get());
 }
 
 // The mip-chain fixture of --check-pixel-case-mips (mirrored by mip_texel in tests/pixel_aot_draws/image.py): an 8x8

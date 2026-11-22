@@ -70,7 +70,7 @@ CONTROLS = {
     # FCHS as 0 - x, as a compiler negation through arithmetic would be: +0 stays +0, NaNs are quieted and
     # a 64-bit significand rounds to 53 bits.
     "chssub": (re.compile(r"x87_chs\(X87Value v\) \{ v\.se \^= 0x8000; return v; \}"),
-               "x87_chs(X87Value v) { return x87_sub({0, 0}, v); }"),
+               "x87_chs(X87Value v) { return x87_sub({0, 0}, v, 0x027f); }"),
     # FABS as x < 0 ? -x : x: -0 and negative NaNs keep their sign.
     "absnan": (re.compile(r"x87_abs\(X87Value v\) \{ v\.se &= 0x7fff; return v; \}"),
                "x87_abs(X87Value v) { if (x87_sign(v) && !x87_is_zero(v) && !x87_is_nan(v)) v.se &= 0x7fff; return v; }"),
@@ -82,9 +82,9 @@ CONTROLS = {
     # FSTP ST(i) only pops: the copy into ST(i) is dropped.
     "fstpdrop": (re.compile(r"x87_slot\[\d\] = x87_slot\[\d\];  // fstp st"), ";  // fstp st"),
     # FST m32/m64 also writes the rounded value back into ST(0).
-    "fstwrite": (re.compile(r"store<uint(32|64)_t>\(a, x87_to_f\1\(x87_slot\[(\d)\]\)\); \}  // fst m"),
-                 r"store<uint\1_t>(a, x87_to_f\1(x87_slot[\2])); "
-                 r"x87_slot[\2] = x87_from_f\1(x87_to_f\1(x87_slot[\2])); }  // fst m"),
+    "fstwrite": (re.compile(r"store<uint(32|64)_t>\(a, x87_to_f\1\(x87_slot\[(\d)\], x87_cw\)\); \}  // fst m"),
+                 r"store<uint\1_t>(a, x87_to_f\1(x87_slot[\2], x87_cw)); "
+                 r"x87_slot[\2] = x87_from_f\1(x87_to_f\1(x87_slot[\2], x87_cw)); }  // fst m"),
     # Register copies quiet a signaling NaN, as a conversion would.
     "copyquiet": (re.compile(r"x87_slot\[(\d)\] = x87_slot\[(\d)\];  // (fld|fst|fstp) st"),
                   lambda m: f"x87_slot[{m.group(1)}] = x87_is_nan(x87_slot[{m.group(2)}]) ? "

@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_import_tail_jump
 ; Tail jumps through the import address table, as MSVC ends a function whose last action is a call to an
 ; imported function. mix3(first, second, output) and mix4(first, second, output, fourth) come from
 ; tail_provider.cpp; R8 is the address of three writable QWORDs.

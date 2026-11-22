@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_mul_div
 ; Source-owned differential fixture for baseline x64 MUL, DIV, IDIV, XADD, and CMPXCHG
 ; in 32-bit and 64-bit forms.
 .code

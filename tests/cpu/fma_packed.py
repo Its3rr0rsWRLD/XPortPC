@@ -15,7 +15,9 @@ from ffx_version_query import INTEGER_HEADER, lower, region
 U64 = ctypes.c_uint64
 KINDS = ("madd", "msub", "nmadd", "nmsub", "maddsub", "msubadd")
 ORDERS = ("132", "213", "231")
-EXPORTS = tuple(f"vf{k}{o}{s}_op" for k in KINDS for o in ORDERS for s in ("ps", "pd"))
+EXPORTS = tuple(f"vf{k}{o}{s}_op" for k in KINDS for o in ORDERS for s in ("ps", "pd")) + (
+    "vfmadd132ps_xmm_op", "vfmsub213ps_mem_op",
+)
 
 
 def emit(image, output):
@@ -56,34 +58,49 @@ def check(native_path, lifted_path):
     out_n = (ctypes.c_uint8 * 32)()
     out_l = (ctypes.c_uint8 * 32)()
 
-    qnan32 = struct.unpack("<f", struct.pack("<I", 0x7fc00123))[0]
-    snan32 = struct.unpack("<f", struct.pack("<I", 0x7f800123))[0]
-    qnan64 = struct.unpack("<d", struct.pack("<Q", 0x7ff8000012345678))[0]
-    snan64 = struct.unpack("<d", struct.pack("<Q", 0x7ff0000012345678))[0]
+    ps_a = bytearray(struct.pack("<8f", 1.0 + 2.0**-23, 1.5, -2.25, 0.0, 1e20, 0, 1.0, 1.0))
+    ps_b = bytearray(struct.pack("<8f", 1.0 - 2.0**-23, -2.25, 4.0, -0.0, 1e20, 4.5, 0, 2.0))
+    ps_c = bytearray(struct.pack("<8f", -1.0, 3.75, 0.5, 0.0, -1e38, -0.125, 1.25, 0))
+    struct.pack_into("<I", ps_a, 5 * 4, 0x7f800123)
+    struct.pack_into("<I", ps_b, 6 * 4, 0xffc00124)
+    struct.pack_into("<I", ps_c, 7 * 4, 0xff800125)
 
-    ps_a = struct.pack("<8f", 1.0 + 2.0**-23, 1.5, -2.25, 0.0, 1e20, snan32, 1.0, 1.0)
-    ps_b = struct.pack("<8f", 1.0 - 2.0**-23, -2.25, 4.0, -0.0, 1e20, 4.5, qnan32, 2.0)
-    ps_c = struct.pack("<8f", -1.0, 3.75, 0.5, 0.0, -1e38, -0.125, 1.25, qnan32)
+    pd_a = bytearray(struct.pack("<4d", 1.0 + 2.0**-52, 0, 1.0, 1.0))
+    pd_b = bytearray(struct.pack("<4d", 1.0 - 2.0**-52, -2.25, 0, 2.0))
+    pd_c = bytearray(struct.pack("<4d", -1.0, 3.75, -0.125, 0))
+    struct.pack_into("<Q", pd_a, 1 * 8, 0x7ff0000012345678)
+    struct.pack_into("<Q", pd_b, 2 * 8, 0xfff8000012345679)
+    struct.pack_into("<Q", pd_c, 3 * 8, 0xfff000001234567a)
 
-    pd_a = struct.pack("<4d", 1.0 + 2.0**-52, snan64, 1.0, 1.0)
-    pd_b = struct.pack("<4d", 1.0 - 2.0**-52, -2.25, qnan64, 2.0)
-    pd_c = struct.pack("<4d", -1.0, 3.75, -0.125, qnan64)
-
+    distinct32 = tuple(struct.pack("<I", bits) * 8 for bits in (0x7fc00127, 0xff800128, 0xffc00129))
+    distinct64 = tuple(struct.pack("<Q", bits) * 4 for bits in
+                       (0x7ff800001234567b, 0xfff000001234567c, 0xfff800001234567d))
     cases = 0
     for name in EXPORTS:
-        a, b, c = (pd_a, pd_b, pd_c) if name.endswith("pd_op") else (ps_a, ps_b, ps_c)
-        buf_a = ctypes.create_string_buffer(a, 32)
-        buf_b = ctypes.create_string_buffer(b, 32)
-        buf_c = ctypes.create_string_buffer(c, 32)
-        ctypes.memset(out_n, 0xaa, 32)
-        ctypes.memset(out_l, 0x55, 32)
-        getattr(native, name)(buf_a, buf_b, buf_c, out_n)
-        getattr(lifted, name)(buf_a, buf_b, buf_c, out_l)
-        if bytes(out_n) != bytes(out_l):
-            raise AssertionError(f"{name}: lifted {bytes(out_l).hex()} != native {bytes(out_n).hex()}")
-        cases += 1
+        is_double = name.endswith("pd_op")
+        single_nan = (pd_a, pd_b, pd_c) if is_double else (ps_a, ps_b, ps_c)
+        distinct = distinct64 if is_double else distinct32
+        one = struct.pack("<d" if is_double else "<f", 1.0)
+        finite = one * (32 // len(one))
+        pairs = tuple(
+            (f"NaN pair with finite operand {index}", distinct[:index] + (finite,) + distinct[index + 1:])
+            for index in range(3)
+        )
+        for label, operands in (("single NaN and finite lanes", single_nan), ("three NaNs", distinct), *pairs):
+            a, b, c = (ctypes.create_string_buffer(bytes(arg), 32) for arg in operands)
+            ctypes.memset(out_n, 0xaa, 32)
+            ctypes.memset(out_l, 0x55, 32)
+            getattr(native, name)(a, b, c, out_n)
+            getattr(lifted, name)(a, b, c, out_l)
+            if bytes(out_n) != bytes(out_l):
+                raise AssertionError(
+                    f"{name} ({label}): lifted {bytes(out_l).hex()} != native {bytes(out_n).hex()}"
+                )
+            if name == "vfmadd132ps_xmm_op" and any(out_l[16:]):
+                raise AssertionError("128-bit FMA did not clear the upper YMM half")
+            cases += 1
 
-    print(f"{cases} packed FMA3 vector cases across all 36 ps/pd forms matched native and translated DLLs bit-for-bit")
+    print(f"{cases} packed FMA3 vector cases matched native and translated DLLs bit-for-bit")
 
 
 def check_rejections():

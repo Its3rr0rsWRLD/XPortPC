@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_crypto_sha
 ; Source-owned differential fixture for all 7 SHA-NI instructions.
 .code
 

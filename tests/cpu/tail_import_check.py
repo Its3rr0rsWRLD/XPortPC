@@ -107,7 +107,7 @@ def check_sources(variant, caller, built, provider):
     binding's number of arguments, and each signature the entry's own number."""
     for symbol, entries in TRANSLATIONS.items():
         bound = binding(provider, variant, symbol)
-        source, functions = translate(caller, list(entries), import_binding=bound)
+        source, functions = translate(caller, list(entries), binding=bound)
         if Path(built[symbol]).read_text(encoding="utf-8") != source:
             raise AssertionError(f"{built[symbol]} is not the translation of {','.join(entries)} bound to {symbol}")
         words = ", ".join(["word"] * bound.arguments)
@@ -136,7 +136,7 @@ def check_return_widths(caller, provider):
         rets = "2 defined at every reachable RET" if name == "tail_choose" else "no RET is reachable"
         note = (f"{width} low byte(s) at every reachable normal return: {rets}, {stated} guaranteed after "
                 f"every tail jump to {symbol} as the binding states")
-        source, (function,) = translate(caller, [name], import_binding=binding(provider, "named", symbol, stated))
+        source, (function,) = translate(caller, [name], binding=binding(provider, "named", symbol, stated))
         comments = [line for line in source.splitlines() if line.startswith("// RAX: ")]
         if function.return_width != width or comments != ["// RAX: " + note]:
             raise AssertionError(f"{name} with {stated} stated bytes: width {function.return_width}, {comments}")
@@ -242,15 +242,15 @@ def check_rejections(builds, sites, slots, terminator):
         ("LEA patched to 67 FF 25, an EIP-relative tail jump", "eip", "tail_guest_arg", mix3,
          "unsupported control flow"),
         ("LEA patched to 64 FF 25, an FS-relative tail jump", "fs", "tail_guest_arg", mix3, "unsupported control flow"),
-        ("guest address in RCX", named, "tail_guest_arg", mix3, "undefined register rcx"),
+        ("guest address in RCX", named, "tail_guest_arg", mix3, "callee argument rcx is undefined"),
         ("three-argument entry, four-argument binding, R9 not written", named, "tail_pass4", mix4,
-         "undefined register r9"),
+         "callee argument r9 is undefined"),
         ("mov r9, rcx; xor r9, rdx patched to mov r9b, cl and NOPs: R9 partly written", "partial", "tail_choose",
-         mix4, f"undefined register r9 at RVA {xor.next_ip:#x}"),
+         mix4, f"callee argument r9 is undefined at RVA {xor.next_ip:#x}"),
         ("AX writes patched to a tail jump through the slot of mix3", "second", "tail_choose", mix4,
-         f"tail jump through a second IAT slot RVA {slots['mix3']:#x}"),
+         f"unbound import {named_dll}!mix3 at IAT slot RVA {slots['mix3']:#x}"),
         ("JAE patched to JMP, no reachable tail jump", "jmp", "tail_choose", mix4,
-         f"binding {named_dll}!mix4 supplied but no tail jump uses it"),
+         f"binding {named_dll}!mix4 supplied but no call or tail jump uses it"),
     ]
     with TemporaryDirectory() as folder:
         for label, image, name, bound, reason in controls:
@@ -261,7 +261,7 @@ def check_rejections(builds, sites, slots, terminator):
                 image = Path(folder) / "control.dll"
                 image.write_bytes(damaged)
             try:
-                translate(image, [name], import_binding=bound)
+                translate(image, [name], binding=bound)
             except ValueError as exc:
                 if reason not in str(exc):
                     raise AssertionError(f"{name} ({label}): expected {reason!r}, got {exc}") from exc

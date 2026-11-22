@@ -697,6 +697,7 @@ def validate_pe_containers(
                 "retargeted_bytes": len(retargeted_blob),
                 "dx_op_count": len(before["ir"]["dx_op_call_sites"]),
                 "xbox_call_count": sum(xbox_calls.values()),
+                "xbox_intrinsics": before["ir"]["xbox_intrinsics"],
                 "retarget": info,
                 "signed": signed,
                 "digest": digest,

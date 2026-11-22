@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_adx
 ; Source-owned differential fixture for ADX instructions (ADCX, ADOX) in 32-bit and 64-bit forms,
 ; plus interleaved ADCX/ADOX proving independent CF and OF carry chains.
 ; Output slot receives (CF << 1) | OF.
@@ -123,5 +124,79 @@ andn_clears_of32 PROC FRAME
     seto al
     ret
 andn_clears_of32 ENDP
+
+mul_seto32 PROC FRAME
+    .endprolog
+    mov eax, ecx
+    mul edx
+    mov eax, 0
+    seto al
+    ret
+mul_seto32 ENDP
+
+xadd_seto32 PROC FRAME
+    .endprolog
+    xadd ecx, edx
+    mov eax, 0
+    seto al
+    ret
+xadd_seto32 ENDP
+
+cmpxchg_seto32 PROC FRAME
+    .endprolog
+    mov eax, ecx
+    cmpxchg edx, r8d
+    mov eax, 0
+    seto al
+    ret
+cmpxchg_seto32 ENDP
+
+rol_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    rol ecx, 1
+    seto al
+    ret
+rol_seto32 ENDP
+
+ror_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    ror ecx, 1
+    seto al
+    ret
+ror_seto32 ENDP
+
+rcl_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    rcl ecx, 1
+    seto al
+    ret
+rcl_seto32 ENDP
+
+rcr_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    rcr ecx, 1
+    seto al
+    ret
+rcr_seto32 ENDP
+
+shld_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    shld ecx, edx, 1
+    seto al
+    ret
+shld_seto32 ENDP
+
+shrd_seto32 PROC FRAME
+    .endprolog
+    xor eax, eax
+    shrd ecx, edx, 1
+    seto al
+    ret
+shrd_seto32 ENDP
 
 END

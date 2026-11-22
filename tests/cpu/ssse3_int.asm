@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_ssse3_int
 ; Source-owned differential fixture for 128-bit SSSE3 integer instructions:
 ; PABSB, PABSW, PABSD, PSIGNB, PSIGNW, PSIGND, PSHUFB, PALIGNR,
 ; PHADDW, PHADDD, PHSUBW, PHSUBD, PHADDSW, PHSUBSW.

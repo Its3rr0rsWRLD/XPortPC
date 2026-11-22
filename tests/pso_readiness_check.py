@@ -20,6 +20,24 @@ def with_rounding(instructions):
     return instructions[:index] + extra + instructions[index:]
 
 
+def with_lowered_ops(instructions):
+    """Insert lowered SDWA, VOP3P, integer compare and conversion ops before the pack."""
+    index = next(i for i, line in enumerate(instructions) if line.startswith("v_cvt_pkrtz"))
+    extra = [
+        "s_clause 0x1",
+        "s_setprio 1",
+        "s_sleep 2",
+        "v_mov_b32_sdwa v12, v12 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:DWORD",
+        "v_cvt_f16_f32_e32 v13, v13",
+        "v_cvt_f32_f16_sdwa v13, v13 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0",
+        "v_pk_add_f16 v14, v14, 1.0",
+        "v_cvt_f32_ubyte0_e32 v14, v14",
+        "v_cmp_lt_i32_e32 vcc_lo, v12, v13",
+        "v_cndmask_b32_e32 v15, v12, v15, vcc_lo",
+    ]
+    return instructions[:index] + extra + instructions[index:]
+
+
 def check_scanner_tracks_pixel_aot():
     import pixel_aot
     from scan_unsupported_shaders import is_instruction_supported, is_opcode_recognized
@@ -27,6 +45,73 @@ def check_scanner_tracks_pixel_aot():
         opcode = f"v_{name}_f32"
         assert is_opcode_recognized(opcode) and is_opcode_recognized(opcode + "_e32"), opcode
         assert is_instruction_supported(f"{opcode}_e32 v1, v2, v3"), opcode
+    for name, (arity, _) in pixel_aot.INTEGER.items():
+        opcode = f"v_{name}"
+        assert is_opcode_recognized(opcode), opcode
+        operands = ", ".join(f"v{k}" for k in range(1, arity + 2))
+        assert is_instruction_supported(f"{opcode} {operands}"), opcode
+        if arity <= 2:
+            assert is_opcode_recognized(opcode + "_e32"), opcode
+            assert is_instruction_supported(f"{opcode}_e32 {operands}"), opcode
+    for name, (arity, _, _) in pixel_aot.SCALAR.items():
+        opcode = f"s_{name}"
+        assert is_opcode_recognized(opcode), opcode
+        operands = ", ".join(f"s{k}" for k in range(1, arity + 2))
+        assert is_instruction_supported(f"{opcode} {operands}"), opcode
+    for name in pixel_aot.SALU_BIT64:
+        opcode = f"s_{name}_b64"
+        assert is_opcode_recognized(opcode), opcode
+        assert is_instruction_supported(f"{opcode} s[0:1], s[2:3], s[4:5]"), opcode
+    for name in pixel_aot.VOP3P_F16:
+        opcode = f"v_pk_{name}_f16"
+        assert is_opcode_recognized(opcode), opcode
+        assert is_instruction_supported(f"{opcode} v0, v1, v2"), opcode
+    for name in pixel_aot.VOP3P_INT16:
+        opcode = f"v_pk_{name}"
+        assert is_opcode_recognized(opcode), opcode
+        assert is_instruction_supported(f"{opcode} v0, v1, v2"), opcode
+    for op in ("v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16"):
+        assert is_opcode_recognized(op), op
+        assert is_instruction_supported(f"{op} v1, v2, v3, v4"), op
+    for op in (
+        "v_dot2_f32_f16", "v_dot2_i32_i16", "v_dot2_u32_u16",
+        "v_dot4_i32_i8", "v_dot4_u32_u8", "v_dot8_i32_i4", "v_dot8_u32_u4",
+    ):
+        assert is_opcode_recognized(op), op
+        assert is_instruction_supported(f"{op} v1, v2, v3, v4"), op
+    for line in (
+        "s_clause 63",
+        "s_setprio 3",
+        "s_sleep 127",
+        "s_waitcnt vmcnt(15)",
+        "s_bfm_b64 s[86:87], s58, s59",
+        "s_bfe_u32 s72, s60, s61",
+        "s_cmp_eq_i32 s0, s1",
+        "v_mov_b32_sdwa v12, v12 dst_sel:WORD_0 dst_unused:UNUSED_PRESERVE src0_sel:WORD_0",
+        "v_cvt_f32_f16_sdwa v12, -|v13| clamp dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_1",
+        "v_cvt_f16_f32_e64 v12, -|v13|",
+        "v_cvt_off_f32_i4_e32 v12, v13",
+        "v_ldexp_f32_e64 v12, v13, s44",
+        "v_cubeid_f32_e64 v12, v13, v14, v15",
+        "v_fma_mix_f32 v12, v13, v14, v15 op_sel:[1,1,0]",
+        "v_dot4_i32_i8 v12, v13, v14, v15 clamp",
+        "v_med3_i32_e64 v12, v13, v14, v15",
+        "v_cmp_lt_u32_e64 s[4:5], v12, v13",
+        "image_sample v[12:14], v[8:9], s[28:35], s[40:43] dmask:0x7 dim:SQ_RSRC_IMG_2D",
+    ):
+        assert is_opcode_recognized(line.split()[0]), line
+        assert is_instruction_supported(line), line
+    assert not is_opcode_recognized("v_imaginary_opcode_sdwa")
+    assert not is_instruction_supported("s_clause 64")
+    assert not is_instruction_supported("s_setprio 4")
+    assert not is_instruction_supported("s_sleep 128")
+    assert not is_instruction_supported("s_waitcnt vmcnt(64)")
+    assert not is_instruction_supported(
+        "v_mov_b32_sdwa v12, v12 dst_sel:BYTE_0 dst_unused:UNUSED_SEXT src0_sel:BYTE_0"
+    )
+    assert not is_instruction_supported("v_bfi_b32_e32 v0, v1, v2, v3")
+    assert not is_instruction_supported("v_xor_b32 v0, v1")
+    assert not is_instruction_supported("v_not_b32 v0, -v1")
 
 
 def check():
@@ -68,6 +153,7 @@ def check():
         for instructions, status, blocker, detail in (
                 (assembly(False), "needs_pso_validation", None, None),
                 (with_rounding(assembly(False)), "needs_pso_validation", None, None),
+                (with_lowered_ops(assembly(False)), "needs_pso_validation", None, None),
                 ([], "blocked", "disassembly_failed", "empty instruction stream"),
                 (ValueError("Unknown instruction at byte 0"), "blocked", "disassembly_failed",
                  "Unknown instruction at byte 0"),

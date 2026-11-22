@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse41_int
 ; Source-owned differential fixture for 14 128-bit SSE4.1 integer vector instructions:
 ; PMINSB, PMAXSB, PMINUW, PMAXUW, PMINSD, PMAXSD, PMINUD, PMAXUD,
 ; PMULLD, PMULDQ, PCMPEQQ, PACKUSDW, PBLENDW, PBLENDVB.

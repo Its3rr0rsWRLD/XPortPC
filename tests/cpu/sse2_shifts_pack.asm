@@ -1,3 +1,4 @@
+; coverage: source cpu_aot_sse2_shifts_pack
 ; Source-owned differential fixture for 25 baseline 128-bit SSE2 packed shifts, packs, unpacks, shuffles, and movemask instructions.
 .code
 

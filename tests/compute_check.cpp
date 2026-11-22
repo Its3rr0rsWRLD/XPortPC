@@ -104,6 +104,7 @@ static ComPtr<ID3D12DescriptorHeap> bind_tables(ID3D12Device* device, ID3D12Grap
 struct StoreCase {
     UINT groups;
     std::array<UINT, capacity> expected;
+    std::array<UINT, constants.size()> root_constants = constants;
 };
 
 static void run_compute(ID3D12Device* device, bool tables, D3D12_SHADER_BYTECODE shader,
@@ -136,7 +137,8 @@ static void run_compute(ID3D12Device* device, bool tables, D3D12_SHADER_BYTECODE
     } else {
         list->SetComputeRootShaderResourceView(0, input->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(1, output->GetGPUVirtualAddress());
-        list->SetComputeRoot32BitConstants(2, static_cast<UINT>(constants.size()), constants.data(), 0);
+        const auto& words = store ? store->root_constants : constants;
+        list->SetComputeRoot32BitConstants(2, static_cast<UINT>(words.size()), words.data(), 0);
     }
     list->Dispatch(store ? store->groups : capacity / 64, 1, 1);
     transition(list.Get(), output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -190,8 +192,13 @@ void check_compute_file(ID3D12Device* device, const char* path, bool conversion_
         std::ifstream file(reference, std::ios::binary);
         file.read(reinterpret_cast<char*>(&store.groups), sizeof(store.groups));
         file.read(reinterpret_cast<char*>(store.expected.data()), sizeof(store.expected));
-        if (!file || file.peek() != std::char_traits<char>::eof() || !store.groups || store.groups > 5)
+        if (!file || !store.groups || store.groups > 5)
             throw std::runtime_error("Invalid compute store reference");
+        if (file.peek() != std::char_traits<char>::eof()) {
+            file.read(reinterpret_cast<char*>(store.root_constants.data()), sizeof(store.root_constants));
+            if (!file || file.peek() != std::char_traits<char>::eof())
+                throw std::runtime_error("Invalid compute store constants");
+        }
         run_compute(device, false, shader, {compute_root, sizeof(compute_root)}, false, &store);
     } else {
         run_compute(device, false, shader, shader, conversion_pair);

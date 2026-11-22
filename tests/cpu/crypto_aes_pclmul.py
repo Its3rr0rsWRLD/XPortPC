@@ -53,6 +53,16 @@ def check_controls() -> None:
     else:
         raise AssertionError("expected 256-bit vaesenc to be rejected")
 
+    # VAESENC xmm0, xmm3, xmm1; RET. XMM3 is outside the tracked profile.
+    body = list(Decoder(64, bytes.fromhex("c4 e2 61 dc c1 c3"), ip=0x1000))
+    try:
+        lower(body, [], {}, {}, {})
+    except ValueError as exc:
+        if "unsupported crypto source at 0x1000" not in str(exc):
+            raise AssertionError(f"unexpected VAESENC rejection: {exc}") from exc
+    else:
+        raise AssertionError("accepted an untracked VAESENC source")
+
 
 def check(native_dll: Path, lifted_dll: Path) -> None:
     check_controls()

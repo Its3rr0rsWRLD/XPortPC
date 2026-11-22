@@ -592,4 +592,63 @@ two_compares_20_jbe:
     ret
 two_compares ENDP
 
+add_fcomi_of PROC FRAME
+    .endprolog
+    mov eax, dword ptr [rcx+32]
+    add eax, dword ptr [rcx+36]
+    seto al
+    mov byte ptr [rdx+21], al
+    fld tbyte ptr [rcx+0]
+    fld tbyte ptr [rcx+16]
+    fcomi st, st(1)
+    seto al
+    mov byte ptr [rdx+20], al
+    mov r9d, 0
+    adox r9d, r9d
+    mov byte ptr [rdx+22], r9b
+    mov byte ptr [rdx+0], 1
+    je add_fcomi_of_0_je
+    mov byte ptr [rdx+0], 0
+add_fcomi_of_0_je:
+    mov byte ptr [rdx+1], 1
+    jne add_fcomi_of_0_jne
+    mov byte ptr [rdx+1], 0
+add_fcomi_of_0_jne:
+    mov byte ptr [rdx+2], 1
+    ja add_fcomi_of_0_ja
+    mov byte ptr [rdx+2], 0
+add_fcomi_of_0_ja:
+    mov byte ptr [rdx+3], 1
+    jae add_fcomi_of_0_jae
+    mov byte ptr [rdx+3], 0
+add_fcomi_of_0_jae:
+    mov byte ptr [rdx+4], 1
+    jb add_fcomi_of_0_jb
+    mov byte ptr [rdx+4], 0
+add_fcomi_of_0_jb:
+    mov byte ptr [rdx+5], 1
+    jbe add_fcomi_of_0_jbe
+    mov byte ptr [rdx+5], 0
+add_fcomi_of_0_jbe:
+    mov r8d, 1
+    mov eax, 0
+    cmove eax, r8d
+    mov dword ptr [rdx+8], eax
+    mov eax, 0
+    cmovne eax, r8d
+    mov dword ptr [rdx+12], eax
+    mov eax, 0
+    cmovbe eax, r8d
+    mov dword ptr [rdx+16], eax
+    mov eax, 0
+    sete al
+    mov byte ptr [rdx+6], al
+    mov eax, 0
+    rcl eax, 1
+    mov byte ptr [rdx+7], al
+    fstp st(0)
+    fstp st(0)
+    ret
+add_fcomi_of ENDP
+
 END
