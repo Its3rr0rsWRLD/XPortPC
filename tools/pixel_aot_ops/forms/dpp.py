@@ -67,10 +67,6 @@ _hlsl("dpp_cvt_i16_f16", "uint dpp_cvt_i16_f16(float x) {\n    if (isnan(x)) ret
                          "    return asuint(int(trunc(x))) & 0xffffu;\n}")
 _hlsl("dpp_cvt_u16_f16", "uint dpp_cvt_u16_f16(float x) {\n    if (isnan(x) || x <= 0.0f) return 0u;\n"
                          "    if (x >= 65535.0f) return 65535u;\n    return uint(trunc(x)) & 0xffffu;\n}")
-_hlsl("dpp_cvt_norm_i16_f16", "uint dpp_cvt_norm_i16_f16(float x) {\n    if (isnan(x)) return 0u;\n"
-                              "    return asuint(int(round(clamp(x, -1.0f, 1.0f) * 32767.0f))) & 0xffffu;\n}")
-_hlsl("dpp_cvt_norm_u16_f16", "uint dpp_cvt_norm_u16_f16(float x) {\n    if (isnan(x)) return 0u;\n"
-                              "    return uint(round(saturate(x) * 65535.0f)) & 0xffffu;\n}")
 _hlsl("dpp_sat_pk_u8_i16", "uint dpp_sat_pk_u8_i16(uint w) {\n    int lo = asint(w << 16) >> 16;\n    int hi = asint(w) >> 16;\n"
                            "    return uint(clamp(lo, 0, 255)) | (uint(clamp(hi, 0, 255)) << 8);\n}")
 # Two binary32 values rounded toward zero to binary16 and packed (v_cvt_pkrtz_f16_f32 as a value; the export form keeps
@@ -118,8 +114,6 @@ OWN = {
     "cvt_f16_u16": ("f16", "bits", "narrow16(float({0} & 0xffffu))", ()),
     "cvt_i16_f16": ("f16", "f16", "dpp_cvt_i16_f16({0})", ("dpp_cvt_i16_f16",)),
     "cvt_u16_f16": ("f16", "f16", "dpp_cvt_u16_f16({0})", ("dpp_cvt_u16_f16",)),
-    "cvt_norm_i16_f16": ("f16", "f16", "dpp_cvt_norm_i16_f16({0})", ("dpp_cvt_norm_i16_f16",)),
-    "cvt_norm_u16_f16": ("f16", "f16", "dpp_cvt_norm_u16_f16({0})", ("dpp_cvt_norm_u16_f16",)),
     "sat_pk_u8_i16": ("f16", "bits", "dpp_sat_pk_u8_i16({0})", ("dpp_sat_pk_u8_i16",)),
     "sin_f32": ("f32", "f32", "sin(({0}) * 6.283185307179586f)", ()),
     "cos_f32": ("f32", "f32", "cos(({0}) * 6.283185307179586f)", ()),
@@ -139,13 +133,15 @@ OWN = {
 # Float sources of these take abs and neg in DPP16 (bit sources and integer ones do not).
 MODIFIABLE = {"cvt_flr_i32_f32", "cvt_rpi_i32_f32", "sin_f32", "cos_f32", "frexp_mant_f32", "frexp_exp_i32_f32",
               "log_f16", "exp_f16", "rcp_f16", "sqrt_f16", "rsq_f16", "sin_f16", "cos_f16", "frexp_mant_f16",
-              "frexp_exp_i16_f16", "cvt_pkrtz_f16_f32", "cvt_i16_f16", "cvt_u16_f16", "cvt_norm_i16_f16", "cvt_norm_u16_f16"}
+              "frexp_exp_i16_f16", "cvt_pkrtz_f16_f32", "cvt_i16_f16", "cvt_u16_f16"}
 CARRY = ("add_co_ci_u32", "sub_co_ci_u32", "subrev_co_ci_u32")
 BINARY_OWN = {"cvt_pkrtz_f16_f32"}  # a second source
 # Refused: v_fmac_f16 is a fused multiply-add that rounds once to binary16. Lowering it as narrow16(mad(...)) in
 # binary32 rounds twice (the product and sum are exact in binary32 only up to 24 bits, then narrow16 rounds again), which
 # can differ from the hardware result; valu_f16 refuses v_fma_f16, v_mad_f16 and v_fmac_f16 for the same reason.
 FUSED_F16 = ("fmac_f16",)
+# Refused: v_cvt_norm_i16_f16 and v_cvt_norm_u16_f16 (DPP16, DPP8; SDWA has none). Whether x * 32767 (65535) is rounded to binary32
+# before the integer conversion is not established by any source (see forms/valu_exact.py).
 
 VGPR = r"v\d+"
 SOURCE = r"(-?)(?:\|(v\d+)\||abs\((v\d+)\)|(v\d+))"
