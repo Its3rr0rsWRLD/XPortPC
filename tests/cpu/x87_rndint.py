@@ -19,7 +19,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 import x87_add as base  # noqa: E402  (tests/cpu is the script directory)
 import x87_integers as integers  # noqa: E402
-import x87_moves as moves  # noqa: E402
 from x87_add import INDEFINITE, J, Q, classify, from_binary, m80_bytes, m80_exact, round_even, to_binary  # noqa: E402
 from x87_div import SIZE  # noqa: E402
 from x87_sub import sub  # noqa: E402
