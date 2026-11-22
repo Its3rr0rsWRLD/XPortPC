@@ -18,8 +18,9 @@ namespace {
 //               (0..8), the P TEXCOORD indices (ascending, below 32) in words 5..12, instance count I (1..),
 //               start instance (b2 word 1), push-word count W (0..32), distance-vector count D (0..2), the D
 //               distance codes in words 17..18 (kind << 8 | semantic index; kind 1 SV_ClipDistance, 2
-//               SV_CullDistance; index 0 or 1), then zero words; V * I is at most 4096
-//   constants[64]: the b0 words (constant-buffer data)
+//               SV_CullDistance; index 0 or 1), the constant word count C in word 19 (0 for 64, else a multiple of 4
+//               from 64 to 16384: at most 4096 uint4, a D3D12 constant buffer), then zero words; V * I is at most 4096
+//   constants[C]: the b0 words (constant-buffer data)
 //   descriptors[64]: the b4 words (runtime V# words)
 //   push[W]: the b3 words (the rest of the 32 are zero)
 //   indices[V] if indexed: the R32 index buffer, one index per vertex of an instance
@@ -32,6 +33,7 @@ constexpr UINT maxRecords = 4096;
 constexpr UINT maxParams = 8;
 constexpr UINT headerWords = 32;
 constexpr UINT pushWords = 32;
+constexpr UINT maxConstantWords = 4096 * 4;
 
 struct TitleRangeRecord {
     UINT64 begin, end;
@@ -146,9 +148,12 @@ VertexCase read_case(const char* path)
             throw BadCase("Vertex case unused distance code is not zero");
         }
     }
-    for (UINT i = 19; i < headerWords; ++i)
+    for (UINT i = 20; i < headerWords; ++i)
         if (header[i]) throw BadCase("Vertex case reserved header words are not zero");
-    c.constants = words(64, "the constants");
+    const UINT constantWords = header[19] ? header[19] : 64;
+    if (constantWords < 64 || constantWords > maxConstantWords || constantWords % 4)
+        throw BadCase("Vertex case constant word count is not a multiple of 4 from 64 to 16384");
+    c.constants = words(constantWords, "the constants");
     c.descriptors = words(64, "the descriptors");
     const auto pushed = words(push, "the push words");
     std::copy(pushed.begin(), pushed.end(), c.push.begin());

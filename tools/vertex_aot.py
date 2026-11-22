@@ -23,7 +23,7 @@ the given LLVM library. MAP.json gives the role of each user SGPR, keyed by its 
      "6": {"role": "inline", "word": 0}}
 A "vsharp" entry names the first of the four descriptor words (b4, `vsharp_words`, 64 words) that hold that V# at
 draw time, as the pixel path's buffer_descriptors name constant words. The "constants" entry is the constant buffer
-that s_buffer_load reads (b0, `params`, its first 256 bytes). {"constants": N} is the same constant buffer whose V#
+that s_buffer_load reads (b0, `params`: 64 words, or as many uint4 as the program reads, up to 4096). {"constants": N} is the same constant buffer whose V#
 is also read as data (a uniform block that buffer_load indexes at run time): its V# words are descriptor words N..N+3,
 and the runtime keeps b0 equal to the title memory that V# addresses. A scalar load through a 64-bit address held in
 inline words (buffer device address) reads title memory. An
@@ -61,6 +61,8 @@ ENTRY_VGPR_REASONS = {
 # On gfx10 an NGG wave gets s0..s7 from the hardware (s2 gs_tg_info, s3 merged_wave_info); user SGPRs start at s8.
 NGG_FIRST_USER_SGPR = 8
 MAX_PARAMS = 32
+# A constant buffer view is at most 4096 uint4 (D3D12); a scalar buffer load past that is refused.
+CONSTANT_BYTES = 4096 * 16
 PUSH_WORDS = 32
 
 REFUSALS = (
@@ -379,6 +381,7 @@ def lower_with_layout(instructions, user_sgprs, vs_out_cntl=None):
     # marks where helper definitions go, as in the pixel lowering; it is replaced by the vertex entry at the end.
     st = Lowering(dict(entry_scalar), {reg: ("uint", name) for reg, name in ENTRY_VGPRS[stage].items()}, [PREAMBLE],
                   {}, (), 0 if has_constants else None, {})
+    st.constant_limit = CONSTANT_BYTES
     reasons = ENTRY_VGPR_REASONS[stage]
     unwritten = set(reasons)
     instance = next(reg for reg, name in ENTRY_VGPRS[stage].items() if name == "iid")
@@ -611,7 +614,8 @@ def _assemble(st, exports, vectors, root, uses_params, uses_vsharps, uses_instan
     head = []
     if uses_params:
         # uint4, not float4: constant and V# words are raw data (see docs/experiments.md).
-        head.append("cbuffer Constants : register(b0) { uint4 params[16]; };")
+        # 16 uint4 (64 words) unless the program reads further; then the highest word read, rounded up to a uint4.
+        head.append(f"cbuffer Constants : register(b0) {{ uint4 params[{max(16, -(-st.constant_words // 4))}]; }};")
     if uses_vsharps:
         # The runtime V# words of the descriptor lists, apart from the constant buffer's data.
         head.append("cbuffer Descriptors : register(b4) { uint4 vsharp_words[16]; };")

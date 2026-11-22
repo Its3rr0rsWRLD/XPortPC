@@ -31,6 +31,8 @@ class Lowering:
         self.sampler = sampler  # the four sampler descriptor words bound to s0; () when no sampler is bound
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
+        self.constant_limit = 256  # bytes of b0 a scalar buffer load may read; the vertex stage raises it (vertex_aot.py)
+        self.constant_words = 0  # one past the highest b0 word a load has read: sizes params[] when it exceeds 64
         self.uses_memory = False  # emit the title-memory helpers
         self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
         self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order

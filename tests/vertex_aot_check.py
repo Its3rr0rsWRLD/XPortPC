@@ -183,7 +183,7 @@ class Model:
 
     def __init__(self, roles, constants, memory, flaws=(), descriptors=None, push=(), stage="legacy"):
         self.roles, self.constants, self.memory, self.flaws = roles, constants, memory, set(flaws)
-        self.descriptors = constants if descriptors is None else descriptors
+        self.descriptors = constants[:64] if descriptors is None else descriptors
         self.push, self.stage = list(push) + [0] * (32 - len(push)), stage
 
     def run(self, program, vertex_id, base_vertex, instance_id=0, start_instance=0):
@@ -269,6 +269,8 @@ class Model:
                 assert [s[n] for n in base] in ([("cbv", j) for j in range(4)], cbv_words)
                 offset = 0 if ops[2] == "null" else int(ops[2], 0)
                 values = [self.constants[offset // 4 + j] for j in range(len(span(ops[0])))]
+                if "window_64" in self.flaws:  # a wrong reference: constant words past 64 read as zero
+                    values = [0 if offset // 4 + j >= 64 else x for j, x in enumerate(values)]
                 for n, value in zip(span(ops[0]), values):
                     s[n] = value
             elif name.startswith("buffer_load_dword"):
@@ -399,13 +401,15 @@ DISTANCE_CODES = {"clip": 1, "cull": 2}
 def case_file(records, base_vertex, params, constants, expected, mask, indices=None, memory=b"", descriptors=None,
               instances=1, start_instance=0, push=(), distances=()):
     """distances: the (kind, semantic index) of each distance vector, in stream-output order."""
-    descriptors = constants if descriptors is None else descriptors
-    assert len(params) <= 8 and len(constants) == len(descriptors) == 64 and len(expected) == len(mask)
+    descriptors = constants[:64] if descriptors is None else descriptors
+    wide = len(constants) != 64  # header word 19 names a constant window other than 64 words (multiple of 4, to 16384)
+    assert len(params) <= 8 and len(constants) % 4 == 0 and 64 <= len(constants) <= 16384
+    assert len(descriptors) == 64 and len(expected) == len(mask)
     assert len(push) <= 32 and len(distances) <= 2
     codes = [DISTANCE_CODES[kind] << 8 | index for kind, index in distances]
     header = [0x56573258, records, int(indices is not None), base_vertex & M32, len(params),
               *params, *[0] * (8 - len(params)), instances, start_instance & M32, len(push), len(codes),
-              *codes, *[0] * (2 - len(codes)), *[0] * 13]
+              *codes, *[0] * (2 - len(codes)), len(constants) if wide else 0, *[0] * 12]
     assert len(header) == 32
     body = header + list(constants) + list(descriptors) + list(push) + list(indices or []) + list(expected) + list(mask)
     return struct.pack(f"<{len(body)}I", *body) + memory
@@ -956,6 +960,49 @@ CARRY = [
 CARRY_ROLES = {3: ("base_vertex",)}
 
 
+# Constants past the first 64 words: the window grows to the highest word read (params[17] and params[65] here),
+# up to the 4096 uint4 of a D3D12 constant buffer. Words 72 to 75 and 260 to 263 are read as a uint4 each.
+WIDE = [
+    "s_setprio 3",
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "v_add_nc_u32_e32 v0, s0, v0",
+    "s_movk_i32 s5, 0x8000",
+    "s_load_dwordx4 s[12:15], s[4:5], null",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dwordx4 s[16:19], s[12:15], 0x120",
+    "s_buffer_load_dwordx4 s[20:23], s[12:15], 0x410",
+    "s_waitcnt lgkmcnt(0)",
+    "v_cvt_f32_ubyte0_e32 v1, v0",
+    "v_mov_b32_e32 v2, s16",
+    "v_mov_b32_e32 v3, s19",
+    "v_add_nc_u32_e32 v4, s20, v0",
+    "v_add_nc_u32_e32 v5, s23, v4",
+    "v_mov_b32_e32 v6, s17",
+    "v_mov_b32_e32 v7, s22",
+    "exp pos0 v1, v2, v3, v4 done vm",
+    "exp param0 v5, v6, v7, v0",
+    "s_endpgm",
+]
+WIDE_ROLES = {3: ("base_vertex",), 4: ("descriptors", HIGH, {0: ("constants",)})}
+
+
+def wide_constants(seed, words):
+    state = [0] * words
+    for k in range(words):
+        seed = (seed * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        state[k] = (seed >> 32) | 1
+    return state
+
+
+def draw_wide(directory, compiler, renderer, backend):
+    """s_buffer_load words past the first 64 (byte offsets 0x120 and 0x410): the constant window is sized from the
+    highest word read. The wrong reference reads every word past 64 as zero."""
+    sets = [(wide_constants(5, 272), Memory([]), 6, 0), (wide_constants(9, 1024), Memory([]), 5, 3)]
+    flaws = [{"window_64"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "wide", WIDE, WIDE_ROLES, sets, flaws)
+
+
 def draw_trig(directory, compiler, renderer, backend):
     """Card V-4: v_sin_f32 and v_cos_f32 (e32, and e64 with the div:2 output modifier) on angles in revolutions, each
     result scaled and rounded to an integer before export (see TRIG)."""
@@ -974,12 +1021,13 @@ def draw_carry(directory, compiler, renderer, backend):
 
 DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan,
                  "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance, "trig": draw_trig,
-                 "carry": draw_carry}
+                 "carry": draw_carry, "wide": draw_wide}
 PROGRAMS = ((FETCH, FETCH_ROLES, None), (MATRIX, MATRIX_ROLES, None), (VERTEX_ID, VERTEX_ID_ROLES, None),
             (NAN, NAN_ROLES, None), (NGG_FETCH, ngg_roles(FETCH_ROLES), None),
             (NGG_MATRIX, ngg_roles(MATRIX_ROLES), None), (NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES), None),
             (INSTANCE, INSTANCE_ROLES, None), (NGG_INSTANCE, ngg_roles(INSTANCE_ROLES), None),
-            (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None))
+            (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None),
+            (WIDE, WIDE_ROLES, None))
 
 
 # --- controls (no DXC, no GPU) -----------------------------------------------------------------------------------------
@@ -1265,11 +1313,27 @@ def check_v4_controls():
     must_refuse([*TRIG[:5], "v_sin_f16_e32 v5, v4", "s_endpgm"], TRIG_ROLES, "Unsupported")
 
 
+def check_wide_controls():
+    """The constant window: a program that reads at most 64 words keeps params[16], a read past it sizes params[] to
+    the highest word read rounded up to a uint4, a CBV's 4096 uint4 are the limit, and the wrong reference differs."""
+    source, layout = lower(WIDE, WIDE_ROLES)
+    assert "uint4 params[66];" in source and "params[65].w" in source, source[:400]  # words 260 to 263 are the last read
+    narrow = [line.replace("0x120", "0x20").replace("0x410", "0x30") for line in WIDE]
+    assert "uint4 params[16];" in lower(narrow, WIDE_ROLES)[0]
+    assert "uint4 params[4096];" in lower([line.replace("0x410", "0xfff0") for line in WIDE], WIDE_ROLES)[0]
+    must_refuse([line.replace("0x410", "0x10000") for line in WIDE], WIDE_ROLES, "exceeds")
+    constants = wide_constants(5, 272)
+    model = lambda flaw=(): outputs(Model(WIDE_ROLES, constants, Memory([]), flaw), WIDE, layout, range(6), 3)[0]  # noqa: E731
+    for flaw in ({"window_64"}, {"base_ignored"}):
+        assert model(flaw) != model(), flaw
+
+
 def check_controls():
     check_reference_arithmetic()
     check_translation_shape()
     check_refusals()
     check_v4_controls()
+    check_wide_controls()
     # Every wrong reference of every family changes the model's output for at least one draw input; the draws check
     # that the renderer then reports the mismatch. Here: the model runs every family's program without error.
     model = Model(FETCH_ROLES, fetch_constants(vsharp(HIGH_BASE, 24, 8, 0), vsharp(HIGH_BASE, 12, 8, 1)),
