@@ -4,8 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pefile
-from iced_x86 import Code as C, Decoder, MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
-from iced_x86 import Decoder, EncodingKind, MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
+from iced_x86 import Code as C, Decoder, EncodingKind, MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
 
 from cpu_leaf_aot import export_rva
 from cpu_ranges import function_ranges, image_bytes
@@ -230,7 +229,6 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     wide_any = {**wide, R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
     avx2_wide_ops = (M.VPBROADCASTB, M.VPBROADCASTW, M.VPBROADCASTD, M.VPBROADCASTQ,
                      M.VPSLLVD, M.VPSRLVD, M.VPSRAVD, M.VPSLLVQ, M.VPSRLVQ)
-    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx2_wide_ops for i in body)
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx2_wide_ops for i in body)
     avx2_perm_ops = (M.VBROADCASTI128, M.VEXTRACTI128, M.VINSERTI128, M.VPBLENDD,
                      M.VPERM2I128, M.VPERMD, M.VPERMPS, M.VPERMQ, M.VPERMPD)
