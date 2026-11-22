@@ -100,6 +100,7 @@ CPU_FIXTURES = {
     "sse41_42_misc": "cpu_aot_sse41_42_misc",
     "sse2_packed_cvt": "cpu_aot_sse2_packed_cvt",
     "avx_f16c_maskmov": "cpu_aot_avx_f16c_maskmov",
+    "avx_int_extend_hadd": "cpu_aot_avx_int_extend_hadd",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
