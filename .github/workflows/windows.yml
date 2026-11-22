@@ -24,7 +24,9 @@ jobs:
       - name: Check machine-code inputs with LLVM 15
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends llvm-15 spirv-tools
+          sudo apt-get install -y --no-install-recommends llvm-15 spirv-tools spirv-cross
+          python3 -B tests/spirv_window/sampler.py spirv-as spirv-val spirv-cross
+          python3 -B tests/spirv_window/ballot.py spirv-as spirv-val spirv-cross
           python3 -B tests/spirv_window/check.py
           python3 -B tests/sampled_coverage_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
           python3 -B tests/depth_mask_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
@@ -54,6 +56,7 @@ jobs:
           python -B tests/script_state_check.py
           python -B tests/resource_root_check.py
           python -B tests/bcpack_check.py
+          python -B tests/bcpack_symbols_check.py
           python -B tests/bc7_blocks_check.py
           python -B tests/bc7_tiles_check.py
           python -B tests/form_coverage_check.py
@@ -66,6 +69,7 @@ jobs:
           python -B tests/dependency_paths_check.py
           python -B tests/intake/paths_check.py
           python -B tests/shader_probe_check.py
+          python -B tests/shader_census_check.py
           python -B tests/dxil_retarget_check.py
           python -B tests/rdna2_tools_check.py
           python -B tests/pso_readiness_check.py

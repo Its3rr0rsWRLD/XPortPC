@@ -1,4 +1,5 @@
 #include "desktop_gpu.h"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -17,6 +18,23 @@ std::vector<char> read_bytes(const char* path)
     return {std::istreambuf_iterator<char>(stream), {}};
 }
 
+void copy_mesh_texture(ID3D12GraphicsCommandList* list, ID3D12Resource* buffer, ID3D12Resource* texture,
+                       const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint)
+{
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = buffer;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint = footprint;
+    to.pResource = texture;
+    list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    transition(list, texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+struct ProducedTexture {
+    ComPtr<ID3D12Resource> buffer, sampled;
+    ComPtr<ID3D12PipelineState> pipeline;
+};
+
 template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Kind, typename T>
 struct alignas(void*) Field {
     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE kind = Kind;
@@ -33,20 +51,56 @@ struct MeshPipeline {
     Field<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, DXGI_FORMAT> depth_format;
     Field<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> topology;
 };
+
+ComPtr<ID3D12PipelineState> fallback_draw_pipeline(ID3D12Device* device, ID3D12RootSignature* root,
+    D3D12_SHADER_BYTECODE vs, D3D12_SHADER_BYTECODE ps)
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = root;
+    desc.VS = vs;
+    desc.PS = ps;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.RasterizerState.DepthClipEnable = TRUE;
+    auto& blend = desc.BlendState.RenderTarget[0];
+    blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    desc.SampleMask = UINT_MAX;
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = desc.SampleDesc.Count = 1;
+    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ComPtr<ID3D12PipelineState> pipeline;
+    check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline)), "Create fallback vertex pipeline");
+    return pipeline;
 }
 
-bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* second, const char* fixture,
-                           bool vertices, MeshConstantBinding binding, MeshDrawMode mode)
+bool check_mesh_draw(ID3D12Device* device, const char* first, const char* second, const char* fixture,
+                     bool vertices, MeshConstantBinding binding, const char* fallback_vertex, MeshDrawMode mode,
+                     const MeshTextureProducers* producers)
 {
-    D3D12_FEATURE_DATA_D3D12_OPTIONS7 options{};
-    check(check_feature(device, D3D12_FEATURE_D3D12_OPTIONS7, &options, sizeof(options)), "Query mesh tier");
-    if (options.MeshShaderTier < D3D12_MESH_SHADER_TIER_1) {
-        std::puts("mesh_shader_tier=unsupported");
-        return false;
+    const bool fallback = fallback_vertex != nullptr;
+    if (fallback) {
+        D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
+        const auto hr = check_feature(device, D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
+        if (hr != E_INVALIDARG) check(hr, "Query fallback shader model");
+        if (hr == E_INVALIDARG || model.HighestShaderModel < D3D_SHADER_MODEL_6_0) {
+            std::puts("mesh_fallback_shader_model=unsupported");
+            return false;
+        }
+    } else {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 options{};
+        check(check_feature(device, D3D12_FEATURE_D3D12_OPTIONS7, &options, sizeof(options)), "Query mesh tier");
+        if (options.MeshShaderTier < D3D12_MESH_SHADER_TIER_1) {
+            std::puts("mesh_shader_tier=unsupported");
+            return false;
+        }
     }
     constexpr UINT side = 32;
     constexpr UINT cb_bytes = 512;
-    constexpr UINT trace_stride = 80;
+    const UINT trace_stride = fallback ? 128 : 80;
     constexpr UINT image_bytes = side * side * 4;
     constexpr auto depth_format = DXGI_FORMAT_D32_FLOAT;
     constexpr UINT texel_bytes = 2 * 2 * 4;
@@ -58,7 +112,7 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     const UINT input_bytes = draw_count * draw_bytes;
     const UINT trace_bytes = draw_count * trace_stride;
     const UINT reference_end = input_bytes + trace_bytes + draw_count * image_bytes;
-    if (input.size() != reference_end + (textured ? texel_bytes : 0))
+    if (input.size() != reference_end + (textured && !producers ? texel_bytes : 0))
         throw std::runtime_error("Invalid draw fixture size");
     auto shader = read_bytes(first);
     auto pixel = read_bytes(second);
@@ -79,7 +133,13 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     params[trace_slot].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
     D3D12_ROOT_SIGNATURE_DESC layout{};
     params[vertex_slot].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    layout.NumParameters = vertex_slot + vertices;
+    const UINT geometry_slot = vertex_slot + vertices;
+    if (fallback) {
+        params[geometry_slot].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[geometry_slot].Descriptor.ShaderRegister = 1;
+        params[geometry_slot].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    }
+    layout.NumParameters = geometry_slot + fallback;
     layout.pParameters = params;
     const UINT texture_slot = vertex_slot + 1;
     D3D12_DESCRIPTOR_RANGE texture_range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
@@ -105,26 +165,37 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     ComPtr<ID3D12RootSignature> root;
     check(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)), "Draw root");
     ComPtr<ID3D12PipelineState> pipeline;
-    MeshPipeline stream;
-    stream.root.value = root.Get();
-    stream.ms.value = {shader.data(), shader.size()};
-    stream.ps.value = {pixel.data(), pixel.size()};
-    stream.formats.value.NumRenderTargets = 1;
-    stream.formats.value.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    stream.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
-    stream.raster.value.CullMode = D3D12_CULL_MODE_NONE;
-    stream.raster.value.DepthClipEnable = TRUE;
-    if (depth_pair) {
-        stream.depth.value.DepthEnable = TRUE;
-        stream.depth.value.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        stream.depth.value.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        stream.depth_format.value = depth_format;
+    ComPtr<ID3D12PipelineState> compute_pipeline;
+    const D3D12_SHADER_BYTECODE ps{pixel.data(), pixel.size()};
+    if (fallback) {
+        const auto vertex = read_bytes(fallback_vertex);
+        pipeline = fallback_draw_pipeline(device, root.Get(), {vertex.data(), vertex.size()}, ps);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = root.Get();
+        desc.CS = {shader.data(), shader.size()};
+        check(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&compute_pipeline)), "Create mesh export compute pipeline");
+    } else {
+        MeshPipeline stream;
+        stream.root.value = root.Get();
+        stream.ms.value = {shader.data(), shader.size()};
+        stream.ps.value = ps;
+        stream.formats.value.NumRenderTargets = 1;
+        stream.formats.value.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        stream.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
+        stream.raster.value.CullMode = D3D12_CULL_MODE_NONE;
+        stream.raster.value.DepthClipEnable = TRUE;
+        if (depth_pair) {
+            stream.depth.value.DepthEnable = TRUE;
+            stream.depth.value.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            stream.depth.value.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+            stream.depth_format.value = depth_format;
+        }
+        stream.topology.value = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        D3D12_PIPELINE_STATE_STREAM_DESC desc{sizeof(stream), &stream};
+        ComPtr<ID3D12Device2> device2;
+        check(device->QueryInterface(IID_PPV_ARGS(&device2)), "Query mesh pipeline device");
+        check(device2->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline)), "Create mesh pipeline");
     }
-    stream.topology.value = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    D3D12_PIPELINE_STATE_STREAM_DESC desc{sizeof(stream), &stream};
-    ComPtr<ID3D12Device2> device2;
-    check(device->QueryInterface(IID_PPV_ARGS(&device2)), "Query mesh pipeline device");
-    check(device2->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline)), "Create mesh pipeline");
     D3D12_RESOURCE_DESC texture{};
     texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     texture.Width = texture.Height = side;
@@ -195,31 +266,71 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
         list->SetGraphicsRootConstantBufferView(0, cbv[0]);
         list->SetGraphicsRootConstantBufferView(1, cbv[1]);
     }
-    if (vertices) list->SetGraphicsRootShaderResourceView(vertex_slot, base + 2 * cb_bytes);
+    if (vertices && !fallback) list->SetGraphicsRootShaderResourceView(vertex_slot, base + 2 * cb_bytes);
     ComPtr<ID3D12Resource> sampled, texture_upload;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12RootSignature> compute_root;
+    std::array<ProducedTexture, 2> produced;
     if (textured) {
         auto sampled_desc = texture;
         sampled_desc.Width = sampled_desc.Height = 2;
         sampled_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT sampled_layout{};
         UINT64 upload_bytes = 0;
         device->GetCopyableFootprints(&sampled_desc, 0, 1, 0, &sampled_layout, nullptr, nullptr, &upload_bytes);
-        texture_upload = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_UPLOAD,
-                                     D3D12_RESOURCE_STATE_GENERIC_READ);
-        check(texture_upload->Map(0, &empty, &mapped), "Map mesh texture upload");
-        for (UINT y = 0; y < 2; ++y)
-            std::memcpy(static_cast<char*>(mapped) + sampled_layout.Offset + y * sampled_layout.Footprint.RowPitch,
-                        input.data() + reference_end + y * 8, 8);
-        texture_upload->Unmap(0, nullptr);
-        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
-        from.pResource = texture_upload.Get();
-        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        from.PlacedFootprint = sampled_layout;
-        to.pResource = sampled.Get();
-        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-        transition(list, sampled.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (producers) {
+            if (sampled_layout.Offset != 0 || sampled_layout.Footprint.RowPitch != D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+                throw std::runtime_error("Unexpected footprint for the compute texture fixture");
+            D3D12_ROOT_PARAMETER output{};
+            output.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            D3D12_ROOT_SIGNATURE_DESC compute_layout{};
+            compute_layout.NumParameters = 1;
+            compute_layout.pParameters = &output;
+            ComPtr<ID3DBlob> compute_blob;
+            check(D3D12SerializeRootSignature(&compute_layout, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &compute_blob, nullptr), "Serialize texture producer root");
+            check(device->CreateRootSignature(0, compute_blob->GetBufferPointer(), compute_blob->GetBufferSize(),
+                                              IID_PPV_ARGS(&compute_root)), "Create texture producer root");
+            list->SetComputeRootSignature(compute_root.Get());
+            const char* paths[]{producers->first, producers->second};
+            const unsigned count = producers->second ? 2 : 1;
+            for (unsigned i = 0; i < count; ++i) {
+                auto& producer = produced[i];
+                const auto bytes = read_bytes(paths[i]);
+                D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
+                compute.pRootSignature = compute_root.Get();
+                compute.CS = {bytes.data(), bytes.size()};
+                check(device->CreateComputePipelineState(&compute, IID_PPV_ARGS(&producer.pipeline)),
+                      "Create texture producer pipeline");
+                producer.buffer = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_DEFAULT,
+                                              D3D12_RESOURCE_STATE_COMMON,
+                                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                producer.sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+                transition(list, producer.buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                list->SetPipelineState(producer.pipeline.Get());
+                list->SetComputeRootUnorderedAccessView(0, producer.buffer->GetGPUVirtualAddress());
+                list->Dispatch(1, 1, 1);
+                transition(list, producer.buffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+                copy_mesh_texture(list, producer.buffer.Get(), producer.sampled.Get(), sampled_layout);
+            }
+            const unsigned selected = producers->bind_first ? 0 : count - 1;
+            sampled = produced[selected].sampled;
+            list->SetPipelineState(pipeline.Get());
+            std::printf("texture_producers=%u bound_texture=%u\n", count, selected);
+        } else {
+            sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+            texture_upload = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_UPLOAD,
+                                         D3D12_RESOURCE_STATE_GENERIC_READ);
+            check(texture_upload->Map(0, &empty, &mapped), "Map mesh texture upload");
+            for (UINT y = 0; y < 2; ++y)
+                std::memcpy(static_cast<char*>(mapped) + sampled_layout.Offset + y * sampled_layout.Footprint.RowPitch,
+                            input.data() + reference_end + y * 8, 8);
+            texture_upload->Unmap(0, nullptr);
+            copy_mesh_texture(list, texture_upload.Get(), sampled.Get(), sampled_layout);
+        }
         D3D12_DESCRIPTOR_HEAP_DESC srv_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1,
                                             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         check(device->CreateDescriptorHeap(&srv_desc, IID_PPV_ARGS(&srv_heap)), "Create mesh texture SRV heap");
@@ -236,7 +347,22 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     list->CopyBufferRegion(trace.Get(), 0, upload.Get(), input_bytes, trace_bytes);
     transition(list, trace.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    list->SetGraphicsRootUnorderedAccessView(trace_slot, trace->GetGPUVirtualAddress());
+    auto trace_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (fallback) {
+        list->SetPipelineState(compute_pipeline.Get());
+        list->SetComputeRootSignature(root.Get());
+        list->SetComputeRootConstantBufferView(0, base);
+        list->SetComputeRootConstantBufferView(1, base + cb_bytes);
+        if (vertices) list->SetComputeRootShaderResourceView(vertex_slot, base + 2 * cb_bytes);
+        list->SetComputeRootUnorderedAccessView(trace_slot, trace->GetGPUVirtualAddress());
+        list->Dispatch(1, 1, 1);
+        trace_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        transition(list, trace.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, trace_state);
+        list->SetPipelineState(pipeline.Get());
+        list->SetGraphicsRootShaderResourceView(geometry_slot, trace->GetGPUVirtualAddress());
+    } else {
+        list->SetGraphicsRootUnorderedAccessView(trace_slot, trace->GetGPUVirtualAddress());
+    }
     ComPtr<ID3D12Resource> depth, depth_readback;
     ComPtr<ID3D12DescriptorHeap> depth_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
@@ -261,18 +387,23 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     list->OMSetRenderTargets(1, &handle, FALSE, depth_pair ? &dsv : nullptr);
     const float clear[4]{0, 0, 0, 1};
     list->ClearRenderTargetView(handle, clear, 0, nullptr);
-    ComPtr<ID3D12GraphicsCommandList6> mesh_list;
-    check(commands.list.As(&mesh_list), "Query mesh dispatch list");
-    mesh_list->DispatchMesh(1, 1, 1);
-    if (depth_pair) {
-        const auto second_base = base + draw_bytes;
-        list->SetGraphicsRootConstantBufferView(0, second_base);
-        list->SetGraphicsRootConstantBufferView(1, second_base + cb_bytes);
-        list->SetGraphicsRootShaderResourceView(vertex_slot, second_base + 2 * cb_bytes);
-        list->SetGraphicsRootUnorderedAccessView(trace_slot, trace->GetGPUVirtualAddress() + trace_stride);
+    if (fallback) {
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->DrawInstanced(3, 1, 0, 0);
+    } else {
+        ComPtr<ID3D12GraphicsCommandList6> mesh_list;
+        check(commands.list.As(&mesh_list), "Query mesh dispatch list");
         mesh_list->DispatchMesh(1, 1, 1);
+        if (depth_pair) {
+            const auto second_base = base + draw_bytes;
+            list->SetGraphicsRootConstantBufferView(0, second_base);
+            list->SetGraphicsRootConstantBufferView(1, second_base + cb_bytes);
+            list->SetGraphicsRootShaderResourceView(vertex_slot, second_base + 2 * cb_bytes);
+            list->SetGraphicsRootUnorderedAccessView(trace_slot, trace->GetGPUVirtualAddress() + trace_stride);
+            mesh_list->DispatchMesh(1, 1, 1);
+        }
     }
-    transition(list, trace.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    transition(list, trace.Get(), trace_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list->CopyBufferRegion(readback.Get(), size, trace.Get(), 0, trace_bytes);
     transition(list, target.Get(), draw_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
@@ -292,8 +423,14 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     check(readback->Map(0, nullptr, &mapped), "Map draw result");
     const char* rows = static_cast<const char*>(mapped);
     const char* reference = input.data() + input_bytes;
-    const bool trace_ok = std::memcmp(rows + size, reference, trace_bytes) == 0;
-    reference += trace_bytes;
+    const auto* trace_end = reference + trace_bytes;
+    const auto* first_bad = std::mismatch(reference, trace_end, rows + size).first;
+    const bool trace_ok = first_bad == trace_end;
+    if (fallback) {
+        std::printf("mesh_exports bytes=%u matched=%d\n", trace_bytes, trace_ok ? 1 : 0);
+        if (!trace_ok) std::printf("first_mesh_export_mismatch_byte=%td\n", first_bad - reference);
+    }
+    reference = trace_end;
     unsigned mismatches = 0;
     for (UINT y = 0; y < side; ++y)
         for (UINT x = 0; x < side; ++x)
@@ -318,4 +455,18 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     if (mismatches) throw std::runtime_error("Draw reference mismatch");
     if (depth_mismatches) throw std::runtime_error("Depth reference mismatch");
     return true;
+}
+}
+
+bool check_mesh_entry_draw(ID3D12Device* device, const char* mesh, const char* pixel, const char* fixture,
+                           bool vertices, MeshConstantBinding binding, MeshDrawMode mode,
+                           const MeshTextureProducers* producers)
+{
+    return check_mesh_draw(device, mesh, pixel, fixture, vertices, binding, nullptr, mode, producers);
+}
+
+bool check_mesh_fallback_draw(ID3D12Device* device, const char* compute, const char* vertex,
+                              const char* pixel, const char* fixture)
+{
+    return check_mesh_draw(device, compute, pixel, fixture, true, MeshConstantBinding::root, vertex, MeshDrawMode::color, nullptr);
 }

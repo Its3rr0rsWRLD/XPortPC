@@ -73,6 +73,7 @@ CPU_FIXTURES = {
     "avx2_regs": "cpu_aot_avx2_regs",
     "avx_int_regs": "cpu_aot_avx_int_regs",
     "avx_move_regs": "cpu_aot_avx_move_regs",
+    "sse2_regs": "cpu_aot_sse2_regs",
     "call_pair": "cpu_aot_call_pair",
     "movbe": "cpu_aot_movbe",
     "bmi1": "cpu_aot_bmi1",

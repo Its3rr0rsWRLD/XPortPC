@@ -1,7 +1,7 @@
 """Draw family `dual`: pixel_aot_check.py draw --family dual."""
 import subprocess
 
-from .common import assembly, lower, must_reject
+from .common import assembly, lower, must_reject, translate, with_constants
 
 # "partial" reads texture A's red channel under vmcnt(1) while B is still outstanding (R0Y00/Xbox2Windows#176 by
 # descent81): the samples return in order, so only the newest one is in flight.
@@ -95,6 +95,23 @@ def controls(directory):
     drained = partial[:end_wait + 1] + ["s_waitcnt vmcnt(63)"] + partial[end_wait + 1:]
     translate_dual(drained)
     must_reject(translate_dual, [op.replace("vmcnt(63)", "vmcnt(64)") for op in drained])
+    # Composite waitcnt forms with multiple counters, single counters, or raw 0 (upstream main).
+    for legal_wait in ("s_waitcnt vmcnt(7) lgkmcnt(0)", "s_waitcnt vmcnt(7) lgkmcnt(63)",
+                       "s_waitcnt lgkmcnt(0) vmcnt(0)", "s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)",
+                       "s_waitcnt 0", "s_waitcnt 0x0"):
+        translate_dual(partial[:end_wait + 1] + [legal_wait] + partial[end_wait + 1:])
+    for illegal_wait in ("s_waitcnt lgkmcnt(64)", "s_waitcnt expcnt(8)", "s_waitcnt vmcnt(0) vmcnt(1)",
+                         "s_waitcnt lgkmcnt(0) lgkmcnt(1)", "s_waitcnt expcnt(0) expcnt(1)", "s_waitcnt invalid"):
+        must_reject(translate_dual, partial[:end_wait + 1] + [illegal_wait] + partial[end_wait + 1:])
+    # lgkmcnt(0) in a composite satisfies a constant read, while lgkmcnt(63) keeps the scalar loads outstanding.
+    cbuf_program = with_constants(["v_mov_b32_e32 v8, s44"])
+    cbuf_wait = cbuf_program.index("s_waitcnt lgkmcnt(0)")
+    cbuf_ok = cbuf_program.copy()
+    cbuf_ok[cbuf_wait] = "s_waitcnt vmcnt(7) lgkmcnt(0)"
+    translate(cbuf_ok)
+    cbuf_pending = cbuf_program.copy()
+    cbuf_pending[cbuf_wait] = "s_waitcnt vmcnt(7) lgkmcnt(63)"
+    must_reject(translate, cbuf_pending)
     # Samples and buffer loads are not known to return in order, so a partial wait over a mix settles neither, and
     # only vmcnt(0) does. Of two samples a partial wait settles the older one. (State-level: an assembled mixed program
     # would need a buffer descriptor setup that load.py already exercises.)

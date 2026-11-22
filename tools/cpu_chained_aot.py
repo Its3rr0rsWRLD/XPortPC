@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+import re
 
 import pefile
 from iced_x86 import Code, Decoder, OpKind, Register as R, RegisterExt
@@ -81,8 +82,11 @@ def translate(image, name, partial=False, callback_offset=None, ffx_destroy=Fals
                   and base in regs and regs[base] not in SAVED.values()):
                 address = f"({regs[base]} + {disp}ull)"
                 if code == Code.MOV_R64_RM64:
+                    # The operand is read once, in guest order, into a local that every later use names. The
+                    # read is volatile: the original faults on an inaccessible operand even when the value is
+                    # overwritten before use, and the host compiler may drop an ordinary load whose value is unused.
                     var = f"load_{ip:x}"
-                    lines.append(indent + f"const word {var} = read_word({address});")
+                    lines.append(indent + f"const word {var} = load_always<word>({address});")
                     regs[dst] = var
                 else:
                     regs[dst] = address
@@ -180,9 +184,23 @@ def translate(image, name, partial=False, callback_offset=None, ffx_destroy=Fals
             ip = ins.next_ip
 
     walk(entry, {**SAVED, R.RCX: "first", R.RDX: "second"}, {}, 0, set(), "    ")
+    for index, line in enumerate(lines):
+        # A load whose value nothing uses is still performed.
+        if " = load_always<word>(" in line:
+            var = line.split("const word ", 1)[1].split(" ", 1)[0]
+            if not any(re.search(rf"\b{var}\b", other) for other in lines[index + 1:]):
+                lines[index] = f"{line} static_cast<void>({var});"
     source = """#include <cstdint>
 #include <cstring>
 using word = std::uint64_t;
+// Every guest MOV load, once per instruction: the compiler must perform it even when its value is unused,
+// because the original faults on an inaccessible address either way.
+template <class T> static T load_always(word address) {
+    return *reinterpret_cast<const volatile T*>(address);
+}
+"""
+    if ffx_destroy or callback_offset is not None:
+        source += """// A check of a bound table slot or allocator word; its value is always compared.
 static word read_word(word address) {
     word value;
     std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));

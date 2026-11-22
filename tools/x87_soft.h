@@ -22,6 +22,16 @@ static inline bool x87_unsupported(X87Value v) { return x87_exp(v) != 0 && (v.si
 static inline bool x87_is_nan(X87Value v) { return x87_exp(v) == 0x7fff && (v.sig & x87_integer_bit) && (v.sig << 1) != 0; }
 static inline bool x87_is_inf(X87Value v) { return x87_exp(v) == 0x7fff && v.sig == x87_integer_bit; }
 static inline bool x87_is_zero(X87Value v) { return x87_exp(v) == 0 && v.sig == 0; }
+// FXAM's C3, C2 and C0 for a register that holds a value (C1, the sign, is not kept): unsupported 000,
+// NaN 001, normal 010, infinity 011, zero 100 and denormal 110, which includes a pseudo-denormal. An empty
+// ST(0), 101, is known when the function is translated.
+static inline uint16_t x87_examine(X87Value v) {
+    if (x87_unsupported(v)) return 0x0000;
+    if (x87_is_nan(v)) return 0x0100;
+    if (x87_is_inf(v)) return 0x0500;
+    if (x87_is_zero(v)) return 0x4000;
+    return x87_exp(v) == 0 ? 0x4400 : 0x0400;
+}
 static inline bool x87_is_quiet(X87Value v) { return (v.sig & 0x4000000000000000ull) != 0; }
 static inline X87Value x87_quiet(X87Value v) { v.sig |= 0x4000000000000000ull; return v; }
 

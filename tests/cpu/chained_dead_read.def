@@ -1,0 +1,6 @@
+EXPORTS
+    read_dead
+    disp_dead
+    pair_dead
+    read_skip
+    read_live

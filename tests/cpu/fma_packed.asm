@@ -419,4 +419,68 @@ vfmsub213ps_mem_op PROC FRAME
     ret
 vfmsub213ps_mem_op ENDP
 
+vfmsub132ps_mem_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm1, ymmword ptr [rdx]
+    vfmsub132ps ymm0, ymm1, ymmword ptr [r8]
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfmsub132ps_mem_op ENDP
+
+vfnmadd132ps_xmm_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm1, ymmword ptr [rdx]
+    vmovups ymm2, ymmword ptr [r8]
+    vfnmadd132ps xmm0, xmm1, xmm2
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfnmadd132ps_xmm_op ENDP
+
+vfmaddsub132ps_xmm_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm1, ymmword ptr [rdx]
+    vmovups ymm2, ymmword ptr [r8]
+    vfmaddsub132ps xmm0, xmm1, xmm2
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfmaddsub132ps_xmm_op ENDP
+
+vfmadd132pd_rounding_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm1, ymmword ptr [rdx]
+    vmovups ymm2, ymmword ptr [r8]
+    vfmadd132pd ymm0, ymm1, ymm2
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfmadd132pd_rounding_op ENDP
+
+vfmadd213pd_xmm_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm1, ymmword ptr [rdx]
+    vmovups ymm2, ymmword ptr [r8]
+    vfmadd213pd xmm0, xmm1, xmm2
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfmadd213pd_xmm_op ENDP
+
+vfmadd132ps_alias_op PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vmovups ymm2, ymmword ptr [r8]
+    vfmadd132ps xmm0, xmm0, xmm2
+    vmovups ymmword ptr [r9], ymm0
+    vzeroupper
+    ret
+vfmadd132ps_alias_op ENDP
+
 END

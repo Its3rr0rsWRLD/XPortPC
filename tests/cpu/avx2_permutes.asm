@@ -117,4 +117,53 @@ permpd256 PROC FRAME
     ret
 permpd256 ENDP
 
+extract_i128_reg_imm2 PROC FRAME
+    .endprolog
+    vmovups ymm0, ymmword ptr [rcx]
+    vextracti128 xmm0, ymm0, 2
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    ret
+extract_i128_reg_imm2 ENDP
+
+insert_i128_reg_imm2 PROC FRAME
+    .endprolog
+    vmovups ymm1, ymmword ptr [rcx]
+    vmovups ymm2, ymmword ptr [rdx]
+    vinserti128 ymm0, ymm1, xmm2, 2
+    vmovups ymmword ptr [r8], ymm0
+    vzeroupper
+    ret
+insert_i128_reg_imm2 ENDP
+
+pblendd256_lane0 PROC FRAME
+    .endprolog
+    vmovups ymm1, ymmword ptr [rcx]
+    vmovups ymm2, ymmword ptr [rdx]
+    vpblendd ymm0, ymm1, ymm2, 1
+    vmovups ymmword ptr [r8], ymm0
+    vzeroupper
+    ret
+pblendd256_lane0 ENDP
+
+; imm8 = 0x38: low lane = zeroed (bit 3 set), high lane = src2_hi (3)
+perm2i128_zero_lo PROC FRAME
+    .endprolog
+    vmovups ymm1, ymmword ptr [rcx]
+    vmovups ymm2, ymmword ptr [rdx]
+    vperm2i128 ymm0, ymm1, ymm2, 38h
+    vmovups ymmword ptr [r8], ymm0
+    vzeroupper
+    ret
+perm2i128_zero_lo ENDP
+
+permq256_imm4 PROC FRAME
+    .endprolog
+    vmovups ymm1, ymmword ptr [rcx]
+    vpermq ymm0, ymm1, 4
+    vmovups ymmword ptr [rdx], ymm0
+    vzeroupper
+    ret
+permq256_imm4 ENDP
+
 END

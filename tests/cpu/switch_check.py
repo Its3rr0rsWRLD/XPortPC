@@ -222,6 +222,18 @@ def check_cmov_read(libraries):
         else:
             raise AssertionError(f"{label} cmov_read with a null source did not fault")
 
+def check_rel_edges(probe, libraries):
+    from direct_check import SENTINELS
+    for label, resolve in libraries:
+        invoke = windows_invoker(probe, resolve)
+        for selector in range(4):
+            operand = 0x12345678
+            want = operand if selector < 3 else operand ^ MASK32
+            got = invoke("select_rel_edges", selector, operand)
+            if got != (want, (GUARDS[0], want, GUARDS[1]), SENTINELS):
+                raise AssertionError(f"{label} select_rel_edges({selector}, {operand:#x}): {got}, expected {want:#x}")
+
+
 def check(probe_path, original_path, lifted_path, swapped_path):
     from direct_check import SENTINELS, register_probe
     probe = register_probe(probe_path)
@@ -238,6 +250,9 @@ def check(probe_path, original_path, lifted_path, swapped_path):
     changed = {n: sum(a != b for a, b in zip(original[n], control[n])) for n in names}
     if not all(changed.values()):
         raise AssertionError(f"swapped-table control matched the original: {changed}")
+    check_rel_edges(probe, [("source fixture", lambda n: getattr(native, n)),
+                            ("translation", lambda n: getattr(lifted, "lifted_" + n)),
+                            ("swapped-table build", lambda n: getattr(swapped, "lifted_" + n))])
     check_narrow(probe, lambda n: getattr(native, n), "source fixture")
     check_narrow(probe, lambda n: getattr(lifted, "lifted_" + n), "translation")
     check_narrow(probe, lambda n: getattr(swapped, "lifted_" + n), "swapped-table build")
@@ -284,6 +299,8 @@ def check_rejections(original_path):
         unwind = next(directory.VirtualAddress + i for i in range(0, len(records), 12)
                       if struct.unpack_from("<I", records, i)[0] == entry)
         record_end = struct.unpack_from("<I", records, unwind - directory.VirtualAddress + 4)[0]
+        _, edge_code = instructions(pe, "select_rel_edges")
+        edge_load = next(i for i in edge_code if i.mnemonic == Mnemonic.MOVSXD)
 
     def branch(ins, target):
         raw = data[offset(ins.ip):offset(ins.ip) + ins.len]
@@ -333,7 +350,42 @@ def check_rejections(original_path):
         path.write_bytes(damaged)
         if translate(path, ["select_rva"])[0] != translate(original_path, ["select_rva"])[0]:
             raise AssertionError("leaf without unwind data translated differently")
-    print(f"{len(controls)} rejection controls and the leaf-without-unwind translation passed")
+        compare = first(Mnemonic.CMP)
+        if data[offset(compare.ip):offset(bound.ip)] != bytes.fromhex("83 f9 06"):
+            raise AssertionError("unexpected select_rva CMP encoding")
+        ge = bytearray(data[offset(bound.ip):offset(bound.next_ip)])
+        opcode = 0 if bound.len == 2 else 1
+        ge[opcode] += 6  # JA -> JGE in either encoding; keep the branch displacement.
+
+        load_bytes = bytearray(data[offset(load.ip):offset(load.next_ip)])
+        if load_bytes[0] != 0x47:
+            raise AssertionError("unexpected select_rva table MOV prefix")
+        load_bytes[0] |= 0x08  # REX.W: MOV r9, qword ptr [r10+r9*4+disp32].
+
+        edge_bytes = bytearray(data[offset(edge_load.ip):offset(edge_load.next_ip)])
+        if edge_bytes != bytes.fromhex("49 63 0c 89"):
+            raise AssertionError("unexpected select_rel_edges MOVSXD encoding")
+        edge_bytes[-1] = 0x8b  # Load via R11; ADD still uses R9.
+
+        extra_controls = [
+            ("select_rva", compare.ip, bytes.fromhex("83 f9 07") + bytes(ge),
+             "not an unsigned upper limit"),
+            ("select_rva", load.ip, load_bytes, "unrecognized table load"),
+            ("select_rel_edges", edge_load.ip, edge_bytes, "unrecognized table load"),
+        ]
+        for name, rva, patch, reason in extra_controls:
+            damaged = bytearray(data)
+            start = offset(rva)
+            damaged[start:start + len(patch)] = patch
+            path.write_bytes(damaged)
+            try:
+                translate(path, [name])
+            except ValueError as exc:
+                if reason not in str(exc):
+                    raise AssertionError(f"{name}: {reason}: {exc}") from exc
+            else:
+                raise AssertionError(f"{name} accepted control: {reason}")
+    print(f"{len(controls) + len(extra_controls)} rejection controls and the leaf-without-unwind translation passed")
 
 
 def check_flag_rejections(original_path):

@@ -1,0 +1,8 @@
+EXPORTS
+    fence_order
+    pause_spin
+    prefetch_sum
+    prefetch_write
+    flush_store
+    flushopt_store
+    clwb_store

@@ -14,7 +14,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from disasm_rdna2 import disasm_rdna2, decode_instruction, disassemble_binary
-from extract_shaders import extract_shaders, extract_native_rdna2_code
+from extract_shaders import extract_shaders, extract_native_rdna2_code, sanitize_filename
 from pixel_aot import native_program
 from scan_unsupported_shaders import (
     analyze_shader_instructions,
@@ -127,7 +127,22 @@ class TestRdna2Disasm(unittest.TestCase):
             ("007d8080", "s_sub_u32", "s_sub_u32 s0, s0, null"),
             ("006c8080", "s_sub_u32", "s_sub_u32 s0, s0, ttmp0"),
             # GFX10 / RDNA 2 opcode numbers, encodings as in LLVM's gfx10 MC tests
+            ("01020080", "s_add_u32", "s_add_u32 s0, s1, s2"),
+            ("01028080", "s_sub_u32", "s_sub_u32 s0, s1, s2"),
+            ("01020081", "s_add_i32", "s_add_i32 s0, s1, s2"),
+            ("01028081", "s_sub_i32", "s_sub_i32 s0, s1, s2"),
             ("01020083", "s_min_i32", "s_min_i32 s0, s1, s2"),
+            ("01028083", "s_min_u32", "s_min_u32 s0, s1, s2"),
+            ("01020084", "s_max_i32", "s_max_i32 s0, s1, s2"),
+            ("01028084", "s_max_u32", "s_max_u32 s0, s1, s2"),
+            ("01020085", "s_cselect_b32", "s_cselect_b32 s0, s1, s2"),
+            ("01020087", "s_and_b32", "s_and_b32 s0, s1, s2"),
+            ("01020088", "s_or_b32", "s_or_b32 s0, s1, s2"),
+            ("01020089", "s_xor_b32", "s_xor_b32 s0, s1, s2"),
+            ("0102008a", "s_andn2_b32", "s_andn2_b32 s0, s1, s2"),
+            ("0102008f", "s_lshl_b32", "s_lshl_b32 s0, s1, s2"),
+            ("01020090", "s_lshr_b32", "s_lshr_b32 s0, s1, s2"),
+            ("01020091", "s_ashr_i32", "s_ashr_i32 s0, s1, s2"),
             ("01020093", "s_mul_i32", "s_mul_i32 s0, s1, s2"),
             ("341281b1", "s_cmpk_eq_i32", "s_cmpk_eq_i32 s1, 0x1234"),
             # SOPC: [31:23] == 0b101111110. These encodings were previously
@@ -208,6 +223,31 @@ class TestRdna2Disasm(unittest.TestCase):
             ("2510027c", "v_cmp_lt_f32_e32", "v_cmp_lt_f32_e32 vcc_lo, s37, v8"),
             ("ff04027c0000803f", "v_cmp_lt_f32_e32", "v_cmp_lt_f32_e32 vcc_lo, 0x3f800000, v2"),
             ("0105227c", "v_cmpx_lt_f32_e32", "v_cmpx_lt_f32_e32 v1, v2"),
+            # GFX10 VOP3A and VOP3B 64-bit vector ALU instructions
+            ("00004bd501050e04", "v_fma_f32", "v_fma_f32 v0, v1, v2, v3"),
+            ("0c8008d50ce50100", "v_mul_f32_e64", "v_mul_f32_e64 v12, v12, 1.0 clamp"),
+            ("000001d42c240260", "v_cmp_lt_f32_e64", "v_cmp_lt_f32_e64 s0, -s44, -v18"),
+            ("0e0001d580e40100", "v_cndmask_b32_e64", "v_cndmask_b32_e64 v14, 0, 1.0, s0"),
+            ("01000fd702070200", "v_add_co_u32", "v_add_co_u32 v1, s0, v2, v3"),
+            ("05004bd501ff09040000803f", "v_fma_f32", "v_fma_f32 v5, v1, 0x3f800000, v2"),
+            ("030103d501050208", "v_add_f32_e64", "v_add_f32_e64 v3, |v1|, v2 mul:2"),
+            ("340889d42c240200", "v_cmp_lt_i16_e64", "v_cmp_lt_i16_e64 s52, s44, v18 op_sel:[1,0,0]"),
+            ("fe0064d501050202", "v_add_f64", "v_add_f64 v[254:255], v[1:2], v[2:3]"),
+            ("0200ffd683080200", "v_lshlrev_b64", "v_lshlrev_b64 v[2:3], 3, v[4:5]"),
+            ("000076d502061204", "v_mad_u64_u32", "v_mad_u64_u32 v[0:1], s0, s2, v3, v[4:5]"),
+            ("000090d502010000", "v_cvt_f64_f32_e64", "v_cvt_f64_f32_e64 v[0:1], v2"),
+            ("00008fd502010000", "v_cvt_f32_f64_e64", "v_cvt_f32_f64_e64 v0, v[2:3]"),
+            ("000080d502091a04", "v_nop", "v_nop"),
+            ("0000abd502091a04", "v_rcp_iflag_f32_e64", "v_rcp_iflag_f32_e64 v0, v2"),
+            ("0000afd502091a04", "v_rcp_f64_e64", "v_rcp_f64_e64 v[0:1], v[2:3]"),
+            ("0000b1d502091a04", "v_rsq_f64_e64", "v_rsq_f64_e64 v[0:1], v[2:3]"),
+            ("0000b4d502091a04", "v_sqrt_f64_e64", "v_sqrt_f64_e64 v[0:1], v[2:3]"),
+            ("0000b9d502091a04", "v_ffbh_u32_e64", "v_ffbh_u32_e64 v0, v2"),
+            ("0000bad502091a04", "v_ffbl_b32_e64", "v_ffbl_b32_e64 v0, v2"),
+            ("0000bbd502091a04", "v_ffbh_i32_e64", "v_ffbh_i32_e64 v0, v2"),
+            ("000040d502091a04", "v_mad_legacy_f32", "v_mad_legacy_f32 v0, v2, v4, v6"),
+            ("000050d502091a04", "v_mullit_f32", "v_mullit_f32 v0, v2, v4, v6"),
+            ("010028d502060000", "v_add_co_ci_u32_e64", "v_add_co_ci_u32_e64 v1, s0, s2, s3, s0"),
             # GFX10 VOP3P packed float16, integer16, dot-products, and mixed-precision FMA
             ("04400acc03030118", "v_pk_add_u16", "v_pk_add_u16 v4, v3, 1"),
             ("04000acc03030118", "v_pk_add_u16", "v_pk_add_u16 v4, v3, 1"),
@@ -262,6 +302,39 @@ class TestRdna2Disasm(unittest.TestCase):
             ("004020dc00007c04", "scratch_load_ubyte", "scratch_load_ubyte v4, off, m0"),
             ("104070dc01087d00", "scratch_store_dword", "scratch_store_dword v1, v8, off offset:16"),
             ("e04f74dc00080200", "scratch_store_dwordx2", "scratch_store_dwordx2 off, v[8:9], s2 offset:-32"),
+            ("000050d800000000", "ds_nop", "ds_nop"),
+            ("0000d8d802000018", "ds_read_b32", "ds_read_b32 v24, v2"),
+            ("4000d8d802000018", "ds_read_b32", "ds_read_b32 v24, v2 offset:64"),
+            ("0400e8d802000018", "ds_read_u8", "ds_read_u8 v24, v2 offset:4"),
+            ("1000d8d902000018", "ds_read_b64", "ds_read_b64 v[24:25], v2 offset:16"),
+            ("0000fcdb02000018", "ds_read_b128", "ds_read_b128 v[24:27], v2"),
+            ("0408dcd802000018", "ds_read2_b32", "ds_read2_b32 v[24:25], v2 offset0:4 offset1:8"),
+            ("0102e0d902000018", "ds_read2st64_b64", "ds_read2st64_b64 v[24:27], v2 offset0:1 offset1:2"),
+            ("000034d802080000", "ds_write_b32", "ds_write_b32 v2, v8"),
+            ("800034d802080000", "ds_write_b32", "ds_write_b32 v2, v8 offset:128"),
+            ("040838d802081000", "ds_write2_b32", "ds_write2_b32 v2, v8, v16 offset0:4 offset1:8"),
+            ("20007cdb02080000", "ds_write_b128", "ds_write_b128 v2, v[8:11] offset:32"),
+            ("080000d802080000", "ds_add_u32", "ds_add_u32 v2, v8 offset:8"),
+            ("080082d802080018", "ds_add_rtn_u32", "ds_add_rtn_u32 v24, v2, v8 offset:8 gds"),
+            ("100030d802081000", "ds_mskor_b32", "ds_mskor_b32 v2, v8, v16 offset:16"),
+            ("0102b8d802081018", "ds_wrxchg2_rtn_b32", "ds_wrxchg2_rtn_b32 v[24:25], v2, v8, v16 offset0:1 offset1:2"),
+            ("0000d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2"),
+            ("1b80d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(QUAD_PERM,3,2,1,0)"),
+            ("1f40d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(SWAP,16)"),
+            ("1f1cd4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(REVERSE,8)"),
+            ("5c00d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(BROADCAST,4,2)"),
+            ("0103d4d802000018", "ds_swizzle_b32", 'ds_swizzle_b32 v24, v2 offset:swizzle(BITMASK_PERM,"1100p")'),
+            ("0c00fad800000018", "ds_append", "ds_append v24 offset:12 gds"),
+            ("0000f4d800000018", "ds_consume", "ds_consume v24"),
+            ("0400fed802000018", "ds_ordered_count", "ds_ordered_count v24, v2 offset:4 gds"),
+            ("000062d800000000", "ds_gws_sema_release_all", "ds_gws_sema_release_all gds"),
+            ("080076d802000000", "ds_gws_barrier", "ds_gws_barrier v2 offset:8 gds"),
+            ("0400c8da02080018", "ds_permute_b32", "ds_permute_b32 v24, v2, v8 offset:4"),
+            ("0000ccda02080018", "ds_bpermute_b32", "ds_bpermute_b32 v24, v2, v8"),
+            ("1000c0da00080000", "ds_write_addtid_b32", "ds_write_addtid_b32 v8 offset:16"),
+            ("1000c4da00000018", "ds_read_addtid_b32", "ds_read_addtid_b32 v24 offset:16"),
+            ("200054da02000000", "ds_add_src2_f32", "ds_add_src2_f32 v2 offset:32"),
+            ("0000f8d902080018", "ds_condxchg32_rtn_b64", "ds_condxchg32_rtn_b64 v[24:25], v2, v[8:9]"),
         ]
         for hex_str, expected_op, expected_asm in vectors:
             raw = bytes.fromhex(hex_str)
@@ -294,6 +367,7 @@ class TestRdna2Disasm(unittest.TestCase):
             "ff040606 0000803f"  # v_add_f32_e32 v3, 0x3f800000, v2
             "01050a5a 41312111"  # v_fmaak_f32 v5, v1, v2, 0x11213141
             "ff04027c 0000803f"  # v_cmp_lt_f32_e32 vcc_lo, 0x3f800000, v2
+            "05004bd5 01ff0904 0000803f"  # v_fma_f32 v5, v1, 0x3f800000, v2
             "000081bf"           # s_endpgm
         )
         insns = disasm_rdna2(stream)
@@ -306,6 +380,7 @@ class TestRdna2Disasm(unittest.TestCase):
                 ("v_add_f32_e32", 8, "v_add_f32_e32 v3, 0x3f800000, v2"),
                 ("v_fmaak_f32", 8, "v_fmaak_f32 v5, v1, v2, 0x11213141"),
                 ("v_cmp_lt_f32_e32", 8, "v_cmp_lt_f32_e32 vcc_lo, 0x3f800000, v2"),
+                ("v_fma_f32", 12, "v_fma_f32 v5, v1, 0x3f800000, v2"),
                 ("s_endpgm", 4, "s_endpgm"),
             ],
         )
@@ -316,6 +391,8 @@ class TestRdna2Disasm(unittest.TestCase):
             ("ff02087e", "vop1_truncated"),
             ("01050a5a", "vop2_truncated"),
             ("ff04027c", "vopc_truncated"),
+            ("05004bd501ff0904", "vop3_truncated"),
+            ("00004bd5", "vop3_truncated"),
             ("220790f020402103", "mimg_truncated"),
         ):
             insns = disasm_rdna2(bytes.fromhex(bad_hex))
@@ -430,6 +507,119 @@ class TestRdna2Disasm(unittest.TestCase):
         self.assertEqual(len(insns), 1)
         self.assertEqual(insns[0]["opcode"], "data")
         self.assertEqual(insns[0]["length"], 2)
+
+    def test_vop3_opcode_table_synthetic_forms(self):
+        from disasm_rdna2 import VOP3_NATIVE_OPS
+        for op, (expected_name, _, arity, is_vop3b, dst_width, src_widths) in VOP3_NATIVE_OPS.items():
+            if is_vop3b:
+                w0 = 0xd4000000 | (op << 16) | (0 << 8) | 1  # sdst=s0, vdst=v1
+            else:
+                w0 = 0xd4000000 | (op << 16) | 1  # vdst=v1
+            w1 = 258 | (259 << 9)  # src0=v2, src1=v3
+            if arity >= 3:
+                w1 |= (260 << 18)  # src2=v4
+            raw = struct.pack("<2I", w0, w1)
+            insns = disasm_rdna2(raw)
+            self.assertEqual(len(insns), 1, f"Failed decoding VOP3 op 0x{op:03x}")
+            self.assertEqual(insns[0]["opcode"], expected_name)
+            self.assertEqual(insns[0]["length"], 8)
+            expected_dst = "v[1:2]" if dst_width == 2 else "v1"
+            expected_srcs = []
+            raw_regs = [2, 3, 4]
+            for i in range(arity):
+                w = src_widths[i]
+                r = raw_regs[i]
+                expected_srcs.append(f"v[{r}:{r+1}]" if w == 2 else f"v{r}")
+            srcs_str = ", ".join(expected_srcs)
+            if is_vop3b:
+                self.assertEqual(insns[0]["assembly"], f"{expected_name} {expected_dst}, s0, {srcs_str}")
+            else:
+                self.assertEqual(insns[0]["assembly"], f"{expected_name} {expected_dst}, {srcs_str}")
+
+        # Scanner recognizes all native VOP3 opcodes
+        self.assertTrue(is_opcode_recognized("v_fma_f32"))
+        self.assertTrue(is_opcode_recognized("v_add_co_u32"))
+        self.assertTrue(is_opcode_recognized("v_cndmask_b32_e64"))
+        self.assertEqual(classify_isa_category("v_fma_f32"), "VOP / VALU (Vector ALU - VOP1/VOP2/VOP3)")
+
+    def test_vop3_distinguishes_non_default_modifiers(self):
+        # Base instruction: v_add_f32_e64 v3, v1, v2
+        w0_base = 0xd4000000 | (0x103 << 16) | 3
+        w1_base = 257 | (258 << 9)
+
+        base_asm = disasm_rdna2(struct.pack("<2I", w0_base, w1_base))[0]["assembly"]
+        self.assertEqual(base_asm, "v_add_f32_e64 v3, v1, v2")
+
+        # abs on src0 (w0[8] = 1)
+        abs_asm = disasm_rdna2(struct.pack("<2I", w0_base | (1 << 8), w1_base))[0]["assembly"]
+        self.assertEqual(abs_asm, "v_add_f32_e64 v3, |v1|, v2")
+
+        # neg on src0 (w1[29] = 1)
+        neg_asm = disasm_rdna2(struct.pack("<2I", w0_base, w1_base | (1 << 29)))[0]["assembly"]
+        self.assertEqual(neg_asm, "v_add_f32_e64 v3, -v1, v2")
+
+        # abs and neg on src0
+        abs_neg_asm = disasm_rdna2(struct.pack("<2I", w0_base | (1 << 8), w1_base | (1 << 29)))[0]["assembly"]
+        self.assertEqual(abs_neg_asm, "v_add_f32_e64 v3, -|v1|, v2")
+
+        # clamp (w0[15] = 1)
+        clamp_asm = disasm_rdna2(struct.pack("<2I", w0_base | (1 << 15), w1_base))[0]["assembly"]
+        self.assertEqual(clamp_asm, "v_add_f32_e64 v3, v1, v2 clamp")
+
+        # omod mul:2 (w1[27:28] = 1)
+        omod_asm = disasm_rdna2(struct.pack("<2I", w0_base, w1_base | (1 << 27)))[0]["assembly"]
+        self.assertEqual(omod_asm, "v_add_f32_e64 v3, v1, v2 mul:2")
+
+        # op_sel (w0[11] = 1)
+        opsel_asm = disasm_rdna2(struct.pack("<2I", w0_base | (1 << 11), w1_base))[0]["assembly"]
+        self.assertEqual(opsel_asm, "v_add_f32_e64 v3, v1, v2 op_sel:[1,0,0]")
+
+        variants = [base_asm, abs_asm, neg_asm, abs_neg_asm, clamp_asm, omod_asm, opsel_asm]
+        self.assertEqual(len(set(variants)), len(variants), "VOP3 modifiers produced colliding assemblies")
+
+    def test_vop3_operand_widths_and_stream_alignment(self):
+        # Verify opcode-specific operand widths from LLVM GFX10 MC test cases,
+        # mixed-width forms, conversions, and byte-stream alignment with trailing s_endpgm.
+        stream = bytes.fromhex(
+            "fe0064d501050202"  # v_add_f64 v[254:255], v[1:2], v[2:3]
+            "0200ffd683080200"  # v_lshlrev_b64 v[2:3], 3, v[4:5]
+            "020068d5040d0000"  # v_ldexp_f64 v[2:3], v[4:5], s6
+            "000076d502061204"  # v_mad_u64_u32 v[0:1], s0, v2, v3, v[4:5]
+            "00026ed502091a04"  # v_div_scale_f64 v[0:1], s2, v[2:3], v[4:5], v[6:7]
+            "000090d502010000"  # v_cvt_f64_f32_e64 v[0:1], v2
+            "00008fd502010000"  # v_cvt_f32_f64_e64 v0, v[2:3]
+            "000021d402090200"  # v_cmp_lt_f64_e64 s0, v[2:3], v[4:5]
+            "000080d502091a04"  # v_nop (8-byte VOP3 slot)
+            "0000abd502091a04"  # v_rcp_iflag_f32_e64 v0, v2
+            "0000afd502091a04"  # v_rcp_f64_e64 v[0:1], v[2:3]
+            "000040d502091a04"  # v_mad_legacy_f32 v0, v2, v4, v6
+            "000050d502091a04"  # v_mullit_f32 v0, v2, v4, v6
+            "000072d502091a04"  # v_vop3_172 (undecoded special form consumes 8 bytes)
+            "05004bd501ff09040000803f"  # v_fma_f32 v5, v1, 0x3f800000, v2 (12-byte literal)
+            "000081bf"          # s_endpgm
+        )
+        insns = disasm_rdna2(stream)
+        self.assertEqual(
+            [(i["opcode"], i["length"], i["assembly"]) for i in insns],
+            [
+                ("v_add_f64", 8, "v_add_f64 v[254:255], v[1:2], v[2:3]"),
+                ("v_lshlrev_b64", 8, "v_lshlrev_b64 v[2:3], 3, v[4:5]"),
+                ("v_ldexp_f64", 8, "v_ldexp_f64 v[2:3], v[4:5], s6"),
+                ("v_mad_u64_u32", 8, "v_mad_u64_u32 v[0:1], s0, s2, v3, v[4:5]"),
+                ("v_div_scale_f64", 8, "v_div_scale_f64 v[0:1], s2, v[2:3], v[4:5], v[6:7]"),
+                ("v_cvt_f64_f32_e64", 8, "v_cvt_f64_f32_e64 v[0:1], v2"),
+                ("v_cvt_f32_f64_e64", 8, "v_cvt_f32_f64_e64 v0, v[2:3]"),
+                ("v_cmp_lt_f64_e64", 8, "v_cmp_lt_f64_e64 s0, v[2:3], v[4:5]"),
+                ("v_nop", 8, "v_nop"),
+                ("v_rcp_iflag_f32_e64", 8, "v_rcp_iflag_f32_e64 v0, v2"),
+                ("v_rcp_f64_e64", 8, "v_rcp_f64_e64 v[0:1], v[2:3]"),
+                ("v_mad_legacy_f32", 8, "v_mad_legacy_f32 v0, v2, v4, v6"),
+                ("v_mullit_f32", 8, "v_mullit_f32 v0, v2, v4, v6"),
+                ("v_vop3_172", 8, "v_vop3_172 v0, v2, v4, v6"),
+                ("v_fma_f32", 12, "v_fma_f32 v5, v1, 0x3f800000, v2"),
+                ("s_endpgm", 4, "s_endpgm"),
+            ],
+        )
 
     def test_vop3p_opcode_table_synthetic_forms(self):
         from disasm_rdna2 import VOP3P_OPS, VOP3P_3SRC
@@ -754,6 +944,110 @@ class TestRdna2Disasm(unittest.TestCase):
             "scratch_load_dword off, s2 offset:16 lds",
         )
 
+    def test_ds_opcode_table_synthetic_forms(self):
+        """All 154 GFX1013 DS opcodes must decode cleanly and invalid variants keep 8-byte alignment."""
+        from disasm_rdna2 import DS_OPS
+
+        self.assertEqual(len(DS_OPS), 154)
+
+        def fmt_v(reg: int, width: int) -> str:
+            return f"v{reg}" if width == 1 else f"v[{reg}:{reg + width - 1}]"
+
+        for op, (expected_name, vdst_w, has_addr, data0_w, data1_w, offset_mode, gds_mode) in DS_OPS.items():
+            with self.subTest(op=op, name=expected_name):
+                gds = 1 if gds_mode == "gds_only" else 0
+                w0 = 0xd8000000 | (op << 18) | (gds << 17)
+                w1 = (24 << 24) | (16 << 16) | (8 << 8) | 2
+                insns = disasm_rdna2(struct.pack("<2I", w0, w1))
+                self.assertEqual(len(insns), 1)
+                self.assertEqual(insns[0]["opcode"], expected_name)
+                self.assertEqual(insns[0]["length"], 8)
+
+                ops = []
+                if vdst_w:
+                    ops.append(fmt_v(24, vdst_w))
+                if has_addr:
+                    ops.append("v2")
+                if data0_w:
+                    ops.append(fmt_v(8, data0_w))
+                if data1_w:
+                    ops.append(fmt_v(16, data1_w))
+                expected_asm = expected_name
+                if ops:
+                    expected_asm += f" {', '.join(ops)}"
+                if gds:
+                    expected_asm += " gds"
+                self.assertEqual(insns[0]["assembly"], expected_asm)
+                self.assertTrue(is_opcode_recognized(expected_name))
+                self.assertEqual(classify_isa_category(expected_name), "LDS (Local Data Share)")
+
+        # Truncated DS header reports ds_truncated instead of crashing.
+        trunc = disasm_rdna2(struct.pack("<I", 0xd8000000 | (0x36 << 18)))
+        self.assertEqual(len(trunc), 1)
+        self.assertEqual(trunc[0]["opcode"], "ds_truncated")
+        self.assertIn("<truncated>", trunc[0]["assembly"])
+
+        # Unknown DS opcode, gds_only with gds=0, no_gds with gds=1, and ds_nop with non-zero offset
+        # must all consume 8 bytes so following instructions stay aligned.
+        invalid_w0s = [
+            0xd8000000 | (0x16 << 18),
+            0xd8000000 | (0x3f << 18),
+            0xd8000000 | (0xb2 << 18) | (1 << 17),
+            0xd8000000 | (0x14 << 18) | 4,
+        ]
+        for bad_w0 in invalid_w0s:
+            stream = struct.pack("<3I", bad_w0, 0, 0xbf810000)
+            decoded = disasm_rdna2(stream)
+            self.assertEqual([r["length"] for r in decoded], [8, 4])
+            self.assertEqual(decoded[1]["opcode"], "s_endpgm")
+
+    def test_ds_distinguishes_offsets_swizzle_and_gds(self):
+        """DS single offsets, dual offset0/offset1 pairs, swizzle patterns, and gds must stay distinct."""
+        w1_read = (24 << 24) | 2
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", 0xd8000000 | (0x36 << 18) | 8721, w1_read))[0]["assembly"],
+            "ds_read_b32 v24, v2 offset:8721",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", 0xd8000000 | (0x36 << 18) | (1 << 17) | 64, w1_read))[0]["assembly"],
+            "ds_read_b32 v24, v2 offset:64 gds",
+        )
+
+        # Dual offsets emit non-zero offset0 / offset1 independently.
+        dual_base = 0xd8000000 | (0x37 << 18)
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | 17, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset0:17",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | (34 << 8), w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset1:34",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | (34 << 8) | 17, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset0:17 offset1:34",
+        )
+
+        # Swizzle modes: omitted zero, QUAD_PERM, SWAP, REVERSE, BROADCAST, BITMASK_PERM, decimal fallback.
+        swz_base = 0xd8000000 | (0x35 << 18)
+        for imm, suffix in (
+            (0x0000, ""),
+            (0x80e4, " offset:swizzle(QUAD_PERM,0,1,2,3)"),
+            (0x041f, " offset:swizzle(SWAP,1)"),
+            (0x1c1f, " offset:swizzle(REVERSE,8)"),
+            (0x0058, " offset:swizzle(BROADCAST,8,2)"),
+            (0x1234, ' offset:swizzle(BITMASK_PERM,"10i01")'),
+            (0xc0e4, " offset:49380"),
+        ):
+            self.assertEqual(
+                disasm_rdna2(struct.pack("<2I", swz_base | imm, w1_read))[0]["assembly"],
+                f"ds_swizzle_b32 v24, v2{suffix}",
+            )
+
     def test_cli_hex_entry_point(self):
         script = Path(__file__).resolve().parents[1] / "tools" / "disasm_rdna2.py"
         res = subprocess.run(
@@ -870,6 +1164,39 @@ class TestRdna2Disasm(unittest.TestCase):
             "scratch_load_dword v4, off, s2 offset:-16 glc slc dlc",
             "scratch_load_dword off, s2 offset:16 lds",
             "scratch_store_dwordx2 off, v[8:9], s2 offset:-32",
+            "v_fma_f32 v0, v1, v2, v3",
+            "v_add_f32_e64 v3, v1, v2",
+            "v_cndmask_b32_e64 v14, 0, 1.0, vcc_lo",
+            "v_add_co_u32 v1, vcc_lo, v2, v3",
+            "ds_nop",
+            "ds_read_b32 v24, v2",
+            "ds_read_b32 v24, v2 offset:64",
+            "ds_read_b64 v[24:25], v2 offset:16",
+            "ds_read_b128 v[24:27], v2",
+            "ds_read2_b32 v[24:25], v2 offset0:4 offset1:8",
+            "ds_read2st64_b64 v[24:27], v2 offset0:1 offset1:2",
+            "ds_write_b32 v2, v8 offset:128",
+            "ds_write2_b32 v2, v8, v16 offset0:4 offset1:8",
+            "ds_add_rtn_u32 v24, v2, v8 offset:8 gds",
+            "ds_mskor_b32 v2, v8, v16 offset:16",
+            "ds_wrxchg2_rtn_b32 v[24:25], v2, v8, v16 offset0:1 offset1:2",
+            "ds_swizzle_b32 v24, v2",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(QUAD_PERM,3,2,1,0)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(SWAP,16)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(REVERSE,8)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(BROADCAST,4,2)",
+            'ds_swizzle_b32 v24, v2 offset:swizzle(BITMASK_PERM,"1100p")',
+            "ds_append v24 offset:12 gds",
+            "ds_consume v24",
+            "ds_ordered_count v24, v2 offset:4 gds",
+            "ds_gws_sema_release_all gds",
+            "ds_gws_barrier v2 offset:8 gds",
+            "ds_permute_b32 v24, v2, v8 offset:4",
+            "ds_bpermute_b32 v24, v2, v8",
+            "ds_write_addtid_b32 v8 offset:16",
+            "ds_read_addtid_b32 v24 offset:16",
+            "ds_add_src2_f32 v2 offset:32",
+            "ds_condxchg32_rtn_b64 v[24:25], v2, v[8:9]",
             "s_endpgm",
         ]
 
@@ -924,7 +1251,7 @@ class TestRdna2Disasm(unittest.TestCase):
                 rdna2_op, llvm_op,
                 f"Instruction {i}: disasm_rdna2 opcode '{rdna2_op}' does not match LLVM opcode '{llvm_op}'"
             )
-            if orig_op.startswith(("v_", "exp", "image_", "buffer_", "tbuffer_", "flat_", "global_", "scratch_")):
+            if orig_op.startswith(("v_", "exp", "image_", "buffer_", "tbuffer_", "flat_", "global_", "scratch_", "ds_")):
                 self.assertEqual(
                     " ".join(rdna2_rec["assembly"].lower().split()),
                     " ".join(llvm_line.lower().split()),
@@ -1016,6 +1343,34 @@ class TestRdna2Extractor(unittest.TestCase):
             self.assertTrue((output_dir / "pixel" / "PS_CliTest.bin").is_file())
             self.assertEqual((output_dir / "pixel" / "PS_CliTest.bin").read_bytes(), known_code)
             self.assertTrue((output_dir / "manifest.json").is_file())
+
+    def test_cli_limit_must_be_positive(self):
+        """A limit below one is rejected instead of extracting a record anyway."""
+        records = [envelope(bytes.fromhex("000080bf 000081bf"), b"PS_First"),
+                   envelope(bytes.fromhex("000382be 000081bf"), b"PS_Second")]
+        script = Path(__file__).resolve().parents[1] / "tools" / "extract_shaders.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = tmp_path / "limit.rpf"
+            archive.write_bytes(b"RPF\0" + b"".join(records))
+            for limit in ("0", "-1"):
+                output_dir = tmp_path / f"limit_{limit}"
+                res = subprocess.run(
+                    [sys.executable, "-B", str(script), str(archive), "--output-dir", str(output_dir),
+                     "--stage", "pixel", "--limit", limit],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+                self.assertIn("--limit", res.stderr)
+                self.assertFalse(output_dir.exists(), "no output may be written for a rejected limit")
+            output_dir = tmp_path / "limit_1"
+            subprocess.run(
+                [sys.executable, "-B", str(script), str(archive), "--output-dir", str(output_dir),
+                 "--stage", "pixel", "--limit", "1"],
+                capture_output=True, text=True, check=True,
+            )
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["total_extracted"], 1)
 
     def test_extracted_names_round_trip_length_prefixed_records(self) -> None:
         code = bytes.fromhex("000080bf 000081bf")
@@ -1158,6 +1513,33 @@ class TestRdna2Extractor(unittest.TestCase):
             self.assertEqual(len({p.casefold() for p in paths}), 4, f"Colliding output paths: {paths}")
             for entry, expected in zip(manifest["shaders"], codes):
                 self.assertEqual((out_path / entry["native_file"]).read_bytes(), expected)
+
+    def test_overlong_record_names_get_bounded_distinct_files(self):
+        """A record name near the one-byte length limit must not make the output name unwritable."""
+        codes = [bytes.fromhex("000080bf 000081bf"), bytes.fromhex("000382be 000081bf")]
+        names = [b"PS_" + b"a" * 250 + b"1", b"PS_" + b"a" * 250 + b"2"]
+        records = [envelope(code, name) for code, name in zip(codes, names)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            archive = tmp_path / "long.rpf"
+            archive.write_bytes(b"RPF\0" + b"".join(records))
+
+            out_path, manifest_file = extract_shaders(archive, tmp_path / "extracted_long", target_stages={"pixel"})
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["total_extracted"], 2)
+            self.assertEqual([entry["name"] for entry in manifest["shaders"]],
+                             [name.decode("ascii") for name in names])
+            paths = [entry["native_file"] for entry in manifest["shaders"]]
+            self.assertEqual(len({p.casefold() for p in paths}), 2, f"Colliding output paths: {paths}")
+            for path in paths:
+                self.assertLessEqual(len(Path(path).name.encode("utf-8")), 160, path)
+            for path, expected in zip(paths, codes):
+                self.assertEqual((out_path / path).read_bytes(), expected)
+        # Truncation counts bytes and never splits a multi-byte character.
+        for name in ("é" * 200, "a€" * 100):
+            stem = sanitize_filename(name)
+            self.assertTrue(name.startswith(stem) and 0 < len(stem.encode("utf-8")) <= 128, stem)
 
     def test_empty_archive_produces_empty_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1687,8 +2069,16 @@ class TestRdna2Scanner(unittest.TestCase):
         self.assertFalse(is_instruction_supported("s_waitcnt_expcnt null, invalid"))
         self.assertFalse(is_instruction_supported("s_waitcnt expcnt(8)"))
         self.assertFalse(is_instruction_supported("s_waitcnt vmcnt(64)"))
-        self.assertFalse(is_instruction_supported("s_waitcnt vmcnt(7) lgkmcnt(0)"))
+        self.assertFalse(is_instruction_supported("s_waitcnt lgkmcnt(64)"))
+        self.assertTrue(is_instruction_supported("s_waitcnt vmcnt(7) lgkmcnt(0)"))
+        self.assertTrue(is_instruction_supported("s_waitcnt vmcnt(7) lgkmcnt(63)"))
+        self.assertTrue(is_instruction_supported("s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)"))
+        self.assertTrue(is_instruction_supported("s_waitcnt 0"))
+        self.assertTrue(is_instruction_supported("s_waitcnt 0x0"))
         self.assertFalse(is_instruction_supported("s_waitcnt foo"))
+        self.assertFalse(is_instruction_supported("s_waitcnt vmcnt(0) lgkmcnt(0) vmcnt(1)"))
+        self.assertFalse(is_instruction_supported("s_waitcnt lgkmcnt(0)lgkmcnt(1)"))
+        self.assertFalse(is_instruction_supported("s_waitcnt expcnt(0) expcnt(1)"))
 
     def test_gfx1013_waitcnt_expcnt_decode_and_lower(self):
         """Assemble/decode GFX1013 s_waitcnt_expcnt binary bytes and lower with pixel_aot."""

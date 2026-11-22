@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 
 import pefile
-from iced_x86 import Decoder
+from iced_x86 import Code, Decoder, Mnemonic, OpKind, RegisterExt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_leaf_aot import export_rva
@@ -211,11 +211,53 @@ def check(native_path, lifted_path):
     print(f"{cases} BMI2 cases (32/64-bit values, BZHI flags, preserved flags, MULX same-dest) matched native and translated DLLs")
 
 
+def check_rejections():
+    # Malformed legacy-prefix/VEX controls (0x66-prefixed VEX byte sequences) are outside the lowering contract.
+    for hex_bytes, name, expected_mnem in (
+        ("66 c4 e2 78 f5 c1 c3", "bzhi", Mnemonic.BZHI),
+        ("66 c4 e2 7b f6 c9 c3", "mulx", Mnemonic.MULX),
+        ("66 c4 e2 7b f5 c1 c3", "pdep", Mnemonic.PDEP),
+        ("66 c4 e2 7a f5 c1 c3", "pext", Mnemonic.PEXT),
+        ("66 c4 e3 7b f0 c1 07 c3", "rorx", Mnemonic.RORX),
+        ("66 c4 e2 79 f7 c1 c3", "shlx", Mnemonic.SHLX),
+        ("66 c4 e2 7a f7 c1 c3", "sarx", Mnemonic.SARX),
+        ("66 c4 e2 7b f7 c1 c3", "shrx", Mnemonic.SHRX),
+    ):
+        raw = bytes.fromhex(hex_bytes)
+        prefixed_insns = list(Decoder(64, raw, ip=0x1000))
+        assert len(prefixed_insns) >= 1
+        first = prefixed_insns[0]
+        assert first.code == Code.INVALID
+        assert first.mnemonic == Mnemonic.INVALID
+
+        unprefixed_insns = list(Decoder(64, raw[1:], ip=0x1000))
+        assert len(unprefixed_insns) >= 1
+        un_first = unprefixed_insns[0]
+        assert un_first.code != Code.INVALID
+        assert un_first.mnemonic == expected_mnem
+        for op_idx in range(un_first.op_count):
+            if un_first.op_kind(op_idx) == OpKind.REGISTER:
+                assert RegisterExt.is_gpr32(un_first.op_register(op_idx)), f"{name} op{op_idx} is not GPR32"
+
+        try:
+            lower(prefixed_insns, [], {}, {}, {})
+        except ValueError as exc:
+            if not str(exc).startswith("unsupported query operation at 0x1000"):
+                raise AssertionError(f"unexpected diagnostic for malformed {name}: {exc}") from exc
+        else:
+            raise AssertionError(f"accepted malformed {name}")
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        check_rejections()
+        print("All 8 malformed legacy-prefix/VEX BMI2 rejection controls passed")
+        sys.exit(0)
     mode, native, other = sys.argv[1:]
     if mode == "emit":
         emit(Path(native), Path(other))
     elif mode == "check":
         check(native, other)
+        check_rejections()
     else:
         raise ValueError(mode)

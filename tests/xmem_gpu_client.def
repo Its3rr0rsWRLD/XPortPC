@@ -1,0 +1,3 @@
+LIBRARY xmem_gpu_client
+EXPORTS
+    ClientTitleGpuRoundTrip

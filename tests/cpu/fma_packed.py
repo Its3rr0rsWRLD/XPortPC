@@ -15,9 +15,17 @@ from ffx_version_query import INTEGER_HEADER, lower, region
 U64 = ctypes.c_uint64
 KINDS = ("madd", "msub", "nmadd", "nmsub", "maddsub", "msubadd")
 ORDERS = ("132", "213", "231")
+FINITE_CASES = {
+    "vfmsub132ps_mem_op": ("f", (2.0, 3.0, 5.0)),
+    "vfnmadd132ps_xmm_op": ("f", (2.0, 3.0, 5.0)),
+    "vfmaddsub132ps_xmm_op": ("f", (2.0, 3.0, 5.0)),
+    "vfmadd132pd_rounding_op": ("d", (1.0 + 2.0**-52, -1.0, 1.0 - 2.0**-52)),
+    "vfmadd213pd_xmm_op": ("d", (2.0, 3.0, 5.0)),
+    "vfmadd132ps_alias_op": ("f", (2.0, 3.0, 5.0)),
+}
 EXPORTS = tuple(f"vf{k}{o}{s}_op" for k in KINDS for o in ORDERS for s in ("ps", "pd")) + (
     "vfmadd132ps_xmm_op", "vfmsub213ps_mem_op",
-)
+) + tuple(FINITE_CASES)
 
 
 def emit(image, output):
@@ -77,16 +85,23 @@ def check(native_path, lifted_path):
                        (0x7ff800001234567b, 0xfff000001234567c, 0xfff800001234567d))
     cases = 0
     for name in EXPORTS:
-        is_double = name.endswith("pd_op")
-        single_nan = (pd_a, pd_b, pd_c) if is_double else (ps_a, ps_b, ps_c)
-        distinct = distinct64 if is_double else distinct32
-        one = struct.pack("<d" if is_double else "<f", 1.0)
-        finite = one * (32 // len(one))
-        pairs = tuple(
-            (f"NaN pair with finite operand {index}", distinct[:index] + (finite,) + distinct[index + 1:])
-            for index in range(3)
-        )
-        for label, operands in (("single NaN and finite lanes", single_nan), ("three NaNs", distinct), *pairs):
+        if name in FINITE_CASES:
+            fmt, values = FINITE_CASES[name]
+            lanes = 32 // struct.calcsize("<" + fmt)
+            operands = tuple(struct.pack("<" + fmt, value) * lanes for value in values)
+            vectors = (("finite operands", operands),)
+        else:
+            is_double = name.endswith("pd_op")
+            single_nan = (pd_a, pd_b, pd_c) if is_double else (ps_a, ps_b, ps_c)
+            distinct = distinct64 if is_double else distinct32
+            one = struct.pack("<d" if is_double else "<f", 1.0)
+            finite = one * (32 // len(one))
+            pairs = tuple(
+                (f"NaN pair with finite operand {index}", distinct[:index] + (finite,) + distinct[index + 1:])
+                for index in range(3)
+            )
+            vectors = (("single NaN and finite lanes", single_nan), ("three NaNs", distinct), *pairs)
+        for label, operands in vectors:
             a, b, c = (ctypes.create_string_buffer(bytes(arg), 32) for arg in operands)
             ctypes.memset(out_n, 0xaa, 32)
             ctypes.memset(out_l, 0x55, 32)
