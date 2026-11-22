@@ -805,7 +805,15 @@ extern "C" __declspec(dllexport) int pe_map_release(void* mapped) {
 // an entry point, for a null exit_code and for an unreadable TLS callback list. The PEB argument that
 // Windows passes to the entry point is not forwarded, and no process-detach notification follows because
 // the process goes on.
-extern "C" __declspec(dllexport) int pe_map_run(void* mapped, std::uint32_t* exit_code) {
+//
+// pe_map_run_traced is the same start with an observer, which x2w_launch uses for its run log. The observer is
+// called on the starting thread before each TLS callback (PE_MAP_RUN_TLS_CALLBACK, with the callback's index and
+// address), once after the last callback has returned (PE_MAP_RUN_TLS_DONE, with the number of callbacks) and
+// just before the entry point (PE_MAP_RUN_ENTRY, with its address). A null observer is pe_map_run.
+enum RunEvent : int { PE_MAP_RUN_TLS_CALLBACK = 0, PE_MAP_RUN_TLS_DONE = 1, PE_MAP_RUN_ENTRY = 2 };
+using RunObserver = void(__cdecl*)(int event, std::uint32_t index, void* address);
+
+extern "C" __declspec(dllexport) int pe_map_run_traced(void* mapped, std::uint32_t* exit_code, RunObserver observe) {
     auto* base = static_cast<std::uint8_t*>(mapped);
     const auto* nt = Image{base, 0}.headers();
     if (!exit_code || (nt->FileHeader.Characteristics & IMAGE_FILE_DLL) || !nt->OptionalHeader.AddressOfEntryPoint)
@@ -813,8 +821,20 @@ extern "C" __declspec(dllexport) int pe_map_run(void* mapped, std::uint32_t* exi
     const Image image{base, nt->OptionalHeader.SizeOfImage};
     std::vector<PIMAGE_TLS_CALLBACK> callbacks;
     if (tls_callbacks(image, nt, callbacks)) return 0;
-    for (auto callback : callbacks) callback(base, DLL_PROCESS_ATTACH, nullptr);
+    std::uint32_t index = 0;
+    for (auto callback : callbacks) {
+        if (observe) observe(PE_MAP_RUN_TLS_CALLBACK, index, reinterpret_cast<void*>(callback));
+        ++index;
+        callback(base, DLL_PROCESS_ATTACH, nullptr);
+    }
+    if (observe) observe(PE_MAP_RUN_TLS_DONE, index, nullptr);
     using Entry = DWORD(WINAPI*)(void*);
-    *exit_code = reinterpret_cast<Entry>(base + nt->OptionalHeader.AddressOfEntryPoint)(nullptr);
+    const auto entry = reinterpret_cast<Entry>(base + nt->OptionalHeader.AddressOfEntryPoint);
+    if (observe) observe(PE_MAP_RUN_ENTRY, 0, reinterpret_cast<void*>(entry));
+    *exit_code = entry(nullptr);
     return 1;
+}
+
+extern "C" __declspec(dllexport) int pe_map_run(void* mapped, std::uint32_t* exit_code) {
+    return pe_map_run_traced(mapped, exit_code, nullptr);
 }

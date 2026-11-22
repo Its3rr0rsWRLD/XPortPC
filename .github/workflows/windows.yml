@@ -74,6 +74,7 @@ jobs:
           python -B tests/rdna2_tools_check.py
           python -B tests/pso_readiness_check.py
           python -B tests/xmem_attribute_scan_check.py
+          python -B tests/native/report_check.py
           python -B tests/docs_links_check.py
           python -B tests/bidi_controls_check.py
   build-and-test:

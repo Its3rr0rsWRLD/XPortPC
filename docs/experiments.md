@@ -215,6 +215,23 @@ cmake --build --preset dev --target pe_map cpu_exe_original_lifted
 ctest --preset dev --no-tests=error -R '^cpu_native_exe_(chain|termination)$' -V
 ```
 
+## Title report and the rung 1 run log
+
+[`tools/x2w_report.py`](../tools/x2w_report.py) reads a title's executable with pefile and classifies each ordinary and delay import by the routes `x2w_launch` uses, in the same order: `implemented` (a `--shims` directory has the DLL and the export), `package` (a DLL beside the executable exports the name; like `pe_map_export`, ordinals and forwarded exports are not resolved), `windows` (System32 or an API set, looked up with `LoadLibraryExW(DONT_RESOLVE_DLL_REFERENCES)`), `stub` (a route has the DLL but not the function) and `missing` (no route has the DLL). It also reports the machine, subsystem, sections, TLS callbacks and template size, relocation blocks, entry RVA and the `pe_map` requirements the image fails. The optional shader census reads extracted shaders and archives in place through `scan_unsupported_shaders.py` and `shader_census.py` and keeps only totals and ISA mnemonics.
+
+`x2w_launch --log FILE` writes one line per event: route totals, each first stub call with its class, TLS callbacks (through the new `pe_map_run_traced`, which `pe_map_run` now calls with no observer), the entry point, the first thread and the first one started in the title (seen by a TLS callback in the launcher), the first call into a `d3d12*` import (through a thunk that saves RCX, RDX, R8, R9 and XMM0 to XMM3), the first error exception, the first unhandled crash as module+RVA with the last stub called, and the exit. `--timeout` ends a run that is still going.
+
+The rung 1 title ([`tests/native/rung1_title.cpp`](../tests/native/rung1_title.cpp)) is CRT-free and uses only names already in this repository: `xmem.dll` and `d3d12_xs.dll` exports, kernel32, a name the xmem shim lacks and `x2w_missing.dll`, one import of it by ordinal. It has a TLS callback and a worker thread, and exits with `0x5f` when every step behaves. With `X2W_RUNG1_CRASH=1` it writes through a null pointer after its last stub call.
+
+`native_report_synthetic` builds PE images in Python and checks every class, the PE facts, a failed preflight and the shader census. `native_report_rung1` checks the classes of the built title. Both check that every string in `report.json` is an import, section or program name, a number or a string from the report tools, and that no 8-byte window of any section, nor its hex, appears in either report file. Tampered copies must fail. `native_run_log_rung1` checks the milestones in order, one line per first stub call, the exit line, and in the crash control the access violation inside `.text`, the null write address and the last stub.
+
+On the Linux cross-build (clang-cl and zig, `lld-link /FORCE:UNRESOLVED`), the synthetic check and `native_report_rung1` passed against the cross-built title and shims. The run-log test and both launcher runs have not yet run on Windows.
+
+```powershell
+cmake --build --preset dev --target x2w_launch x2w_shims x2w_rung1_title
+ctest --preset dev --no-tests=error -R '^native_(launch_fake_title|report_synthetic|report_rung1|run_log_rung1)$' -V
+```
+
 ## Pipeline readiness from shader manifests
 
 `tools/pso_readiness.py` joins the native SHA-256 and stage in the shader extraction manifest with explicit pipeline references. It counts archive records, records with a native hash and unique stage/hash pairs separately. Multiple archive records can refer to the same native code. A hash from one stage does not establish coverage in another stage.

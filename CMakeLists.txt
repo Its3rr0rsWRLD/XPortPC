@@ -2892,5 +2892,45 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "${CMAKE_SOURCE_DIR}/tests/native/launch_check.py" "$<TARGET_FILE:x2w_launch>"
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
+
+    # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
+    # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a
+    # title"). The rung 1 title imports names the shims export, one the xmem shim does not, kernel32 and
+    # x2w_missing.dll (also by ordinal), and has a TLS callback and a worker thread.
+    if(TARGET d3d12_xs_shim)
+        set(x2w_shim_dir "${CMAKE_CURRENT_BINARY_DIR}/shims")
+        add_custom_target(x2w_shims ALL
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${x2w_shim_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:xmem_shim>" "$<TARGET_FILE:d3d12_xs_shim>"
+                "${x2w_shim_dir}"
+            DEPENDS xmem_shim d3d12_xs_shim VERBATIM)
+        add_dependencies(x2w_launch x2w_shims)
+        foreach(rung1_def IN ITEMS xmem missing)
+            set(rung1_${rung1_def}_lib "${CMAKE_CURRENT_BINARY_DIR}/rung1_${rung1_def}.lib")
+            add_custom_command(OUTPUT "${rung1_${rung1_def}_lib}"
+                COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64
+                    "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/rung1_${rung1_def}.def"
+                    "/OUT:${rung1_${rung1_def}_lib}"
+                DEPENDS tests/native/rung1_${rung1_def}.def VERBATIM)
+        endforeach()
+        add_custom_target(x2w_rung1_imports DEPENDS "${rung1_xmem_lib}" "${rung1_missing_lib}")
+        add_executable(x2w_rung1_title tests/native/rung1_title.cpp)
+        add_dependencies(x2w_rung1_title x2w_rung1_imports x2w_shims)
+        target_compile_options(x2w_rung1_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_rung1_title PRIVATE /ENTRY:rung1_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+            /DYNAMICBASE /INCREMENTAL:NO)
+        target_link_libraries(x2w_rung1_title PRIVATE kernel32 "${rung1_xmem_lib}" d3d12_xs_shim
+            "${rung1_missing_lib}")
+        add_test(NAME native_report_rung1 COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/report_check.py" --title "$<TARGET_FILE:x2w_rung1_title>"
+            --shims "${x2w_shim_dir}")
+        add_test(NAME native_report_synthetic COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/report_check.py")
+        add_test(NAME native_run_log_rung1 COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/run_log_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_rung1_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_report_rung1 native_report_synthetic native_run_log_rung1
+            PROPERTIES TIMEOUT 180)
+    endif()
 endif()
 
