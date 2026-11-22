@@ -250,9 +250,11 @@ def lift(pe, name, result, slots):
             if ins.mnemonic != M.RET and ins.is_stack_instruction:
                 raise ValueError(f"stack operation in leaf profile at RVA {ip:#x}")
             body[ip], reads, writes = lifter.statement(ins, following)
+            # The shared scalar lifter reports reads and writes as ordered dicts; the dataflow below wants sets.
+            reads, writes = set(reads), set(writes)
             effects[ip] = (reads, writes, lifter.merges)
         reads, writes, merges = effects[ip]
-        touched = reads | writes | {key for pair in merges for key in pair}
+        touched = set(reads) | set(writes) | {key for pair in merges for key in pair}
         saved = sorted(describe(key) for key in touched
                        if (key[0] not in VOLATILE_XMM if isinstance(key, tuple) else key not in VOLATILE))
         if saved:
@@ -270,7 +272,7 @@ def lift(pe, name, result, slots):
         changed = False
         for ip in order:
             _, writes, merges = effects[ip]
-            out = defined[ip] | writes
+            out = defined[ip] | set(writes)
             for destination, source in merges:
                 if source not in defined[ip]:
                     out.discard(destination)
