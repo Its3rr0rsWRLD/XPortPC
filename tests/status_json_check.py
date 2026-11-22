@@ -1,6 +1,8 @@
 """Check tools/status_json.py against tiny fixtures, and that the status page makes no off-site requests."""
 
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -31,12 +33,19 @@ CORPUS = ("# Corpus: 10 shaders (pixel 4, vertex 3, compute 2, other 1).\n"
           "# Blocking form v_a_e64: 3 shaders\n# Blocking form s_b: 2 shaders\n# Blocking form v_c: 1 shaders\n"
           "# Blocking form v_d: 1 shaders\n# Blocking form v_e: 1 shaders\n# Blocking form v_f: 1 shaders\n"
           "form\tencoding\n")
+GFX1013 = ("# 10 forms. Fixture.\n"
+           "SOP1\ts_mov_b32\nSOP1\ts_not_b32\nSOP1\ts_abs_i32\nSOP1\ts_wqm_b32\n"
+           "VOP2\tv_add_f32\nVOP2\tv_sub_f32\nVOP2\tv_mul_f32\nVOP2\tv_max_f32\nVOP2\tv_min_f32\nVOP2\tv_and_b32\n")
+# Test a passed (2 SOP1 forms, and v_add_f32 through its _e32 spelling); c failed, so v_sub_f32 is not
+# covered; "old" is a record from another run (outside the JUnit window), so v_mul_f32 is not covered.
+RECORDS = {"a": "s_mov_b32 s_not_b32 s_endpgm", "b": "v_add_f32_e32 s_mov_b32", "c": "v_sub_f32", "old": "v_mul_f32"}
 PARTS = {"parts": [{"name": "A", "state": "done", "note": "n"}, {"name": "B", "state": "not_started", "note": "m"}]}
 
 
 def make_repo(base):
     (base / "docs" / "coverage").mkdir(parents=True)
     (base / "docs" / "coverage" / "corpus-gfx1013.tsv").write_text(CORPUS, encoding="utf-8")
+    (base / "docs" / "coverage" / "gfx1013.tsv").write_text(GFX1013, encoding="utf-8")
     (base / "docs" / "status-parts.json").write_text(json.dumps(PARTS), encoding="utf-8")
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "PATH": __import__("os").environ["PATH"]}
@@ -53,14 +62,25 @@ class StatusJson(unittest.TestCase):
         make_repo(self.repo)
         (self.dir / "j.xml").write_text(JUNIT, encoding="utf-8")
         (self.dir / "c.json").write_text(json.dumps(COVERAGE), encoding="utf-8")
+        self.records = self.dir / "records"
+        self.records.mkdir()
+        run = datetime.fromisoformat("2026-11-20T10:00:00").timestamp() + 1
+        for test, words in RECORDS.items():
+            path = self.records / f"{test}.txt"
+            path.write_text(words + "\n", encoding="utf-8")
+            when = run - 86400 if test == "old" else run
+            os.utime(path, (when, when))
+
+    def build(self):
+        return status_json.build(self.dir / "j.xml", self.dir / "c.json", self.repo, self.records)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_fields(self):
-        data = status_json.build(self.dir / "j.xml", self.dir / "c.json", self.repo)
+        data = self.build()
         self.assertEqual(list(data), ["schema", "commit", "tests", "gfx1013", "corpus", "stages_supported", "x64", "parts"])
-        self.assertEqual(data["schema"], 2)
+        self.assertEqual(data["schema"], 3)
         self.assertEqual({k: data["tests"][k] for k in ("passed", "failed", "skipped", "total")},
                          {"passed": 2, "failed": 1, "skipped": 1, "total": 4})
         self.assertEqual(data["tests"]["run_at"], "2026-11-20T10:00:00")
@@ -80,6 +100,72 @@ class StatusJson(unittest.TestCase):
         self.assertEqual(len(data["commit"]["full"]), 40)
         self.assertTrue(data["commit"]["full"].startswith(data["commit"]["short"]))
         self.assertEqual([p["state"] for p in data["parts"]], ["done", "not_started"])
+        forms = g["forms"]
+        self.assertEqual(len(forms), 10)
+        self.assertEqual(forms[0], {"name": "s_mov_b32", "group": "SOP1", "covered": True})
+        self.assertEqual(sorted(f["name"] for f in forms if f["covered"]), ["s_mov_b32", "s_not_b32", "v_add_f32"])
+
+    def test_output_is_compact_and_cli_unchanged(self):
+        out = self.dir / "site" / "status.json"
+        old = status_json.ROOT
+        status_json.ROOT = self.repo
+        try:
+            # The merge script's command line, plus --records because the fixture is not in out/.
+            code = status_json.main(["--junit", str(self.dir / "j.xml"), "--coverage", str(self.dir / "c.json"),
+                                     "--out", str(out), "--records", str(self.records)])
+        finally:
+            status_json.ROOT = old
+        self.assertEqual(code, 0)
+        text = out.read_text(encoding="utf-8")
+        self.assertEqual(text.count("\n"), 1)
+        self.assertEqual(json.loads(text)["schema"], 3)
+
+    def test_rerun_junit_overrides_by_name(self):
+        # c failed in the main run and passes in a serial rerun 10 minutes later; its record is from the rerun.
+        (self.dir / "r.xml").write_text('<?xml version="1.0"?>\n<testsuite name="x" tests="1" '
+                                        'timestamp="2026-11-20T10:10:00" time="2"><testcase name="c" status="run"/>'
+                                        '</testsuite>\n', encoding="utf-8")
+        rerun = datetime.fromisoformat("2026-11-20T10:10:00").timestamp() + 1
+        os.utime(self.records / "c.txt", (rerun, rerun))
+        cov = json.loads(json.dumps(COVERAGE))
+        cov["gfx1013"]["covered"] = 4
+        cov["gfx1013"]["groups"]["VOP2"]["covered"] = 2
+        (self.dir / "c.json").write_text(json.dumps(cov), encoding="utf-8")
+        data = status_json.build([self.dir / "j.xml", self.dir / "r.xml"], self.dir / "c.json", self.repo, self.records)
+        self.assertEqual({k: data["tests"][k] for k in ("passed", "failed", "skipped", "total", "run_at")},
+                         {"passed": 3, "failed": 0, "skipped": 1, "total": 4, "run_at": "2026-11-20T10:00:00"})
+        self.assertIn("v_sub_f32", [f["name"] for f in data["gfx1013"]["forms"] if f["covered"]])
+        # Order matters: the main run given last overrides the rerun, so c is failed again and the
+        # rerun's record no longer counts, which now disagrees with the coverage file.
+        self.assertEqual(status_json.read_junit([self.dir / "r.xml", self.dir / "j.xml"])["failed"], 1)
+        with self.assertRaises(status_json.InputError):
+            status_json.build([self.dir / "r.xml", self.dir / "j.xml"], self.dir / "c.json", self.repo, self.records)
+        out = self.dir / "two.json"
+        old = status_json.ROOT
+        status_json.ROOT = self.repo
+        try:
+            code = status_json.main(["--junit", str(self.dir / "j.xml"), "--junit", str(self.dir / "r.xml"),
+                                     "--coverage", str(self.dir / "c.json"), "--out", str(out), "--records", str(self.records)])
+        finally:
+            status_json.ROOT = old
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["tests"]["passed"], 3)
+
+    def test_missing_or_empty_records_exit_2(self):
+        out = self.dir / "status.json"
+        empty = self.dir / "empty"
+        empty.mkdir()
+        for records in (self.dir / "absent", empty):
+            self.assertEqual(status_json.main(["--junit", str(self.dir / "j.xml"), "--coverage", str(self.dir / "c.json"),
+                                               "--out", str(out), "--records", str(records)]), 2)
+            self.assertFalse(out.exists())
+
+    def test_records_disagreeing_with_coverage_are_rejected(self):
+        (self.records / "a.txt").write_text("s_mov_b32 s_not_b32 s_abs_i32\n", encoding="utf-8")
+        run = datetime.fromisoformat("2026-11-20T10:00:00").timestamp() + 1
+        os.utime(self.records / "a.txt", (run, run))
+        with self.assertRaises(status_json.InputError):
+            self.build()
 
     def test_missing_input_exits_2_and_writes_nothing(self):
         out = self.dir / "status.json"
@@ -92,7 +178,7 @@ class StatusJson(unittest.TestCase):
         (self.repo / "docs" / "coverage" / "corpus-gfx1013.tsv").write_text(
             "# Corpus: 7 shaders (pixel 7).\n# Uses of covered forms: 50 of 200 (25.0%)\n", encoding="utf-8")
         with self.assertRaises(status_json.InputError):
-            status_json.build(self.dir / "j.xml", self.dir / "c.json", self.repo)
+            self.build()
 
     def test_real_corpus_header_parses(self):
         _, corpus = status_json.read_corpus(ROOT)

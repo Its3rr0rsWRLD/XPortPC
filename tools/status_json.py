@@ -2,11 +2,19 @@
 
 Usage:
     python tools/status_json.py --junit out/test-results.xml --coverage out/coverage.json --out site/status.json
+        [--records out/build/dev/form_coverage] [--junit out/rerun-results.xml ...]
 
-Inputs: a CTest JUnit file, the JSON written by `tools/form_coverage.py --json`, the corpus header in
+Inputs: one or more CTest JUnit files (repeat --junit: results merge by test name and a later file
+overrides an earlier one, so a serial rerun of tests that timed out replaces their first result), the
+JSON written by `tools/form_coverage.py --json`, the shader translation records those runs wrote
+(--records, default out/build/dev/form_coverage), the corpus header in
 docs/coverage/corpus-gfx1013.tsv, docs/status-parts.json and the Git HEAD of this repository.
 Exits with 2 and writes nothing when any input is missing or unreadable, so a stale file is never
 half-updated. Python standard library only.
+
+Schema 3 adds gfx1013.forms: one {name, group, covered} entry per form of docs/coverage/gfx1013.tsv,
+covered exactly as tools/form_coverage.py counts it (a record from these runs whose test passed).
+The per-group totals must match the coverage file, so the list and the counts never disagree.
 """
 
 import argparse
@@ -18,6 +26,9 @@ import sys
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+import form_coverage  # noqa: E402
+
 CORPUS = Path("docs/coverage/corpus-gfx1013.tsv")
 PARTS = Path("docs/status-parts.json")
 STATES = ("done", "partial", "not_started")
@@ -37,23 +48,38 @@ def read_json(path):
         raise InputError(f"cannot read {path}: {error}")
 
 
-def read_junit(path):
-    try:
-        suite = ET.parse(path).getroot()
-    except (OSError, ET.ParseError) as error:
-        raise InputError(f"cannot read {path}: {error}")
-    counts = {"passed": 0, "failed": 0, "skipped": 0}
-    for case in suite.iter("testcase"):
-        if case.find("failure") is not None or case.find("error") is not None:
-            counts["failed"] += 1
-        elif case.get("status") == "notrun" or case.find("skipped") is not None:
-            counts["skipped"] += 1
-        elif case.get("status") == "run":
-            counts["passed"] += 1
-        else:
-            counts["failed"] += 1
+def junit_paths(junit):
+    """One path or several; several are merged by test name, later files overriding earlier ones."""
+    paths = [junit] if isinstance(junit, (str, Path)) else list(junit)
+    if not paths:
+        raise InputError("no JUnit file given")
+    return paths
+
+
+def read_junit(junit):
+    """Pass/fail/skip counts over the merged results. run_at is the first file's start, the main run."""
+    states, run_at = {}, None
+    for path in junit_paths(junit):
+        try:
+            suite = ET.parse(path).getroot()
+        except (OSError, ET.ParseError) as error:
+            raise InputError(f"cannot read {path}: {error}")
+        if run_at is None:
+            run_at = suite.get("timestamp")
+        for case in suite.iter("testcase"):
+            if case.find("failure") is not None or case.find("error") is not None:
+                state = "failed"
+            elif case.get("status") == "notrun" or case.find("skipped") is not None:
+                state = "skipped"
+            elif case.get("status") == "run":
+                state = "passed"
+            else:
+                state = "failed"
+            states.pop(case.get("name"), None)  # a rerun replaces the earlier result
+            states[case.get("name")] = state
+    counts = {k: sum(v == k for v in states.values()) for k in ("passed", "failed", "skipped")}
     counts["total"] = sum(counts.values())
-    counts["run_at"] = suite.get("timestamp")
+    counts["run_at"] = run_at
     return counts
 
 
@@ -103,7 +129,46 @@ def read_git(root):
     return {"short": out[0], "full": out[1], "time": out[2]}
 
 
-def build(junit, coverage, root=ROOT):
+def read_forms(junit, records, root=ROOT):
+    """[{name, group, covered}] for every gfx1013 reference form, in reference-file order."""
+    records = Path(records)
+    if not records.is_dir() or not any(records.glob("*.txt")):
+        raise InputError(f"no form-coverage records in {records} (run the CTest suite first, or pass --records)")
+    path = root / "docs" / "coverage" / "gfx1013.tsv"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        results, start, end = {}, None, None
+        for path in junit_paths(junit):  # later files override earlier ones; records may come from any run
+            more, (lo, hi) = form_coverage.read_results(path)
+            results.update(more)
+            start, end = (lo, hi) if start is None else (min(start, lo), max(end, hi))
+        accepted = form_coverage.read_records(records, (start, end))
+    except (OSError, ValueError, TypeError, ET.ParseError) as error:
+        raise InputError(f"cannot read form coverage inputs: {error}")
+    reference = [tuple(line.split("\t")) for line in lines if line and not line.startswith("#")]
+    if not reference or any(len(form) != 2 for form in reference):
+        raise InputError(f"{path} is not a two-column form list")
+    covered = set()
+    for test, mnemonics in accepted.items():
+        if form_coverage.fixture_status(results, [test]) == "pass":
+            covered |= form_coverage.gfx_forms(mnemonics, set(reference))
+    return [{"name": name, "group": group, "covered": (group, name) in covered} for group, name in reference]
+
+
+def check_forms(forms, groups):
+    counts = {}
+    for f in forms:
+        c = counts.setdefault(f["group"], [0, 0])
+        c[0] += f["covered"]
+        c[1] += 1
+    expected = {g["name"]: [g["covered"], g["total"]] for g in groups}
+    if counts != expected:
+        diff = sorted(n for n in set(counts) | set(expected) if counts.get(n) != expected.get(n))
+        raise InputError("form records disagree with the coverage file for " + ", ".join(diff)
+                         + " (were both written by the same test run?)")
+
+
+def build(junit, coverage, root=ROOT, records=form_coverage.RECORDS):
     cov = read_json(coverage)
     try:
         gfx, x64 = cov["gfx1013"], cov["x64_zen2"]
@@ -118,9 +183,11 @@ def build(junit, coverage, root=ROOT):
     if forms["forms_total"] <= 0:
         raise InputError(f"{coverage} reports zero gfx1013 forms")
     forms["forms_percent"] = round(100 * forms["forms_covered"] / forms["forms_total"], 1)
+    forms["forms"] = read_forms(junit, records, root)
+    check_forms(forms["forms"], groups)
     legacy, corpus = read_corpus(root)  # legacy fields stay in gfx1013 so a schema-1 page still works
     return {
-        "schema": 2,
+        "schema": 3,
         "commit": read_git(root),
         "tests": tests,
         "gfx1013": {**forms, **legacy},
@@ -133,17 +200,20 @@ def build(junit, coverage, root=ROOT):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--junit", type=Path, required=True)
+    parser.add_argument("--junit", type=Path, required=True, action="append",
+                        help="CTest JUnit file; repeat it to merge reruns (later files override earlier ones by test name)")
     parser.add_argument("--coverage", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--records", type=Path, default=form_coverage.RECORDS,
+                        help="directory of shader translation records (default: %(default)s)")
     args = parser.parse_args(argv)
     try:
-        data = build(args.junit, args.coverage)
+        data = build(args.junit, args.coverage, ROOT, args.records)
     except InputError as error:
         print(f"status_json: {error}", file=sys.stderr)
         return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    args.out.write_text(json.dumps(data, separators=(",", ":")) + "\n", encoding="utf-8")
     return 0
 
 

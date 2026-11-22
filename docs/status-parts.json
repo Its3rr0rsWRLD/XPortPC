@@ -1,7 +1,7 @@
 {
   "parts": [
     {"name": "Shader converter: instruction forms", "state": "partial", "note": "Counts and shares are in the figures above."},
-    {"name": "Shader converter: control flow", "state": "not_started", "note": "Branches, loops and exec masks."},
+    {"name": "Shader converter: control flow", "state": "partial", "note": "Uniform branches and loops work; branches that split lanes (exec masks) are not started."},
     {"name": "Shader converter: other stages", "state": "not_started", "note": "Vertex, compute and other stages."},
     {"name": "GPU memory loads", "state": "partial", "note": "Buffer, global and image loads are done; stores and LDS are not started."},
     {"name": "Console Direct3D 12 layer (d3d12_xs)", "state": "not_started", "note": "Not started."},
