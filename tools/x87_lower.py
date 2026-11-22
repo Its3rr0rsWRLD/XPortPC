@@ -5,6 +5,8 @@ The profile accepts:
 - FLD, FST, FSTP and FXCH with ST(i), and FCHS and FABS;
 - the constant loads FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2 and FLDLN2;
 - FILD, FISTP and FISTTP with an m16, m32 or m64 integer operand, and FIST with m16 or m32;
+- FCOMI, FCOMIP, FUCOMI and FUCOMIP ST(0), ST(i), which set ZF and CF for the integer lowering (PF is
+  not modelled, and the integer lowering rejects every instruction that reads it);
 - FADD, FSUB, FSUBR, FMUL, FDIV and FDIVR with an m32 or m64 operand, with ST(0), ST(i) and with
   ST(i), ST(0), and their popping forms FADDP, FSUBP, FSUBRP, FMULP, FDIVP and FDIVRP ST(i), ST(0) for
   i from 1 to 7.
@@ -23,7 +25,8 @@ from iced_x86 import Code as C, FlowControl, MemorySize as S, Mnemonic as M, OpK
 
 X87_HEADER = Path(__file__).with_name("x87_soft.h").read_text(encoding="ascii")
 X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FLD1, M.FLDZ, M.FLDPI, M.FLDL2T, M.FLDL2E,
-                     M.FLDLG2, M.FLDLN2, M.FILD, M.FIST, M.FISTP, M.FISTTP, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
+                     M.FLDLG2, M.FLDLN2, M.FILD, M.FIST, M.FISTP, M.FISTTP, M.FCOMI,
+                     M.FCOMIP, M.FUCOMI, M.FUCOMIP, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
                      M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP})
 DECLARATION = "X87Value x87_slot[8]{};"
 
@@ -47,6 +50,8 @@ CONSTANTS = {M.FLD1: (0x8000000000000000, 0x3FFF), M.FLDZ: (0, 0), M.FLDPI: (0xC
 # Integer memory operands: (signed type, unsigned type, bits).
 INTEGERS = {S.INT16: ("int16_t", "uint16_t", 16), S.INT32: ("int32_t", "uint32_t", 32),
             S.INT64: ("int64_t", "uint64_t", 64)}
+# Comparisons into EFLAGS; the P forms pop after comparing.
+COMPARES = frozenset({M.FCOMI, M.FCOMIP, M.FUCOMI, M.FUCOMIP})
 # Undocumented aliases of FSTP ST(i) (DF D0+i, DF D8+i) and FXCH ST(i) (DD C8+i, DF C8+i). Assemblers do
 # not emit them and the fixtures do not measure them, so they stay outside the profile.
 ALIASES = frozenset({C.FSTP_STI_DFD0, C.FSTP_STI_DFD8, C.FXCH_ST0_STI_DDC8, C.FXCH_ST0_STI_DFC8})
@@ -76,6 +81,12 @@ def _effect(i, depth):
         if depth <= i.op1_register - R.ST0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth
+    if op in COMPARES:
+        if i.op_count != 2 or i.op0_register != R.ST0:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        if depth <= i.op1_register - R.ST0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth - 1 if op in (M.FCOMIP, M.FUCOMIP) else depth
     if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
         if i.op0_kind != K.MEMORY or i.memory_size not in INTEGERS:
             raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
@@ -176,6 +187,10 @@ def statement(i, depth, address):
     if op == M.FXCH:
         k = top - (i.op1_register - R.ST0)
         return f"{{ const X87Value t = x87_slot[{top}]; x87_slot[{top}] = x87_slot[{k}]; x87_slot[{k}] = t; }}  // fxch"
+    if op in COMPARES:  # ZF and CF: 1 and 0 for equal, 0 and 1 for less, 0 and 0 for greater, 1 and 1 unordered
+        k = top - (i.op1_register - R.ST0)
+        return (f"{{ const int r = x87_compare(x87_slot[{top}], x87_slot[{k}]); "
+                f"zero = r == 1 || r == 3; carry = r == 0 || r == 3; }}")
     if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
         signed, unsigned, bits = INTEGERS[i.memory_size]
         if op == M.FILD:

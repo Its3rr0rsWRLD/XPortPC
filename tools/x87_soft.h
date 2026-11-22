@@ -305,3 +305,20 @@ static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop) {
     if (magnitude > indefinite - (x87_sign(v) ? 0 : 1)) return indefinite;
     return (x87_sign(v) ? 0 - magnitude : magnitude) & mask;
 }
+
+// FCOMI, FUCOMI and their P forms: 0 if a < b, 1 if equal, 2 if a > b and 3 if unordered (a NaN or an
+// unsupported encoding; with the invalid operation masked, FCOMI and FUCOMI give the same result). The
+// comparison uses all 64 significand bits, +0 equals -0, and a pseudo-denormal equals the normal value
+// with the same significand at biased exponent 1.
+static inline int x87_compare(X87Value a, X87Value b) {
+    if (x87_unsupported(a) || x87_unsupported(b) || x87_is_nan(a) || x87_is_nan(b)) return 3;  // unordered
+    const bool za = x87_is_zero(a), zb = x87_is_zero(b);
+    if (za && zb) return 1;  // signed zeros
+    if (za) return x87_sign(b) ? 2 : 0;
+    if (zb) return x87_sign(a) ? 0 : 2;
+    if (x87_sign(a) != x87_sign(b)) return x87_sign(a) ? 0 : 2;
+    const X87Unpacked ua = x87_unpack(a), ub = x87_unpack(b);  // infinities unpack above every finite value
+    if (ua.e == ub.e && ua.sig == ub.sig) return 1;
+    const bool less = ua.e != ub.e ? ua.e < ub.e : ua.sig < ub.sig;
+    return less != x87_sign(a) ? 0 : 2;
+}

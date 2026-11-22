@@ -1,0 +1,12 @@
+EXPORTS
+    fcomi_st1
+    fcomip_st1
+    fucomi_st1
+    fucomip_st1
+    fcomi_st2
+    fucomip_st2
+    fucomi_st0
+    fcomip_st0
+    fcomi_m64
+    fucomi_m32
+    two_compares
