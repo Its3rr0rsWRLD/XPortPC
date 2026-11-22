@@ -273,9 +273,16 @@ footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--r
           panels.push(p);
           row.addEventListener("click", function () {
             var open = row.getAttribute("aria-expanded") !== "true";
+            clearTimeout(p.clear);
             if (open && p.filled !== show) fill(p);
             row.setAttribute("aria-expanded", String(open));
             li.classList.toggle("open", open);
+            if (!open) {
+              // Empty the list once it has closed: a collapsed multi-column list still adds to the page's scroll
+              // height in Chrome. Reopening fills it again.
+              var wait = 1000 * (parseFloat(getComputedStyle(panel).transitionDuration) || 0);
+              p.clear = setTimeout(function () { p.ul.textContent = ""; p.filled = null; }, wait + 20);
+            }
           });
         }
         ul.appendChild(li);
