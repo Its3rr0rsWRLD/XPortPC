@@ -1,38 +1,192 @@
 # Control flow in pixel_aot: design
 
-Status: CF-1 implemented; CF-2 and CF-3 proposed. Applies to tools/pixel_aot.py `lower()`.
+Status: CF-1 implemented; CF-2 designed in detail below (section "CF-2: divergent control flow"), not implemented; CF-3 proposed. Applies to tools/pixel_aot.py `lower()` (after the per-family split, to whichever module holds `lower()` and the CF-1 walk).
 
 ## Where we are
-`lower()` is one forward pass over straight-line code. It tracks each register symbolically (`vector`/`scalar` dicts holding HLSL names, `("uint", expr)` words, descriptor provenance such as `texture_ptr` or `(name, j)`), and the execution mask is only `entry` or `quad`. Every VALU branch refuses anything but `mask == "entry"`. There is no branch, label or loop support.
+`lower()` tracks each register symbolically (`vector`/`scalar` dicts holding HLSL names, `("uint", expr)` words, descriptor provenance such as `texture_ptr` or `(name, j)`, lane masks as `("condition", name, j, width)`). CF-1 added basic blocks (`split_blocks`), loop discovery (`find_loops`), the structured walk (`program()` → `walk_region` / `walk_loop` / `loop_body`), and join variables (`plan_join`, `sync_lines`: `uint jv_*`, `uint js_*`, `bool jc_*`) for uniform branches on SCC. The execution mask is still only `entry` or `quad`: every VALU branch refuses `mask != "entry"`, a branch in `quad` mode is refused, and no instruction may write EXEC except the fixture idiom `s_mov_b64 s[a:b], exec` / `s_wqm_b64 exec, exec` / `s_and_b64 exec, exec, s[a:b]`.
 
 ## Model: one HLSL thread = one console lane
 A pixel shader invocation on desktop is one lane of the console wave. Wave-wide state is reduced to *this lane's view*:
-- **EXEC** becomes a per-thread `bool exec_on` (this lane's bit). VCC and SGPR lane masks written by VALU compares are already per-lane `("condition", ...)` values. SALU bitwise ops on lane masks (`s_and/or/xor/andn2/orn2_b32/b64`, `*_saveexec_*`, `*_wrexec_*`) operate on this lane's bit, which is exact for bitwise algebra.
-- **Wave-uniform questions** about a mask (`s_cbranch_execz/execnz`, `s_cbranch_vccz/vccnz`, `s_bcnt1` / `s_ff1` / `s_cmp_*` on a mask) cannot be answered per lane exactly, because desktop waves are not console waves. Rule:
-  - `s_cbranch_execz L` / `s_cbranch_execnz L` that skip or repeat a region are **lowered as if the lane decides for itself** ("this lane inactive" for execz, "this lane active" for execnz). This is exact for the lane's own results whenever the skipped or repeated region only contains masked vector work and scalar work that is either dead afterwards or recomputed identically; it is the shape LLVM's structurizer emits (SI_IF / SI_ELSE / SI_END_CF / SI_LOOP). The translator must *verify* that shape (see "Checks") and refuse otherwise.
-  - Population counts and lane searches on masks (`s_bcnt1`, `s_ff1`, readfirstlane) are refused in divergent regions until a later card models them with wave intrinsics.
+- **EXEC** becomes a per-thread bool (this lane's bit). VCC and SGPR lane masks written by VALU compares are already per-lane `("condition", ...)` values. SALU bitwise ops on lane masks (`s_and/or/xor/andn2/orn2/nand/nor/xnor_b64`, `*_saveexec_*`) operate on this lane's bit, which is exact for bitwise algebra.
+- **Wave-uniform questions** about a mask (`s_cbranch_execz/execnz`, SCC of a mask op, `s_cbranch_vccz/vccnz`, `s_bcnt1` / `s_ff1` / `s_cmp_*` on a mask) cannot be answered per lane exactly, because desktop waves are not console waves. CF-2 answers the branch forms per lane only inside the shapes RADV's compiler emits, where the answer provably does not change the lane's results (section "Why a lane may decide for itself"); everything else is refused.
 - **Uniform branches** (`s_cbranch_scc0/1` on an SCC computed only from uniform scalar data, `s_branch`) are ordinary per-thread branches: every lane takes the same edge.
 
 ## Representation: basic blocks + join variables (keeps every existing lowering branch)
-1. Split the instruction list into basic blocks at labels and after branches. Labels come from the disassembly (`_L1:` or `s_branch label` forms; support the spelling our llvm-mc 15 fixtures use).
-2. Lower each block with the existing straight-line code, unchanged. Within a block, values stay symbolic exactly as today.
-3. At block boundaries, every register that is live-out and written in any block of the region is spilled to a **join variable** declared once at function scope: `uint jv5;` / `uint js12;` (raw 32-bit bits, so float and integer values both survive bit-exactly; reads become `("uint", "jv5")`, which fp_operand already turns into `asfloat(jv5)`). Lane masks use `bool jc_vcc;`.
-4. **Provenance values** (descriptor words, `texture_ptr`, `interp_base`, sample/vmcnt state, `pending`) are not spilled: they must be identical on every incoming edge of a block, or the program is refused ("descriptor state differs at a join"). Real shaders set descriptors up in the entry block.
-5. Emission: one HLSL function body in **structured form when the CFG is reducible and matches if / if-else / loop patterns** (`if (c) { ... } else { ... }`, `[loop] while (true) { ...; if (!c) break; }`), which keeps implicit-derivative sampling legal in uniform control flow and lets DXC optimize. A CFG that does not match is refused in the first card (no dispatcher yet); a `switch(pc)` dispatcher can be added later as a fallback.
-6. **Masked writes**: when `exec_on` is not provably true (inside a divergent region), each VALU result written to a register becomes `exec_on ? new : old` on the join variable or the previous symbolic value. Implement once: wrap the `vector` dict in a recorder that captures writes per instruction; after a VALU branch runs, the recorder emits the select. Branches stop checking `mask != "entry"` and instead the recorder handles the mask (one mechanical edit across ~27 branches).
-7. **Samples and derivatives**: an implicit-LOD `image_sample` inside a divergent region is refused in the first cards (desktop derivatives are undefined in divergent flow; console helper lanes keep computing). A later card can hoist coordinates or use explicit gradients computed in uniform flow.
-8. Memory loads (card 4b) inside a divergent region execute only when `exec_on` (wrap in `if (exec_on)`), returning the old destination otherwise.
+1. Split the instruction list into basic blocks at labels and after branches. Labels come from the disassembly (`_L<n>:` from `name_branch_targets`, `BB<n>:` in RADV dumps, `BB0_<n>:` in the llvm-mc fixtures).
+2. Lower each block with the existing straight-line code. Within a block, values stay symbolic exactly as today.
+3. At block boundaries, every register that is live-out and written in any block of the region is spilled to a **join variable** declared once at function scope (raw 32-bit bits, so float and integer values both survive bit-exactly). Lane masks use `bool jc_*`.
+4. **Provenance values** (descriptor words, `texture_ptr`, `interp_base`, sample/vmcnt state, `pending`) are not spilled: they must be identical on every incoming edge of a block, or the program is refused.
+5. Emission: one HLSL function body in **structured form** (`if (c) { ... } else { ... }`, `[loop] while (true) { ...; if (!c) break; }`). A CFG that does not match is refused; a `switch(pc)` dispatcher is CF-3.
 
-## Checks the translator performs
-- Every branch target resolves; no fallthrough off the end; one export path.
-- Divergent regions are single-entry/single-exit and bracketed by saveexec/restore pairs as LLVM emits them; exec restored on every exit edge.
+## Checks the translator performs (CF-1)
+- Every branch target resolves; no fallthrough off the end; export exactly once on every path.
 - Provenance agreement at joins.
-- No refused operation inside a divergent region (implicit-LOD sample, mask popcount/search, cross-lane DPP/readlane/permlane, LDS swizzle).
+- Loops nest, have one back edge, and leave at the header or at the latch (CF-2 widens this, card CF-2e).
 
-## Tests (each card)
-Source-built programs assembled by llvm-mc 15 (gfx1013) with labels; draws whose per-pixel inputs differ so lanes really diverge (use the interpolated uv or a per-pixel texture value as the condition); CPU reference per pixel; wrong references for: masked write not applied, else-branch result leaking, loop running one iteration too few/many, exec not restored after the region.
+---
 
-## Cards
-- **CF-1**: blocks, labels, `s_branch`, uniform `s_cbranch_scc0/scc1`, join variables, structured if/else and loops on uniform conditions. No exec changes.
-- **CF-2**: divergence: `v_cmp` → `s_and_saveexec_b32/b64`, `s_xor_b32/b64 exec`, `s_or_b32/b64 exec` restore, `s_andn2_b32/b64 exec`, `s_cbranch_execz/execnz`, masked writes via the recorder, loops with per-lane exit (`s_cbranch_execnz` back-edge).
-- **CF-3**: wave-level questions with wave intrinsics where sound, explicit-gradient sampling in divergent flow, `switch(pc)` fallback for irreducible shapes.
+## CF-2: divergent control flow
+
+### 1. What the corpus does
+The 250 RADV pixel shaders in docs/coverage/corpus-shaders.tsv were compiled by **ACO** (RADV's default backend), not LLVM, so the shapes to match are ACO's (`aco_instruction_selection.cpp` `begin_divergent_if_then` / `begin_divergent_if_else` / `end_divergent_if`, `emit_loop_break`, `emit_loop_continue`, discard/demote lowering), not SI_IF / SI_ELSE / SI_END_CF. 60 pixel shaders have the `branches` flag; 56 contain a branch instruction and 4 only write EXEC (linear if/else with no skip branch: `sascha__instancing__instancing`, `sascha__offscreen__phong`, `vksamples__instancing__glsl__instancing`, `sascha__shadowmappingcascade__depthpass`). The 190 others touch EXEC only with `s_wqm_b64 exec, exec` (104 uses).
+
+Survey of the 60 (ISA from `corpus-work/isa-main/pixel/`; counts are instruction occurrences / shaders):
+
+| Pattern (ACO shape) | Instructions | Uses | Shaders | Examples |
+|---|---|---|---|---|
+| **Divergent if, begin** | `s_and_saveexec_b64 Ssave, M` | 18 | 11 | deferredshadows, multiview__viewdisplay, shadowmapping__scene |
+| | `s_mov_b64 Ssave, exec` + `v_cmpx_*` | 53 + 52 | 22 / 20 | inlineuniformblocks__pbr, occlusionquery__mesh, offscreen__mirror |
+| | join restore immediately followed by the next `v_cmpx_*` (next if reuses the save) | 79 | 10 | pbrbasic__pbr, pbribl__pbribl, mobile_nerf__merged |
+| | re-narrow after a join: `s_and_b64 exec, M, exec` | 47 | 2 | deferredshadows (PCF taps), mobile_nerf__merged |
+| **Skip then** | `s_cbranch_execz` → else-prep block | 93 | 18 | deferredshadows, multiview__viewdisplay |
+| **Else** | `s_andn2_b64 exec, Ssave, exec` | 110 | 23 | instancing, offscreen__phong, variablerateshading |
+| **Skip else / skip to join** | `s_cbranch_execz` → join or loop exit | 89 | 15 | variablerateshading (else chain skipping to the outer join), particlesystem |
+| **Join** | `s_mov_b64 exec, Ssave` | 171 | 33 | nearly every branching shader |
+| ACO omits the skip branch | then/else with no `s_cbranch_execz` at all | — | ≥4 | instancing, offscreen__phong, deferredshadows (empty else) |
+| **Divergent loop** (preheader save, break, continue, exit) | `s_mov_b64 Spre, exec` … `s_mov_b64 exec, Spre` | 4 / 14 | 3 / 4 | oit__color, parallaxmapping, sparse_image |
+| break lanes | `s_mov_b64 Sb, exec` + `v_cmpx_*`, or `s_and_saveexec_b64 Sb, M` | 10 + 5 | 3 + 3 | parallaxmapping; oit__color, sparse_image |
+| lanes that continue | `s_andn2_b64 Sc, Sc, exec` + `s_cbranch_scc0 EXIT` | 12 | 4 | parallaxmapping, oit_linked_lists__combine |
+| continue with them | `s_mov_b64 exec, Sc` | 12 | 4 | same |
+| back edge | `s_branch HEADER` | 12 of 15 back edges | 4 | (12 divergent-exit loops; none samples with implicit LOD; 3 use `image_sample_lz/_l`) |
+| **Uniform loops** (CF-1-like) | back edge `s_branch` / `s_cbranch_scc0` / `s_cbranch_vccz` | 3 + 4 + 4 | 9 | ssao, irradiancecube, genbrdflut, prefilterenvmap, deferredmultisampling (4 of them contain divergent ifs; 6 contain implicit-LOD samples) |
+| **VCC branch on a uniform compare** | `v_cmp_* vcc, <uniform>, <uniform>` + `s_cbranch_vccz` | 9 (4 back edges) | 5 | irradiancecube (float counter), parallaxmapping (`cvt(s4)` vs `s6`), color_cycle (push constant), distancefieldfonts (`v_cmp vcc, 0, s1`) |
+| **Discard, top level** | `v_cmpx_*` with no save, then `s_cbranch_execz NULL` | 4 | 3 | oit_depth_peeling__gather, render_octomap splat (two chained), swapchain circle |
+| discard leaving WQM | `s_mov_b64 Sexact, exec` before `s_wqm_b64`; later `s_andn2_b64 exec, Sexact, vcc` | 9 / 3 | 9 / 3 | dynamicrenderinglocalread, indirectdraw, shadowmappingcascade__depthpass |
+| discard inside WQM / flow | `s_andn2_b64 exec, exec, M` + `s_andn2_b64 Sexact, Sexact, M` + `s_cbranch_scc0 NULL` | 6 + 6 | 6 | parallaxmapping, shadowmappingcascade__scene, vertexattributes, mobile_nerf__raster |
+| leave WQM before export | `s_mov_b64 exec, Sexact` | 5 | 5 | parallaxmapping, shadowmappingcascade__scene |
+| all-lanes-dead exit | `s_cbranch_execz` / `s_cbranch_scc0` → `exp null off, off, off, off done vm; s_endpgm` | 7 + 6 (14 null exports) | 13 | dynamicrenderinglocalread, render_octomap |
+| **SCC → lane mask** | `s_cselect_b64 M, -1, 0`, `s_mov_b64 vcc, 0`, then `s_and/nand/not_b64` on masks | 75 / 3 / 87 | 7 / 2 / 13 | deferred__deferred, oit__color, sparse_image |
+| **WQM** | `s_wqm_b64 exec, exec` | 42 | 42 | — |
+| `s_cbranch_execnz` | — | 0 | 0 | (ACO never emits it in these shaders) |
+| **Cross-lane: waterfall loop** | `v_readfirstlane_b32 s, v` + `v_cmpx_eq_i32 s, v` + `s_andn2_wrexec_b64` + `s_cbranch_scc1` back edge | 4 | 4 | descriptorindexing, descriptor_heap cube, nonuniform-quads, profiles |
+| cross-lane: other readfirstlane | `v_readfirstlane_b32` (uniform-by-language values) | 6 | 3 | dynamic_multisample model, oit__geometry, oit_linked_lists__gather |
+| cross-lane: lane counts | `v_mbcnt_lo/hi_u32_b32`; `s_bcnt1_i32_b64 s, exec`; `s_ff1_i32_b64 s, exec` | 18; 2; 2 | 4; 2; 2 | oit__geometry and oit_linked_lists__gather (atomic compaction), both fragment-barycentric samples (lane index) |
+| cross-lane: quad DPP | `v_mov/subrev/add_f32_dpp quad_perm:[...]` (fine derivatives) | 24 | 3 | distancefieldfonts, dynamic_line_rasterization grid, fragment_shading_rate_dynamic |
+| WWM (`s_or_saveexec_b64 S, -1`) | — | 0 | 0 | — |
+
+Two observations drive the design:
+- **ACO lays a divergent if/else out linearly**: then-block, else-prep (`s_andn2_b64 exec, Ssave, exec`), else-block, join (`s_mov_b64 exec, Ssave`), with optional forward `s_cbranch_execz` that only *skip* work when no lane is active. There is no `s_branch` around the else. So, per lane, a divergent if/else is straight-line code with masked writes; the skip branches carry no meaning for an individual lane.
+- **Only loops need real per-lane structure**: a lane leaves a divergent loop at its own iteration.
+
+### 2. Lane state
+- `ex`: the lane's EXEC bit, held in the symbolic state as an HLSL bool expression, `"true"` when provably on. Each EXEC write emits `bool ex<i> = ...;` and points `ex` at it. At CF-1 joins it is merged like a lane mask (`bool jx_<tag> `, through `plan_join` / `sync_lines`).
+- The program starts with `ex = true`. `s_wqm_b64 exec, exec` keeps `ex = true` (records `wqm = True`). `s_mov_b64 Sexact, exec` before it gives `Sexact = true`. Desktop helper invocations run with `ex = true` everywhere; see section 6 for why that is exact.
+- A saved mask is an ordinary lane-mask value: `s_mov_b64 S, exec` stores `("condition", <current ex>, j, 2)` in both SGPRs. A lane needs only its own bit, so a 64-bit mask is one bool.
+
+### 3. Translation table (per lane; `c(M)` is the lane's bit of mask operand M)
+| Instruction | Lane bit result | SCC (per lane, see 4) |
+|---|---|---|
+| `v_cmp_* D, a, b` (VOPC/VOP3, also carry-out writes) | `D = ex && cmp(a, b)`: inactive lanes get 0 (VOPC writes 0 for lanes off in EXEC) | — |
+| `v_cmpx_* a, b` (GFX10: writes EXEC only) | `ex = ex && cmp(a, b)` | — |
+| `s_and_saveexec_b64 S, M` | `S = ex; ex = ex && c(M)` | `ex` |
+| `s_{or,xor,andn2,orn2,nand,nor,xnor,andn1,orn1}_saveexec_b64 S, M` | `S = ex; ex = op(c(M), ex)` with the RDNA operand order (`andn2`: `M & ~exec`; `andn1`: `~M & exec`) | `ex` |
+| `s_mov_b64 S, exec` / `s_mov_b64 exec, S` | copy | — |
+| `s_and/or/xor/andn2/orn2/nand/nor/xnor_b64 D, A, B` with any of D, A, B = exec or a lane mask | bool op on the bits; `exec` as D sets `ex` | `D != 0` → lane-local bit |
+| `s_not_b64 D, M` | `!c(M)` (so an inactive lane's 0 from a masked compare becomes 1, as on the console) | lane-local |
+| `s_cselect_b64 D, -1, 0` | `D = scc` (all lanes, not masked) | — |
+| `s_mov_b64 D, 0` / `-1` | `false` / `true` | — |
+| VALU write to a VGPR | `v = ex ? new : old`; when `old` is undefined, `v = new` (a refinement of an undefined register) | — |
+| `v_cndmask_b32 d, a, b, M` | masked write of `c(M) ? b : a` | — |
+| `s_cbranch_execz L` / `execnz L` | per lane: taken iff `!ex` / `ex` (lowered by the rules in 4) | — |
+| `s_cbranch_scc0/1 L` on a lane-local SCC | per lane, only in the idioms of 4 | — |
+| `s_cbranch_vccz/vccnz L` | only when vcc is a compare of wave-uniform operands (5); lowered as a uniform branch on the *unmasked* compare | — |
+| `exp ... done vm` | `if (!ex) discard;` before the return when `ex` is not provably true (the valid-mask bit kills lanes that are off) | — |
+
+Scalar ALU on data (not masks) is unchanged: it is not masked by EXEC on the console either.
+
+### 4. Why a lane may decide for itself, and what is checked
+A branch on a lane-local predicate p (execz, the SCC of a mask op) is taken by the console wave on a wave-wide answer. Let E_w be the wave's edge and E_l the lane's own. Per-lane lowering is exact for the lane when
+1. **(inactive on the other side)** whenever E_l ≠ E_w the lane is inactive on E_w until the reconvergence point R, so its VGPRs are untouched there; and
+2. **(no scalar leak)** no SGPR, SCC or lane mask written on only one of the two paths is read after R.
+
+ACO's shapes satisfy (1) by construction: `s_cbranch_execz` skips only when no lane is active (an inactive lane that falls through stays inactive); `s_andn2_b64 Sc, Sc, exec; s_cbranch_scc0 EXIT` leaves only when no lane continues (a lane whose bit is 0 stays inactive for the rest of the loop because the loop continues with `exec = Sc`). The translator verifies instead of trusting:
+- **Narrow-only regions.** Inside a skipped region and after a lane-local loop exit until the exit block, every EXEC write must be `ex && x` or restore a mask saved *inside* the same region (`s_mov_b64 exec, S` / `s_andn2_b64 exec, S, exec` where S was written from exec inside it). A restore from a mask saved outside the region would re-enable the lane on a path the wave never takes for it: refused ("exec re-enabled inside a skipped region").
+- **Poison at the reconvergence point.** At R, an SGPR or lane mask whose value differs between the two paths (the `plan_join` comparison CF-1 already does) is not joined but *poisoned*; reading a poisoned register raises ("scalar value depends on another lane"). Registers both paths leave equal (for example ACO's rematerialized `s_movk_i32 s3, 0x8000`) are kept, as in CF-1. VGPRs are joined by the masked selects, which is exact.
+- **Lane-local SCC is a branch condition only.** An SCC produced by a mask op may feed only `s_cbranch_scc0/1` in the loop-exit and discard idioms below; feeding `s_cselect`, `s_addc`, `s_cmov` or being read later is refused.
+
+How each branch is lowered:
+- **`s_cbranch_execz` over a region: predicate (default).** The branch is dropped and the region runs straight-line with masked writes. For the lane this equals the wave's non-skip path, and the poison rule covers the skip path. This keeps HLSL control flow uniform, so an implicit-LOD sample in the region keeps defined derivatives (section 6).
+- **`s_cbranch_execz` over a region: branch (optimization, card CF-2g).** When the region has no implicit-derivative operation (implicit-LOD `image_sample*`, `v_interp_*`, DPP), emit CF-1's `if (ex) { ... }` with `ex = true` inside until the next EXEC write, so the selects disappear. Same checks.
+- **Branch to the all-dead block** (a block that is exactly `exp null off, off, off, off done vm; s_endpgm`), from `s_cbranch_execz` or from `s_cbranch_scc0` after `s_andn2_b64 Sexact, Sexact, M`: lowered as not taken. The wave reaches it only when every lane is dead; a dead lane falling through stays masked and is discarded at the final `exp ... done vm`. Keeping the lane alive (rather than an early `discard; return`) keeps its stale registers visible to quad neighbours exactly as on the console. A program whose *only* export is `exp null` (depth-only, e.g. shadowmappingcascade__depthpass) needs a void `main`; that is card CF-2f.
+- **Loop exit `s_andn2_b64 Sc, Sc, exec; s_cbranch_scc0 EXIT`** (EXIT is the block after the latch and starts with `s_mov_b64 exec, Spre`): per lane `Sc = Sc && !ex; if (!Sc) break;`. The same for `s_and_saveexec_b64 Sb, M` used as the break mask (oit__color, sparse_image: `s_cselect_b64 S, -1, 0; s_nand_b64 S, vcc, S; s_and_saveexec_b64 S, S`). A lane that is inactive when it enters the loop has `Sc = false` at its first exit test and leaves at once, so it cannot spin. SGPRs written in a divergent loop are poisoned after the exit (the wave keeps updating them after this lane left), unless every exit path leaves them equal.
+- **Uniform exits from a divergent loop** (`s_cbranch_vccz` on a uniform compare to an arm ending `s_branch EXIT`, parallaxmapping) are CF-1 uniform branches; the `s_branch` to EXIT is a `break`.
+
+Per-lane HLSL for the parallaxmapping loop, as a reference shape:
+```
+bool m12 = ex;                         // s_mov_b64 s[12:13], exec
+[loop] while (true) {
+    bool vccu = !(asfloat(s6) > float(int(s4)));   // uniform compare, unmasked
+    if (vccu) { v10 = ex ? v13 : v10; break; }       // s_cbranch_vccz / s_branch EXIT
+    ... body, masked ...
+    bool m14 = ex;                     // s_mov_b64 s[14:15], exec
+    ex = ex && (v13 < v12);            // v_cmpx_lt_f32: lanes that break
+    v10 = ex ? v14 : v10;              // break-path work
+    m14 = m14 && !ex;                  // s_andn2_b64 s[14:15], s[14:15], exec
+    if (!m14) break;                   // s_cbranch_scc0 BB19
+    ex = m14;                          // s_mov_b64 exec, s[14:15]
+    s4 = s4 + 1; v13 = ex ? v14 : v13;
+}
+ex = m12;                              // s_mov_b64 exec, s[12:13]; s4 poisoned from here
+```
+
+### 5. Uniform values (for VCC branches)
+A small lattice on the symbolic state marks a value *wave-uniform* when it is a constant, an SGPR (data, not a lane mask), a `params[]` word, or a VALU result whose operands are all uniform and which was computed with `ex` provably true or is never read by a lane while inactive; join variables are uniform when every incoming value is (iterate to a fixed point in the loop dry run CF-1 already performs). `s_cbranch_vccz/vccnz` is accepted only when vcc holds a compare of uniform operands; it is then lowered on the unmasked compare (so lanes inactive at that point follow the wave, which matters for termination: irradiancecube's loop has no other exit). All 9 `s_cbranch_vccz` in the corpus are of this kind. A divergent `s_cbranch_vccz` (wave-level "any lane" question) is refused.
+
+### 6. Helper lanes and derivatives
+- Desktop runs every 2x2 quad with helper invocations, as the console does in WQM. Modelling helpers as `ex = true` throughout is exact for every exported pixel: a helper's registers are only ever observed by quad neighbours through derivatives, and ACO enters WQM before any derivative operation, where console helpers are on too. Helpers' own exports are dropped on both sides.
+- **Predicated regions keep derivatives exact.** In predicate mode the HLSL around an implicit-LOD `Sample()` is uniform, all four quad invocations execute it, and each one's coordinate is `ex ? new : old`, which is exactly the console register content including inactive lanes (they keep old values). So the four coordinates the derivative sees are the console's. This relies on the console texture unit taking derivatives from all four lanes' address VGPRs regardless of EXEC, which is what WQM is for; the language calls the result undefined in a divergent region, so this case is matched, not required.
+- **Divergent HLSL scopes** (inside `if (ex)` in branch mode, or inside a divergent loop after any lane may have left) lose quad neighbours on desktop. An implicit-derivative operation there (implicit-LOD `image_sample*`, DPP quad ops, `v_interp_*`) is refused ("derivative in divergent flow"). No corpus divergent loop contains one (3 use only `image_sample_lz` / `image_sample_l`). Lifting it (run the loop `while (WaveActiveAnyTrue(cont))` with masked iterations, so quads stay in lock-step) is CF-3.
+- Tests make derivative behaviour unobservable where it is undefined: the pixel-case fixture samples a single-mip texture through `MIN_MAG_MIP_POINT`, so the LOD cannot change a sample.
+
+### 7. Refused in CF-2 (each with a control)
+- Cross-lane reads of masks or values: `s_bcnt1_*`, `s_ff1_*`, `s_flbit_*` on exec or any lane mask; `v_readfirstlane_b32`, `v_readlane_b32`, `v_writelane_b32`; `v_mbcnt_*`; `s_cmp_*`/`s_bitcmp*` on a lane-mask half; a lane mask or `exec_lo/exec_hi` read as data (`v_mov_b32 v, exec_lo`, `v_cndmask` with exec as a data operand, `s_mov_b32` of a mask half into a data use); DPP, DPP8, `ds_swizzle`, `v_permlane*` anywhere a lane may be inactive.
+- WWM (`s_or_saveexec_b64 S, -1` and any EXEC write that can turn on a lane that was never active: `s_mov_b64 exec, -1`, `s_not_b64 exec, ...`, `s_xor_b64 exec, ...` other than the else form).
+- The waterfall loop (`s_andn2_wrexec_b64` / `s_andn1_wrexec_b64`); its per-lane meaning is "run once with the own index" (`NonUniformResourceIndex`) and it is CF-3, together with dynamic descriptor indexing.
+- `s_cbranch_vccz/vccnz` on a non-uniform vcc; lane-local SCC used as data; a poisoned register read; EXEC re-enabled inside a skipped region; a loop whose lane-local exit is not the block after its latch; implicit-derivative operations in divergent HLSL scopes; memory loads while `ex` is not provably true (until CF-2g wraps them in `if (ex)`); stores and atomics (no store support at all yet).
+
+### 8. Forms CF-2 marks covered (docs/coverage/gfx1013.tsv names)
+- SOPP: `s_cbranch_execz`, `s_cbranch_execnz`, `s_cbranch_vccz`, `s_cbranch_vccnz` (4).
+- SOP1: `s_and_saveexec_b64`, `s_or_saveexec_b64`, `s_xor_saveexec_b64`, `s_andn2_saveexec_b64`, `s_orn2_saveexec_b64`, `s_nand_saveexec_b64`, `s_nor_saveexec_b64`, `s_xnor_saveexec_b64`, `s_andn1_saveexec_b64`, `s_orn1_saveexec_b64` (10; the or-forms tested with a lane mask, never with -1).
+- SOP2: `s_nand_b64`, `s_nor_b64`, `s_xnor_b64`, `s_cselect_b64` (4).
+- `v_cmpx_*` for every float compare whose `v_cmp_*` is already covered: 16 relations (f, lt, eq, le, gt, lg, ge, o, u, nge, nlg, ngt, nle, neq, nlt, tru) x f16/f32 x VOPC and `_e64` (64), the f32 `_sdwa` forms (16), `v_cmpx_class_f16/f32` and their `_e64` (4): 84.
+- Total **102 forms**: 287 → 389 of 1968 covered (14.6% → 19.8%). Not in CF-2: the 18 `v_cmpx_*_f16_sdwa`/`class_*_sdwa` forms (their `v_cmp` forms are not covered), the f64 forms, the 84 integer `v_cmpx_*` (they come for free with the integer `v_cmp_*` family, which is not covered at all yet), and `s_andn1/andn2_wrexec_b64`.
+
+### 9. What it unlocks (from corpus-shaders.tsv, gfx1013.tsv and site/status.json at d02d2a2)
+Counted the way tools/status_json.py counts `all_covered` (every form of the shader covered), over the 60 branching pixel shaders:
+- Today 2 of them have every form covered (`sascha__shadowmappingcascade__depthpass`, `vksamples__mobile_nerf__raster`) and are blocked only by control flow.
+- With the 102 CF-2 forms: **10** (8 new): `sascha__dynamicrenderinglocalread__scene`, `sascha__occlusionquery__mesh`, `sascha__offscreen__phong`, `sascha__shadowmapping__scene`, `sascha__shadowmappingcascade__depthpass`, `vksamples__mobile_nerf__raster`, `vksamples__oit_depth_peeling__gather`, `vksamples__render_octomap__glsl__splat`, `vksamples__shader_object__post_process_color_cycle`, `vksamples__swapchain_present_timing__glsl__circle`. Pixel `all_covered` goes 140 → 148 of 250. All 10 use only shapes CF-2 accepts (linear if/else with and without skips, top-level and WQM discard with the all-dead block, uniform vccz, an implicit-LOD sample in a predicated region in shadowmapping__scene). Three also need export work outside CF-2: `exp mrt1..mrt3` (dynamicrenderinglocalread, mobile_nerf__raster) and the null-only export (depthpass, card CF-2f).
+- Next cascade (not CF-2 work, listed because it is cheap): a draw that uses `s_cmp_eq_i32` / `s_cmp_lt_i32` / `s_cmp_lg_i32` (already lowered by CF-1, never exercised by a test) adds 4 more (deferred__deferred, ssao__composition, vertexattributes, shader_debugprintf) → 14. Adding the integer `v_cmp`/`v_cmpx` family and 15 small VALU forms (`v_lshrrev_b64`, `v_rndne_f32`, `v_madak_f32`, `v_madmk_f32`, `v_max3_f32`, `v_min3_f32`, `v_cvt_f32_i32/u32`, `v_cvt_i32_f32`, `v_cvt_u32_f32`, `v_bfe_u32`, `v_cvt_pk_u16_u32`, `v_exp/rcp/log_f32_e64`) → 30.
+- Out of reach for CF-2 by design: 12 shaders need cross-lane operations (4 waterfall, 4 lane counts/atomics, 1 more readfirstlane, 3 DPP derivatives), 2 need scratch/stores (oit__color, oit_linked_lists__combine).
+- The site counts `translatable_bound` as all forms covered *and* `branches == 0`; card CF-2h replaces the flag with a control-flow class so the 10 count once CF-2 lands.
+
+### 10. Test plan
+All new draws use the existing pixel-case harness (8x8 R8G8B8A8 texture with texel (x, y) = (RAMP[x], RAMP[y], 128, 255), one pixel per texel, single mip, point sampling, R32G32B32A32_FLOAT target cleared to (-1, -1, -1, -1), 64 per-pixel float4 references in the case file, `-Gis` compile, NVIDIA and WARP). Conditions come from the sample (`v12` = RAMP[x]/255, `v13` = RAMP[y]/255) so lanes diverge, including inside quads (for example `R < 0.25` is true for x = 0..2 and splits the quad x = 2,3). References are Python per pixel; results are exact small integers or binary16-exact values so `export16` is lossless. Each program carries wrong references that must each report `pixel_mismatch` in at least one pixel (as CF-1's `CF_PROGRAMS`). Program text is written in ACO's shapes (labels `BB<n>`), assembled by llvm-mc 15 for gfx1013 as the CF-1 fixtures are. The generated HLSL of every program accepted before CF-2 must be byte-identical (golden check in CF-2a).
+
+Draw families (new family module beside CF-1's after the split):
+- **cf2_if** (CF-2b/c): saveexec form and `s_mov_b64` + `v_cmpx` form; if/else with both skips, with none (ACO's short arms), with an empty else; nested if inside the then-arm; two ifs sharing one save (`s_mov_b64 exec, S` then `v_cmpx`), and the re-narrow form `s_and_b64 exec, M, exec`; a compare inside the then-arm whose mask is used after the join through `s_not_b64` (an inactive lane's 0 becomes 1); `s_cselect_b64` + `s_nand_b64` mask algebra; every saveexec variant once. Wrong references: else result leaking into then lanes, then result kept for else lanes, the join not restoring (a write after the join missing for some pixels), the masked compare not zeroed for inactive lanes, the skip taken per wave instead of per lane.
+- **cf2_kill** (CF-2d): top-level `v_cmpx` kill + `s_cbranch_execz` to the null block (swapchain circle); two chained kills (render_octomap); WQM exact save + `s_andn2_b64 exec, Sexact, vcc` (dynamicrenderinglocalread); mid-shader kill `s_andn2_b64 exec, exec, vcc` + `s_andn2_b64 Sexact, Sexact, vcc` + `s_cbranch_scc0` null, more work, `s_mov_b64 exec, Sexact`, export (parallax / cascade shape); a kill inside a divergent if that also clears the outer save. Discarded pixels must read (-1, -1, -1, -1). Wrong references: kill inverted, kill ignored, whole quad killed, a dead lane revived by the outer restore.
+- **cf2_loop** (CF-2e): per-pixel trip count `n = ceil(8 R)` (0..8): float counter `v20` from 0 step 1.0, break lanes by `s_mov_b64 Sb, exec; v_cmpx_ge_f32 v20, <8R>`, break-path write, `s_andn2_b64 Sc, Sc, exec; s_cbranch_scc0 EXIT; s_mov_b64 exec, Sc`, body accumulating `v21 += v20 * G` (exact), `s_branch HEADER`, `EXIT: s_mov_b64 exec, Spre`; the nand + saveexec break form; a loop also bounded by a uniform maximum through `v_cmp` on scalar operands + `s_cbranch_vccz` (parallax shape); a nested loop with a per-pixel inner trip count from G; a loop inside a divergent if (lanes inactive at entry keep their pre-loop values and terminate). Wrong references: one iteration short or long, the break-path value lost, inactive lanes running the body, the outer `ex` not restored after the loop. Controls: the uniform counter read after the loop is refused (poison).
+- **cf2_uvcc** (CF-2c): `s_cbranch_vccz/vccnz` on a compare of constants and SGPRs (color_cycle), a uniform float VGPR counter loop with a vccz back edge (irradiancecube), vccz inside a divergent region. Wrong references: branch on the masked bit instead of the uniform value (inactive-lane case), inverted sense.
+- **cf2_sample** (CF-2c): an implicit-LOD `image_sample` with coordinates computed inside a saveexec region (shadowmapping shape), plus an `image_sample_lz` in a divergent loop. Static check that no HLSL `if` encloses the implicit-LOD `Sample()`. Controls: the implicit sample in a divergent loop and in branch mode is refused.
+- **Controls without a GPU** (each must raise with its message): everything in section 7, plus a branch to an unknown label, `s_cbranch_execz` whose region re-enables EXEC from an outer save, a lane-local SCC read by `s_cselect_b32`, a loop with a lane-local exit to a block other than the one after its latch.
+
+### 11. Cards (one agent each; land after the pixel_aot / pixel_aot_check per-family split)
+| Card | Scope | Depends on | Forms marked covered |
+|---|---|---|---|
+| **CF-2a Lane state** | Replace `mask` (`entry`/`quad`) by `ex` (bool expression, `wqm` flag); `s_wqm_b64`, `s_mov_b64 S, exec`, fixture `s_and_b64 exec, exec, S` rewritten on it; one masked-write helper used by every VALU lowering instead of the ~27 `mask != "entry"` checks (writes stay unmasked while `ex == "true"`); lift "branch in quad mode refused" and allow VALU in WQM (ACO never leaves it). No new accepted program text; golden check that the HLSL of every existing test program is byte-identical. | split | none |
+| **CF-2b Exec algebra, straight line** | Mask-valued SALU b64 ops incl. exec as source/destination, `s_cselect_b64 M, -1, 0`, `s_mov_b64 M, 0/-1`, all ten `*_saveexec_b64`, VOPC results masked by `ex`, `v_cmpx_*` for all float/class compare forms, masked `v_cndmask`; lane-local SCC tagged; refusal of loads while `ex` may be false. Draws: the linear part of cf2_if (no branches). | CF-2a | 84 `v_cmpx_*`, 10 saveexec, `s_nand/nor/xnor_b64`, `s_cselect_b64` |
+| **CF-2c Skip branches, predicate mode, uniform VCC** | `s_cbranch_execz/execnz` in predicate mode; narrow-only region check; poison at reconvergence; uniformity lattice; `s_cbranch_vccz/vccnz` on uniform compares as CF-1 branches; implicit-LOD sample allowed in predicated regions. Draws: cf2_if (skips), cf2_uvcc, cf2_sample (non-loop part). | CF-2b | `s_cbranch_execz`, `s_cbranch_execnz`, `s_cbranch_vccz`, `s_cbranch_vccnz` |
+| **CF-2d Discard** | `if (!ex) discard;` at `exp ... done vm`; all-dead null block recognized and its branches lowered as not taken; exact-mask updates. Draws: cf2_kill. | CF-2c | none new (`exp`, `s_andn2_b64` already covered) |
+| **CF-2e Divergent loops** | Generalize `find_loops` / `loop_body`: exits from any block of the body to the block after the latch (`s_branch EXIT` in a uniform arm, lane-local `s_cbranch_scc0` after `s_andn2_b64 Sc, Sc, exec`), nested loops, `ex` as a loop-carried join variable, SGPR poison after a divergent exit, derivative refusal inside. Draws: cf2_loop, the loop part of cf2_sample. | CF-2c (CF-2d for kills inside loops) | none new |
+| **CF-2f Null-only export** | Programs whose only export is `exp null ... done vm`: `void main` with `discard` for dead lanes; harness draw without color checks (or a depth target) to verify discards. Small. | CF-2d | none |
+| **CF-2g Branch mode + guarded loads** | `if (ex) { }` for skipped regions without derivative operations, with selects dropped while `ex` is known true inside; buffer/global loads under a non-true `ex` wrapped in `if (ex)` keeping the old destination. Golden check that predicate-mode results equal branch-mode results on all cf2 draws. | CF-2c | none |
+| **CF-2h Accounting** | Replace the `branches` column of corpus-shaders.tsv with a class (none / uniform / divergent-within-CF-2 / needs-CF-3, from the idiom rules of section 4 applied by tools/shader_corpus.py), let tools/status_json.py count the divergent-within-CF-2 class as translatable, update the site's control-flow note and docs/experiments.md. | CF-2e | none |
+
+Order: CF-2a → CF-2b → CF-2c → {CF-2d, CF-2e, CF-2g} → CF-2f (after CF-2d) → CF-2h. After CF-2c, 4 of the 10 form-complete shaders have every shape accepted (occlusionquery__mesh, offscreen__phong, shadowmapping__scene, post_process_color_cycle); CF-2d adds the 6 that discard (3 of those still need CF-2f or multi-MRT export).
+
+---
+
+## Cards (summary)
+- **CF-1** (done): blocks, labels, `s_branch`, uniform `s_cbranch_scc0/scc1`, join variables, structured if/else and loops on uniform conditions. No exec changes.
+- **CF-2** (designed above, cards CF-2a to CF-2h): per-lane EXEC, ACO's linear if/else, skips, discard, uniform VCC branches, divergent loops with per-lane exits.
+- **CF-3**: wave-level questions with wave intrinsics where sound (waterfall loop as `NonUniformResourceIndex`, readfirstlane of uniform values), quad ops / DPP derivatives (`QuadReadLaneAt`, `ddx_fine`), derivative-safe divergent loops (`while (WaveActiveAnyTrue(cont))` with masked iterations), explicit-gradient sampling in divergent flow, `switch(pc)` fallback for irreducible shapes.

@@ -373,6 +373,8 @@ if(EXISTS "${INTAKE_PYTHON}")
     set_tests_properties(status_json PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME form_coverage COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/form_coverage_check.py")
+    add_test(NAME vertex_corpus_report COMMAND "${INTAKE_PYTHON}" -B -I
+        "${CMAKE_SOURCE_DIR}/tests/vertex_corpus_report_check.py")
 
     enable_language(ASM_MASM)
     function(cpu_asm_fixture image source)
