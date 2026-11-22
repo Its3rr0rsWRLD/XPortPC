@@ -597,6 +597,13 @@ int main(int argc, char** argv)
             if (!check_gpu_alias_lookup_writes(device.Get())) return 77;
         } else if (argc == 3 && operation == "--gpu-alias-registry") {
             if (!check_gpu_alias_registry(device.Get())) return 77;
+        } else if (argc == 3 && (operation == "--bvh-shuffle" || operation == "--bvh-shuffle-16" ||
+                                  operation == "--bvh-shuffle-32" || operation == "--bvh-shuffle-64")) {
+            unsigned width = 0;
+            if (operation == "--bvh-shuffle-16") width = 16;
+            if (operation == "--bvh-shuffle-32") width = 32;
+            if (operation == "--bvh-shuffle-64") width = 64;
+            if (!check_bvh_shuffle(device.Get(), width)) return 77;
         } else if (argc == 3 && operation == "--buffer-ops") {
             D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_0};
             const HRESULT hr = check_feature(device.Get(), D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
