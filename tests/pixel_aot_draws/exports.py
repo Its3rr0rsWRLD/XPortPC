@@ -13,7 +13,9 @@ import subprocess
 
 from pixel_aot import disassemble
 
+from pixel_aot_ops.dispatch import dispatch
 from pixel_aot_ops.forms.exp import WRITE_MASKS, write_masks
+from pixel_aot_ops.lowering import Lowering
 
 from .common import RAMP, assembly, f32, half_rtz, half_value, translate, with_constants
 
@@ -288,6 +290,14 @@ def check_exports_controls():
     source = translate(null_program())
     assert "void main(float2 uv : TEXCOORD0) {" in source and source.endswith("    return;\n}\n"), source
     assert write_masks(source) == {} and "SV_Target" not in source and "SV_Depth" not in source, source
+    # A program that is only s_endpgm lowers to the same empty void main, with no sample and no resource use.
+    source = translate(["s_endpgm"])
+    assert "void main(float2 uv : TEXCOORD0) {" in source and source.endswith("    return;\n}\n"), source
+    assert write_masks(source) == {} and "SV_Target" not in source and "SV_Depth" not in source, source
+    assert "tex.Sample" not in source and "SampleLevel" not in source, source
+    # Controls: anything before s_endpgm still needs its export, and two s_endpgm are not the empty program.
+    refuse("Unsupported instruction", ["s_nop 0", "s_endpgm"])
+    refuse("Unsupported instruction 0", ["s_endpgm", "s_endpgm"])
 
     def with_exports(*exports, body=WORDS):
         return program(body, list(exports))
@@ -335,8 +345,24 @@ def check_exports_controls():
     # Only exports may follow an export that is not done.
     for between in ("s_nop 0", "v_mov_b32_e32 v18, s45", "s_waitcnt expcnt(0)"):
         refuse(follow, with_exports("exp mrt0 v16, v16, v17, v17 compr", between, done))
-    # An export in whole-quad mode keeps every lane active, so the lane gate (st.ex) accepts it (CF-2a); the exports
-    # control that refused it predates that model and is dropped.
+    # CF-2a: every lane is active in whole-quad mode, so an export there lowers as anywhere else, and the same
+    # exports in whole-quad mode give the same HLSL.
+    lines = with_exports("exp mrt0 v16, v16, v17, v17 done compr vm")
+    plain = translate(lines)
+    lines.insert(lines.index("exp mrt0 v16, v16, v17, v17 done compr vm"), "s_wqm_b64 exec, exec")
+    assert translate(lines) == plain
+    # An export while this lane may be inactive is refused: the done export, one that is not done, and exp null.
+    for export in ("exp mrt0 v16, v16, v17, v17 done compr vm", "exp mrt0 v16, v16, v17, v17 compr",
+                   "exp mrtz v12, off, off, off done vm", NULL_EXPORT):
+        st = Lowering({}, {"v16": ("alu1", "alu2"), "v17": ("alu3", "alu4"), "v12": "alu5"}, [], {0: "tex"},
+                      [1, 2, 3, 4], 64, {})
+        st.ex = "ex9"
+        try:
+            dispatch(st, 1, export)
+        except ValueError as error:
+            assert "Unsupported export" in str(error), (export, str(error))
+        else:
+            raise AssertionError(f"{export!r} accepted with ex = {st.ex}")
     # An outstanding sample: the uncompressed export reads the sample before vmcnt(0).
     lines = [line for line in with_exports("exp mrt0 v12, v13, v14, v15 done vm") if not line.startswith("v_cvt_pkrtz")]
     lines.insert(lines.index("s_waitcnt vmcnt(0)"), "exp mrt1 v12, off, off, off")
@@ -386,7 +412,7 @@ def binary_fixtures():
     """(program, translator) pairs that `pixel_aot_check.py binary` assembles, disassembles and lowers."""
     return [(program(WORDS, MRT_EXPORTS), translate), (program(WORDS, GAP_EXPORTS), translate),
             *((program(body, exports), translate) for body, exports, _ in DEPTH_PROGRAMS),
-            (null_program(), translate)]
+            (null_program(), translate), (["s_endpgm"], translate)]
 
 
 draw = check_exports_draws

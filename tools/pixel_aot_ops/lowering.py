@@ -140,6 +140,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             raise ValueError("Buffer and texture or constant descriptors overlap")
     st = Lowering(scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words)
     st.integer_export = integer_export
+    # A program whose entire body is s_endpgm exports nothing and reads nothing: an empty void main, the same
+    # signature as a program whose only export is exp null (forms/exp.py), without the texture sample that one has.
+    empty = [line.strip() for line in instructions] == ["s_endpgm"]
+    if empty:
+        st.lines.append("    return;")
+        st.layout, st.signature, st.exported = (), ("void", None), True
     blocks, labels = split_blocks(instructions)
     latch_of = find_loops(blocks, labels)
     for i, line in program(st, blocks, labels, latch_of):
@@ -155,7 +161,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             ex, before = st.ex, dict(st.vector)
             dispatch(st, i, line)
             masked_writes(st, i, ex, before)
-    if not st.ended or st.samples != (2 if second_texture_offset is not None else 1):
+    if not st.ended or st.samples != (0 if empty else 2 if second_texture_offset is not None else 1):
         raise ValueError("Unexpected sample count or missing color export")
     if st.helpers:
         defs = [body for name, body in SALU_HELPERS.items() if name in st.helpers]
