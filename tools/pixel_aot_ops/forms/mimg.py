@@ -35,27 +35,30 @@ def sampler_of(st, state):
     return next((name for name, words in st.samplers.items() if values == list(words)), None)
 
 
-@form(r"image_sample v\[(\d+):(\d+)\], (?:v\[(\d+):(\d+)\]|\[v(\d+), v(\d+)\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
-      r"dmask:0x([7f]) dim:SQ_RSRC_IMG_2D( d16)?")
+@form(r"image_sample (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+, v\d+\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
+      r"dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D( d16)?")
 def sample(st, i, m):
-    # dmask 0x7 is an RGB-only read (R0Y00/Xbox2Windows#303 by Vonsek): three destination VGPRs, and the fourth VGPR
-    # of the usual v[N:N+3] block is left alone. A d16 read of three channels would leave half a register undefined,
-    # so it is refused with the other odd counts (store_results).
+    # The dmask selects the channels that are written, in order, to consecutive destination VGPRs: 0x7 is an RGB-only
+    # read (R0Y00/Xbox2Windows#303 by Vonsek) that leaves the fourth VGPR of a v[N:N+3] block alone, 0x1 or 0x8 one
+    # channel to a single VGPR, and a mask with holes (0x5, 0xa, ...) the set channels packed together, as for the
+    # other MIMG reads (load_query_gather). dmask 0 is refused. A d16 read of an odd channel count would leave half a
+    # register undefined, so it is refused with the other odd counts (store_results).
     # The coordinate is a pair v[N:N+1] or a non-sequential (NSA) pair [vA, vB], as RADV writes it.
-    operands = m.groups()
-    if operands[2] is None:
-        operands = (*operands[:2], *operands[4:])
-        nsa = [int(operands[2]), int(operands[3])]
-        if any(n > 255 for n in nsa):
+    dst_token, addr_token, f0, f1, s0, s1, dmask_digit, d16 = m.groups()
+    d16 = d16 is not None
+    channels = [c for c in range(4) if int(dmask_digit, 16) >> c & 1]
+    if not channels:
+        raise ValueError("Invalid image operation")
+    if d16 and len(channels) % 2:
+        raise ValueError("A d16 image read needs an even number of channels")
+    dest = [int(r[1:]) for r in vgprs(dst_token, len(channels) // 2 if d16 else len(channels))]
+    if addr_token.startswith("["):
+        coords = [int(r[1:]) for r in addr_token[1:-1].split(", ")]
+        if any(n > 255 for n in coords):
             raise ValueError("Image address register out of range")
     else:
-        operands, nsa = (*operands[:4], *operands[6:]), None
-    rgb = operands[8] == "7"
-    d16 = operands[9] is not None
-    if rgb and d16:
-        raise ValueError("A d16 image read needs an even number of channels")
-    dest, coords, image, state = [registers(*operands[k:k+2], width) if k != 2 or nsa is None else nsa
-                                  for k, width in zip((0,2,4,6), (3 if rgb else 2 if d16 else 4,2,8,4))]
+        coords = [int(r[1:]) for r in vgprs(addr_token, 2)]
+    image, state = registers(f0, f1, 8), registers(s0, s1, 4)
     if any(f"v{n}" in st.sample_dest for n in dest):
         raise ValueError("Write overlaps an outstanding sample")
     descriptor = [st.scalar.get(f"s{n}") for n in image]
@@ -67,15 +70,25 @@ def sample(st, i, m):
             or texture is None
             or samp is None):
         raise ValueError("Unsupported image or sampler binding")
-    uv = [st.vector[f"v{n}"] for n in coords]
+    uv = [quad_coordinate(st, st.vector[f"v{n}"]) for n in coords]
     # The implicit level comes from the derivatives of the coordinates, so each must be defined on helper lanes.
-    if any(not isinstance(v, str) or v not in st.quad_values for v in uv):
+    if None in uv:
         raise ValueError("Unsupported texture coordinate")
     st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, float2({', '.join(uv)}));")
     st.samples += 1
     names = [f"v{n}" for n in dest]
-    store_results(st, i, names, [f"sample{i}.{c}" for c in "xyzw"[:3 if rgb else 4]], d16)
+    store_results(st, i, names, [f"sample{i}.{'xyzw'[c]}" for c in channels], d16)
     st.vm_issue(names, "sample")
+
+
+def quad_coordinate(st, value):
+    """The HLSL binary32 expression of a coordinate an implicit-level sample may read, or None: a value defined on the
+    helper lanes (Lowering.quad_values), a float name or a raw word, which is a constant (valu_f32.move)."""
+    if isinstance(value, str) and value in st.quad_values:
+        return value
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint" and value[1] in st.quad_values:
+        return f"asfloat({value[1]})"
+    return None
 
 
 @form(r"image_(load|load_mip|get_resinfo|gather4|gather4_lz_o|gather4_lz) (v\d+|v\[\d+:\d+\]), "

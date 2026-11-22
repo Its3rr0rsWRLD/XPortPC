@@ -94,6 +94,14 @@ def literal_fma(st, i, m):
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    # A multiply-add with at most one varying factor, as for v_fma_f32 and v_mad_f32 (arithmetic, QUAD_AFFINE): under
+    # whole-quad execution its result is a helper-lane value when every VGPR it reads is one.
+    sources = [st.vector.get(t.lstrip("-")) if t.lstrip("-").startswith("v") else None for t in tokens]
+    if (st.wqm and st.ex == "true" and not any("|" in t or "abs(" in t for t in tokens)
+            and all(v in st.quad_values for t, v in zip(tokens, sources) if t.lstrip("-").startswith("v"))):
+        varying = [st.quad_values.get(v, False) for v in sources]
+        if not all(varying[:2]):  # S0 * K or S0 * S1
+            st.quad_values[f"alu{i}"] = any(varying)
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = {ALU[op[:3]][1].format(*values)};")
 
@@ -104,15 +112,30 @@ def move(st, i, m):
     dst, src = m.groups()
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
+    # Under whole-quad execution with every lane active, a copy of a helper-lane value (Lowering.quad_values) or of an
+    # immediate (the same on every lane) is defined on the helper lanes too, so an implicit-level sample may read it.
+    # An SGPR copy and a copy written under the entry mask or while the lane may be inactive do not join the set.
+    quad = st.wqm and st.ex == "true"
     if raw_source(src, st.scalar, st.vector):
         # A raw word is copied as an unsigned integer. It never takes a float type, so the compiler or the
         # driver has no float semantics (NaN canonicalization, denormal flushing) to apply to it.
         st.lines.append(f"    uint movw{i} = {vector_u32(src, st.scalar, st.vector, st.pending, st.sample_pending)};")
         st.vector[dst] = ("uint", f"movw{i}")
+        if quad and not src.startswith(("v", "s")):
+            st.quad_values[f"movw{i}"] = False
     else:
         value = fp_operand(src, st.scalar, st.vector, st.pending, st.sample_pending)
+        if quad and not src.startswith(("v", "s")):
+            st.quad_values[f"alu{i}"] = False
+        elif quad and src.startswith("v") and (source := st.vector.get(src)) in st.quad_values:
+            st.quad_values[f"alu{i}"] = st.quad_values[source]
         st.vector[dst] = f"alu{i}"
         st.lines.append(f"    precise float alu{i} = {value};")
+
+
+# The VALU operations whose whole-quad result joins Lowering.quad_values (arithmetic): sums and differences of quad
+# values, and products and multiply-adds with at most one varying factor.
+QUAD_AFFINE = ("add", "sub", "subrev", "fma", "fmac", "mad", "mac", "mul", "mul_legacy")
 
 
 @form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
@@ -130,11 +153,12 @@ def arithmetic(st, i, m):
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     # CF-2a: whole-quad execution does not restrict VALU, every lane is active. What an implicit-LOD sample may read is
-    # the set of values defined on the helper lanes (Lowering.quad_values): before the first sample, affine coordinate
-    # arithmetic (add, fma and legacy multiply of such values and ready constants, with at most one varying factor, no
-    # absolute value and no clamp) extends it (from R0Y00/Xbox2Windows#283 by Vonsek); anything else is lowered but
-    # does not join it.
-    quad = (st.wqm and st.ex == "true" and not st.samples and len(st.bindings) <= 1 and op in ("add", "fma", "mul_legacy") and not clamp
+    # the set of values defined on the helper lanes (Lowering.quad_values): affine coordinate arithmetic (QUAD_AFFINE
+    # of such values and ready constants, with at most one varying factor in a product, no absolute value and no
+    # clamp) extends it (from R0Y00/Xbox2Windows#283 by Vonsek, there before the first sample of a one-texture program
+    # only; its operands are never sample results and the textures bound do not change what the helper lanes compute,
+    # so neither restriction is needed); anything else is lowered but does not join it.
+    quad = (st.wqm and st.ex == "true" and op in QUAD_AFFINE and not clamp
             and not any("|" in t or "abs(" in t for t in tokens))
     provenance = st.quad_values if quad else None
     try:
@@ -146,7 +170,7 @@ def arithmetic(st, i, m):
         quad, values = False, [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     if quad:
         varying = [st.quad_values.get(st.vector.get(t.lstrip("-"), ""), False) for t in tokens]
-        if op != "add" and all(varying[:2]):
+        if op not in ("add", "sub", "subrev") and all(varying[:2]):
             quad = False
     if quad:
         st.quad_values[f"alu{i}"] = any(varying)

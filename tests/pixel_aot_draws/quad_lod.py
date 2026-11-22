@@ -1,8 +1,8 @@
 """Draw family `quad_lod`: pixel_aot_check.py draw --family quad_lod.
 
-Affine coordinate arithmetic under whole-quad execution (from R0Y00/Xbox2Windows#283 by Vonsek). Before the first
-sample, v_add_f32, v_fma_f32 and v_mul_legacy_f32 may compute a coordinate from the interpolated one and ready
-constants; such a value is defined on the helper lanes too, so image_sample can take its implicit level from it.
+Affine coordinate arithmetic under whole-quad execution (from R0Y00/Xbox2Windows#283 by Vonsek). v_add_f32,
+v_fma_f32 and v_mul_legacy_f32 (and the other forms of valu_f32.QUAD_AFFINE, drawn by sample_shapes) may compute a
+coordinate from the interpolated one and ready constants; such a value is defined on the helper lanes too, so image_sample can take its implicit level from it.
 A value written under the entry mask has no helper-lane definition, and a product of two varying values, absolute
 value and clamp are outside the affine subset. The draw (offscreen_check --check-pixel-quad-lod) is a partial
 triangle on an 8x8 target over a red level 0 and a green level 1: a coordinate scaled by 4 must select level 1 at
@@ -60,10 +60,15 @@ def check_affine_coordinates() -> None:
 
     for opcode in ("v_mul_legacy_f32_e32 v8, v9, v8", "v_fma_f32 v8, v9, v8, 0",
                    "v_fma_f32 v8, 0.5, |v8|, 0", "v_fma_f32 v8, 0.5, v8, 0 clamp",
-                   "v_mul_f32_e32 v8, 0.5, v8", "v_sub_f32_e32 v8, 0.5, v8"):
+                   "v_mul_f32_e32 v8, v8, v8", "v_sub_f32_e64 v8, 0.5, |v8|", "v_rcp_f32_e32 v8, v8"):
         changed = program.copy()
         changed[final_index] = opcode
         must_reject(translate, changed)
+    # v_mul_f32 and v_sub_f32 are affine too (the sample_shapes family draws them).
+    for opcode in ("v_mul_f32_e32 v8, 0.5, v8", "v_sub_f32_e32 v8, 0.5, v8"):
+        changed = program.copy()
+        changed[final_index] = opcode
+        assert f".Sample(samp, float2(alu{final_index}, uv.y))" in translate(changed)
     # Only image_sample takes a whole-quad coordinate; the other operations under whole-quad execution stay refused.
     for other in ("v_mov_b32_e32 v8, s62", "v_cvt_f32_ubyte0_e32 v8, s62", "v_and_b32_e32 v8, s62, v8"):
         changed = program.copy()

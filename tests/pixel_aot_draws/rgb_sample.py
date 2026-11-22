@@ -43,8 +43,10 @@ def controls(directory):
     body = translate(rgb)
     # Three channels are read from the sample, and alpha is the 0.5 that was loaded before it.
     assert ".z" in body and not re.search(r"sample\d+\.w", body), body
-    # The destination width must agree with the dmask, and only the 0x7 and 0xf masks are lowered.
-    for old, new in (("v[12:14]", "v[12:15]"), ("dmask:0x7", "dmask:0xb"), ("dmask:0x7", "dmask:0x3"),
+    # The destination width must agree with the dmask (three VGPRs: any three-channel mask, such as 0xb; the other
+    # masks are drawn by the sample_shapes family).
+    assert re.search(r"sample\d+\.w", translate([line.replace("dmask:0x7", "dmask:0xb") for line in rgb]))
+    for old, new in (("v[12:14]", "v[12:15]"), ("dmask:0x7", "dmask:0x3"),
                      ("dmask:0x7", "dmask:0x1"), ("dmask:0x7", "dmask:0x8"), ("dmask:0x7", "dmask:0x6"),
                      ("v[12:14]", "v[12:13]"), ("dmask:0x7", "dmask:0x7 d16")):
         must_reject(translate, [line.replace(old, new) for line in rgb])

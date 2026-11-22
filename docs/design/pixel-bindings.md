@@ -68,5 +68,8 @@ the compute stage's corpus contract): entry SGPRs are those read before they are
 `interp`; one whose pair the program completes with a constant high word and loads through is a set pointer (the lowest
 set 0); any other read entry SGPR is a push word; each loaded descriptor is classified by its first use. With it, 125
 of the 250 corpus pixel shaders translate (72 before; those 72 keep byte-identical HLSL), and all 125 compile with DXC.
-The remaining refusals are forms, not bindings: other image dimensions and dmasks, sample coordinates the helper-lane
+The remaining refusals were forms, not bindings: other image dimensions and dmasks, sample coordinates the helper-lane
 rule does not prove, and a few dynamic descriptor indices ("Scalar load offset register must hold a known constant").
+With 2D samples of any dmask and the wider helper-lane rule (immediates, copies, v_sub/v_mul/v_mad/v_mad*k and flat
+attributes under whole-quad execution, also after a sample; the `sample_shapes` draw family), 140 translate and compile.
+Cube, 2D-array and 3D samples (21 shaders) need a texture dimension in the description and the harness, and stay refused.
