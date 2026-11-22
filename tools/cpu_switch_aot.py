@@ -422,6 +422,7 @@ class Function:
         self.calls = {}
         self.tails = {}
         self.import_tails = {}  # import tail jump RVA -> IAT slot RVA
+        self.import_tail = None  # (slot, C name, Binding) once bound
         self.host_calls = {}
 
     def leaves_for(self, ins):
@@ -461,7 +462,6 @@ class Function:
             raise ValueError(f"call target {target:#x} is not a function entry ({self.entries.why_not(target)}) "
                              f"at RVA {ins.ip:#x}")
         return target
-        self.import_tail = None  # (slot, C name, Binding) once bound
 
     def decode(self, ip):
         for begin, end, data in self.ranges:
