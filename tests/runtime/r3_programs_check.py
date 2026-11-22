@@ -95,8 +95,8 @@ def check(assembler=None, objcopy=None):
         stage = "pixel" if name == "r3_ps" else "vertex"
         roles = PS_ROLES if stage == "pixel" else VS_ROLES
         try:
-            source, _ = pso_translate.lower(stage, program, roles)
-            pso_translate.place_in_runtime_spaces(source)
+            source, layout, _ = pso_translate.lower(stage, program, roles)
+            pso_translate.place_in_runtime_spaces(source, stage, layout)
         except ValueError as error:
             if name != "r3_refused_vs" or "mrt0 is not a vertex-shader export" not in str(error):
                 raise

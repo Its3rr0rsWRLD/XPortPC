@@ -93,7 +93,7 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_pipeline.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -122,6 +122,13 @@ add_executable(r3_triangle tests/runtime/r3_triangle.cpp)
 target_include_directories(r3_triangle PRIVATE src)
 target_compile_features(r3_triangle PRIVATE cxx_std_17)
 target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+
+# Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
+# r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3.
+add_executable(r4_scene tests/runtime/r4_scene.cpp)
+target_include_directories(r4_scene PRIVATE src)
+target_compile_features(r4_scene PRIVATE cxx_std_17)
+target_link_libraries(r4_scene PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
@@ -2672,6 +2679,28 @@ if(EXISTS "${INTAKE_PYTHON}")
         set_tests_properties(runtime_r3_triangle_cold_${adapter} runtime_r3_triangle_warm_${adapter}
             runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
             ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    # Runtime ladder R4 (tests/runtime/r4_scene.cpp): cold run first (empties the cache), then warm and the controls.
+    add_test(NAME runtime_r4_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r4_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r4_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r4_cache_${adapter}")
+        set(r4_after_cold)
+        foreach(mode IN ITEMS cold warm wrong_reference missing_view missing_memory)
+            set(r4_name runtime_r4_scene_${mode}_${adapter})
+            if(mode STREQUAL "wrong_reference" OR mode MATCHES "^missing_")
+                set(r4_name runtime_r4_${mode}_${adapter})
+            endif()
+            add_test(NAME ${r4_name} COMMAND r4_scene ${adapter} ${mode})
+            set_tests_properties(${r4_name} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 ENVIRONMENT "${r4_environment}"
+                RUN_SERIAL TRUE)
+            if(mode STREQUAL "cold")
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_SETUP r4_cache_${adapter})
+            else()
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_REQUIRED r4_cache_${adapter})
+            endif()
+        endforeach()
     endforeach()
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT

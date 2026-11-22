@@ -4,13 +4,17 @@
 // constant-initialized and filled once through INIT_ONCE, so the DLL keeps an empty TLS template.
 #include "d3d12_xs_pipeline.h"
 #include "d3d12_xs_api.h"
+#include "d3d12_xs_descriptors.h"
 #include "d3d12_xs_wrap.h"
 #include "era_title_gpu_api.h"
 
 #include <wrl/client.h>
 
+#include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <new>
 #include <string>
 #include <vector>
@@ -28,6 +32,9 @@ constexpr GUID root_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 
 constexpr GUID pso_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x02}};
 constexpr UINT runtime_space = 1000;
 constexpr UINT runtime_memory_space = 1001;
+constexpr UINT runtime_texture_space = 1002;
+constexpr UINT runtime_pixel_constant_space = 1003;
+constexpr UINT placeholder_space = 1004;
 // Console-only root-signature flag bits (d3d12_xs_shim.cpp) and the DENY_*_SHADER_ROOT_ACCESS flags, which would
 // hide the converter's parameters from the stages that read them.
 constexpr std::uint32_t dropped_root_flags = 0x03000000u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x100u | 0x200u;
@@ -245,7 +252,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
     Sha256 sha;
-    sha.update_text("x2w-pso-translate-1");
+    sha.update_text("x2w-pso-translate-2");
     fingerprint_tree(sha, config->tools, 2);
     const std::wstring header = config->tools + L"\\..\\src";
     WIN32_FIND_DATAW found;
@@ -363,14 +370,14 @@ int run_translator(const Config& c, const char* stage, const std::wstring& base,
                    const std::string& roles, std::string& why)
 {
     const std::wstring code = base + L".code", roles_path = base + L".roles.json", log = base + L".log";
-    const std::wstring output = base + L".dxil";
+    const std::wstring output = base + L".dxil", bindings = base + L".bind";
     if (!write_file(code, program.code, program.code_bytes) || !write_file(roles_path, roles.data(), roles.size())) {
         why = "cannot write the translator's input files in the cache directory";
         return 2;
     }
     std::wstring command = L"\"" + c.python + L"\" -B \"" + c.tools + L"\\pso_translate.py\" --stage " +
                            widen(stage) + L" --code \"" + code + L"\" --roles \"" + roles_path + L"\" --dxc \"" +
-                           c.dxc + L"\" --output \"" + output + L"\"";
+                           c.dxc + L"\" --output \"" + output + L"\" --bindings \"" + bindings + L"\"";
     if (!c.llvm.empty()) command += L" --llvm \"" + c.llvm + L"\"";
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
     HANDLE log_file = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
@@ -427,9 +434,10 @@ int run_translator(const Config& c, const char* stage, const std::wstring& base,
 
 const char* stage_name(std::uint32_t stage) { return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel"; }
 
-// The DXIL of one console shader: from the cache, or translated and cached. Returns false with `why` set.
+// The DXIL of one console shader and its descriptor-table reads (pso_translate.py --bindings): from the cache, or
+// translated and cached. Returns false with `why` set.
 bool translated_shader(const Program& program, const std::string& roles, std::vector<std::uint8_t>& dxil,
-                       std::string& key_text, std::string& why)
+                       std::string& bindings, std::string& key_text, std::string& why)
 {
     const Config* c = config();
     if (!c) {
@@ -446,7 +454,11 @@ bool translated_shader(const Program& program, const std::string& roles, std::ve
     sha.finish(key);
     key_text = hex(key, 32);
     const std::wstring final_path = c->cache + L"\\" + widen(key_text) + L".dxil";
-    if (read_file(final_path, dxil)) {
+    const std::wstring final_bind = c->cache + L"\\" + widen(key_text) + L".bind";
+    std::vector<std::uint8_t> text;
+    // The sidecar is stored first, so a DXIL file in the cache always has its bindings.
+    if (read_file(final_bind, text) && read_file(final_path, dxil)) {
+        bindings.assign(text.begin(), text.end());
         count_shader(true);
         return true;
     }
@@ -458,17 +470,22 @@ bool translated_shader(const Program& program, const std::string& roles, std::ve
     std::swprintf(unique, 64, L".%lu.%lu", GetCurrentProcessId(), GetCurrentThreadId());
     const std::wstring base = c->cache + L"\\" + widen(key_text) + unique;
     const int result = run_translator(*c, stage_name(program.stage), base, program, roles, why);
-    const std::wstring produced = base + L".dxil";
+    const std::wstring produced = base + L".dxil", produced_bind = base + L".bind";
     if (result != 0) {
         DeleteFileW(produced.c_str());
+        DeleteFileW(produced_bind.c_str());
         if (result == 2) why = "translator failure: " + why;
         return false;
     }
-    if (!MoveFileExW(produced.c_str(), final_path.c_str(), MOVEFILE_REPLACE_EXISTING) || !read_file(final_path, dxil)) {
+    if (!MoveFileExW(produced_bind.c_str(), final_bind.c_str(), MOVEFILE_REPLACE_EXISTING) ||
+        !MoveFileExW(produced.c_str(), final_path.c_str(), MOVEFILE_REPLACE_EXISTING) || !read_file(final_path, dxil) ||
+        !read_file(final_bind, text)) {
         DeleteFileW(produced.c_str());
+        DeleteFileW(produced_bind.c_str());
         why = "cannot store the translation in the cache";
         return false;
     }
+    bindings.assign(text.begin(), text.end());
     count_shader(false);
     return true;
 }
@@ -482,6 +499,7 @@ void refuse(const char* stage, const std::string& key, const std::string& why)
 }
 
 }  // namespace
+
 
 void RootArgs::clear()
 {
@@ -517,27 +535,61 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
         info.types[i] = static_cast<std::uint8_t>(params[i].ParameterType);
         if (params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
             info.constants[i] = static_cast<std::uint8_t>(params[i].Constants.Num32BitValues);
+        if (params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            // Its tables point into title heaps (d3d12_xs_descriptors.h); the slot keeps its index and its one word.
+            params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+            params[i].Constants = {i, placeholder_space, 1};
+        }
     }
-    D3D12_DESCRIPTOR_RANGE1 memory{};
-    memory.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    memory.NumDescriptors = title_memory_slots;
-    memory.BaseShaderRegister = 0;
-    memory.RegisterSpace = runtime_memory_space;
-    memory.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-    memory.OffsetInDescriptorsFromTableStart = 0;
+    D3D12_DESCRIPTOR_RANGE1 memory[2]{};
+    memory[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    memory[0].NumDescriptors = title_memory_slots;
+    memory[0].RegisterSpace = runtime_memory_space;
+    memory[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    memory[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;  // x2w_lookup_misses (u0 space1000)
+    memory[1].NumDescriptors = 1;
+    memory[1].RegisterSpace = runtime_space;
+    memory[1].Flags = memory[0].Flags;
+    memory[1].OffsetInDescriptorsFromTableStart = title_memory_slots;
+    D3D12_DESCRIPTOR_RANGE1 textures{};
+    textures.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    textures.NumDescriptors = texture_table;
+    textures.RegisterSpace = runtime_texture_space;
+    textures.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    D3D12_DESCRIPTOR_RANGE1 samplers{};
+    samplers.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    samplers.NumDescriptors = sampler_table;
+    samplers.RegisterSpace = runtime_texture_space;
+    samplers.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
     D3D12_ROOT_PARAMETER1 extra[converter_params]{};
+    for (auto& p : extra) p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     extra[param_range_count].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_range_count].Constants = {1, runtime_space, 1};
     extra[param_ranges].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     extra[param_ranges].Descriptor = {2, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     extra[param_memory].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    extra[param_memory].DescriptorTable = {1, &memory};
+    extra[param_memory].DescriptorTable = {2, memory};
     extra[param_push_words].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_push_words].Constants = {3, runtime_space, push_word_count};
-    for (auto& p : extra) {
-        p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        params.push_back(p);
+    extra[param_vertex_root].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    extra[param_vertex_root].Constants = {2, runtime_space, 2};
+    extra[param_vertex_root].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    extra[param_vertex_constants].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    extra[param_vertex_constants].Descriptor = {0, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    extra[param_vertex_constants].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    for (UINT k = 0; k < pixel_constant_slots; ++k) {
+        D3D12_ROOT_PARAMETER1& p = extra[param_pixel_constants + k];
+        p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        p.Descriptor = {k, runtime_pixel_constant_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+        p.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
+    extra[param_textures].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    extra[param_textures].DescriptorTable = {1, &textures};
+    extra[param_textures].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    extra[param_samplers].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    extra[param_samplers].DescriptorTable = {1, &samplers};
+    extra[param_samplers].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    for (auto& p : extra) params.push_back(p);
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC copy{};
     copy.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     copy.Desc_1_1 = desc;
@@ -577,6 +629,70 @@ bool pso_info(ID3D12PipelineState* state, PsoInfo* info)
 }
 
 // --- pipelines --------------------------------------------------------------------------------------------------
+
+namespace {
+
+// Why a root-word binding cannot be read, or null.
+const char* root_word_problem(const RootInfo& root, const X2WShaderBinding& b)
+{
+    if (b.root_parameter >= root.title_params) return "a binding names a root parameter the root signature does not have";
+    const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[b.root_parameter]);
+    if (type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+        return "a root-word binding names a descriptor table parameter (bind it as a descriptor table)";
+    const bool address = type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                         type == D3D12_ROOT_PARAMETER_TYPE_UAV;
+    if (address ? b.word > 1 : b.word >= root.constants[b.root_parameter]) return "a binding reads past its root parameter";
+    return nullptr;
+}
+
+const char* table_problem(const RootInfo& root, const X2WShaderBinding& b)
+{
+    if (b.root_parameter >= root.title_params) return "a binding names a root parameter the root signature does not have";
+    if (root.types[b.root_parameter] != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
+        return "a descriptor-table binding names a parameter that is not a descriptor table";
+    if (b.word != 0) return "a descriptor-table binding has a word other than 0 (the table address is 32 bits)";
+    return nullptr;
+}
+
+// Reads pso_translate.py's --bindings text into `info`. Returns null or the reason it cannot be bound.
+const char* add_refs(const std::string& text, std::uint32_t stage, const std::vector<UINT>& tables, PsoInfo& info)
+{
+    std::size_t at = text.find('\n');
+    if (text.compare(0, at, "x2w-bindings 1") != 0) return "the translator's bindings have an unknown format";
+    while (at != std::string::npos && at + 1 < text.size()) {
+        const std::size_t next = text.find('\n', at + 1);
+        const std::string line = text.substr(at + 1, next == std::string::npos ? std::string::npos : next - at - 1);
+        at = next;
+        char kind[16] = {};
+        unsigned slot = 0, set = 0, offset = 0;
+        if (std::sscanf(line.c_str(), "%15s %u %u %u", kind, &slot, &set, &offset) != 4) return "malformed bindings line";
+        TableRef ref{};
+        ref.stage = static_cast<std::uint8_t>(stage);
+        if (!std::strcmp(kind, "texture")) ref.kind = RefKind::texture;
+        else if (!std::strcmp(kind, "sampler")) ref.kind = RefKind::sampler;
+        else if (!std::strcmp(kind, "constants")) ref.kind = RefKind::constants;
+        else return "unknown kind of descriptor in the bindings";
+        const unsigned slots = ref.kind == RefKind::texture   ? 8
+                               : ref.kind == RefKind::sampler ? sampler_table
+                               : stage == X2W_SHADER_STAGE_VERTEX ? 1
+                                                                  : pixel_constant_slots;
+        if (slot >= slots) return "a descriptor slot the runtime does not bind";
+        if (set >= tables.size()) return "a descriptor read through a set the container does not bind";
+        const UINT increment = ref.kind == RefKind::sampler ? descriptors::sampler_increment : descriptors::view_increment;
+        if (offset % increment)
+            return ref.kind == RefKind::sampler
+                       ? "an S# at a table offset that is not a multiple of 16 (the sampler descriptor size)"
+                       : "a T# or V# at a table offset that is not a multiple of 32 (the CBV/SRV/UAV descriptor size)";
+        if (info.ref_count == max_table_refs) return "more than 24 descriptor-table reads in one pipeline";
+        ref.slot = static_cast<std::uint8_t>(slot);
+        ref.parameter = static_cast<std::uint8_t>(tables[set]);
+        ref.offset = offset;
+        info.refs[info.ref_count++] = ref;
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
                                  void** out)
@@ -618,9 +734,23 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
         return E_NOTIMPL;
     }
 
-    // Entry contracts. Vertex: each root-word SGPR becomes the next push word. Pixel: the interpolation base only.
+    // Entry contracts. Root words become push words, numbered across both stages in binding order (vertex_aot role
+    // "inline", pixel role "push:W"); descriptor tables become descriptor sets, numbered per stage in binding order.
     PsoInfo info{};
     info.magic = pso_magic;
+    std::vector<UINT> tables[2];
+    const auto push_word = [&](const X2WShaderBinding& b, const char* stage) -> bool {
+        if (const char* problem = root_word_problem(root, b)) {
+            refuse(stage, "", problem);
+            return false;
+        }
+        if (info.push_count == push_word_count) {
+            refuse(stage, "", "more than 32 root-word bindings in one pipeline");
+            return false;
+        }
+        info.push[info.push_count++] = {static_cast<std::uint8_t>(b.root_parameter), static_cast<std::uint8_t>(b.word)};
+        return true;
+    };
     std::string vs_roles = "{\"user_sgprs\": {", ps_roles = "{\"sgprs\": {";
     bool used[106] = {};
     for (const X2WShaderBinding& b : vs.bindings) {
@@ -630,56 +760,81 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
             return E_NOTIMPL;
         }
         used[b.sgpr] = true;
-        if (b.kind != X2W_SHADER_BINDING_ROOT_WORD) {
-            refuse("vertex", "", "a vertex binding other than a root-parameter word");
+        if (b.kind == X2W_SHADER_BINDING_ROOT_WORD) {
+            if (!push_word(b, "vertex")) return E_NOTIMPL;
+            std::snprintf(entry, sizeof(entry), "\"%u\": {\"role\": \"inline\", \"word\": %u}", b.sgpr, info.push_count - 1);
+        } else if (b.kind == X2W_SHADER_BINDING_TABLE) {
+            if (const char* problem = table_problem(root, b)) {
+                refuse("vertex", "", problem);
+                return E_NOTIMPL;
+            }
+            std::snprintf(entry, sizeof(entry), "\"%u\": {\"role\": \"descriptors\", \"set\": %u}", b.sgpr,
+                          static_cast<unsigned>(tables[0].size()));
+            tables[0].push_back(b.root_parameter);
+        } else if (b.kind == X2W_SHADER_BINDING_BASE_VERTEX || b.kind == X2W_SHADER_BINDING_START_INSTANCE) {
+            std::snprintf(entry, sizeof(entry), "\"%u\": {\"role\": \"%s\"}", b.sgpr,
+                          b.kind == X2W_SHADER_BINDING_BASE_VERTEX ? "base_vertex" : "start_instance");
+        } else {
+            refuse("vertex", "", "a vertex binding of a kind the vertex stage does not have (interpolation base)");
             return E_NOTIMPL;
         }
-        if (b.root_parameter >= root.title_params) {
-            refuse("vertex", "", "a binding names a root parameter the root signature does not have");
-            return E_NOTIMPL;
-        }
-        const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[b.root_parameter]);
-        const bool address = type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
-                             type == D3D12_ROOT_PARAMETER_TYPE_UAV;
-        if (type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
-            (address ? b.word > 1 : b.word >= root.constants[b.root_parameter])) {
-            refuse("vertex", "", type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
-                                     ? "a binding reads a descriptor table parameter (descriptor heaps come with R4)"
-                                     : "a binding reads past its root parameter");
-            return E_NOTIMPL;
-        }
-        if (info.push_count == push_word_count) {
-            refuse("vertex", "", "more than 32 root-word bindings");
-            return E_NOTIMPL;
-        }
-        std::snprintf(entry, sizeof(entry), "%s\"%u\": {\"role\": \"inline\", \"word\": %u}", info.push_count ? ", " : "",
-                      b.sgpr, info.push_count);
+        if (vs_roles.back() != '{') vs_roles += ", ";
         vs_roles += entry;
-        info.push[info.push_count++] = {static_cast<std::uint8_t>(b.root_parameter), static_cast<std::uint8_t>(b.word)};
     }
     vs_roles += "}}";
-    bool first = true;
+    std::memset(used, 0, sizeof(used));
     for (const X2WShaderBinding& b : ps.bindings) {
-        if (b.kind != X2W_SHADER_BINDING_INTERP || b.sgpr > 105) {
-            refuse("pixel", "", "pixel bindings other than the interpolation base are not bound by the runtime yet");
+        char entry[64];
+        if (b.sgpr > 105 || used[b.sgpr]) {
+            refuse("pixel", "", "an entry SGPR is out of range or bound twice");
             return E_NOTIMPL;
         }
-        char entry[48];
-        std::snprintf(entry, sizeof(entry), "%s\"s%u\": \"interp\"", first ? "" : ", ", b.sgpr);
+        used[b.sgpr] = true;
+        if (b.kind == X2W_SHADER_BINDING_INTERP) {
+            std::snprintf(entry, sizeof(entry), "\"s%u\": \"interp\"", b.sgpr);
+        } else if (b.kind == X2W_SHADER_BINDING_ROOT_WORD) {
+            if (!push_word(b, "pixel")) return E_NOTIMPL;
+            std::snprintf(entry, sizeof(entry), "\"s%u\": \"push:%u\"", b.sgpr, info.push_count - 1);
+        } else if (b.kind == X2W_SHADER_BINDING_TABLE) {
+            if (const char* problem = table_problem(root, b)) {
+                refuse("pixel", "", problem);
+                return E_NOTIMPL;
+            }
+            if (tables[1].size() == 8) {
+                refuse("pixel", "", "more than 8 descriptor tables in a pixel program");
+                return E_NOTIMPL;
+            }
+            if (tables[1].empty()) std::snprintf(entry, sizeof(entry), "\"s%u\": \"descriptors\"", b.sgpr);
+            else std::snprintf(entry, sizeof(entry), "\"s%u\": \"descriptors.%u\"", b.sgpr, static_cast<unsigned>(tables[1].size()));
+            tables[1].push_back(b.root_parameter);
+        } else {
+            refuse("pixel", "", "a pixel binding of a kind the pixel stage does not have (base vertex, start instance)");
+            return E_NOTIMPL;
+        }
+        if (ps_roles.back() != '{') ps_roles += ", ";
         ps_roles += entry;
-        first = false;
     }
     ps_roles += "}}";
 
     std::vector<std::uint8_t> vs_dxil, ps_dxil;
-    std::string key;
-    if (!translated_shader(vs, vs_roles, vs_dxil, key, why)) {
+    std::string key, vs_bind, ps_bind;
+    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
         refuse("vertex", key, why);
         return E_NOTIMPL;
     }
-    if (desc->PS.BytecodeLength && !translated_shader(ps, ps_roles, ps_dxil, key, why)) {
-        refuse("pixel", key, why);
+    if (const char* problem = add_refs(vs_bind, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
+        refuse("vertex", key, problem);
         return E_NOTIMPL;
+    }
+    if (desc->PS.BytecodeLength) {
+        if (!translated_shader(ps, ps_roles, ps_dxil, ps_bind, key, why)) {
+            refuse("pixel", key, why);
+            return E_NOTIMPL;
+        }
+        if (const char* problem = add_refs(ps_bind, X2W_SHADER_STAGE_PIXEL, tables[1], info)) {
+            refuse("pixel", key, problem);
+            return E_NOTIMPL;
+        }
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
     copy.VS = {vs_dxil.data(), vs_dxil.size()};
@@ -714,7 +869,7 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
     return device->CreateComputePipelineState(desc, riid, out);
 }
 
-// --- title memory at draw time ----------------------------------------------------------------------------------
+// --- title memory and descriptors at draw time ------------------------------------------------------------------
 
 using GetShaderViewFn = std::int32_t (*)(X2WTitleGpuRange*, void**, std::uint32_t, std::uint32_t*);
 using TranslateFn = std::uint64_t (*)(std::uint64_t, std::uint64_t);
@@ -734,29 +889,218 @@ std::uint64_t translate_address(std::uint64_t address, std::uint64_t bytes)
     return desktop ? desktop : address;
 }
 
+namespace {
+
+// The TitleLookup miss counter of the live device (its mapped word), and the counts of devices already destroyed.
+std::atomic<volatile std::uint32_t*> g_title_misses;
+std::atomic<std::uint64_t> g_title_misses_before;
+
+// The identity of the descriptors a block holds: (heap serial, index, generation) per entry; zero for a null entry.
+template <unsigned N>
+using BlockKey = std::array<std::uint32_t, 3 * N>;
+
+}  // namespace
+
+std::uint64_t title_lookup_misses()
+{
+    const volatile std::uint32_t* live = g_title_misses.load();
+    return g_title_misses_before.load() + (live ? *live : 0);
+}
+
 class TitleViews {
 public:
     explicit TitleViews(ID3D12Device* device) : device_(device) { InitializeSRWLock(&lock_); }
+    ~TitleViews()
+    {
+        if (counter_word_) {
+            volatile std::uint32_t* expected = counter_word_;
+            if (g_title_misses.compare_exchange_strong(expected, nullptr)) g_title_misses_before += *counter_word_;
+        }
+    }
 
-    // The shim's heap, the table of title-memory SRVs and the ranges buffer for the current xmem.dll view.
-    bool current(ID3D12DescriptorHeap** heap, D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges,
-                 UINT* count, std::string& why)
+    // The shim's heaps, the table of title-memory SRVs and the miss counter, and the ranges buffer for the current
+    // xmem.dll view.
+    bool current(D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges, UINT* count, std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
-        const bool good = refresh(why);
+        const bool good = ensure(why) && refresh(why);
         if (good) {
-            *heap = heap_.Get();
-            *table = heap_->GetGPUDescriptorHandleForHeapStart();
-            table->ptr += static_cast<UINT64>(block_) * title_memory_slots * increment_;
+            *table = views_gpu(block_ * memory_block);
             *ranges = ranges_.back()->GetGPUVirtualAddress();
             *count = static_cast<UINT>(last_.size());
         }
         ReleaseSRWLockExclusive(&lock_);
         return good;
     }
+    ID3D12DescriptorHeap* view_heap() const { return heap_.Get(); }
+    ID3D12DescriptorHeap* sampler_heap() const { return samplers_.Get(); }
+    D3D12_GPU_VIRTUAL_ADDRESS zero_buffer() const { return zero_->GetGPUVirtualAddress(); }
+
+    // A texture-table block holding `sources` (a null handle for a null SRV), and one for samplers (a null handle for
+    // a point sampler). Blocks are cached by the identity of their descriptors, so a draw never changes a block an
+    // earlier draw reads.
+    bool texture_block(const BlockKey<texture_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[texture_table],
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        bool good = true;
+        auto it = texture_blocks_.find(key);
+        if (it == texture_blocks_.end()) {
+            if (texture_blocks_.size() == texture_block_count) {
+                why = "more than 4096 distinct texture tables on one device (blocks are not recycled yet)";
+                good = false;
+            } else {
+                const UINT block = static_cast<UINT>(texture_blocks_.size());
+                const UINT first = texture_first + block * texture_table;
+                for (UINT i = 0; i < texture_table; ++i) {
+                    if (sources[i].ptr) {
+                        device_->CopyDescriptorsSimple(1, views_cpu(first + i), sources[i],
+                                                       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                    } else {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC null{};
+                        null.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                        null.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        null.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        null.Texture2D.MipLevels = 1;
+                        device_->CreateShaderResourceView(nullptr, &null, views_cpu(first + i));
+                    }
+                }
+                it = texture_blocks_.emplace(key, block).first;
+            }
+        }
+        if (good) *out = views_gpu(texture_first + it->second * texture_table);
+        ReleaseSRWLockExclusive(&lock_);
+        return good;
+    }
+
+    bool sampler_block(const BlockKey<sampler_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[sampler_table],
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        bool good = true;
+        auto it = sampler_blocks_.find(key);
+        if (it == sampler_blocks_.end()) {
+            if (sampler_blocks_.size() == sampler_block_count) {
+                why = "more than 512 distinct sampler tables on one device (blocks are not recycled yet)";
+                good = false;
+            } else {
+                const UINT block = static_cast<UINT>(sampler_blocks_.size());
+                for (UINT i = 0; i < sampler_table; ++i) {
+                    D3D12_CPU_DESCRIPTOR_HANDLE dst = samplers_->GetCPUDescriptorHandleForHeapStart();
+                    dst.ptr += static_cast<SIZE_T>(block * sampler_table + i) * sampler_increment_;
+                    if (sources[i].ptr) {
+                        device_->CopyDescriptorsSimple(1, dst, sources[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+                    } else {
+                        D3D12_SAMPLER_DESC point{};
+                        point.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                        point.AddressU = point.AddressV = point.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        point.MaxLOD = D3D12_FLOAT32_MAX;
+                        device_->CreateSampler(&point, dst);
+                    }
+                }
+                it = sampler_blocks_.emplace(key, block).first;
+            }
+        }
+        if (good) {
+            *out = samplers_->GetGPUDescriptorHandleForHeapStart();
+            out->ptr += static_cast<UINT64>(it->second * sampler_table) * sampler_increment_;
+        }
+        ReleaseSRWLockExclusive(&lock_);
+        return good;
+    }
+
+    // Whether a miss at (serial, index) is the first of its kind on this device (it is logged then).
+    bool first_miss(std::uint32_t serial, std::uint32_t index, RefKind kind)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        const std::uint64_t key = std::uint64_t(serial) << 34 | std::uint64_t(index) << 2 | static_cast<unsigned>(kind);
+        bool first = false;
+        if (misses_logged_.size() < 64 && misses_logged_.emplace(key, 0).second) first = true;
+        ReleaseSRWLockExclusive(&lock_);
+        return first;
+    }
 
 private:
-    static constexpr UINT blocks = 256;
+    static constexpr UINT blocks = 256;  // title-memory views
+    static constexpr UINT texture_block_count = 4096;
+    static constexpr UINT sampler_block_count = 512;  // 2048 samplers, the desktop limit of a shader-visible heap
+    static constexpr UINT texture_first = blocks * memory_block;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE views_cpu(UINT index) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = heap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(index) * increment_;
+        return h;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE views_gpu(UINT index) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = heap_->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(index) * increment_;
+        return h;
+    }
+
+    // The shim's shader-visible heaps, the TitleLookup miss counter and the zero buffer, created on first use.
+    bool ensure(std::string& why)
+    {
+        if (heap_) return true;
+        D3D12_DESCRIPTOR_HEAP_DESC desc{};
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        desc.NumDescriptors = texture_first + texture_block_count * texture_table;
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        D3D12_DESCRIPTOR_HEAP_DESC sampler_desc{};
+        sampler_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        sampler_desc.NumDescriptors = sampler_block_count * sampler_table;
+        sampler_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        // The miss counter: a CPU-readable buffer the shaders count into (write-back system memory, as the title
+        // memory aliases are), and a zero-filled upload buffer for constant buffers whose view is missing.
+        D3D12_HEAP_PROPERTIES counter_heap{};
+        counter_heap.Type = D3D12_HEAP_TYPE_CUSTOM;
+        counter_heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+        counter_heap.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = 256;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        D3D12_RESOURCE_DESC zero = buffer;
+        zero.Width = 65536;
+        zero.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES upload{};
+        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+        void* mapped = nullptr;
+        if (FAILED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap_))) ||
+            FAILED(device_->CreateDescriptorHeap(&sampler_desc, IID_PPV_ARGS(&samplers_))) ||
+            FAILED(device_->CreateCommittedResource(&counter_heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                    IID_PPV_ARGS(&counter_))) ||
+            FAILED(counter_->Map(0, nullptr, &mapped)) ||
+            FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &zero,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&zero_)))) {
+            heap_.Reset();
+            samplers_.Reset();
+            counter_.Reset();
+            zero_.Reset();
+            why = "cannot create the shim's descriptor heaps or counter buffers";
+            return false;
+        }
+        std::memset(mapped, 0, 256);
+        counter_word_ = static_cast<volatile std::uint32_t*>(mapped);
+        volatile std::uint32_t* expected = nullptr;
+        g_title_misses.compare_exchange_strong(expected, counter_word_);
+        void* zeros = nullptr;
+        if (SUCCEEDED(zero_->Map(0, nullptr, &zeros))) {
+            std::memset(zeros, 0, 65536);
+            zero_->Unmap(0, nullptr);
+        }
+        increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        sampler_increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        block_ = blocks - 1;
+        return true;
+    }
 
     bool refresh(std::string& why)
     {
@@ -793,23 +1137,10 @@ private:
             why = "more than 8 title memory ranges; the converter's title_memory table has 8 slots";
             return false;
         }
-        if (heap_ && ranges.size() == last_.size() && resources == last_resources_ &&
+        if (!ranges_.empty() && ranges.size() == last_.size() && resources == last_resources_ &&
             (ranges.empty() || std::memcmp(ranges.data(), last_.data(), ranges.size() * sizeof(ranges[0])) == 0)) {
             release();
             return true;
-        }
-        if (!heap_) {
-            D3D12_DESCRIPTOR_HEAP_DESC desc{};
-            desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = blocks * title_memory_slots;
-            desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            if (FAILED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap_)))) {
-                release();
-                why = "cannot create the shim's descriptor heap";
-                return false;
-            }
-            increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            block_ = blocks - 1;
         }
         // A new block per view, so descriptors that recorded draws still read stay unchanged until the heap wraps.
         if (++used_ > blocks) {
@@ -818,8 +1149,7 @@ private:
             return false;
         }
         block_ = (block_ + 1) % blocks;
-        D3D12_CPU_DESCRIPTOR_HANDLE handle = heap_->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += static_cast<SIZE_T>(block_) * title_memory_slots * increment_;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = views_cpu(block_ * memory_block);
         for (UINT i = 0; i < title_memory_slots; ++i) {
             D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
             raw.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -838,6 +1168,12 @@ private:
             device_->CreateShaderResourceView(resource, &raw, handle);
             handle.ptr += increment_;
         }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC misses{};
+        misses.Format = DXGI_FORMAT_R32_TYPELESS;
+        misses.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        misses.Buffer.NumElements = 64;
+        misses.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device_->CreateUnorderedAccessView(counter_.Get(), nullptr, &misses, handle);
         // The ranges as TitleLookup reads them (stride 24), in an upload buffer kept for the device's lifetime.
         D3D12_HEAP_PROPERTIES upload{};
         upload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -870,42 +1206,112 @@ private:
 
     ID3D12Device* device_;  // the desktop device; the owning wrapper outlives this object
     SRWLOCK lock_;
-    ComPtr<ID3D12DescriptorHeap> heap_;
-    UINT increment_ = 0;
+    ComPtr<ID3D12DescriptorHeap> heap_, samplers_;
+    ComPtr<ID3D12Resource> counter_, zero_;
+    volatile std::uint32_t* counter_word_ = nullptr;
+    UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
     UINT used_ = 0;
     std::vector<ComPtr<ID3D12Resource>> ranges_;
     std::vector<X2WTitleGpuRange> last_;
     std::vector<void*> last_resources_;  // identity only; not referenced
+    std::map<BlockKey<texture_table>, UINT> texture_blocks_;
+    std::map<BlockKey<sampler_table>, UINT> sampler_blocks_;
+    std::map<std::uint64_t, int> misses_logged_;
 };
 
 TitleViews* create_title_views(ID3D12Device* device) { return new (std::nothrow) TitleViews(device); }
 void destroy_title_views(TitleViews* views) { delete views; }
 
+void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
+{
+    for (UINT i = 0; i < root.title_params; ++i)
+        if (root.types[i] == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) list->SetGraphicsRoot32BitConstant(i, 0, 0);
+}
+
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                   const RootArgs& args, ID3D12DescriptorHeap* title_heap, bool* ours_bound)
+                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound)
 {
     const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Draw";
     std::string why;
-    ID3D12DescriptorHeap* heap = nullptr;
     D3D12_GPU_DESCRIPTOR_HANDLE table{};
     D3D12_GPU_VIRTUAL_ADDRESS ranges = 0;
     UINT count = 0;
-    if (!views || !views->current(&heap, &table, &ranges, &count, why)) {
-        log_refused(symbol, ("draw skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(), true);
-        return false;
-    }
-    if (title_heap && title_heap != heap) {
+    if (heaps.foreign) {
         log_refused(symbol,
-                    "draw skipped: the title bound its own CBV/SRV/UAV heap; the converter's title-memory table "
-                    "needs a shadow heap (R4)",
+                    "draw skipped: the title bound a shader-visible heap the shim did not create; translated shaders "
+                    "read descriptors from title heaps only",
                     true);
         return false;
     }
+    if (!views || !views->current(&table, &ranges, &count, why)) {
+        log_refused(symbol, ("draw skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(), true);
+        return false;
+    }
+
+    // TextureLookup: each descriptor the shaders read from a title table, resolved to the slot of its heap.
+    BlockKey<texture_table> texture_key{};
+    BlockKey<sampler_table> sampler_key{};
+    D3D12_CPU_DESCRIPTOR_HANDLE texture_src[texture_table] = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE sampler_src[sampler_table] = {};
+    bool any_texture = false, any_sampler = false;
+    D3D12_GPU_VIRTUAL_ADDRESS constants[1 + pixel_constant_slots] = {};
+    bool any_constants[1 + pixel_constant_slots] = {};
+    for (std::uint32_t r = 0; r < pso.ref_count; ++r) {
+        const TableRef& ref = pso.refs[r];
+        const descriptors::SlotKind want = ref.kind == RefKind::texture   ? descriptors::SlotKind::srv
+                                           : ref.kind == RefKind::sampler ? descriptors::SlotKind::sampler
+                                                                          : descriptors::SlotKind::cbv;
+        const descriptors::Resolved found = descriptors::resolve(
+            args.address[ref.parameter], ref.offset, want, ref.kind == RefKind::sampler ? heaps.samplers : heaps.views);
+        if (!found.found) {
+            count_texture_miss();
+            if (views->first_miss(found.serial, found.index, ref.kind)) {
+                char detail[320];
+                std::snprintf(detail, sizeof(detail),
+                              "TextureLookup miss: %s %s slot %u reads root parameter %u + %u (heap %u, descriptor "
+                              "%u): %s; it reads %s",
+                              ref.stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel",
+                              ref.kind == RefKind::texture   ? "texture"
+                              : ref.kind == RefKind::sampler ? "sampler"
+                                                             : "constant buffer",
+                              ref.slot, ref.parameter, ref.offset, found.serial, found.index, found.why,
+                              ref.kind == RefKind::texture   ? "a null SRV"
+                              : ref.kind == RefKind::sampler ? "through a point sampler"
+                                                             : "zeros");
+                log_note(symbol, detail, nullptr);
+            }
+        }
+        const std::uint32_t identity[3] = {found.found ? found.serial : 0, found.found ? found.index : 0,
+                                           found.found ? found.generation : 0};
+        if (ref.kind == RefKind::texture) {
+            const UINT at = ref.slot < 2 ? ref.slot : ref.slot + 1u;  // the converter's texture registers skip t2
+            texture_src[at] = found.found ? found.shadow : D3D12_CPU_DESCRIPTOR_HANDLE{};
+            std::memcpy(&texture_key[3 * at], identity, sizeof(identity));
+            any_texture = true;
+        } else if (ref.kind == RefKind::sampler) {
+            sampler_src[ref.slot] = found.found ? found.shadow : D3D12_CPU_DESCRIPTOR_HANDLE{};
+            std::memcpy(&sampler_key[3 * ref.slot], identity, sizeof(identity));
+            any_sampler = true;
+        } else {
+            const unsigned at = ref.stage == X2W_SHADER_STAGE_VERTEX ? 0 : 1 + ref.slot;
+            constants[at] = found.found ? translate_address(found.cbv_address, 256) : views->zero_buffer();
+            any_constants[at] = true;
+        }
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE texture_table_at{}, sampler_table_at{};
+    if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, why)) ||
+        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why))) {
+        log_refused(symbol, ("draw skipped: " + why).c_str(), true);
+        return false;
+    }
+
     if (!*ours_bound) {
-        list->SetDescriptorHeaps(1, &heap);
+        ID3D12DescriptorHeap* ours[2] = {views->view_heap(), views->sampler_heap()};
+        list->SetDescriptorHeaps(2, ours);
         *ours_bound = true;
     }
+    set_placeholders(list, root);
     std::uint32_t words[push_word_count] = {};
     for (std::uint32_t i = 0; i < pso.push_count; ++i) {
         const PushSource s = pso.push[i];
@@ -919,6 +1325,12 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     list->SetGraphicsRootShaderResourceView(base + param_ranges, ranges);
     list->SetGraphicsRootDescriptorTable(base + param_memory, table);
     list->SetGraphicsRoot32BitConstants(base + param_push_words, push_word_count, words, 0);
+    list->SetGraphicsRoot32BitConstants(base + param_vertex_root, 2, &bases, 0);
+    if (any_constants[0]) list->SetGraphicsRootConstantBufferView(base + param_vertex_constants, constants[0]);
+    for (UINT k = 0; k < pixel_constant_slots; ++k)
+        if (any_constants[1 + k]) list->SetGraphicsRootConstantBufferView(base + param_pixel_constants + k, constants[1 + k]);
+    if (any_texture) list->SetGraphicsRootDescriptorTable(base + param_textures, texture_table_at);
+    if (any_sampler) list->SetGraphicsRootDescriptorTable(base + param_samplers, sampler_table_at);
     return true;
 }
 

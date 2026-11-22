@@ -6,8 +6,10 @@ the pure-Python decoder tools/disasm_rdna2.py, corrected where its text differs 
 
 - s_waitcnt: the gfx10 fields (vmcnt bits 3:0 and 15:14, expcnt 6:4, lgkmcnt 13:8), each printed only when below its
   maximum, in LLVM's order;
-- SMEM: an immediate offset of 0 with a null SGPR offset prints as `null`;
-- v_interp_mov_f32: the parameter field is p10, p20 or p0 (disasm_rdna2 prints it as a VGPR).
+- SMEM (s_load, s_buffer_load): an immediate offset of 0 with a null SGPR offset prints as `null`;
+- v_interp_mov_f32: the parameter field is p10, p20 or p0 (disasm_rdna2 prints it as a VGPR);
+- 64-bit SALU operands (s_mov_b64, s_wqm_b64, s_and_b64): an SGPR pair prints as s[n:n+1] and exec_lo/vcc_lo as
+  exec/vcc (disasm_rdna2 prints the low register only).
 
 Only mnemonics whose text was compared with LLVM 15's disassembly (tests/runtime/r3_programs_check.py, which also
 re-checks the list against llvm-mc when one is given) are accepted. Any other instruction is refused with its
@@ -23,10 +25,32 @@ import disasm_rdna2  # noqa: E402
 
 # Mnemonics whose corrected text equals LLVM 15's for every encoding the check covers.
 VERIFIED = frozenset({
+    # Rung R3 (tests/runtime/r3_programs_check.py).
     "exp", "global_load_dword", "global_load_dwordx2", "global_load_dwordx4", "s_endpgm", "s_load_dword",
     "s_load_dwordx2", "s_load_dwordx4", "s_mov_b32", "s_waitcnt", "v_interp_mov_f32_e32", "v_lshlrev_b32_e32",
     "v_mov_b32_e32",
+    # Rung R4 (tests/runtime/r4_programs_check.py).
+    "image_sample", "s_and_b64", "s_buffer_load_dword", "s_buffer_load_dwordx2", "s_buffer_load_dwordx4",
+    "s_load_dwordx8", "s_mov_b64", "s_movk_i32", "s_wqm_b64", "v_add_f32_e32", "v_add_nc_u32_e32",
+    "v_interp_p1_f32_e32", "v_interp_p2_f32_e32", "v_mul_f32_e32",
 })
+# 64-bit scalar operations whose operands disasm_rdna2 prints as their low 32-bit register.
+PAIR_OPERANDS = frozenset({"s_and_b64", "s_mov_b64", "s_wqm_b64"})
+
+
+def _pairs(text):
+    """The operands of a 64-bit SALU instruction as LLVM prints them: s[n:n+1], exec, vcc."""
+    head, _, rest = text.partition(" ")
+
+    def one(token):
+        token = token.strip()
+        if m := re.fullmatch(r"s(\d+)", token):
+            n = int(m[1])
+            if n % 2:
+                raise ValueError(f"{head}: 64-bit operand s{n} is not an even SGPR")
+            return f"s[{n}:{n + 1}]"
+        return {"exec_lo": "exec", "vcc_lo": "vcc"}.get(token, token)
+    return head + " " + ", ".join(one(token) for token in rest.split(","))
 
 
 def _waitcnt(word):
@@ -55,8 +79,10 @@ def decode(code):
         word, = struct.unpack_from("<I", code, offset)
         if name == "s_waitcnt":
             text = _waitcnt(word)
-        elif name.startswith("s_load_dword"):
+        elif name.startswith(("s_load_dword", "s_buffer_load_dword")):
             text = re.sub(r", 0x0$", ", null", text)
+        elif name in PAIR_OPERANDS:
+            text = _pairs(text)
         elif name == "v_interp_mov_f32_e32":
             param = {0: "p10", 1: "p20", 2: "p0"}.get(word & 0xff)
             if param is None:
