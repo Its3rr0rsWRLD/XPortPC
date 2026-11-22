@@ -355,6 +355,10 @@ DPP_F16_BODY = [
     "v_sub_f16_dpp v25, v20, v20 dpp8:[1,2,3,0,5,6,7,4]",
     "v_min_f16_dpp v26, v25, v25 quad_perm:[3,3,3,3] row_mask:0xf bank_mask:0xf",
     "v_mov_b32_e32 v27, v24",
+    # v22 * v23 (1 * 2 in every lane) through a dpp8 swap, as the refused v_fmac_f16_dpp added it: the reference's 8.0.
+    "v_mov_b32_e32 v50, 0",
+    "v_mul_f16_dpp v50, v22, v23 dpp8:[1,0,3,2,5,4,7,6]",
+    "v_add_f16_dpp v27, v27, v50 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
     "v_mov_b32_e32 v28, s44",
     "v_add_f16_dpp v27, v27, -v26 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
     "v_add_f16_dpp v27, v27, v28 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
