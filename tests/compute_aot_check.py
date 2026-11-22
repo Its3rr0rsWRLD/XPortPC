@@ -713,11 +713,106 @@ def image_b_reference(inputs, flaws):
     return (GROUPS_B, constants, [], [], [], [(0, *TEX_B, tex)], [(1, 8, *OUT_B, before, bytes(out))])
 
 
+# Program C (the corpus's game-of-life update shape): the T# words 1 to 3 read as data (descriptor_data puts the T#'s
+# eight words in constant words 16 to 23) give the image size as imageSize does: WIDTH - 1 from word 1 bits 30-31 and
+# word 2 bits 0-13, HEIGHT - 1 from word 2 bits 14-29, both shifted right by BASE_LEVEL (word 3 bits 12-15) and at
+# least 1, the width 0 for a null descriptor (word 1 zero). Each thread loads the texel mirrored at (w - 1 - x,
+# h - 1 - y), then an if/else in whole-wave form (s_mov_b64 exec, vcc; s_cbranch_execz; s_andn2_b64 exec, -1, exec;
+# s_mov_b64 exec, -1, which the full 8x8 wave64 workgroup allows): where r > 0.5, (1 - g, g, a); else (2 b, 0, b);
+# stored with dmask 0x7 at (x, y).
+IMAGE_C = [
+    "s_movk_i32 s3, 0x8000",
+    "v_lshl_add_u32 v2, s4, 3, v0",
+    "v_lshl_add_u32 v3, s5, 3, v1",
+    "s_clause 0x1",
+    "s_load_dwordx8 s[8:15], s[2:3], null",
+    "s_load_dwordx8 s[16:23], s[2:3], 0x20",
+    "s_waitcnt lgkmcnt(0)",
+    "s_bfe_u32 s0, s9, 0x2001e",
+    "s_and_b32 s1, s10, 0x3fff",
+    "s_lshl2_add_u32 s1, s1, s0",
+    "s_bfe_u32 s6, s10, 0x10000e",
+    "s_bfe_u32 s7, s11, 0x4000c",
+    "s_add_u32 s1, s1, 1",
+    "s_add_u32 s6, s6, 1",
+    "s_lshr_b32 s1, s1, s7",
+    "s_lshr_b32 s6, s6, s7",
+    "s_max_u32 s1, s1, 1",
+    "s_max_u32 s6, s6, 1",
+    "s_cmp_eq_i32 s9, 0",
+    "s_cselect_b32 s1, 0, s1",
+    "v_sub_nc_u32_e32 v4, s1, v2",
+    "v_add_nc_u32_e32 v4, -1, v4",
+    "v_sub_nc_u32_e32 v5, s6, v3",
+    "v_add_nc_u32_e32 v5, -1, v5",
+    "image_load v[6:9], v[4:5], s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+    "s_waitcnt vmcnt(0)",
+    "v_cmp_lt_f32_e32 vcc, 0.5, v6",
+    "s_mov_b64 exec, vcc",
+    "s_cbranch_execz BB4",
+    "v_sub_f32_e32 v6, 1.0, v7",
+    "v_mov_b32_e32 v8, v9",
+    "BB4:",
+    "s_andn2_b64 exec, -1, exec",
+    "v_mul_f32_e32 v6, 2.0, v8",
+    "v_mov_b32_e32 v7, 0",
+    "s_mov_b64 exec, -1",
+    "image_store v[6:8], v[2:3], s[16:23] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm",
+    "s_endpgm",
+]
+IMAGE_C_CONTRACT = {"numthreads": (8, 8, 1), "wave": 64, "local_ids": 2,
+                    "sgprs": {"s2": "descriptors", "s4": "group_id.x", "s5": "group_id.y"},
+                    "textures": {0: 0}, "storage_images": {0x20: (0, "r8g8b8a8_unorm")}, "descriptor_data": {0: 16}}
+OUT_C = (16, 16)
+
+
+def tsharp_words(width, height, base_level, null=False):
+    """A 2D RGBA8 T# (gfx10 layout, as Mesa's gfx10_make_texture_descriptor writes it) of a width x height image whose
+    view starts at base_level; the address and the fields the program does not read are arbitrary."""
+    w, h = width - 1, height - 1
+    word1 = 0 if null else (w & 3) << 30 | 0x38 << 20 | 0x12
+    return [0x2345_6700, word1, w >> 2 | h << 14 | 1 << 31, 0xfac | base_level << 12 | 3 << 16 | 9 << 28,
+            0x0007_0000, 0x5a5a_0001, 0, 0x0100_0000]
+
+
+def image_c_reference(inputs, flaws):
+    seed, full, base_level, null = inputs
+    width, height = full
+    tex_size = (max(width >> base_level, 1), max(height >> base_level, 1))
+    tex = rgba8_texels(seed, *tex_size)
+    before = rgba8_texels(seed + 5, *OUT_C)
+    out = bytearray(before)
+    constants = [0] * 64
+    constants[16:24] = tsharp_words(width, height, base_level, null)
+    shift = 0 if "no_shift" in flaws else base_level
+    w = (width - 1 & (3 if "no_word2" in flaws else 0xffff)) + 1
+    h = (width if "height_from_width" in flaws else height - 1 + 1)
+    w, h = max(w >> shift, 1), max(h >> shift, 1)
+    if null:
+        w = 0
+    for y in range(OUT_C[1]):
+        for x in range(OUT_C[0]):
+            found = texel(tex, *tex_size, w - 1 - x, h - 1 - y)
+            r, g, b, a = [0] * 4 if found is None else [unorm8_bits(k) for k in found]
+            then = f32_value(r) > Fraction(1, 2)
+            channels = [r, g, b]
+            if then:
+                channels = [sub(0x3f800000, g), g, a]
+            if not then or "else_not_inverted" in flaws:
+                channels = [mul(0x40000000, channels[2]), 0, channels[2]]
+            if then and "no_restore" in flaws:
+                continue
+            image_put(out, OUT_C[0], x, y, [unorm8(k) for k in channels] + [0])
+    return ((2, 2, 1), constants, [], [], [], [(0, *tex_size, tex)], [(0, 8, *OUT_C, before, bytes(out))])
+
+
 IMAGE_PROGRAMS = [
     (IMAGE_A, IMAGE_A_CONTRACT, [(5,), (77,)], image_a_reference,
      [{"same_texel"}, {"swap_xy"}, {"alpha_one"}, {"abs"}, {"oob_edge"}]),
     (IMAGE_B, IMAGE_B_CONTRACT, [(9, 21, 19, 0x3d800000), (31, 24, 13, 0x3d000000)], image_b_reference,
      [{"no_mask"}, {"mask_x_only"}, {"wrap"}, {"no_flip"}, {"row_scale_x"}]),
+    (IMAGE_C, IMAGE_C_CONTRACT, [(4, (13, 11), 0, False), (8, (27, 20), 1, False), (15, (12, 9), 0, True)],
+     image_c_reference, [{"no_word2"}, {"no_shift"}, {"height_from_width"}, {"else_not_inverted"}, {"no_restore"}]),
 ]
 
 
@@ -1271,6 +1366,27 @@ def check_refusals():
         must_reject(image_program(*fill, istore) if False else
                     (lambda change=change: compute_aot.lower_compute([*ihead, *fill, istore, "s_endpgm"],
                                                                      **{**images, **change})))
+    # Descriptor words as data (descriptor_data): a T# word read by a scalar form needs them; the contract must name a
+    # declared image or sampler and words inside the 64 that overlap no buffer V#, user word or other data.
+    width = ["s_bfe_u32 s40, s17, 0x2001e", "v_lshlrev_b32_e32 v4, 2, v0", "v_mov_b32_e32 v8, s40", "buffer_store_dword v8, v4, s[8:11], 0 offen"]
+    assert "params[5].y" in compute_aot.lower_compute([*ihead, *width, "s_endpgm"], **{**images, "descriptor_data": {0x40: 20}})
+    assert "params[5].y" in compute_aot.lower_compute([*ihead, "s_bfe_u32 s40, s13, 0x2001e", *width[1:], "s_endpgm"],
+                                                      **{**images, "descriptor_data": {0x80: 20}})  # an S# word
+    must_reject(image_program(*width))
+    for data in ({0x48: 20}, {0xa0: 20}, {0x40: 57}, {0x40: 6}, {0x40: 20, 0x60: 24}, {0x40: -1}):
+        must_reject(lambda data=data: compute_aot.lower_compute([*ihead, *width, "s_endpgm"],
+                                                                **{**images, "descriptor_data": data}))
+    # EXEC = -1 (s_mov_b64 exec, -1 and s_andn2_b64 exec, -1, exec) where every lane of every wave is a thread and the
+    # walk is in no skipped region or loop; refused for a partial wave (48 threads in wave64), in a loop, inside a
+    # skipped region (above) and in the pixel stage.
+    whole = ["v_cmp_gt_u32_e32 vcc, 5, v0", "s_mov_b64 exec, vcc", "v_mov_b32_e32 v5, 1", "s_andn2_b64 exec, -1, exec",
+             "v_mov_b32_e32 v5, 2", "s_mov_b64 exec, -1", "buffer_store_dword v5, v4, s[8:11], 0 offen"]
+    assert "bool ex" in program(*whole)()
+    must_reject(program(*whole, contract={**base, "numthreads": (48, 1, 1)}))
+    must_reject(program(*whole[:3], "s_mov_b64 exec, -1", whole[-1], contract={**base, "numthreads": (48, 1, 1)}))
+    must_reject(program("v_cmp_gt_u32_e32 vcc, 5, v0", "s_mov_b64 exec, vcc", "s_mov_b32 s6, 0", "_L0:",
+                        "s_mov_b64 exec, -1", "s_add_u32 s6, s6, 1", "s_cmp_lt_u32 s6, 3", "s_cbranch_scc1 _L0", store))
+    must_reject(common.translate, common.with_constants(["s_mov_b64 exec, -1"]))
     # A descriptor word outside every declared descriptor, and a pointer of an undeclared set.
     must_reject(image_program("s_load_dwordx4 s[40:43], s[2:3], 0xa0"))
     must_reject(lambda: compute_aot.lower_compute(

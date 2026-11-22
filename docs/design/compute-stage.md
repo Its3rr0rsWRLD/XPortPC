@@ -5,7 +5,8 @@ Status: C-1 to C-4 and the first part of C-7 are implemented (`tools/compute_aot
 the instruction lowerings stay in `tools/pixel_aot_ops/forms/` and are shared, and the compute stage adds only its entry
 contract, its terminator, its refusals and its test harness. With C-4, 12 of the 27 corpus compute shaders translate
 (see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18. C-7's lane reads add headless
-(see [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)).
+(see [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)) and descriptor words as data add
+game_of_life_update (see [Descriptor words as data](#descriptor-words-as-data)): 14 of 27.
 
 ## What the corpus shows
 The corpus has 27 compute shaders (10 from Sascha Willems' Vulkan samples, 17 from Khronos Vulkan-Samples; licenses in
@@ -237,7 +238,7 @@ game_of_life_init, game_of_life_mutate (C-2), sascha computeparticles/particle, 
 - multi_draw_indirect/cull: nested loops whose inner loop leaves through the outer loop's exit (a two-level break),
   which CF-2e does not structure.
 - game_of_life_update: reads T# word 1 as data (`s_bfe_u32` of the image width, imageSize), which needs a descriptor
-  word model of the bound image.
+  word model of the bound image (since added, see [Descriptor words as data](#descriptor-words-as-data)).
 - raytracing: two uniform buffers (the constant words are one) and `s_buffer_load` at a runtime SGPR offset.
 - the three 16bit_arithmetic shaders: `s_buffer_load` at a runtime SGPR offset (the constant words are read only at
   translation-time offsets).
@@ -323,6 +324,35 @@ constant-built values rounded and read under the narrowed EXEC, one the trip cou
 group's address, read into an SGPR, a scalar Fibonacci loop). Wrong references: no mask, no max, truncation for
 `v_rndne_f32`, the two read values swapped; no group bound, the read value taken as 0, one trip fewer. `controls`
 checks the refusals above, `v_readlane_b32`, a vector or m0 destination and the pixel stage.
+
+## Descriptor words as data
+A program may read the words of a T# or S# with scalar ALU forms, as imageSize does (game_of_life_update: WIDTH - 1
+from T# word 1 bits 30-31 and word 2 bits 0-13, HEIGHT - 1 from word 2 bits 14-29, shifted right by BASE_LEVEL from
+word 3 bits 12-15, at least 1, and 0 when word 1 is zero, a null descriptor). The descriptor's words are the runtime's
+(the harness writes them), so the contract says where they are: `descriptor_data={key: W}` (`--descriptor-data
+OFFSET=WORD`) puts the eight words of the declared T# or storage image at key (four for the S#) in the constant words
+W onwards. `forms/smem.compute_descriptor_load` then tracks each word as a `registers.DescriptorWord`: the provenance
+`(tag, j)` it always was, for the image and sample forms that bind the descriptor, and its data `params[W + j]`,
+which `registers.scalar_u32` returns, so every scalar form reads it as any word. Without `descriptor_data` such a
+read stays refused ("Expected a numeric scalar register"). The words must lie inside the 64 and overlap no buffer V#,
+user-data word or other descriptor's data. Nothing checks that the data words describe the bound view: the runtime
+writes both from one descriptor, and the draws do so (a base level of 1 describes a view whose level 0 is the bound
+texture).
+
+game_of_life_update also needs **EXEC = -1** (`s_andn2_b64 exec, -1, exec` for its else arm and `s_mov_b64 exec, -1`
+after it). Whole-wave mode stays refused in general, since on the console it turns on lanes that were never active;
+in the compute stage it is lowered when every lane of every wave is a thread (the workgroup size a multiple of the
+wave size; compute has no kill, so every thread is active at entry and -1 is the set of all threads) and the walk is
+in no skipped region or loop (`forms/exec_mask.write_mask`, control_flow's `st.nesting`), so that every thread runs the
+code that follows as every lane does on the console.
+
+Draw: `image` program C, the update shape (the size from the T# data words, a texel loaded at the mirrored
+coordinate, an if/else in whole-wave form, a UNORM store), with a base level 0, a base level 1 over a larger image,
+and a null word 1. Wrong references: word 2's width bits ignored, BASE_LEVEL ignored, the height taken from the width,
+the else arm's EXEC not inverted, EXEC not restored to -1. `controls` checks that a T# word read as data without
+`descriptor_data` is refused, the invalid `descriptor_data` contracts, and EXEC = -1 in a partial wave (48 threads in
+wave64), in a loop, in a skipped region and in the pixel stage. The pixel stage's binding description
+(`PixelBindings`) does not take descriptor data yet.
 
 ## Cards
 Counts are corpus shaders whose first translatable card it is (`tools/compute_aot.py survey`, "first_card"),

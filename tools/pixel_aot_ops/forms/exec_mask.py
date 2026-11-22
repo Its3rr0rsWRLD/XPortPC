@@ -139,9 +139,13 @@ def write_mask(st, i, dst, expression, *, widens=False):
     held in a bool local (`ex<i>` for EXEC, `lm<i>` otherwise). `widens`: the bit is folded from a constant source
     (0 or -1) into something other than false or one of the other sources (`s_mov_b64 exec, -1`,
     `s_xor_b64 exec, exec, -1`, `s_or_saveexec_b64 S, -1`); in EXEC that could turn on a lane that was never active,
-    which is whole-wave mode: refused."""
+    which is whole-wave mode: refused. In the compute stage it is lowered where every lane of every wave is a thread
+    (st.full_waves: the workgroup size a multiple of the wave size, and compute has no kill) and the walk is in no
+    skipped region or loop (st.nesting), so -1 is the set of all threads, which every thread runs as on the console
+    (docs/design/compute-stage.md, descriptor words as data)."""
     if dst == "exec":
-        if widens:
+        if widens and not (st.stage == "compute" and getattr(st, "full_waves", False)
+                           and not any(getattr(st, "nesting", ([None],)))):
             raise ValueError("EXEC write may enable an inactive lane (whole-wave mode)")
         if not re.fullmatch(r"true|false|ex\d+", expression):
             st.lines.append(f"    bool ex{i} = {expression};")

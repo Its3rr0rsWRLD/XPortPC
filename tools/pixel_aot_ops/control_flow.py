@@ -892,6 +892,7 @@ def program(st, blocks, labels, latch_of):
     null_targets = set()
     live = ["true"]  # lane bits under which the wave provably has an active lane (uniform_vcc), by region
     st.live = live  # read by forms/lanes.py (C-7)
+    st.nesting = (skips, loops, awaiting_restore)  # read by forms/exec_mask.write_mask (compute full waves)
     dead_skips = set()  # and the bits at skips to the all-lanes-dead block, from there on
     uniform_claims = []  # compares that s_cbranch_vccz/vccnz lowered as uniform
     yield from walk_region(0, len(blocks))
