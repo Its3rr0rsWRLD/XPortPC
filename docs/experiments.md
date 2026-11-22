@@ -940,6 +940,34 @@ ctest --preset dev --no-tests=error -R "^sgd5_effect_candidates$" -V
 The report follows the effect's stored list order. Each entry gives its stored group, zero-based program index, name, numeric DXIL shader kind and decoded-container SHA-256. Check the DXIL kind when interpreting a group label. A stored VS group can contain a mesh shader (kind 13).
 
 Two independently located local effects yielded 5 and 81 candidates across all groups. Their pixel lists contained 2 and 41 candidates respectively, and every pixel-container digest matched an independent decode. Identifying which candidate a draw uses still requires evidence of pass selection.
+## Scalar SSE and SSE2 leaf functions
+
+Compilers keep `float` and `double` values in XMM registers and use the scalar SSE and SSE2 instructions for them. The [scalar float translator](../tools/cpu_sse_aot.py) adds these instructions to the control flow and integer instructions of the [jump-table translator](../tools/cpu_switch_aot.py), without its jump tables. It lifts `MOVSS` and `MOVSD` between registers and memory, register `MOVAPS`/`MOVUPS` copies, `ADD`/`SUB`/`MUL`/`DIV` in both precisions, `CVTSI2SS`/`CVTSI2SD` from 32- and 64-bit integers, the truncating `CVTTSS2SI`/`CVTTSD2SI`, `CVTSS2SD`/`CVTSD2SS`, the four `COMISS`-family compares, `MOVD`, `MOVQ` between XMM registers and memory, and `XORPS`/`XORPD`/`PXOR` of a register with itself.
+
+```powershell
+cmake --build --preset dev --target cpu_float_original_lifted cpu_float_swapped_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_scalar_float$' -V
+```
+
+A PE does not record argument types, so each export is named with its signature, such as `blend_ss=f:ffqf`: the result, then up to four slots, each `f` (float), `d` (double) or `q` (a 64-bit integer or pointer). Under the Windows x64 convention, slot N arrives in XMM0 to XMM3 when it is floating point and in RCX, RDX, R8 or R9 otherwise. The generated function has the matching C++ signature. XMM6 to XMM15 are nonvolatile and a leaf has no frame to save them in, so any use is rejected.
+
+The generated C++ keeps the low quadword of each XMM register in a 64-bit integer. Every supported instruction computes that quadword from low quadwords only, so the upper half of a register never reaches a result and is not modelled. The two dwords of the quadword are tracked as defined or undefined along every path. A `float` argument defines the low dword alone, a register copy carries undefined parts with it, and a read of an undefined part is rejected. `MOVSS` between registers and every single-precision result replace the low dword and keep bits 32 to 63.
+
+Results must match the processor bit for bit, and three rules are written out because C++ leaves them to the host compiler:
+
+- **NaN operands.** `ADDSS xmm0, xmm1` returns the quieted NaN of its destination when that is a NaN, otherwise the quieted source NaN. A compiler may swap the operands of `a + b`, which changes the payload when both are NaN, so the generated code tests the operands before the arithmetic. An invalid operation such as `inf - inf` gives the default NaN with the sign bit set.
+- **Truncation.** `CVTTSS2SI` and `CVTTSD2SI` return the integer indefinite, `0x80000000` or `0x8000000000000000`, for a NaN or a value outside the destination range. The C++ cast is undefined there, so the range is tested first.
+- **Compares.** An unordered compare sets ZF, PF and CF together. The three flags are stored by the compare and may feed a run of conditional jumps, as in the `JP`, `JNE` pair compilers emit for equality. `JE`, `JNE`, `JB`, `JAE`, `JBE`, `JA`, `JP` and `JNP` are accepted. Integer flags still feed only the jump that follows their producer.
+
+Addition, subtraction, multiplication, division and the conversions run as one host instruction each under the thread's MXCSR, as in the original, with contraction to fused multiply-add switched off. Exceptions are assumed masked.
+
+The [source fixture](../tests/cpu/scalar_float.asm) exports six functions: single- and double-precision arithmetic through register and memory operands, conversions in both directions and between the precisions, and two classifiers that turn compare flags into a bit mask. The test passes every floating-point slot as a `double` whose bit pattern it chooses, so signalling NaNs reach XMM unchanged and the upper dword of a `float` slot holds junk. Inputs cover zeros of both signs, denormals, infinities, quiet and signalling NaNs with distinct payloads, the values around ±2^31 and ±2^63, ties in the narrowing conversions and random patterns. For 13,287 calls it compares the result bits and a guarded output buffer between the original DLL and its translation, and again between a control build and the control's translation. The control assembles the same source with one operand order or source changed in each function. In `blend_ss` the control computes `b + a` instead of `a + b`, and the test requires that its results differ exactly when both operands are NaN. 23 calls have results fixed in the test from the instruction set reference, including both integer indefinites and the sign of the default NaN.
+
+On a copy of the linked DLL, the test patches one instruction at a time and expects each to be rejected: packed `ADDPS`, `SQRTSS`, VEX-encoded `VADDSS`, `XORPS` of two different registers, `CVTSS2SI` (which rounds by MXCSR), `MOVQ` to an integer register, a RIP-relative load, a write to XMM6, a read of an unwritten register, `ADDSD` on `float` arguments, `JLE` after `COMISS`, a compare with no jump after it, and a second jump after an integer compare. Eight wrong signatures are rejected as well, for example a `double` result from a function that defines only a `float`.
+
+Not covered: RIP-relative constants, packed operations, `SQRT`, `MIN` and `MAX`, the rounding conversions, `SETcc` and `CMOVcc` after a compare, stack frames and calls.
+
+On Linux, `llvm-ml` assembled the fixture and `lld-link` linked it. The original machine code ran in-process through a Windows-ABI trampoline that loads each slot into both its integer and its XMM register. It matched the lifted C++ built with clang at `-O0`, `-O2` and `-O3` on every call, for both builds, and all rejection controls passed. The generated sources compile without warnings under clang-cl `/W4 /WX`. A Windows run of `cpu_aot_scalar_float` with ML64 and MSVC has not been recorded yet.
 
 ## Offline pixel shader recompilation
 

@@ -62,6 +62,7 @@ CPU_FIXTURES = {
     "dead_read": "cpu_aot_dead_reads",
     "switch_addr32": "cpu_aot_switch_addr32",
     "fourth_arg": "cpu_aot_fourth_argument",
+    "scalar_float": "cpu_aot_scalar_float",
     "repeat_call": "cpu_aot_repeated_call",
     "working_set_delta": "cpu_working_set_delta",
     "xlatb": "cpu_aot_xlatb",
