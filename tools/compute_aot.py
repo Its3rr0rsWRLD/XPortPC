@@ -41,12 +41,9 @@ from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_LOOKUP  # noqa: E402
 from pixel_aot_ops.control_flow import find_loops, poisoned_operands, program, split_blocks  # noqa: E402
 from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
-from pixel_aot_ops.forms.smem import SET_STRIDE  # noqa: E402
+from pixel_aot_ops.bindings import RADV_DESCRIPTOR_HIGH, SET_STRIDE, overlap, pointer_role, valid_key  # noqa: E402
 from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
 
-# RADV completes a 32-bit descriptor-list pointer with s_movk_i32 s(n+1), 0x8000, which sign-extends to 0xffff8000
-# (its address32_hi on gfx10).
-RADV_DESCRIPTOR_HIGH = 0xffff8000
 # Parameter order: 0 the constant words (params, b0), 1 the title ranges (t2), 2 the eight title-memory UAVs (u0..u7,
 # space 1), 3 the range count (b1).
 # 4 the read images (t0, t1: tex, tex1), 5 the storage images (u0..u31, space 2, eight levels per slot), and the
@@ -136,10 +133,8 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(f"Invalid entry SGPR {reg}")
         role = parse_role(token)
         roles[role] += 1
-        if role == "descriptors":
-            scalar[reg] = "texture_ptr"  # the provenance forms/smem.py expects of a descriptor-list base
-        elif role.startswith("descriptors."):
-            scalar[reg] = f"texture_ptr.{role[12:]}"
+        if pointer_role(role):
+            scalar[reg] = pointer_role(role)  # the provenance forms/smem.py expects of a descriptor-list base
         elif role.startswith("user:"):
             word = int(role[5:])
             scalar[reg] = ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
@@ -166,7 +161,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     spans = sorted([*((k, 16) for k in vsharp_words), *((k, 32) for k in (*textures, *storage_images)),
                     *([(constant_descriptor, 16)] if constant_descriptor is not None else []),
                     *([(sampler, 16)] if sampler is not None else [])])
-    if any(b < a + size for (a, size), (b, _) in zip(spans, spans[1:])):
+    if overlap(spans):
         raise ValueError("Descriptor-table entries overlap")
     users = {int(r[5:]) for r in roles if r.startswith("user:")}
     if any(w <= u < w + 4 for u in users for w in vsharp_words.values()):
@@ -180,7 +175,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     st.stage = "compute"
     st.descriptor_high = descriptor_high
     st.storage_images.update(storage_images)
-    st.sampler_offsets = () if sampler is None else (sampler,)
+    st.sampler_offsets = {} if sampler is None else {sampler: "sampler"}
     for i, line in enumerate(instructions):
         for pattern, reason in LATER:
             if re.fullmatch(pattern, line):
@@ -216,11 +211,6 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     if not st.ended:
         raise ValueError("Missing s_endpgm")
     return emit(st, numthreads)
-
-
-def valid_key(key, size):
-    """A descriptor key (set * SET_STRIDE + byte offset) of a descriptor of `size` bytes in one of sets 0 to 7."""
-    return isinstance(key, int) and 0 <= key < 8 * SET_STRIDE and key % 16 == 0 and key % SET_STRIDE + size <= SET_STRIDE
 
 
 def emit(st, numthreads):

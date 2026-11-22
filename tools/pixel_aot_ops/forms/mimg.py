@@ -26,17 +26,35 @@ def store_results(st, i, dests, values, d16):
         st.vector[d] = ("uint", f"mem_d16_{i}_{k}")
 
 
-@form(r"image_sample v\[(\d+):(\d+)\], v\[(\d+):(\d+)\], s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] dmask:0x([7f]) dim:SQ_RSRC_IMG_2D( d16)?")
+def sampler_of(st, state):
+    """The HLSL sampler the four SGPRs `state` hold, or None: st.sampler ("samp") for the fixed contract and the compute
+    stage, else the sampler of a binding description (st.samplers) whose tracked words they are."""
+    values = [st.scalar.get(r) for r in state]
+    if st.samplers is None:
+        return "samp" if values == list(st.sampler) else None
+    return next((name for name, words in st.samplers.items() if values == list(words)), None)
+
+
+@form(r"image_sample v\[(\d+):(\d+)\], (?:v\[(\d+):(\d+)\]|\[v(\d+), v(\d+)\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
+      r"dmask:0x([7f]) dim:SQ_RSRC_IMG_2D( d16)?")
 def sample(st, i, m):
     # dmask 0x7 is an RGB-only read (R0Y00/Xbox2Windows#303 by Vonsek): three destination VGPRs, and the fourth VGPR
     # of the usual v[N:N+3] block is left alone. A d16 read of three channels would leave half a register undefined,
     # so it is refused with the other odd counts (store_results).
+    # The coordinate is a pair v[N:N+1] or a non-sequential (NSA) pair [vA, vB], as RADV writes it.
     operands = m.groups()
+    if operands[2] is None:
+        operands = (*operands[:2], *operands[4:])
+        nsa = [int(operands[2]), int(operands[3])]
+        if any(n > 255 for n in nsa):
+            raise ValueError("Image address register out of range")
+    else:
+        operands, nsa = (*operands[:4], *operands[6:]), None
     rgb = operands[8] == "7"
     d16 = operands[9] is not None
     if rgb and d16:
         raise ValueError("A d16 image read needs an even number of channels")
-    dest, coords, image, state = [registers(*operands[k:k+2], width)
+    dest, coords, image, state = [registers(*operands[k:k+2], width) if k != 2 or nsa is None else nsa
                                   for k, width in zip((0,2,4,6), (3 if rgb else 2 if d16 else 4,2,8,4))]
     if any(f"v{n}" in st.sample_dest for n in dest):
         raise ValueError("Write overlaps an outstanding sample")
@@ -44,15 +62,16 @@ def sample(st, i, m):
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
     # CF-2c: a sample while the lane may be inactive (a predicated skip region or a narrowed EXEC) runs in uniform HLSL
     # flow, so all four lanes of the quad take part in the derivatives; lower() masks its destination writes.
+    samp = sampler_of(st, [f"s{n}" for n in state])
     if (any(f"s{n}" in st.pending for n in (*image, *state))
             or texture is None
-            or [st.scalar.get(f"s{n}") for n in state] != list(st.sampler)):
+            or samp is None):
         raise ValueError("Unsupported image or sampler binding")
     uv = [st.vector[f"v{n}"] for n in coords]
     # The implicit level comes from the derivatives of the coordinates, so each must be defined on helper lanes.
     if any(not isinstance(v, str) or v not in st.quad_values for v in uv):
         raise ValueError("Unsupported texture coordinate")
-    st.lines.append(f"    float4 sample{i} = {texture}.Sample(samp, float2({', '.join(uv)}));")
+    st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, float2({', '.join(uv)}));")
     st.samples += 1
     names = [f"v{n}" for n in dest]
     store_results(st, i, names, [f"sample{i}.{c}" for c in "xyzw"[:3 if rgb else 4]], d16)
@@ -106,7 +125,8 @@ def load_query_gather(st, i, m):
         raise ValueError("Unsupported image binding")
     if gather:
         state = [f"s{n}" for n in registers(s0, s1, 4)]
-        if any(r in st.pending for r in state) or [st.scalar.get(r) for r in state] != list(st.sampler) or int(s0) % 4:
+        samp = sampler_of(st, state)
+        if any(r in st.pending for r in state) or samp is None or int(s0) % 4:
             raise ValueError("Unsupported sampler binding")
     if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
         raise ValueError("Write overlaps an outstanding sample")
@@ -121,7 +141,7 @@ def load_query_gather(st, i, m):
         if offset is not None:
             st.helpers.update(("image_offset_uv",))
             position = f"image_offset_uv({texture}, {position}, 0.0f, {offset})"
-        call = f"{texture}.Gather{('Red', 'Green', 'Blue', 'Alpha')[channels[0]]}(samp, {position})"
+        call = f"{texture}.Gather{('Red', 'Green', 'Blue', 'Alpha')[channels[0]]}({samp}, {position})"
         st.lines.append(f"    float4 sample{i} = {call};")
         results = [f"sample{i}.{c}" for c in "xyzw"]
     elif op == "get_resinfo":
@@ -186,7 +206,7 @@ def sample_level(st, i, m):
     descriptor = [st.scalar.get(r) for r in image]
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
     if (texture is None or int(f0) % 4 or int(s0) % 4 or int(f1) > 105 or int(s1) > 105
-            or any(r in st.pending for r in (*image, *state)) or [st.scalar.get(r) for r in state] != list(st.sampler)):
+            or any(r in st.pending for r in (*image, *state)) or (samp := sampler_of(st, state)) is None):
         raise ValueError("Unsupported image or sampler binding")
     if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
         raise ValueError("Write overlaps an outstanding sample")
@@ -198,23 +218,23 @@ def sample_level(st, i, m):
         if any(v not in ("uv.x", "uv.y") for v in uv):
             raise ValueError("Unsupported texture coordinate")
         bias = fp_operand(addrs[0], st.scalar, st.vector, st.pending, st.sample_pending)
-        call = f"{texture}.SampleBias(samp, float2({', '.join(uv)}), {bias})"
+        call = f"{texture}.SampleBias({samp}, float2({', '.join(uv)}), {bias})"
     elif op == "d":
         gradient = [coordinate(st, r) for r in addrs[:4]]
         x, y = (coordinate(st, r) for r in addrs[4:])
-        call = (f"{texture}.SampleGrad(samp, float2({x}, {y}), float2({gradient[0]}, {gradient[1]}), "
+        call = (f"{texture}.SampleGrad({samp}, float2({x}, {y}), float2({gradient[0]}, {gradient[1]}), "
                 f"float2({gradient[2]}, {gradient[3]}))")
     else:
         x, y = (coordinate(st, r) for r in addrs[:2])
         lod = coordinate(st, addrs[2]) if op.startswith("l") and not op.startswith("lz") else "0.0f"
         if offset is None:
-            call = f"{texture}.SampleLevel(samp, float2({x}, {y}), {lod})"
+            call = f"{texture}.SampleLevel({samp}, float2({x}, {y}), {lod})"
         else:
             # The offset is in texels of the level that is read, so the level is chosen here, once, for both.
             st.helpers.update(("image_offset_uv", "image_level"))
             level = f"image_level({texture}, {lod})" if lod != "0.0f" else "0.0f"
             st.lines.append(f"    float level{i} = {level};")
-            call = (f"{texture}.SampleLevel(samp, image_offset_uv({texture}, float2({x}, {y}), level{i}, {offset}), "
+            call = (f"{texture}.SampleLevel({samp}, image_offset_uv({texture}, float2({x}, {y}), level{i}, {offset}), "
                     f"level{i})")
     st.lines.append(f"    float4 sample{i} = {call};")
     store_results(st, i, dests, [f"sample{i}.{'xyzw'[c]}" for c in channels], d16)

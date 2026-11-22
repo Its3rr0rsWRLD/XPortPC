@@ -22,11 +22,23 @@ static const float4 ATTRIBUTES[7][3] = {
     { float4(33, 10, 44, 3), float4(26, 35, 47, 24), float4(39, 1, 20, 10) },
     { float4(16, 21, 38, 50), float4(45, 14, 29, 36), float4(18, 52, 57, 23) },
 };
-[RootSignature("DescriptorTable(SRV(t0,numDescriptors=2),visibility=SHADER_VISIBILITY_PIXEL),CBV(b0,visibility=SHADER_VISIBILITY_PIXEL),"
+// Root parameters: 0 tex, tex1 (t0, t1) and tex2..tex7 (t3..t8, heap offset 50), 1 params (b0), 2 title ranges (t2),
+// 3 title memory, 4 range count (b1), 5 title memory UAVs, 6 storage images, 7..9 params1..params3 (b2..b4); point
+// samplers samp..samp3 (s0..s3). The extra textures, buffers and samplers are the bindings draws'
+// (tests/pixel_aot_draws/bindings.py, docs/design/pixel-bindings.md).
+[RootSignature("DescriptorTable(SRV(t0,numDescriptors=2),SRV(t3,numDescriptors=6,offset=50),visibility=SHADER_VISIBILITY_PIXEL),CBV(b0,visibility=SHADER_VISIBILITY_PIXEL),"
                "SRV(t2,visibility=SHADER_VISIBILITY_PIXEL),DescriptorTable(SRV(t0,space=1,numDescriptors=8),visibility=SHADER_VISIBILITY_PIXEL),"
                "RootConstants(num32BitConstants=1,b1,visibility=SHADER_VISIBILITY_PIXEL),"
                "DescriptorTable(UAV(u0,space=1,numDescriptors=8),visibility=SHADER_VISIBILITY_PIXEL),"
-               "DescriptorTable(UAV(u0,space=2,numDescriptors=32),visibility=SHADER_VISIBILITY_PIXEL),StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_POINT,"
+               "DescriptorTable(UAV(u0,space=2,numDescriptors=32),visibility=SHADER_VISIBILITY_PIXEL),"
+               "CBV(b2,visibility=SHADER_VISIBILITY_PIXEL),CBV(b3,visibility=SHADER_VISIBILITY_PIXEL),CBV(b4,visibility=SHADER_VISIBILITY_PIXEL),"
+               "StaticSampler(s0,filter=FILTER_MIN_MAG_MIP_POINT,"
+               "addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP),"
+               "StaticSampler(s1,filter=FILTER_MIN_MAG_MIP_POINT,"
+               "addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP),"
+               "StaticSampler(s2,filter=FILTER_MIN_MAG_MIP_POINT,"
+               "addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP),"
+               "StaticSampler(s3,filter=FILTER_MIN_MAG_MIP_POINT,"
                "addressU=TEXTURE_ADDRESS_CLAMP,addressV=TEXTURE_ADDRESS_CLAMP,addressW=TEXTURE_ADDRESS_CLAMP)")]
 Vertex main(uint id : SV_VertexID)
 {

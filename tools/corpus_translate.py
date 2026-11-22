@@ -18,25 +18,19 @@ branch operands name them, as name_branch_targets() would produce for a native p
 tools/pixel_aot.disassemble() is not used: it decodes as wave32, which prints a VOP3 lane-mask destination s[0:1] as
 s0 and vcc as vcc_lo, so it would not be the program RADV compiled.
 
-Binding contract. lower() takes the entry SGPR of the descriptor-table address, the entry SGPR that holds the
-interpolation base, the four sampler words and the offsets of the constant and second texture descriptors. They are
-read off the program, the way a caller with the title's pipeline layout would supply them:
-- interp_sgpr: the entry SGPR copied (through s_mov_b32) into m0;
-- texture_sgpr: the low SGPR of the address pair of the first s_load_dwordx8 (the descriptor table);
-- sampler: None for a program without image_sample (bound with no texture or sampler); else the words of the
-  first image_sample's sampler registers if s_mov_b32 / s_movk_i32 set them all to constants, else zeros (a sampler
-  loaded from memory then refuses as an unknown binding);
-- constant_descriptor: the offset of the first s_load_dwordx4 from the descriptor table, if any;
-- second_texture_offset: with exactly two image_sample instructions, the offset of a second, different
-  s_load_dwordx8 from the table.
-Unused registers get distinct free SGPRs. Nothing in the program is rewritten.
+Bindings. Each program is lowered under a binding description (tools/pixel_aot_ops/bindings.py PixelBindings,
+docs/design/pixel-bindings.md) that derive_bindings() reads off the dump, the way a caller with the title's pipeline
+layout would supply it: descriptor-set pointers, the interpolation base and push-constant words among the entry SGPRs,
+and each descriptor the program loads (T#, S#, constant-buffer V#, buffer V#) classified by its first use. lower()
+then resolves every descriptor word against it and refuses one it does not declare.
 
 Output. --summary writes a TSV: header comments with the counts (all, all-covered, translated, translated among all
 covered) and the refusal reasons ranked by shader count, then one row per shader. A reason is the refusal message
 with instruction numbers removed; its place is family.form for a form, or the module.function of lower() and the
 control-flow walk that raised it. A refusal that is not a ValueError (KeyError, TypeError, ...) is marked crash:
-lower() is meant to refuse with ValueError, so a crash is a translator bug. A refusal from the binding contract (see
-CONTRACT) is marked contract; any other ValueError from a form is refused, and an instruction no form matches no_form.
+lower() is meant to refuse with ValueError, so a crash is a translator bug. A refusal from the bindings (see
+CONTRACT: the description, and the resolution of descriptor loads and samples against it) is marked contract; any
+other ValueError from a form is refused, and an instruction no form matches no_form.
 --hlsl-dir writes <shader>.hlsl for every translated shader (tests/corpus_translate_check.py compiles them).
 --status (default site/status.json) gives the covered forms used for the all-covered column, with the rule of
 tools/status_json.py recount_corpus(). Python standard library only.
@@ -51,7 +45,7 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from pixel_aot_ops import lowering  # noqa: E402
+from pixel_aot_ops import bindings, lowering  # noqa: E402
 from pixel_aot_ops.dispatch import FORMS  # noqa: E402
 
 ISA = ROOT / "tests" / "corpus" / "isa" / "pixel"
@@ -90,89 +84,173 @@ def _offset(token):
     return 0 if token == "null" else int(token, 16) if token.startswith("0x") else None
 
 
-def binding_contract(program):
-    """lower()'s positional and keyword inputs for this program (see the module docstring)."""
-    written = set()
-    alias = {}  # SGPR -> entry SGPR it still holds a copy of
-    interp = table = constant = None
-    loads8 = []
-    constants = {}  # SGPR -> constant word
-    sampler = None
-    samples = 0
-    for line in program:
+def _span_regs(token):
+    span = _pair(token)
+    if span:
+        return [f"s{n}" for n in range(span[0], span[1] + 1)]
+    return [token] if re.fullmatch(r"s\d+|m0", token) else []
+
+
+# Scalar instructions whose first operand is read, not written.
+_NO_DESTINATION = ("s_cmp", "s_bitcmp", "s_waitcnt", "s_cbranch", "s_branch", "s_clause", "s_endpgm", "s_nop",
+                   "s_setprio", "s_sendmsg", "s_inst_prefetch", "s_setpc", "s_ttracedata", "s_wqm_b64 exec")
+
+
+def derive_bindings(program):
+    """The binding description of a RADV pixel program (bindings.PixelBindings), read off the program the way the
+    pipeline layout would give it. RADV's user SGPRs for a pixel shader are the 32-bit descriptor-set pointers, inline
+    push-constant words and the primitive mask, which the program copies into m0:
+    - entry SGPRs are the scalar registers read before the program writes them (through s_mov_b32 copies);
+    - the one copied into m0 is "interp";
+    - one that is the low word of the address pair of an s_load is a descriptor-set pointer: the lowest such SGPR is
+      set 0 ("descriptors"), the others descriptors.1, .2, ... in register order; the high word the program writes
+      into the pair (s_movk_i32 0x8000 is RADV's 0xffff8000) is descriptor_high;
+    - any other entry SGPR the program reads is an inline push-constant word: push:0, push:1, ... in register order,
+      in a constant slot of their own;
+    - each s_load's destination is classified by its first use: a T# where an image instruction names s[r:r+7] as its
+      resource (a storage image for image_store, with the corpus's r8g8b8a8_unorm format), an S# where it names
+      s[r:r+3] as its sampler, a constant-buffer V# where s_buffer_load names s[r:r+3], a buffer V# where a buffer or
+      tbuffer instruction does (its words at the top of params). A load of x8 or x16 is split into its descriptors
+      that way; a word with no use stays undeclared, and lower() refuses a program that loads it;
+    - a sampler whose four registers s_mov_b32/s_movk_i32 set to constants is an inline (immutable) sampler with
+      those words.
+    Slots are given in order of first use. Nothing in the program is rewritten."""
+    written, alias, constants = set(), {}, {}
+    entry_reads = []  # entry SGPRs in order of first read
+    interp = None
+    pointers = {}  # entry SGPR -> descriptor high word written to its pair
+    loads = []  # (index, destination registers, entry pointer SGPR, offset)
+    inline_samplers = {}  # instruction index -> four words
+    for k, line in enumerate(program):
         if line.endswith(":"):
             continue
         mnemonic, _, operands = line.partition(" ")
-        ops = [o.strip() for o in operands.split(",")]
+        ops = [o.strip() for o in operands.split(",")] if operands else []
+        has_dst = mnemonic.startswith("s_") and not line.startswith(_NO_DESTINATION) and ops
+        sources = ops[1:] if has_dst else ops
+        if mnemonic.startswith("s_load_dword"):
+            sources = ops[1:2]  # the address pair; its high word is read through the pair below
+        for token in sources:
+            for reg in _span_regs(token.split()[0]) if token else []:
+                if reg not in written and reg != "m0" and reg not in entry_reads:
+                    entry_reads.append(reg)
         if mnemonic in ("s_mov_b32", "s_movk_i32") and len(ops) == 2:
             dst, src = ops
             if re.fullmatch(r"s\d+", src):
-                entry = alias.get(src, src if src not in written else None)
-                if dst == "m0" and interp is None and entry is not None:
-                    interp = int(entry[1:])
-                if entry is not None:
-                    alias[dst] = entry
+                origin = alias.get(src, src if src not in written else None)
+                if dst == "m0" and interp is None and origin is not None:
+                    interp = origin
+                alias.pop(dst, None)
+                if origin is not None:
+                    alias[dst] = origin
+                constants.pop(dst, None)
             elif re.fullmatch(r"0x[0-9a-f]+|-?\d+", src):
                 value = int(src, 0) & 0xffffffff
-                if mnemonic == "s_movk_i32":
-                    value = (value - 0x10000 if value & 0x8000 else value) & 0xffffffff
+                if mnemonic == "s_movk_i32" and value & 0x8000:
+                    value = (value | 0xffff0000) & 0xffffffff
                 constants[dst] = value
                 alias.pop(dst, None)
             written.add(dst)
             continue
-        if mnemonic in ("s_load_dwordx8", "s_load_dwordx4") and len(ops) >= 3:
-            base = _pair(ops[1])
-            offset = _offset(ops[2].split()[0])
-            if base and offset is not None:
-                low = f"s{base[0]}"
-                entry = alias.get(low, low if low not in written else None)
-                if mnemonic == "s_load_dwordx8":
-                    if table is None and entry is not None:
-                        table = int(entry[1:])
-                    if entry is not None and table == int(entry[1:]):
-                        loads8.append(offset)
-                elif constant is None and entry is not None and (table is None or table == int(entry[1:])):
-                    constant = offset
-        if mnemonic == "image_sample":
-            samples += 1
-            if sampler is None and len(ops) >= 4:
-                state = _pair(ops[-1].split()[0])
-                if state and state[1] - state[0] == 3:
-                    sampler = [constants.get(f"s{n}") for n in range(state[0], state[1] + 1)]
-        # Any other write to an SGPR ends what it held (the first operand of a scalar instruction is its destination).
-        if mnemonic.startswith("s_") and ops and ops[0]:
-            for reg in re.findall(r"s\d+", ops[0]) + [f"s{n}" for a, b in [_pair(ops[0]) or (1, 0)]
-                                                      for n in range(a, b + 1)]:
+        if mnemonic.startswith("s_load_dword") and len(ops) >= 3:
+            base, offset = _pair(ops[1]), _offset(ops[2].split()[0])
+            low = f"s{base[0]}" if base else None
+            origin = alias.get(low, low if low not in written else None) if low else None
+            # A descriptor-set pointer is 32 bits: the program writes the pair's high word with a constant. A pair
+            # whose high word comes in with it (RADV's 64-bit ring and scratch pointers) is not one.
+            high = constants.get(f"s{base[1]}") if base else None
+            if origin is not None and high is not None and (offset is not None or re.fullmatch(r"s\d+", ops[2].split()[0])):
+                pointers.setdefault(origin, high)
+                loads.append((k, _span_regs(ops[0]), origin, offset))
+        if mnemonic.startswith("image_") and len(ops) >= 4:
+            state = _pair(ops[3].split()[0])
+            if state and state[1] - state[0] == 3:
+                words = [constants.get(f"s{n}") for n in range(state[0], state[1] + 1)]
+                if None not in words:
+                    inline_samplers[k] = tuple(words)
+        if has_dst:
+            for reg in _span_regs(ops[0]):
                 written.add(reg)
                 alias.pop(reg, None)
-                if mnemonic not in ("s_mov_b32", "s_movk_i32"):
-                    constants.pop(reg, None)
-    used = {int(n) for line in program for n in re.findall(r"\bs(\d+)\b", line)}
-    free = (n for n in range(105, -1, -1) if n not in used)
-    if table is None:
-        table = next(free)
-    if interp is None or interp == table:
-        interp = next(n for n in free if n != table)
-    if samples == 0:
-        sampler = None  # no image_sample: bound without a texture or sampler (lower(sampler=None))
-    elif sampler is None or None in sampler:
-        sampler = [0, 0, 0, 0]
-    second = None
-    if samples == 2:
-        second = next((o for o in loads8 if o != loads8[0]), None)
-    if constant is not None and (constant % 4 or constant < 0):
-        constant = None
-    return (table, interp, sampler), {"constant_descriptor": constant, "second_texture_offset": second}
+                constants.pop(reg, None)
+    order = sorted(pointers, key=lambda r: int(r[1:]))
+    sets = {reg: n for n, reg in enumerate(order[:8])}
+    sgprs = {reg: "descriptors" if n == 0 else f"descriptors.{n}" for reg, n in sets.items()}
+    if interp is not None:
+        sgprs[interp] = "interp"
+    pushed = sorted((r for r in entry_reads if r not in sgprs and re.fullmatch(r"s\d+", r)), key=lambda r: int(r[1:]))
+    for n, reg in enumerate(pushed[:64]):
+        sgprs[reg] = f"push:{n}"
+    highs = {pointers[r] for r in sets if pointers[r] is not None}
+    high = highs.pop() if len(highs) == 1 else bindings.RADV_DESCRIPTOR_HIGH
+    textures, samplers, cbvs, buffers, images = {}, {}, {}, {}, {}
+    sampler_keys, inline_order = [], []
+    spans = []  # (key, size) of the descriptors declared so far
+
+    def declared(at):
+        return any(start <= at < start + size for start, size in spans)
+
+    for k, dst, origin, offset in loads:
+        if origin not in sets or not dst or offset is None:
+            continue  # an SGPR offset: lower() resolves it only if the SGPR holds a constant, and it names no new descriptor
+        key = sets[origin] * bindings.SET_STRIDE + offset
+        first = int(dst[0][1:])
+        for q in range(0, len(dst), 4):
+            reg0, at = first + q, key + 4 * q
+            if declared(at):
+                continue
+            use = None
+            for later in program[k + 1:]:
+                if later.startswith("image_") and f"s[{reg0}:{reg0 + 7}]" in later:
+                    use = "image_store" if later.startswith("image_store") else "image"
+                    break
+                if f"s[{reg0}:{reg0 + 3}]" in later:
+                    use = ("sampler" if later.startswith("image_") else "constants" if later.startswith("s_buffer_load")
+                           else "buffer" if later.startswith(("buffer_", "tbuffer_")) else None)
+                    break
+            if use == "image" and len(dst) - q >= 8 and not declared(at + 16):
+                textures[at] = len(textures)
+                spans.append((at, 32))
+            elif use == "image_store" and len(dst) - q >= 8 and not declared(at + 16):
+                images[at] = (len(images), "r8g8b8a8_unorm")
+                spans.append((at, 32))
+            elif use in ("sampler", "constants", "buffer"):
+                spans.append((at, 16))
+                if use == "sampler":
+                    sampler_keys.append(at)
+                elif use == "constants":
+                    cbvs[at] = len(cbvs)
+                else:
+                    buffers[at] = 60 - 4 * len(buffers)
+    for k in sorted(inline_samplers):
+        if inline_samplers[k] not in inline_order:
+            inline_order.append(inline_samplers[k])
+    for source in (*sampler_keys, *inline_order):
+        if len(samplers) < bindings.SAMPLER_SLOTS:
+            samplers[len(samplers)] = source
+    push = None
+    if pushed or buffers and 0 not in cbvs.values():
+        push = next(n for n in range(bindings.CONSTANT_SLOTS) if n not in cbvs.values()) \
+            if len(cbvs) < bindings.CONSTANT_SLOTS else None
+    if buffers and push != 0 and 0 not in cbvs.values():
+        buffers = {}
+    return bindings.PixelBindings(
+        sgprs=sgprs, textures={k: v for k, v in textures.items() if v < bindings.TEXTURE_SLOTS},
+        samplers=samplers, constant_buffers={k: v for k, v in cbvs.items() if v < bindings.CONSTANT_SLOTS},
+        push_constants=push, buffers=buffers, storage_images={k: v for k, v in images.items() if v[0] < 4},
+        descriptor_high=high)
 
 
-# Refusals that come from lower()'s binding contract (the inputs a caller supplies and the program shape lower()
-# requires: one T# at descriptor-table offset 0, a table address whose high word is 0, sampler words set by moves,
-# one or two samples, no read of an SGPR the contract does not name) rather than from the lowering of a form.
-CONTRACT = ("Texture address differs from binding contract", "Unresolved constant buffer binding",
-            "Texture and constant descriptors overlap", "Second texture descriptor must have a distinct aligned offset",
-            "Unexpected sample count or missing color export", "Unsupported image or sampler binding",
-            "Descriptor table word is not a tracked descriptor", "Read of unset scalar register",
-            "Second texture requires a sampler")
+# Refusals that come from the binding description (bindings.PixelBindings.check) or from resolving a program's
+# descriptor loads and samples against it, rather than from the lowering of a form.
+CONTRACT = ("Unresolved constant buffer binding", "Unresolved descriptor-list pointer",
+            "Descriptor table word is not a tracked descriptor", "Descriptor load offset must be an immediate",
+            "Unsupported image or sampler binding", "Unsupported image binding", "Unsupported sampler binding",
+            "Unsupported storage image binding", "Read of unset scalar register", "Invalid entry SGPR",
+            "Unknown entry SGPR role", "Entry SGPR role", "Invalid texture key", "Invalid sampler slot",
+            "A sampler is a descriptor key", "Two inline samplers", "Invalid constant-buffer key",
+            "Buffer descriptors need", "Invalid buffer descriptor", "Invalid storage image key",
+            "Descriptor-table entries overlap", "A push-constant", "Scalar load offset register must hold a known constant")
 
 
 class _Dispatch:
@@ -208,11 +286,11 @@ def _place(exc):
 
 def translate(program):
     """('translated', hlsl, None) or ('refused', None, {reason, place, kind, instruction})."""
-    args, kwargs = binding_contract(program)
+    described = derive_bindings(program)
     recorder = _Dispatch(lowering.dispatch)
     lowering.dispatch = recorder
     try:
-        return "translated", lowering.lower(program, *args, **kwargs), None
+        return "translated", lowering.lower(program, bindings=described), None
     except Exception as exc:  # noqa: BLE001 - every refusal is classified, a non-ValueError one as a crash
         message = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
         reason = re.sub(r"\binstruction \d+", "instruction", message)

@@ -68,6 +68,10 @@ struct PixelInput {
     std::vector<Color> expected;
     std::vector<BYTE> secondRows;
     std::vector<Word> constants = std::vector<Word>(64);
+    // The 'X2WB' bindings section (tests/pixel_aot_draws/bindings.py): textures 2..7 (t3..t8, the rows of each in the
+    // format and extent of the first) and constant buffers params1..params3 (b2..b4, 64 words each).
+    std::vector<std::vector<BYTE>> moreRows;
+    std::vector<std::vector<Word>> moreConstants;
     TitleMemory memory;
     bool integerRT = false;      // bit 0 of the flags word of the optional 'X2WF' case section
     std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
@@ -110,6 +114,10 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     const bool depth = outputs && outputs->depth;
     const auto& input = levels.front();
     auto cb = upload(device, input.constants);
+    // params1..params3 (root parameters 7..9): the bindings section's buffers, zero words otherwise.
+    std::array<ComPtr<ID3D12Resource>, 3> moreCbs;
+    for (size_t k = 0; k < moreCbs.size(); ++k)
+        moreCbs[k] = upload(device, k < input.moreConstants.size() ? input.moreConstants[k] : std::vector<Word>(64));
     // Title memory is always bound. Without a memory section the range buffer holds one zeroed range
     // and the count is 0, and every slot views the same small zero buffer.
     std::vector<TitleRangeRecord> rangeRecords = input.memory.ranges;
@@ -253,6 +261,18 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         secondStaging = upload(device, colors);
         secondTexture = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     }
+    // Textures 2..7 of the bindings section, uploaded as the second one is.
+    if (input.moreRows.size() > 6) throw std::runtime_error("At most eight textures");
+    std::vector<ComPtr<ID3D12Resource>> moreTextures(input.moreRows.size()), moreStaging(input.moreRows.size());
+    for (size_t k = 0; k < input.moreRows.size(); ++k) {
+        if (residentCount != 1 || firstResident || input.moreRows[k].size() != input.rows.size())
+            throw std::runtime_error("Invalid bound texture extent");
+        for (UINT y = 0; y < rows[0]; ++y)
+            std::memcpy(colors.data() + y * layouts[0].Footprint.RowPitch,
+                        input.moreRows[k].data() + y * rowBytes[0], rowBytes[0]);
+        moreStaging[k] = upload(device, colors);
+        moreTextures[k] = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+    }
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
     heapDesc.NumDescriptors = (std::max)(targetCount, 1u);
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -265,7 +285,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvs)), "Pixel depth heap");
     }
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.NumDescriptors = 2 + 8 + 8 + 32;
+    // tex, tex1; title memory SRVs; title memory UAVs; storage images; tex2..tex7 (t3..t8, table 0 at offset 50).
+    heapDesc.NumDescriptors = 2 + 8 + 8 + 32 + 6;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&srvs)), "Pixel texture heap");
     const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
@@ -280,6 +301,11 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     secondHandle.ptr += device->GetDescriptorHandleIncrementSize(heapDesc.Type);
     device->CreateShaderResourceView(secondTexture.Get(), &view, secondHandle);
     const UINT increment = device->GetDescriptorHandleIncrementSize(heapDesc.Type);
+    for (UINT k = 0; k < 6; ++k) {
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(2 + 8 + 8 + 32 + k) * increment;
+        device->CreateShaderResourceView(k < moreTextures.size() ? moreTextures[k].Get() : nullptr, &view, handle);
+    }
     for (UINT i = 0; i < 8; ++i) {
         D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
         raw.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -372,6 +398,12 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                 list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 transition(list, secondTexture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
+            for (size_t k = 0; k < moreTextures.size(); ++k) {
+                src.pResource = moreStaging[k].Get();
+                dst.pResource = moreTextures[k].Get();
+                list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                transition(list, moreTextures[k].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
             for (size_t i = 0; i < writable.size(); ++i) {
                 if (!writable[i]) continue;
                 transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -409,6 +441,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto imageTable = srvs->GetGPUDescriptorHandleForHeapStart();
         imageTable.ptr += UINT64(2 + 8 + 8) * increment;
         list->SetGraphicsRootDescriptorTable(6, imageTable);
+        for (UINT k = 0; k < 3; ++k)
+            list->SetGraphicsRootConstantBufferView(7 + k, moreCbs[k]->GetGPUVirtualAddress());
         // WARP and hardware can use either the rounded SRV extent or the
         // unrounded base extent for implicit LOD. Their geometric mean is
         // within half a mip of both, since rounding discards less than one texel.
@@ -845,6 +879,31 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
             for (BYTE mask : input.nanMask)
                 if (mask & 0xf0u) throw BadCase("NaN-class mask names a channel beyond the fourth");
             at += section;
+        }
+        // The optional 'X2WB' bindings section (tests/pixel_aot_draws/bindings.py), before the memory section: magic,
+        // a texture count T (0..8), a constant-buffer count C (0..3) and a zero word, then T textures of 8x8 RGBA8
+        // rows (256 bytes each: texture 0 replaces the ramp, then tex1, tex2, ...) and C buffers of 64 words
+        // (params1, params2, params3).
+        if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x42573258u) {
+            if (bytes.size() - at < 16) throw BadCase("Bindings section is truncated");
+            const UINT textures = readWord(bytes.data() + at + 4), buffers = readWord(bytes.data() + at + 8);
+            if (textures > 8 || buffers > 3 || readWord(bytes.data() + at + 12) != 0)
+                throw BadCase("Bindings section needs at most 8 textures, 3 buffers and a zero word");
+            at += 16;
+            const size_t textureBytes = size_t(input.width) * input.height * 4, bufferBytes = 64 * sizeof(Word);
+            if (bytes.size() - at < textures * textureBytes + buffers * bufferBytes)
+                throw BadCase("Bindings section is truncated in its data");
+            for (UINT k = 0; k < textures; ++k, at += textureBytes) {
+                std::vector<BYTE> texels(bytes.data() + at, bytes.data() + at + textureBytes);
+                if (k == 0) input.rows = std::move(texels);
+                else if (k == 1) input.secondRows = std::move(texels);
+                else input.moreRows.push_back(std::move(texels));
+            }
+            for (UINT k = 0; k < buffers; ++k, at += bufferBytes) {
+                std::vector<Word> words(64);
+                std::memcpy(words.data(), bytes.data() + at, bufferBytes);
+                input.moreConstants.push_back(std::move(words));
+            }
         }
         if (bytes.size() > at) input.memory = parse_memory_section(bytes.data() + at, bytes.size() - at);
     }

@@ -3,12 +3,13 @@ import re
 
 from ..dispatch import form
 from ..registers import registers, sgpr_name, sgpr_pair
+from .. import bindings
 
 
-# A descriptor-list pointer of the compute stage (tools/compute_aot.py): set 0 is "texture_ptr", the pixel stage's name,
+# A descriptor-list pointer (tools/compute_aot.py, lower(bindings=...)): set 0 is "texture_ptr", the pixel stage's name,
 # and set N > 0 is "texture_ptr.N"; both are completed with st.descriptor_high. A descriptor of set N is keyed by
-# N * SET_STRIDE + its byte offset in the set (SMEM offsets are 20 bits, so the keys of two sets never meet).
-SET_STRIDE = 0x100000
+# N * SET_STRIDE + its byte offset in the set (bindings.SET_STRIDE).
+SET_STRIDE = bindings.SET_STRIDE
 
 
 def table_set(st, values):
@@ -22,16 +23,19 @@ def table_set(st, values):
     return None
 
 
-@form(r"s_load_dword(x2|x4|x8|x16)? (s\d+|s\[\d+:\d+\]), (s\[\d+:\d+\]), (null|0x[0-9a-f]+)( glc)?( dlc)?",
-      when=lambda st, m: st.stage == "compute")
+@form(r"s_load_dword(x2|x4|x8|x16)? (s\d+|s\[\d+:\d+\]), (s\[\d+:\d+\]), (null|0x[0-9a-f]+|s\d+)(?: offset:(0x[0-9a-f]+))?"
+      r"( glc)?( dlc)?",
+      when=lambda st, m: st.stage == "compute" or st.descriptor_words)
 def compute_descriptor_load(st, i, m):
-    # The compute stage reads every descriptor through this form (docs/design/compute-stage.md): each destination word
-    # is the word of the declared descriptor that covers it, a T# (st.bindings, sampled or read-only images, 32 bytes),
-    # a storage-image T# (st.storage_images, 32 bytes), a sampler S# (st.sampler_offsets, 16 bytes, tracked as
-    # ("sampler", j)), the constant-buffer V# (16 bytes) or a buffer V# (16 bytes, its words in params). One load may
-    # span several descriptors, as s_load_dwordx16 of two adjacent T#s does. A word no declared descriptor covers is
-    # refused, as is an offset that is not a translation-time constant.
-    width, dst_token, base_token, soffset, _glc, _dlc = m.groups()
+    # The compute stage, and the pixel stage under a binding description (lower(bindings=...),
+    # docs/design/pixel-bindings.md), read every descriptor through this form (docs/design/compute-stage.md): each
+    # destination word is the word of the declared descriptor that covers it, a T# (st.bindings, sampled or read-only
+    # images, 32 bytes), a storage-image T# (st.storage_images, 32 bytes), a sampler S# (st.sampler_offsets: key ->
+    # tag, 16 bytes, tracked as (tag, j)), a constant-buffer V# (16 bytes, tracked as ("cbv<k>", j); compute's single
+    # one is st.constant_descriptor) or a buffer V# (16 bytes, its words in params). One load may span several
+    # descriptors, as s_load_dwordx16 of two adjacent T#s does. A word no declared descriptor covers is refused, as is
+    # an offset that is not a translation-time constant.
+    width, dst_token, base_token, soffset, extra, _glc, _dlc = m.groups()
     count = int(width[1:]) if width else 1
     if count == 1:
         dst = [sgpr_name(dst_token)]
@@ -46,9 +50,21 @@ def compute_descriptor_load(st, i, m):
     table = table_set(st, [st.scalar.get(r) for r in base])
     if table is None or st.pending.intersection(base):
         raise ValueError("Unresolved descriptor-list pointer")
-    offset = 0 if soffset == "null" else int(soffset, 16)
+    if soffset.startswith("s"):
+        # An SGPR offset (plus the offset: field) must hold a translation-time constant, as in scalar_load.
+        value = st.scalar.get(soffset)
+        if soffset in st.pending or not isinstance(value, int):
+            raise ValueError("Scalar load offset register must hold a known constant")
+        offset = (value + int(extra or "0x0", 16)) & 0xffffffff
+    elif extra is not None:
+        raise ValueError("An offset: field needs an SGPR offset")
+    else:
+        offset = 0 if soffset == "null" else int(soffset, 16)
     if offset % 4 or offset > 0xfffff:
         raise ValueError("Scalar load offset is misaligned or out of range")
+    constants = dict(st.constant_buffers)
+    if st.constant_descriptor is not None:
+        constants.setdefault(st.constant_descriptor, "cbv")
     words = []
     for j in range(count):
         at = table * SET_STRIDE + offset + 4 * j
@@ -56,14 +72,15 @@ def compute_descriptor_load(st, i, m):
         image = next((k for k in st.storage_images if k <= at < k + 32), None)
         sampler = next((k for k in st.sampler_offsets if k <= at < k + 16), None)
         vsharp = next((k for k in st.vsharp_words if k <= at < k + 16), None)
+        cbv = next((k for k in constants if k <= at < k + 16), None)
         if texture is not None:
             words.append((st.bindings[texture], (at - texture) // 4))
         elif image is not None:
             words.append((f"image{st.storage_images[image][0]}", (at - image) // 4))
         elif sampler is not None:
-            words.append(("sampler", (at - sampler) // 4))
-        elif st.constant_descriptor is not None and st.constant_descriptor <= at < st.constant_descriptor + 16:
-            words.append(("cbv", (at - st.constant_descriptor) // 4))
+            words.append((st.sampler_offsets[sampler], (at - sampler) // 4))
+        elif cbv is not None:
+            words.append((constants[cbv], (at - cbv) // 4))
         elif vsharp is not None:
             word = st.vsharp_words[vsharp] + (at - vsharp) // 4
             words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
@@ -115,6 +132,10 @@ def scalar_load(st, i, m):
         if (last - first + 1 != count or first % (2 if count == 2 else 4) or last > 105):
             raise ValueError("Invalid scalar load destination registers")
         dst = [f"s{n}" for n in range(first, last + 1)]
+    if descriptor and st.descriptor_words:
+        # Under a binding description every descriptor load is resolved by compute_descriptor_load, which needs an
+        # immediate offset.
+        raise ValueError("Descriptor load offset must be an immediate")
     if descriptor:
         base = sgpr_pair(base_token)
     else:
@@ -122,8 +143,15 @@ def scalar_load(st, i, m):
         if high - low != 3 or low % 4 or high > 105:
             raise ValueError("Invalid scalar buffer registers")
         base = [f"s{n}" for n in range(low, high + 1)]
-    expected = ["texture_ptr", st.descriptor_high] if descriptor else [("cbv", n) for n in range(4)]
-    if st.constant_descriptor is None or st.pending.intersection(base) or [st.scalar.get(r) for r in base] != expected:
+    values = [st.scalar.get(r) for r in base]
+    # s_buffer_load reads through a constant-buffer V#: the four words ("cbv<k>", 0..3) of constant slot k, whose
+    # words are params<k> (bindings.constant_array; "cbv" and params for the fixed contract's single one).
+    array = None if descriptor or not isinstance(values[0], tuple) else bindings.constant_array_of_tag(values[0][0])
+    if descriptor:
+        resolved = st.constant_descriptor is not None and values == ["texture_ptr", st.descriptor_high]
+    else:
+        resolved = array is not None and values == [(values[0][0], n) for n in range(4)]
+    if not resolved or st.pending.intersection(base):
         raise ValueError("Unresolved constant buffer binding")
     if soffset.startswith("s"):
         value = st.scalar.get(sgpr_name(soffset))
@@ -142,8 +170,7 @@ def scalar_load(st, i, m):
     for j in range(count):
         at = offset + 4 * j
         if not descriptor:
-            word = at // 4
-            words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+            words.append(("uint", bindings.word(array, at // 4)))
         elif st.constant_descriptor <= at < st.constant_descriptor + 16:
             words.append(("cbv", (at - st.constant_descriptor) // 4))
         else:
