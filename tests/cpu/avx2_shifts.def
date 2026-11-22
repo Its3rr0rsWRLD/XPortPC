@@ -1,0 +1,11 @@
+EXPORTS
+    bcast_b256
+    bcast_w256
+    bcast_d256
+    bcast_q256
+    bcast_d128_reg
+    sllvd256
+    srlvd256
+    sravd256
+    sllvq256
+    srlvq256
