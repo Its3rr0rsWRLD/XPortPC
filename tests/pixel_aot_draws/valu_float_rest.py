@@ -20,7 +20,7 @@ import re
 import struct
 import subprocess
 
-from .common import M32, byte, must_reject, narrow_reference, single, translate, ubyte, with_constants
+from .common import M32, DrawBatch, byte, must_reject, narrow_reference, single, translate, ubyte, with_constants
 
 NAN32, INF32 = 0x7fc00000, 0x7f800000
 
@@ -397,27 +397,25 @@ def check_models():
 
 def check_draws(directory, compiler, renderer, backend):
     check_models()
-    case = directory / "valu_float_rest.case"
     for n, row in enumerate(ROWS):
         source = directory / f"valu_float_rest_{n}.hlsl"
         shader = directory / f"valu_float_rest_{n}.cso"
         source.write_text(translate(row.program()), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "valu_float_rest")
         sets = row_words(row)
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
-            case.write_bytes(constants + struct.pack("<4f", *row.channels(words)) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *row.channels(words)) * 64, "pass",
+                      f"{row.name} for words {words} gives a result other than {row.channels(words)}")
         for bug in row.bugs:
             words = next(w for w in sets if row.channels(w, bug) != row.channels(w))
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
-            case.write_bytes(constants + struct.pack("<4f", *row.channels(words, bug)) * 64)
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                raise AssertionError(f"Lowering bug {bug} escaped detection in {row.name} for words {words}")
+            batch.add(constants + struct.pack("<4f", *row.channels(words, bug)) * 64, "mismatch",
+                      f"Lowering bug {bug} escaped detection in {row.name} for words {words}")
+        batch.flush()
 
 
 def refused(line):

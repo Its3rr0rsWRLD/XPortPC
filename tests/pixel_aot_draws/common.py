@@ -177,6 +177,53 @@ def compile_shader(compiler, source, shader, *, listing=None, mode=F32_DENORM_MO
     subprocess.run(command, check=True)
 
 
+BATCH_SIZE = 100  # cases per renderer launch; a Windows command line holds about 32 000 characters
+
+
+class DrawBatch:
+    """Cases drawn with one shader, sent to the renderer's --check-pixel-batch BATCH_SIZE at a time instead of one launch
+    each. add(data, status, message) queues a case file (the bytes the per-case path wrote to its case file) with the
+    status the renderer must report for it, "pass" or "mismatch" (a wrong reference, which must be noticed); flush() draws
+    what is queued. Use it as a context manager: the queue is drawn on leaving the block. The first case whose status
+    differs raises AssertionError(message), in queue order, as the per-case path did. A renderer exit of 77 (no adapter)
+    raises CalledProcessError(77), which pixel_aot_check.py reports as a skip. Only for families whose cases do not depend
+    on one another's side effects: nothing is read back between cases."""
+
+    def __init__(self, directory, renderer, backend, shader, name="batch"):
+        self.directory, self.renderer, self.backend, self.shader, self.name = directory, renderer, backend, shader, name
+        self.cases = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, trace):
+        if kind is None:
+            self.flush()
+
+    def add(self, data, status="pass", message=None):
+        path = self.directory / f"{self.name}_{len(self.cases)}.case"
+        path.write_bytes(data)
+        self.cases.append((path, status, message or f"{self.shader.name}: case {len(self.cases)} expected {status}"))
+        if len(self.cases) >= BATCH_SIZE:
+            self.flush()
+
+    def flush(self):
+        if not self.cases:
+            return
+        cases, self.cases = self.cases, []
+        command = [self.renderer, self.backend, "--check-pixel-batch", self.shader, *(path for path, _, _ in cases)]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 77:
+            raise subprocess.CalledProcessError(77, command, result.stdout, result.stderr)
+        actual = [line for line in result.stdout.splitlines() if line.startswith("case=")]
+        for i, (_, status, message) in enumerate(cases):
+            if i >= len(actual) or actual[i] != f"case={i} status={status}":
+                raise AssertionError(f"{message}\n{result.stdout}\n{result.stderr}")
+        if len(actual) != len(cases) or (result.returncode != 0) != any(status != "pass" for _, status, _ in cases):
+            raise AssertionError(f"{self.shader.name}: batch of {len(cases)} cases ended with status {result.returncode}\n"
+                                 f"{result.stdout}\n{result.stderr}")
+
+
 def flush_ftz(value):
     """Flush one binary32 subnormal input or result to signed zero, as -denorm ftz would."""
     bits, = struct.unpack("<I", struct.pack("<f", value))
@@ -188,8 +235,8 @@ def flush_ftz(value):
 FLOAT_MODE_MAGIC = 0x46573258  # 'X2WF' little-endian: the float-mode section of a renderer case, before any memory section
 
 
-def write_case(path, constants, pixels, *, nan_mask=None, integer_rt=False):
-    """Write a renderer case: 256 constant bytes, then 64 expected float4 rows in row-major order. A single float4
+def case_data(constants, pixels, *, nan_mask=None, integer_rt=False):
+    """A renderer case: 256 constant bytes, then 64 expected float4 rows in row-major order. A single float4
     broadcasts to every texel. The optional 'X2WF' section (magic, a flags word whose bit 0 selects the lossless
     R32G32B32A32_UINT readback target, then 64 per-texel mask bytes whose bit ch accepts a NaN of any sign or payload on
     channel ch) follows. Without integer_rt or nan_mask the case is the plain 1280 bytes."""
@@ -207,5 +254,10 @@ def write_case(path, constants, pixels, *, nan_mask=None, integer_rt=False):
         elif len(nan_mask) != 64:
             raise ValueError("The NaN-class mask needs exactly 64 texel bytes")
         data += struct.pack("<II", FLOAT_MODE_MAGIC, 1 if integer_rt else 0) + bytes(nan_mask)
-    Path(path).write_bytes(data)
+    return bytes(data)
+
+
+def write_case(path, constants, pixels, **options):
+    """case_data() written to path; returns the path."""
+    Path(path).write_bytes(case_data(constants, pixels, **options))
     return Path(path)

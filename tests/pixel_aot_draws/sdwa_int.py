@@ -11,7 +11,7 @@ import functools
 import struct
 import subprocess
 
-from .common import must_reject, translate, with_constants
+from .common import DrawBatch, must_reject, translate, with_constants
 from .sdwa import M32, S, Z, float_bits, model_field, model_place, signed32
 
 # A source spec is (selector, sign-extended, modifier), as in the `sdwa` family; modifiers are for binary32 sources.
@@ -152,29 +152,27 @@ def cmp_plans():
 
 
 def check_cmp_draws(directory, compiler, renderer, backend):
-    case = directory / "sdwa_int_cmp.case"
     for index, (channels, (inputs, wrongs, _)) in enumerate(zip(CMP_PROGRAMS, cmp_plans())):
         source, shader = directory / f"sdwa_int_cmp{index}.hlsl", directory / f"sdwa_int_cmp{index}.cso"
         source.write_text(translate(cmp_program(channels)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "sdwa_int_cmp")
         shown = set()
         for a, b in inputs:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, a, b, 0, 0x3f800000)
             right = [cmp_truth(channel, a, b) for channel in channels]
-            case.write_bytes(constants + struct.pack("<4f", *right) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *right) * 64, "pass",
+                      f"SDWA comparison program {index} gives a result other than {right} for inputs {a:#x}, {b:#x}")
             for (k, label), fn in wrongs.items():
                 if (k, label) in shown or fn(a, b) == right[k]:
                     continue
                 values = list(right)
                 values[k] = fn(a, b)
-                case.write_bytes(constants + struct.pack("<4f", *values) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong SDWA comparison reference ({label}, channel {k}) escaped detection in program {index}")
+                batch.add(constants + struct.pack("<4f", *values) * 64, "mismatch",
+                          f"A wrong SDWA comparison reference ({label}, channel {k}) escaped detection in program {index}")
                 shown.add((k, label))
+        batch.flush()
 
 
 # ---- word results ------------------------------------------------------------------------------------------------
@@ -305,28 +303,26 @@ def row_plans():
 
 
 def check_word_draws(directory, compiler, renderer, backend):
-    case = directory / "sdwa_int_word.case"
     for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, row_plans())):
         source, shader = directory / f"sdwa_int_word{index}.hlsl", directory / f"sdwa_int_word{index}.cso"
         source.write_text(translate(row_program(row)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "sdwa_int_word")
         shown = set()
         for a, b in inputs:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, a, b, INIT, 0)
             right = row_word(row, a, b)
-            case.write_bytes(constants + struct.pack("<4f", *[float((right >> 8 * n) & 255) for n in range(4)]) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *[float((right >> 8 * n) & 255) for n in range(4)]) * 64, "pass",
+                      f"SDWA word row {row} gives a result other than {right:#010x} for inputs {a:#x}, {b:#x}")
             for label, wrong in wrongs.items():
                 word = row_word(wrong, a, b)
                 if label in shown or word == right:
                     continue
-                case.write_bytes(constants + struct.pack("<4f", *[float((word >> 8 * n) & 255) for n in range(4)]) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong SDWA reference ({label}) escaped detection for {row}")
+                batch.add(constants + struct.pack("<4f", *[float((word >> 8 * n) & 255) for n in range(4)]) * 64, "mismatch",
+                          f"A wrong SDWA reference ({label}) escaped detection for {row}")
                 shown.add(label)
+        batch.flush()
 
 
 def draw(directory, compiler, renderer, backend):

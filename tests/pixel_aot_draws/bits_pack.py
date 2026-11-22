@@ -14,7 +14,7 @@ half-widening trick); the draws here are new.
 import struct
 import subprocess
 
-from .common import M32, byte, must_reject, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, byte, must_reject, signed, translate, ubyte, with_constants
 
 
 def bfe_u(src, off, width):
@@ -184,13 +184,12 @@ BITS_PACK_PROGRAMS = (
 
 
 def check_bits_pack_draws(directory, compiler, renderer, backend):
-    case = directory / "bits_pack.case"
     for index, (body, reference, sets, bugs) in enumerate(BITS_PACK_PROGRAMS):
         source = directory / f"bits_pack_{index}.hlsl"
         shader = directory / f"bits_pack_{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "bits_pack")
         separated = [False] * len(bugs)
         for words in sets:
             if "v_mov_b32_e32 v18, s47" in body:
@@ -198,8 +197,8 @@ def check_bits_pack_draws(directory, compiler, renderer, backend):
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = [float(v) for v in reference(*words)]
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Program {index} gives a result other than {expected} for words {[hex(v) for v in words]}")
             for k, (channel, buggy) in enumerate(bugs):
                 value = float(buggy(*words))
                 if value == expected[channel]:
@@ -207,11 +206,10 @@ def check_bits_pack_draws(directory, compiler, renderer, backend):
                 separated[k] = True
                 wrong = list(expected)
                 wrong[channel] = value
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong bitfield or pack result escaped detection in program {index}, "
-                                         f"channel {channel}, words {[hex(v) for v in words]}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A wrong bitfield or pack result escaped detection in program {index}, "
+                          f"channel {channel}, words {[hex(v) for v in words]}")
+        batch.flush()
         assert all(separated), (index, separated)
 
 

@@ -20,9 +20,8 @@ scale) and clamp dropped; and a div:2 result that keeps its subnormal instead of
 from fractions import Fraction
 import math
 import struct
-import subprocess
 
-from .common import compile_shader, must_reject, translate, with_constants, write_case
+from .common import DrawBatch, case_data, compile_shader, must_reject, translate, with_constants
 from .f32_modes import uncompressed_export
 
 OMODS = ((" mul:2", 2.0), (" mul:4", 4.0), (" div:2", 0.5))
@@ -179,7 +178,6 @@ OPS = ("add", "sub", "subrev", "mul", "mul_legacy", "min", "max", "fma", "fmac",
 
 
 def check_omod_arith_draws(directory, compiler, renderer, backend):
-    case = directory / "omod_arith.case"
     for op in OPS:
         for clamp in (False, True):
             name = f"omod_arith_{op}{'_clamp' if clamp else ''}"
@@ -187,27 +185,25 @@ def check_omod_arith_draws(directory, compiler, renderer, backend):
             shader = directory / f"{name}.cso"
             source.write_text(translate(program(op, clamp)), encoding="ascii")
             compile_shader(compiler, source, shader)
-            draw = [renderer, backend, "--check-pixel-case", shader, case]
+            batch = DrawBatch(directory, renderer, backend, shader, "omod_arith")
             bugs = wrong_references(op, clamp)
             separated = [False] * len(bugs)
             for inputs_ in input_sets(op, clamp):
                 constants = bytearray(256)
                 struct.pack_into("<4f", constants, 12, *inputs_, 0.0)
                 expected = reference(op, clamp, *inputs_)
-                write_case(case, constants, expected)
-                subprocess.run(draw, check=True)
+                batch.add(case_data(constants, expected), "pass",
+                          f"{name} gives a result other than {expected} for inputs {inputs_}")
                 for k, (channel, label, buggy) in enumerate(bugs):
                     value = float(buggy(*inputs_))
                     if separated[k] or struct.pack("<f", value) == struct.pack("<f", expected[channel]):
                         continue
                     wrong = list(expected)
                     wrong[channel] = value
-                    write_case(case, constants, wrong)
-                    result = subprocess.run(draw, capture_output=True, text=True)
-                    if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                        raise AssertionError(f"A wrong omod result ({label}) escaped detection in {name}, channel "
-                                             f"{channel}, inputs {inputs_}")
+                    batch.add(case_data(constants, wrong), "mismatch",
+                              f"A wrong omod result ({label}) escaped detection in {name}, channel {channel}, inputs {inputs_}")
                     separated[k] = True
+            batch.flush()
             missing = [bugs[k][1] for k, done in enumerate(separated) if not done]
             assert not missing, (name, missing)
 

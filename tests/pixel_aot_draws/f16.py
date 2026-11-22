@@ -3,7 +3,7 @@ import math
 import struct
 import subprocess
 
-from .common import (f16_const, half_rtz, half_value, must_reject, narrow_reference, sdwa_readback, translate,
+from .common import (DrawBatch, f16_const, half_rtz, half_value, must_reject, narrow_reference, sdwa_readback, translate,
                      with_constants)
 
 
@@ -283,27 +283,25 @@ def check_f16_models() -> None:
 
 def check_f16_draws(directory, compiler, renderer, backend):
     check_f16_models()
-    case = directory / "f16.case"
     for name, body, model, sets, bugs in F16_PROGRAMS:
         source = directory / f"f16_{name}.hlsl"
         shader = directory / f"f16_{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "f16")
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = model(words, None)
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Binary16 program {name} gives a result other than {expected} for words {words}")
             for bug in bugs:
                 wrong = model(words, bug)
                 if struct.pack("<4f", *wrong) == struct.pack("<4f", *expected):
                     continue
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A binary16 lowering bug ({bug}) escaped detection in {name} for words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A binary16 lowering bug ({bug}) escaped detection in {name} for words {words}")
+        batch.flush()
 
 
 def controls(directory):

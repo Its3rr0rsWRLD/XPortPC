@@ -3,7 +3,7 @@ import math
 import struct
 import subprocess
 
-from .common import M32, f16_const, half_value, must_reject, translate, with_constants
+from .common import M32, DrawBatch, f16_const, half_value, must_reject, translate, with_constants
 from .predicate import PREDICATES
 
 
@@ -250,34 +250,28 @@ def check_f16_cmp_models():
 
 def check_f16_cmp_draws(directory, compiler, renderer, backend):
     check_f16_cmp_models()
-    case = directory / "f16cmp.case"
     for name, body, model, sets, bugs in (*F16_CMP_PROGRAMS, *F16_CLASS_PROGRAMS):
         source = directory / f"f16cmp_{name}.hlsl"
         shader = directory / f"f16cmp_{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "f16cmp")
         drawn = dict.fromkeys(bugs, 0)
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = model(words, None)
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            try:
-                subprocess.run(draw, check=True)
-            except subprocess.CalledProcessError as error:
-                error.add_note(f"Binary16 comparison draw {name} on {backend}, words {[hex(w) for w in words]}")
-                raise
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Binary16 comparison draw {name} on {backend}, words {[hex(w) for w in words]}")
             for bug in bugs:
                 wrong = model(words, bug)
                 # One exposing set per bug establishes that the renderer notices it.
                 if wrong == expected or drawn[bug] == 1:
                     continue
                 drawn[bug] += 1
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A binary16 comparison bug ({bug}) escaped detection in {name} for words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A binary16 comparison bug ({bug}) escaped detection in {name} for words {words}")
+        batch.flush()
         assert all(count > 0 for count in drawn.values()), (name, drawn)
 
 
