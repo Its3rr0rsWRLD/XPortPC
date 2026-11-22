@@ -16,11 +16,16 @@ Schema 3 adds gfx1013.forms: one {name, group, covered} entry per form of docs/c
 covered exactly as tools/form_coverage.py counts it (a record from these runs whose test passed).
 Schema 4 adds x64.forms: one {name, covered} entry per form of docs/coverage/x64_zen2.tsv, covered
 when a tests/cpu/*.asm fixture whose mapped test (form_coverage.CPU_FIXTURES) passed uses it.
+Next to --out the tool also keeps history.json (override with --history): a JSON array of
+{"t": ISO UTC time, "covered": gfx+x64 covered forms, "total": gfx+x64 total}, the same combined number
+the page's figure shows, at most one point per UTC hour (the latest run in an hour replaces earlier ones),
+capped at HISTORY_MAX points. A malformed history file is reset rather than trusted.
 The per-group (gfx) and overall (x64) totals must match the coverage file, so the lists and the counts
 never disagree.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -39,6 +44,9 @@ STATES = ("done", "partial", "not_started")
 ADAPTERS = ["NVIDIA GeForce RTX 4070 Ti", "WARP"]
 STAGES = ("pixel", "vertex", "compute", "other")
 STAGES_SUPPORTED = ["pixel"]  # shader stages the converter handles today; edit by hand when another lands
+
+
+HISTORY_MAX = 2000
 
 
 class InputError(Exception):
@@ -263,6 +271,54 @@ def build(junit, coverage, root=ROOT, records=form_coverage.RECORDS):
     }
 
 
+def history_point(data, now=None):
+    """The combined gfx+x64 number the page's figure shows, stamped with now (UTC)."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return {"t": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "covered": data["gfx1013"]["forms_covered"] + data["x64"]["covered"],
+            "total": data["gfx1013"]["forms_total"] + data["x64"]["total"]}
+
+
+def _valid_point(p):
+    if not isinstance(p, dict) or not isinstance(p.get("t"), str):
+        return False
+    try:
+        datetime.strptime(p["t"], "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    c, t = p.get("covered"), p.get("total")
+    return all(isinstance(v, int) and not isinstance(v, bool) for v in (c, t)) and 0 <= c <= t and t > 0
+
+
+def read_history(path):
+    """Points from an existing history file; [] when it is absent, and also when it is not a list of valid
+    points, so one bad write never blocks the next status update."""
+    try:
+        points = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        print(f"status_json: {path} is unreadable; starting a new history", file=sys.stderr)
+        return []
+    if not isinstance(points, list) or not all(_valid_point(p) for p in points):
+        print(f"status_json: {path} is malformed; starting a new history", file=sys.stderr)
+        return []
+    return points
+
+
+def update_history(path, point):
+    """Append point, or replace the earlier point of the same UTC hour; keep the newest HISTORY_MAX."""
+    points = [p for p in read_history(path) if p["t"][:13] != point["t"][:13]]
+    points.append(point)
+    points.sort(key=lambda p: p["t"])
+    points = points[-HISTORY_MAX:]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([{k: p[k] for k in ("t", "covered", "total")} for p in points],
+                               separators=(",", ":")).replace("},{", "},\n{") + "\n", encoding="utf-8")
+    return points
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--junit", type=Path, required=True, action="append",
@@ -271,6 +327,8 @@ def main(argv):
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--records", type=Path, default=form_coverage.RECORDS,
                         help="directory of shader translation records (default: %(default)s)")
+    parser.add_argument("--history", type=Path,
+                        help="progress history file (default: history.json next to --out)")
     args = parser.parse_args(argv)
     try:
         data = build(args.junit, args.coverage, ROOT, args.records)
@@ -279,6 +337,7 @@ def main(argv):
         return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(data, separators=(",", ":")) + "\n", encoding="utf-8")
+    update_history(args.history or args.out.with_name("history.json"), history_point(data))
     return 0
 
 

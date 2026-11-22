@@ -53,11 +53,31 @@ code, .code { font-family: var(--code); font-size: 0.875em; }
 .figure .ratio { font-family: var(--serif); font-size: clamp(3.25rem, 13vw, 6.5rem); line-height: 1; letter-spacing: -0.02em; }
 .figure .ratio span { color: var(--ink-2); font-size: 0.5em; letter-spacing: 0; }
 .figure .pct { font-family: var(--serif); font-size: clamp(2rem, 7vw, 3.5rem); line-height: 1; }
+.figure .pctwrap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.875rem; }
+.figure .delta { font-size: 0.9375rem; color: var(--ink-2); }
 .bar { height: 6px; border-radius: 3px; background: var(--meter); overflow: hidden; margin-top: 1.75rem; }
 .bar i { display: block; height: 100%; background: var(--accent); }
 .split { display: flex; gap: 1.5rem; margin-top: 0.75rem; font-size: 0.9375rem; color: var(--ink-2); }
 .split b { color: var(--ink); font-weight: 600; }
 .figure .missing { margin-top: 0.75rem; color: var(--ink-2); }
+
+/* Progress graph */
+.trend { margin: 0 0 3.5rem; opacity: 0; transition: opacity var(--open) ease-out; }
+.trend.in { opacity: 1; }
+.trend h2 { font-family: var(--serif); font-size: 1.1875rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--rule-2); }
+.chart { position: relative; margin-top: 1rem; }
+.chart svg { display: block; width: 100%; touch-action: pan-y; overflow: visible; }
+.chart .grid { stroke: var(--rule); stroke-width: 1; }
+.chart .tick { fill: var(--ink-2); font: 0.8125rem var(--sans); font-variant-numeric: tabular-nums lining-nums; }
+.chart .area { fill: var(--accent); fill-opacity: 0.12; stroke: none; }
+.chart .line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart .guide { stroke: var(--rule-2); stroke-width: 1; }
+.chart .dot { fill: var(--paper); stroke: var(--accent); stroke-width: 1.5; }
+.tip { position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0; transition: opacity var(--open) ease-out;
+  background: var(--surface); border: 1px solid var(--rule-2); border-radius: 4px; padding: 0.3125rem 0.625rem;
+  font-size: 0.8125rem; line-height: 1.4; color: var(--ink-2); white-space: nowrap; }
+.tip.on { opacity: 1; }
+.tip b { color: var(--ink); font-weight: 600; }
 
 /* Filter */
 .tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; margin-bottom: 1.5rem; }
@@ -128,11 +148,16 @@ footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--r
 <section class="figure" aria-labelledby="h-done">
   <h1 id="h-done">Instructions done</h1>
   <div id="figure" hidden>
-    <div class="big"><p class="ratio num" id="ratio"></p><p class="pct num" id="pct"></p></div>
+    <div class="big"><p class="ratio num" id="ratio"></p><div class="pctwrap"><p class="pct num" id="pct"></p><p class="delta num" id="delta" hidden></p></div></div>
     <div class="bar" aria-hidden="true"><i id="bar"></i></div>
     <p class="split num"><span>Done <b id="n-done"></b></span><span>Missing <b id="n-missing"></b></span></p>
   </div>
   <p class="missing" id="no-figure">Loading.</p>
+</section>
+
+<section class="trend" id="trend" aria-labelledby="h-trend" hidden>
+  <h2 id="h-trend">Progress</h2>
+  <div class="chart" id="chart"></div>
 </section>
 
 <section aria-label="Every instruction, by group" id="list" hidden>
@@ -210,6 +235,118 @@ footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--r
     $("n-done").textContent = nf.format(done);
     $("n-missing").textContent = nf.format(total - done);
     $("figure").hidden = false; $("no-figure").hidden = true;
+    return 100 * done / total;
+  }
+
+  // Progress history: [{t, covered, total}], the same combined number as the figure. Optional.
+  function points(h) {
+    if (!Array.isArray(h)) return [];
+    return h.map(function (p) { return p && { t: Date.parse(p.t), n: p.covered, total: p.total }; })
+      .filter(function (p) { return p && isNum(p.t, p.n, p.total) && p.total > 0; })
+      .sort(function (a, b) { return a.t - b.t; });
+  }
+
+  function delta(now, pts) {
+    if (now === undefined || !pts.length) return;
+    var ref = pts[0], cut = Date.now() - 864e5;
+    pts.forEach(function (p) { if (p.t <= cut) ref = p; });
+    var d = Math.round((now - 100 * ref.n / ref.total) * 10) / 10;
+    if (!d) return;
+    var e = $("delta");
+    e.textContent = (d > 0 ? "+" : "\u2212") + Math.abs(d).toFixed(1) + "% since yesterday";
+    e.hidden = false;
+  }
+
+  var SVGNS = document.querySelector("svg").namespaceURI;  // taken from the sprite, so no URL literal here
+  function sv(tag, attrs, parent) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function shortDay(t) { var d = new Date(t); return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()].slice(0, 3); }
+  function clock(t) { var d = new Date(t); return ("0" + d.getUTCHours()).slice(-2) + ":" + ("0" + d.getUTCMinutes()).slice(-2); }
+  // Gridline values: 2 or 3 round numbers inside [lo, hi].
+  function ticksFor(lo, hi) {
+    var base = Math.pow(10, Math.floor(Math.log(hi - lo) / Math.LN10)), steps = [];
+    [0.1, 0.2, 0.25, 0.5, 1, 2, 5].forEach(function (m) { steps.push(m * base); });
+    for (var i = 0; i < steps.length; i++) {
+      var out = [];
+      for (var v = Math.ceil(lo / steps[i]) * steps[i]; v <= hi + 1e-9; v += steps[i]) out.push(Math.round(v * 1e6) / 1e6);
+      if (out.length <= 3 && out.length >= 2) return out;
+    }
+    return [Math.round(lo), Math.round(hi)];
+  }
+
+  function graph(pts) {
+    var host = $("chart"), sec = $("trend");
+    if (pts.length < 2) return;
+    sec.hidden = false;
+    var tip = null, picked = null, away = function () {};
+    document.addEventListener("pointerdown", function (e) { if (!host.contains(e.target)) away(); });
+    function draw() {
+      var W = Math.floor(host.clientWidth);
+      if (W < 120) return;
+      var H = W < 480 ? 180 : 200;
+      var t0 = pts[0].t, t1 = pts[pts.length - 1].t, lo = Infinity, hi = -Infinity;
+      pts.forEach(function (p) { lo = Math.min(lo, p.n); hi = Math.max(hi, p.n); });
+      if (hi === lo) { hi += 1; lo -= 1; }
+      var pad = (hi - lo) * 0.1; lo = Math.max(0, lo - pad); hi += pad;
+      var yt = ticksFor(lo, hi), lab = Math.max.apply(null, yt.map(function (v) { return nf.format(v).length; }));
+      var m = { l: Math.round(lab * 7.5 + 12), r: 6, t: 8, b: 28 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+      function X(t) { return m.l + (t1 === t0 ? 0 : pw * (t - t0) / (t1 - t0)); }
+      function Y(v) { return m.t + ph * (1 - (v - lo) / (hi - lo)); }
+      host.textContent = "";
+      var svg = sv("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img",
+        "aria-label": "Instructions done over time, from " + nf.format(pts[0].n) + " on " + day(pts[0].t) + " to " + nf.format(pts[pts.length - 1].n) + " on " + day(t1) }, host);
+      yt.forEach(function (v) {
+        sv("line", { "class": "grid", x1: m.l, x2: W - m.r, y1: Y(v) + 0.5, y2: Y(v) + 0.5 }, svg);
+        var tx = sv("text", { "class": "tick", x: m.l - 8, y: Y(v), "text-anchor": "end", "dominant-baseline": "central" }, svg);
+        tx.textContent = nf.format(v);
+      });
+      var n = W < 520 ? 3 : 4, short = t1 - t0 < 2 * 864e5;
+      for (var i = 0; i < n; i++) {
+        var t = t0 + (t1 - t0) * i / (n - 1);
+        var tx = sv("text", { "class": "tick", x: m.l + pw * i / (n - 1), y: H - 6, "text-anchor": i === 0 ? "start" : i === n - 1 ? "end" : "middle" }, svg);
+        tx.textContent = short ? shortDay(t) + " " + clock(t) : shortDay(t);
+      }
+      var d = pts.map(function (p, i) { return (i ? "L" : "M") + X(p.t).toFixed(1) + " " + Y(p.n).toFixed(1); }).join("");
+      sv("path", { "class": "area", d: d + "L" + X(t1).toFixed(1) + " " + (m.t + ph) + "L" + X(t0).toFixed(1) + " " + (m.t + ph) + "Z" }, svg);
+      sv("path", { "class": "line", d: d }, svg);
+      var guide = sv("line", { "class": "guide", y1: m.t, y2: m.t + ph, visibility: "hidden" }, svg);
+      var dot = sv("circle", { "class": "dot", r: 3.5, visibility: "hidden" }, svg);
+      tip = el("div", "tip"); tip.setAttribute("aria-hidden", "true"); host.appendChild(tip);
+      function hide() { tip.classList.remove("on"); guide.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); picked = null; }
+      function show(i) {
+        var p = pts[i], x = X(p.t), y = Y(p.n);
+        picked = i;
+        guide.setAttribute("x1", x); guide.setAttribute("x2", x); guide.setAttribute("visibility", "visible");
+        dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("visibility", "visible");
+        tip.textContent = "";
+        tip.appendChild(document.createTextNode(day(p.t) + ", " + clock(p.t) + " UTC"));
+        tip.appendChild(document.createElement("br"));
+        tip.appendChild(el("b", "", nf.format(p.n))); tip.appendChild(document.createTextNode(" of " + nf.format(p.total)));
+        var w = tip.offsetWidth, h = tip.offsetHeight;
+        var left = Math.min(Math.max(x - w / 2, 0), W - w);  // stays inside the chart on both sides
+        var top = y - h - 12; if (top < 0) top = Math.min(y + 12, H - h);
+        tip.style.transform = "translate(" + Math.round(left) + "px," + Math.round(top) + "px)";
+        tip.classList.add("on");
+      }
+      function near(e) {
+        var r = svg.getBoundingClientRect(), x = (e.clientX - r.left) * (W / r.width), best = 0;
+        pts.forEach(function (p, i) { if (Math.abs(X(p.t) - x) < Math.abs(X(pts[best].t) - x)) best = i; });
+        show(best);
+      }
+      svg.addEventListener("pointermove", near);
+      svg.addEventListener("pointerdown", near);
+      svg.addEventListener("pointerleave", function (e) { if (e.pointerType !== "touch") hide(); });
+      away = hide;
+    }
+    draw();
+    requestAnimationFrame(function () { sec.classList.add("in"); });
+    var w = host.clientWidth, pending;
+    function again() { if (host.clientWidth !== w) { w = host.clientWidth; cancelAnimationFrame(pending); pending = requestAnimationFrame(draw); } }
+    if (window.ResizeObserver) new ResizeObserver(again).observe(host); else window.addEventListener("resize", again);
   }
 
   function list(s) {
@@ -328,9 +465,16 @@ footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--r
     }
   }
 
+  // Optional: without history.json the page is just the figure, the groups and the stages.
+  var histP = fetch("history.json", { cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .catch(function () { return null; });
   fetch("status.json", { cache: "no-store" })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(function (s) { s = s || {}; figure(s); list(s); stages(s); updated(s); })
+    .then(function (s) {
+      s = s || {}; var now = figure(s); list(s); stages(s); updated(s);
+      histP.then(function (h) { var pts = points(h); delta(now, pts); graph(pts); });
+    })
     .catch(function () { $("no-figure").textContent = "The status data could not be loaded."; });
 })();
 </script>

@@ -1,6 +1,6 @@
 """Check tools/status_json.py against tiny fixtures, and that the status page makes no off-site requests."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -235,6 +235,82 @@ class StatusJson(unittest.TestCase):
 
     def test_real_parts_file_is_valid(self):
         status_json.read_parts(ROOT)
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "history.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def pt(t, covered=1, total=10):
+        return {"t": t, "covered": covered, "total": total}
+
+    def test_point_is_the_combined_figure(self):
+        data = {"gfx1013": {"forms_covered": 3, "forms_total": 10}, "x64": {"covered": 5, "total": 20}}
+        now = datetime(2026, 11, 20, 12, 30, 5, tzinfo=timezone.utc)
+        self.assertEqual(status_json.history_point(data, now), self.pt("2026-11-20T12:30:05Z", 8, 30))
+
+    def test_appends_in_time_order(self):
+        status_json.update_history(self.path, self.pt("2026-11-20T10:00:00Z"))
+        points = status_json.update_history(self.path, self.pt("2026-11-20T11:00:00Z", 2))
+        self.assertEqual([p["t"] for p in points], ["2026-11-20T10:00:00Z", "2026-11-20T11:00:00Z"])
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), points)
+
+    def test_same_hour_is_replaced_by_the_latest_run(self):
+        status_json.update_history(self.path, self.pt("2026-11-20T10:05:00Z", 1))
+        status_json.update_history(self.path, self.pt("2026-11-20T11:00:00Z", 2))
+        points = status_json.update_history(self.path, self.pt("2026-11-20T10:50:00Z", 3))
+        self.assertEqual([(p["t"], p["covered"]) for p in points],
+                         [("2026-11-20T10:50:00Z", 3), ("2026-11-20T11:00:00Z", 2)])
+
+    def test_cap_keeps_the_newest_points(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+        old = [self.pt(datetime.fromtimestamp(start + 3600 * i, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), i % 5)
+               for i in range(status_json.HISTORY_MAX)]
+        self.path.write_text(json.dumps(old), encoding="utf-8")
+        points = status_json.update_history(self.path, self.pt("2030-01-01T00:00:00Z", 9))
+        self.assertEqual(len(points), status_json.HISTORY_MAX)
+        self.assertEqual(points[0], old[1])
+        self.assertEqual(points[-1]["covered"], 9)
+
+    def test_malformed_file_is_reset(self):
+        for text in ("{not json", '{"t": "x"}', '[{"t": "nope", "covered": 1, "total": 2}]',
+                     '[{"t": "2026-11-20T10:00:00Z", "covered": 5, "total": 2}]',
+                     '[{"t": "2026-11-20T10:00:00Z", "covered": "1", "total": 2}]', "[1]"):
+            self.path.write_text(text, encoding="utf-8")
+            points = status_json.update_history(self.path, self.pt("2026-11-20T10:00:00Z"))
+            self.assertEqual(points, [self.pt("2026-11-20T10:00:00Z")], text)
+
+    def test_main_writes_history_next_to_out(self):
+        tmp = Path(self.tmp.name)
+        repo = tmp / "repo"
+        repo.mkdir()
+        make_repo(repo)
+        (tmp / "j.xml").write_text(JUNIT, encoding="utf-8")
+        (tmp / "c.json").write_text(json.dumps(COVERAGE), encoding="utf-8")
+        records = tmp / "records"
+        records.mkdir()
+        run = datetime.fromisoformat("2026-11-20T10:00:00").timestamp() + 1
+        for test, words in RECORDS.items():
+            (records / f"{test}.txt").write_text(words + "\n", encoding="utf-8")
+            when = run - 86400 if test == "old" else run
+            os.utime(records / f"{test}.txt", (when, when))
+        old = status_json.ROOT
+        status_json.ROOT = repo
+        try:
+            args = ["--junit", str(tmp / "j.xml"), "--coverage", str(tmp / "c.json"),
+                    "--out", str(tmp / "site" / "status.json"), "--records", str(records)]
+            self.assertEqual(status_json.main(args), 0)
+            self.assertEqual(status_json.main(args), 0)  # a second run within the hour replaces, not appends
+        finally:
+            status_json.ROOT = old
+        points = json.loads((tmp / "site" / "history.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(points), 1)
+        self.assertEqual((points[0]["covered"], points[0]["total"]), (8, 30))
 
 
 class Page(unittest.TestCase):
