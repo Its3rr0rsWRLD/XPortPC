@@ -1838,6 +1838,24 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_aot_x87_fnstcw COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_fnstcw.py"
         check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_fnstcw>"
         "$<TARGET_FILE:cpu_x87_fnstcw_lifted>" ${x87_fnstcw_control_files})
+    cpu_asm_fixture(cpu_x87_examine x87_examine)
+    # The lifted DLL and three mutated controls that the check requires to mismatch.
+    set(x87_examine_control_files "")
+    foreach(variant IN ITEMS lifted normal unsigned positive)
+        set(x87_examine_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_x87_examine_${variant}.cpp")
+        add_custom_command(OUTPUT "${x87_examine_fixture}"
+            COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_examine.py"
+                emit "$<TARGET_FILE:cpu_x87_examine>" "${x87_examine_fixture}" ${variant}
+            DEPENDS cpu_x87_examine tests/cpu/x87_examine.py tests/cpu/x87_add.py tools/ffx_version_query.py
+                tools/x87_lower.py tools/x87_soft.h tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+        add_library(cpu_x87_examine_${variant} SHARED "${x87_examine_fixture}")
+        if(NOT variant STREQUAL "lifted")
+            list(APPEND x87_examine_control_files "$<TARGET_FILE:cpu_x87_examine_${variant}>")
+        endif()
+    endforeach()
+    add_test(NAME cpu_aot_x87_examine COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_examine.py"
+        check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_examine>"
+        "$<TARGET_FILE:cpu_x87_examine_lifted>" ${x87_examine_control_files})
     cpu_asm_fixture(cpu_x87_fldcw x87_fldcw)
     # The checked translation and ten mutated controls that the check requires to mismatch.
     set(x87_fldcw_control_files "")
