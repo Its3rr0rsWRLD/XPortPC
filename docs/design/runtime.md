@@ -274,6 +274,12 @@ R2 program: `tests/runtime/r2_clear.cpp` over the graphics shim skeleton in `d3d
 wrapped interfaces in [experiments.md](../experiments.md#graphics-shim-skeleton-runtime-rung-r2)). It runs directly,
 not under `x2w_launch`, until `pe_map` maps implicit TLS.
 
+R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
+`src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
+[experiments.md](../experiments.md#pipeline-time-translation-runtime-rung-r3)). Its shaders come in a console
+bytecode container that our own tests define (`X2WShaderContainer`, `src/d3d12_xs_api.h`): the container real titles
+use is not public and is learned from owner logs, then parsed by the same single function.
+
 ## 7. Game report
 
 `x2w_report` is the tool the owner runs on his own titles, from his own copy. It produces one Markdown file and one
