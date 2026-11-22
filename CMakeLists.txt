@@ -1321,6 +1321,17 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_aot_cmov_setcc COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/cmov_setcc.py"
         check "$<TARGET_FILE:cpu_cmov_setcc>" "$<TARGET_FILE:cpu_cmov_setcc_lifted>")
 
+    cpu_asm_fixture(cpu_signed_conds signed_conds)
+    set(signed_conds_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_signed_conds_lifted.cpp")
+    add_custom_command(OUTPUT "${signed_conds_fixture}"
+        COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/signed_conds.py"
+            emit "$<TARGET_FILE:cpu_signed_conds>" "${signed_conds_fixture}"
+        DEPENDS cpu_signed_conds tests/cpu/signed_conds.py tools/ffx_version_query.py
+            tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+    add_library(cpu_signed_conds_lifted SHARED "${signed_conds_fixture}")
+    add_test(NAME cpu_aot_signed_conds COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/signed_conds.py"
+        check "$<TARGET_FILE:cpu_signed_conds>" "$<TARGET_FILE:cpu_signed_conds_lifted>")
+
     cpu_asm_fixture(cpu_adx adx)
     set(adx_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_adx_lifted.cpp")
     add_custom_command(OUTPUT "${adx_fixture}"
