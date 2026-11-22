@@ -611,7 +611,33 @@ def separation(programs=ALL_PROGRAMS):
     return unseparated
 
 
+def upstream_edge_controls():
+    """Translation of the programs R0Y00/Xbox2Windows main added as Windows GPU draws (0a9cc04): s_cmpk_eq_u32 against
+    0x8001 with s_cmovk_i32 on a second compare, v_subrev_nc_u32 with two VGPR sources, the v_mad_legacy_f32 and
+    v_madak_f32 edge operands and s_bitset1_b32 at a low bit. Only the lowering is checked here; the draws and their
+    references need a Windows GPU run."""
+    from .f32_modes import uncompressed_export
+    four = ["v_mov_b32_e32 v12, s52", "v_mov_b32_e32 v13, s53", "v_mov_b32_e32 v14, s50", "v_mov_b32_e32 v15, s51"]
+    for body in (
+        ["s_mov_b32 s52, 0", "s_mov_b32 s53, 0", "s_mov_b32 s50, s46", "s_mov_b32 s51, s46",
+         "s_cmpk_eq_u32 s45, 0x8001", "s_cselect_b32 s63, 64, 0", "s_or_b32 s53, s53, s63",
+         "s_cmpk_eq_i32 s47, 0xffff", "s_cmovk_i32 s50, 0xfffe", "s_cmpk_eq_i32 s47, 1", "s_cmovk_i32 s51, 0x8000",
+         *four],
+        ["v_mov_b32_e32 v18, s45", "v_mov_b32_e32 v19, s44", "v_subrev_nc_u32_e32 v12, s44, v18",
+         "v_subrev_nc_u32_e32 v14, v19, v18", "v_mov_b32_e32 v13, 0", "v_mov_b32_e32 v15, 0"],
+        ["v_mov_b32_e32 v19, s47", "v_mad_legacy_f32 v12, s44, s45, 1.0", "v_mad_legacy_f32 v13, s46, 1.0, 1.0",
+         "v_madak_f32 v14, s44, v19, 0x3f400000", "v_mad_legacy_f32 v15, 1.0, |v19|, 0.0"],
+        ["s_mov_b32 s52, s46", "s_bitset1_b32 s52, 4", "s_mov_b32 s53, 0", "s_mov_b32 s50, 0", "s_mov_b32 s51, 0",
+         *four],
+    ):
+        if any(line.startswith("v_s") or line.startswith("v_mad") for line in body):
+            translate(uncompressed_export(body))
+        else:
+            translate(with_constants(body))
+
+
 def controls(directory):
+    upstream_edge_controls()
     assert not separation(), separation()
     for body, *_ in ALL_PROGRAMS:  # every program translates (and is recorded for the form-coverage count)
         translate(with_constants(body))
