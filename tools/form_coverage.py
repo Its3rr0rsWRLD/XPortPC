@@ -96,6 +96,7 @@ CPU_FIXTURES = {
     "sse2_sat_mul": "cpu_aot_sse2_sat_mul",
     "sse_packed_fp": "cpu_aot_sse_packed_fp",
     "sse3_4_fp": "cpu_aot_sse3_4_fp",
+    "sse41_42_misc": "cpu_aot_sse41_42_misc",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

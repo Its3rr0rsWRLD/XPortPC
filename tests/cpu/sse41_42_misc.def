@@ -1,0 +1,19 @@
+EXPORTS
+    pextrb_op
+    pextrw_op
+    pextrd_op
+    pextrq_op
+    pinsrb_op
+    pinsrw_op
+    pinsrd_op
+    pinsrq_op
+    pmaddubsw_op
+    pmulhrsw_op
+    phminposuw_op
+    ptest_op
+    mpsadbw_op
+    movntdqa_op
+    pcmpgtq_op
+    crc32_8_op
+    crc32_32_op
+    crc32_64_op
