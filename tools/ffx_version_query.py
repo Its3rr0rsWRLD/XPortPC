@@ -147,6 +147,11 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         for k in ("madd", "msub", "nmadd", "nmsub") for o in ("132", "213", "231") for s in ("ss", "sd")
     }
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in fma_scalar for i in body)
+    fma_packed = {
+        getattr(M, f"VF{k.upper()}{o}{s.upper()}"): (k, o, s == "pd")
+        for k in ("madd", "msub", "nmadd", "nmsub", "maddsub", "msubadd") for o in ("132", "213", "231") for s in ("ps", "pd")
+    }
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in fma_packed for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -636,6 +641,30 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             neg_c = "true" if kind in ("msub", "nmsub") else "false"
             stmt = (f"{{ const {ftype} r = fma_x86<{ftype}, {utype}>({s0}, {s1}, {s2}, {order}, {neg_p}, {neg_c}); "
                     f"auto keep = {dst}; {dst} = {{}}; memcpy({dst}.data(), keep.data(), 16); memcpy({dst}.data(), &r, {sz}); }}")
+        elif has_wide and i.encoding == EncodingKind.VEX and op in fma_packed:
+            kind, order, is_f64 = fma_packed[op]
+            ftype, utype, sz = ("double", "uint64_t", 8) if is_f64 else ("float", "uint32_t", 4)
+            vec_size = RegisterExt.size(i.op0_register)
+            dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
+            if i.op2_kind == K.MEMORY:
+                s2_init, s2_expr = f"const word s2addr = {address()};", f"load<{ftype}>(s2addr + n)"
+            else:
+                s2_init, s2_expr = f"const auto in2 = {wide_any[i.op2_register]};", f"load<{ftype}>(reinterpret_cast<word>(in2.data() + n))"
+            s0 = f"load<{ftype}>(reinterpret_cast<word>(in0.data() + n))"
+            s1 = f"load<{ftype}>(reinterpret_cast<word>(in1.data() + n))"
+            neg_p = "true" if kind in ("nmadd", "nmsub") else "false"
+            if kind in ("msub", "nmsub"):
+                neg_c = "true"
+            elif kind == "maddsub":
+                neg_c = "(lane & 1u) == 0u"
+            elif kind == "msubadd":
+                neg_c = "(lane & 1u) != 0u"
+            else:
+                neg_c = "false"
+            stmt = (f"{{ const auto in0 = {dst}, in1 = {src1}; {s2_init} {dst} = {{}}; "
+                    f"for (size_t lane = 0; lane < {vec_size // sz}; ++lane) {{ const size_t n = lane * {sz}; "
+                    f"const {ftype} r = fma_x86<{ftype}, {utype}>({s0}, {s1}, {s2_expr}, {order}, {neg_p}, {neg_c}); "
+                    f"memcpy({dst}.data() + n, &r, {sz}); }} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
