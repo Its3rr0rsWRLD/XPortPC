@@ -16,6 +16,22 @@ EXPORTS
     rep_stosd_backward
     rep_stosq_backward
     branch_direction
+    once_movsb_forward
+    once_movsw_forward
+    once_movsd_forward
+    once_movsq_forward
+    once_stosb_forward
+    once_stosw_forward
+    once_stosd_forward
+    once_stosq_forward
+    once_movsb_backward
+    once_movsw_backward
+    once_movsd_backward
+    once_movsq_backward
+    once_stosb_backward
+    once_stosw_backward
+    once_stosd_backward
+    once_stosq_backward
     loop_copy
     call_copy
     bad_df_call

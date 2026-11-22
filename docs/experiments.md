@@ -1387,9 +1387,9 @@ Sixteen mutations of the translator each fail the test:
 
 Only the alias checks catch the last two.
 
-## Direction-aware repeated memory transfers and fills in the control-flow CPU lifter
+## String memory transfers in the control-flow CPU lifter
 
-`tools/cpu_switch_aot.py` now lowers rep movs and rep stos copy and fill 1-, 2-, 4- and 8-byte elements in either direction. These instructions
+`tools/cpu_switch_aot.py` lowers MOVS and STOS, with and without REP, to copy and fill 1-, 2-, 4- and 8-byte elements in either direction. These instructions
 can occur inside branches, loops and translated callees; they use the existing
 register-definedness and nonvolatile-save proofs. A zero REP count touches no memory
 and leaves the pointers unchanged. The loop updates RSI/RDI and RCX at their architectural widths.
@@ -1398,7 +1398,7 @@ Each element is read before it is written. Forward overlapping copies deliberate
 observe bytes written by preceding iterations, unlike `memmove`. Volatile guest
 reads and writes preserve access faults and iteration order under `/O2`. Multi-byte accesses allow unaligned addresses and keep the original element width.
 Arithmetic flags survive a transfer and remain available to the existing bounded
-flag-consumer proof. STD/CLD are represented by a local direction flag. A control-flow proof requires DF clear on every path to calls, tail jumps and returns, including joins with different direction states. The backwards path clears DF before leaving its copy region. Non-repeated string instructions remain rejected.
+flag-consumer proof. STD/CLD are represented by a local direction flag. A control-flow proof requires DF clear on every path to calls, tail jumps and returns, including joins with different direction states. The backwards path clears DF before leaving its copy region. Non-repeated forms preserve RCX.
 Address-size overrides, segment prefixes, REPNE, LODS, CMPS and SCAS remain rejected
 in this control-flow profile. The shared straight-line translator has its separate
 string-instruction coverage. Guest exception resumption, native REP register values
@@ -1417,7 +1417,7 @@ ctest --test-dir out/native --no-tests=error -R '^cpu_aot_switch_strings$' -V
 ```
 
 Windows 11 build 26300.9974, MSVC/ML64 19.44.35230 and Python 3.12.8:
-19 exports, 7,608 native/AOT/reference comparisons and 63 access-violation
+35 exports, 13,656 native/AOT/reference comparisons and 63 access-violation
 comparisons passed, including the `/O2` translation. Compiled incorrect
 implementations must fail the comparison: a bulk `memmove` on destructive overlap
 and a truncated repeat count, plus ignored backwards direction.

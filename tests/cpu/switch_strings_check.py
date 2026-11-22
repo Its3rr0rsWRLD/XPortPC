@@ -17,7 +17,7 @@ MASK = (1 << 64) - 1
 SENTINELS = (0x0123456789abcdef, 0xfedcba9876543210, 0)
 GUARDS = (0xa55aa55adeadbeef, 0x5aa55aa5feedface)
 WIDTHS = dict(b=1, w=2, d=4, q=8)
-NAMES = ('rep_movsb_forward', 'rep_movsw_forward', 'rep_movsd_forward', 'rep_movsq_forward', 'rep_stosb_forward', 'rep_stosw_forward', 'rep_stosd_forward', 'rep_stosq_forward', 'rep_movsb_backward', 'rep_movsw_backward', 'rep_movsd_backward', 'rep_movsq_backward', 'rep_stosb_backward', 'rep_stosw_backward', 'rep_stosd_backward', 'rep_stosq_backward', 'branch_direction', 'loop_copy', 'call_copy')
+NAMES = ('rep_movsb_forward', 'rep_movsw_forward', 'rep_movsd_forward', 'rep_movsq_forward', 'rep_stosb_forward', 'rep_stosw_forward', 'rep_stosd_forward', 'rep_stosq_forward', 'rep_movsb_backward', 'rep_movsw_backward', 'rep_movsd_backward', 'rep_movsq_backward', 'rep_stosb_backward', 'rep_stosw_backward', 'rep_stosd_backward', 'rep_stosq_backward', 'once_movsb_forward', 'once_movsw_forward', 'once_movsd_forward', 'once_movsq_forward', 'once_stosb_forward', 'once_stosw_forward', 'once_stosd_forward', 'once_stosq_forward', 'once_movsb_backward', 'once_movsw_backward', 'once_movsd_backward', 'once_movsq_backward', 'once_stosb_backward', 'once_stosw_backward', 'once_stosd_backward', 'once_stosq_backward', 'branch_direction', 'loop_copy', 'call_copy')
 
 
 def spec(name, backwards):

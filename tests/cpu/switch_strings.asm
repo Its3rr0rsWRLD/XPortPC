@@ -53,6 +53,22 @@ STRING_CASE rep_stosb_backward, stosb, 1, 1
 STRING_CASE rep_stosw_backward, stosw, 1, 1
 STRING_CASE rep_stosd_backward, stosd, 1, 1
 STRING_CASE rep_stosq_backward, stosq, 1, 1
+STRING_CASE once_movsb_forward, movsb, 0, 0
+STRING_CASE once_movsw_forward, movsw, 0, 0
+STRING_CASE once_movsd_forward, movsd, 0, 0
+STRING_CASE once_movsq_forward, movsq, 0, 0
+STRING_CASE once_stosb_forward, stosb, 0, 0
+STRING_CASE once_stosw_forward, stosw, 0, 0
+STRING_CASE once_stosd_forward, stosd, 0, 0
+STRING_CASE once_stosq_forward, stosq, 0, 0
+STRING_CASE once_movsb_backward, movsb, 1, 0
+STRING_CASE once_movsw_backward, movsw, 1, 0
+STRING_CASE once_movsd_backward, movsd, 1, 0
+STRING_CASE once_movsq_backward, movsq, 1, 0
+STRING_CASE once_stosb_backward, stosb, 1, 0
+STRING_CASE once_stosw_backward, stosw, 1, 0
+STRING_CASE once_stosd_backward, stosd, 1, 0
+STRING_CASE once_stosq_backward, stosq, 1, 0
 
 ; Two paths join with different DF values. The selected direction is live at REP.
 branch_direction PROC FRAME

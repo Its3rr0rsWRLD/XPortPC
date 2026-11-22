@@ -971,7 +971,7 @@ class Lifter:
         mnemonic = ins.mnemonic
         if ins.code in STRING_TRANSFERS:
             kind, width = STRING_TRANSFERS[ins.code]
-            if (not ins.has_rep_prefix or ins.has_segment_prefix or ins.has_repne_prefix or ins.has_lock_prefix
+            if (ins.has_segment_prefix or ins.has_repne_prefix or ins.has_lock_prefix
                     or any(ins.op_kind(n) not in (OpKind.REGISTER, OpKind.MEMORY_ESRDI, OpKind.MEMORY_SEG_RSI)
                            for n in range(ins.op_count))):
                 raise ValueError(f"unsupported string addressing or prefix at RVA {ins.ip:#x}")
