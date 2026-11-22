@@ -1544,10 +1544,11 @@ def lift_function(program, entry, symbol, arguments, internal):
         elif ip in function.import_tails:
             # The bound import returns to this function's caller; its argument registers must be fully
             # defined and hold no guest address. The path ends here, so nothing after the call is modelled.
-            _, symbol, bound = function.import_tail
+            # Not "symbol": that names the function being emitted.
+            _, callee, bound = function.import_tail
             forwarded = ARGUMENT_REGISTERS[:bound.arguments]
             lifter.used.update(forwarded)
-            body[ip] = f"return {symbol}({', '.join(NAMES[r] for r in forwarded)});"
+            body[ip] = f"return {callee}({', '.join(NAMES[r] for r in forwarded)});"
             effects[ip] = (dict.fromkeys(forwarded, 8), {}, set())
         elif ip in skipped:
             # The table load reads the 64-bit index; it and the add leave guest addresses behind.
