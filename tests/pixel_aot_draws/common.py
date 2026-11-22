@@ -66,6 +66,18 @@ def assembly(swap):
     ]
 
 
+def lod_zero_sample():
+    """assembly(False) with the colour read by an explicit level-zero sample (upstream R0Y00/Xbox2Windows#320 spells it
+    image_sample_lz with the helper-lane mask removed). The fixed contract here counts only implicit-level samples
+    (forms/mimg.py sample_level) and needs one per texture, so the implicit sample stays, its result unread in v[4:7],
+    and the lz sample writes v[12:15]; the drawn colour is the level-zero read either way."""
+    program = assembly(False)
+    at = next(i for i, line in enumerate(program) if line.startswith("image_sample "))
+    sample = program[at]
+    program[at:at + 1] = [sample.replace("v[12:15]", "v[4:7]"), sample.replace("image_sample ", "image_sample_lz ")]
+    return program
+
+
 def must_reject(function, *args):
     try:
         function(*args)
