@@ -81,6 +81,7 @@ CPU_FIXTURES = {
     "mul_div": "cpu_aot_mul_div",
     "adx": "cpu_aot_adx",
     "avx2_shifts": "cpu_aot_avx2_shifts",
+    "avx2_permutes": "cpu_aot_avx2_permutes",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

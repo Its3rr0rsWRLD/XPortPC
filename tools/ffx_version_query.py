@@ -123,6 +123,10 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     avx2_wide_ops = (M.VPBROADCASTB, M.VPBROADCASTW, M.VPBROADCASTD, M.VPBROADCASTQ,
                      M.VPSLLVD, M.VPSRLVD, M.VPSRAVD, M.VPSLLVQ, M.VPSRLVQ)
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx2_wide_ops for i in body)
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx2_wide_ops for i in body)
+    avx2_perm_ops = (M.VBROADCASTI128, M.VEXTRACTI128, M.VINSERTI128, M.VPBLENDD,
+                     M.VPERM2I128, M.VPERMD, M.VPERMPS, M.VPERMQ, M.VPERMPD)
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx2_perm_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -542,6 +546,64 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     f"for (size_t n = 0; n < {vec_size}; n += {elem_size}) {{ "
                     f"const {w} a = load<{w}>(reinterpret_cast<word>(in1.data() + n)), c = {cnt_expr}; "
                     f"const {w} v = {op_expr}; memcpy({dst}.data() + n, &v, {elem_size}); }} }}")
+        elif has_wide and i.encoding == EncodingKind.VEX and op == M.VBROADCASTI128 and i.op1_kind == K.MEMORY:
+            dst = wide[i.op0_register]
+            stmt = (f"{{ const auto lane = load<std::array<uint8_t,16>>({address()}); "
+                    f"memcpy({dst}.data(), lane.data(), 16); memcpy({dst}.data() + 16, lane.data(), 16); }}")
+        elif has_wide and i.encoding == EncodingKind.VEX and op == M.VEXTRACTI128:
+            src = wide[i.op1_register]
+            off = 16 if (i.immediate(2) & 1) else 0
+            if i.op0_kind == K.MEMORY:
+                stmt = f"memcpy(reinterpret_cast<void*>({address()}), {src}.data() + {off}, 16);"
+            else:
+                dst = wide_any[i.op0_register]
+                stmt = f"{{ const auto in1 = {src}; {dst} = {{}}; memcpy({dst}.data(), in1.data() + {off}, 16); }}"
+        elif has_wide and i.encoding == EncodingKind.VEX and op == M.VINSERTI128:
+            dst, src1 = wide[i.op0_register], wide[i.op1_register]
+            off = 16 if (i.immediate(3) & 1) else 0
+            src2_expr = (f"load<std::array<uint8_t,16>>({address()})" if i.op2_kind == K.MEMORY
+                         else f"load<std::array<uint8_t,16>>(reinterpret_cast<word>({wide_any[i.op2_register]}.data()))")
+            stmt = f"{{ auto out = {src1}; const auto lane = {src2_expr}; memcpy(out.data() + {off}, lane.data(), 16); {dst} = out; }}"
+        elif has_wide and i.encoding == EncodingKind.VEX and op == M.VPBLENDD:
+            vec_size = RegisterExt.size(i.op0_register)
+            dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
+            imm = i.immediate(3)
+            if i.op2_kind == K.MEMORY:
+                s2_init, s2_ptr = f"const word s2addr = {address()};", "load<uint32_t>(s2addr + n)"
+            else:
+                s2_init, s2_ptr = f"const auto in2 = {wide_any[i.op2_register]};", "load<uint32_t>(reinterpret_cast<word>(in2.data() + n))"
+            stmt = (f"{{ const auto in1 = {src1}; {s2_init} {dst} = {{}}; "
+                    f"for (size_t lane = 0; lane < {vec_size // 4}; ++lane) {{ const size_t n = lane * 4; "
+                    f"const uint32_t v = (({imm}u >> lane) & 1u) ? {s2_ptr} : load<uint32_t>(reinterpret_cast<word>(in1.data() + n)); "
+                    f"memcpy({dst}.data() + n, &v, 4); }} }}")
+        elif has_wide and i.encoding == EncodingKind.VEX and op == M.VPERM2I128:
+            dst, src1 = wide[i.op0_register], wide[i.op1_register]
+            imm = i.immediate(3)
+            s2_init = (f"const auto in2 = load<std::array<uint8_t,32>>({address()});" if i.op2_kind == K.MEMORY
+                       else f"const auto in2 = {wide[i.op2_register]};")
+            def _lane_copy(sel, out_off):
+                if sel & 8:
+                    return f"memset({dst}.data() + {out_off}, 0, 16);"
+                src_arr, src_off = ("in1", 0) if (sel & 3) == 0 else ("in1", 16) if (sel & 3) == 1 else ("in2", 0) if (sel & 3) == 2 else ("in2", 16)
+                return f"memcpy({dst}.data() + {out_off}, {src_arr}.data() + {src_off}, 16);"
+            stmt = f"{{ const auto in1 = {src1}; {s2_init} {_lane_copy(imm & 0xf, 0)} {_lane_copy((imm >> 4) & 0xf, 16)} }}"
+        elif has_wide and i.encoding == EncodingKind.VEX and op in (M.VPERMD, M.VPERMPS):
+            dst, idx_reg = wide[i.op0_register], wide[i.op1_register]
+            s2_init = (f"const auto src = load<std::array<uint8_t,32>>({address()});" if i.op2_kind == K.MEMORY
+                       else f"const auto src = {wide[i.op2_register]};")
+            stmt = (f"{{ const auto idx = {idx_reg}; {s2_init} {dst} = {{}}; "
+                    f"for (size_t lane = 0; lane < 8; ++lane) {{ "
+                    f"const size_t pick = load<uint32_t>(reinterpret_cast<word>(idx.data() + lane * 4)) & 7u; "
+                    f"memcpy({dst}.data() + lane * 4, src.data() + pick * 4, 4); }} }}")
+        elif has_wide and i.encoding == EncodingKind.VEX and op in (M.VPERMQ, M.VPERMPD):
+            dst = wide[i.op0_register]
+            imm = i.immediate(2)
+            s1_init = (f"const auto src = load<std::array<uint8_t,32>>({address()});" if i.op1_kind == K.MEMORY
+                       else f"const auto src = {wide[i.op1_register]};")
+            stmt = (f"{{ {s1_init} {dst} = {{}}; "
+                    f"for (size_t lane = 0; lane < 4; ++lane) {{ "
+                    f"const size_t pick = ({imm}u >> (lane * 2u)) & 3u; "
+                    f"memcpy({dst}.data() + lane * 8, src.data() + pick * 8, 8); }} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
