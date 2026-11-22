@@ -1,0 +1,4 @@
+LIBRARY d3d12_xs
+EXPORTS
+    D3D12SerializeVersionedRootSignature=xs_serialize_versioned_root_signature
+    D3D12CreateRootSignatureDeserializer=xs_create_root_signature_deserializer

@@ -887,6 +887,10 @@ A local scan of the inspected package's 16 DLLs together with this `xmem.dll` (`
 | `xmem_shim_query` | Graphics memory from `XMemAlloc` passes both BVH predicates and keeps the sentinel after `+0x30`, through the pseudo-handle and a real handle. After `XMemFree` the address reads as `MEM_FREE` with a clear tail. Heap memory fails the tail check, and an address outside user space returns `FALSE` without touching the buffer. |
 | `xmem_shim_working_set` | Returns `FALSE` with `ERROR_NOT_SUPPORTED` and leaves the output untouched, so the callers' value is zero. |
 
+### Desktop d3d12_xs.dll
+
+`src/d3d12_xs_shim.cpp` builds `d3d12_xs.dll` with the two root-signature functions behind the last two unresolved package edges. Both forward to the desktop `d3d12.dll`. `D3D12SerializeVersionedRootSignature` copies the caller's descriptor and clears only `0x03000000`, the bits that the desktop serializer rejects and that every embedded BVH root signature carries; it reports the first clearing on stderr. Their console meaning remains open, so this follows the observed desktop boundary rather than a semantic mapping. `d3d12_xs_shim` checks, with a synthetic v1.1 descriptor and no local inputs, that desktop flags give the `d3d12.dll` bytes, that each console bit alone and the pair give the same bytes as the cleared descriptor while `d3d12.dll` alone returns `E_INVALIDARG`, that the caller's descriptor is unchanged, that an unknown version still fails with the desktop result, and that the deserializer reads the blob back with desktop flags and rejects bytes without a root signature.
+
 ### Desktop GPU addresses for title allocations
 
 On the console a graphics allocation's CPU pointer is also its GPU virtual address. Titles pass those addresses to D3D12 calls, and the BVH builder's shaders read 64-bit addresses from their input records. A desktop D3D12 resource gets a GPU virtual address chosen by the driver.
