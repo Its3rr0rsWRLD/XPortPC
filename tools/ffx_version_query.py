@@ -434,6 +434,16 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         M.VDPPS, M.VDPPD, M.VROUNDPS, M.VROUNDPD, M.VZEROALL,
     }
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx_shuffle_ops for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    wide_any = {**wide, **wide_xmm}
+    avx_minmax_mul_ops = {
+        M.VPADDSB, M.VPADDSW, M.VPADDUSB, M.VPADDUSW, M.VPSUBSB, M.VPSUBSW, M.VPSUBUSB, M.VPSUBUSW,
+        M.VPMINSB, M.VPMAXSB, M.VPMINUB, M.VPMAXUB, M.VPMINSW, M.VPMAXSW, M.VPMINUW, M.VPMAXUW,
+        M.VPMINSD, M.VPMAXSD, M.VPMINUD, M.VPMAXUD,
+        M.VPAVGB, M.VPAVGW, M.VPMULHW, M.VPMULHUW, M.VPMULLW, M.VPMULLD, M.VPMULDQ, M.VPMULUDQ,
+        M.VPMULHRSW, M.VPMADDWD, M.VPMADDUBSW, M.VPSADBW, M.VMPSADBW,
+    }
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx_minmax_mul_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -2106,6 +2116,92 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                             f"for (size_t k=0; k<{lanes}; ++k) {{ if (({imm}u >> (4u + k)) & 1u) s += a[k] * b[k]; }} "
                             f"for (size_t k=0; k<{lanes}; ++k) {{ const {ftype} v = (({imm}u >> k) & 1u) ? s : {ftype}(0); "
                             f"memcpy({dst}.data()+l+k*{lane_size}, &v, {lane_size}); }} }}{zero_hi} }}")
+        elif op in avx_minmax_mul_ops and i.encoding == EncodingKind.VEX and has_wide and i.op0_register in wide_any:
+            dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
+            nbytes = 32 if i.op0_register in wide else 16
+            zero_hi = f" memset({dst}.data()+16, 0, 16);" if nbytes == 16 else ""
+            s2_init = (f"auto rhs = {wide_any[i.op2_register]};" if i.op2_kind == K.REGISTER
+                       else f"std::array<uint8_t,32> rhs{{}}; memcpy(rhs.data(), reinterpret_cast<const void*>({address()}), {nbytes});")
+            if op in (M.VPADDSB, M.VPSUBSB, M.VPADDSW, M.VPSUBSW):
+                ls = 1 if op in (M.VPADDSB, M.VPSUBSB) else 2
+                st, lo, hi = ("int8_t", -128, 127) if ls == 1 else ("int16_t", -32768, 32767)
+                sign = "+" if op in (M.VPADDSB, M.VPADDSW) else "-"
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={ls}) {{ "
+                        f"{st} a, b; memcpy(&a, lhs.data()+n, {ls}); memcpy(&b, rhs.data()+n, {ls}); "
+                        f"const int s = int(a) {sign} int(b); const {st} v = static_cast<{st}>(s < {lo} ? {lo} : (s > {hi} ? {hi} : s)); "
+                        f"memcpy({dst}.data()+n, &v, {ls}); }}{zero_hi} }}")
+            elif op in (M.VPADDUSB, M.VPADDUSW):
+                ls = 1 if op == M.VPADDUSB else 2
+                ut, hi = ("uint8_t", 255) if ls == 1 else ("uint16_t", 65535)
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={ls}) {{ "
+                        f"{ut} a, b; memcpy(&a, lhs.data()+n, {ls}); memcpy(&b, rhs.data()+n, {ls}); "
+                        f"const unsigned s = unsigned(a) + unsigned(b); const {ut} v = static_cast<{ut}>(s > {hi}u ? {hi}u : s); "
+                        f"memcpy({dst}.data()+n, &v, {ls}); }}{zero_hi} }}")
+            elif op in (M.VPSUBUSB, M.VPSUBUSW):
+                ls = 1 if op == M.VPSUBUSB else 2
+                ut = "uint8_t" if ls == 1 else "uint16_t"
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={ls}) {{ "
+                        f"{ut} a, b; memcpy(&a, lhs.data()+n, {ls}); memcpy(&b, rhs.data()+n, {ls}); "
+                        f"const {ut} v = a > b ? static_cast<{ut}>(a - b) : {ut}(0); memcpy({dst}.data()+n, &v, {ls}); }}{zero_hi} }}")
+            elif op in (M.VPMINSB, M.VPMAXSB, M.VPMINUB, M.VPMAXUB, M.VPMINSW, M.VPMAXSW,
+                        M.VPMINUW, M.VPMAXUW, M.VPMINSD, M.VPMAXSD, M.VPMINUD, M.VPMAXUD):
+                lt, ls = {
+                    M.VPMINSB: ("int8_t", 1), M.VPMAXSB: ("int8_t", 1), M.VPMINUB: ("uint8_t", 1), M.VPMAXUB: ("uint8_t", 1),
+                    M.VPMINSW: ("int16_t", 2), M.VPMAXSW: ("int16_t", 2), M.VPMINUW: ("uint16_t", 2), M.VPMAXUW: ("uint16_t", 2),
+                    M.VPMINSD: ("int32_t", 4), M.VPMAXSD: ("int32_t", 4), M.VPMINUD: ("uint32_t", 4), M.VPMAXUD: ("uint32_t", 4),
+                }[op]
+                cmp_op = "<" if op in (M.VPMINSB, M.VPMINUB, M.VPMINSW, M.VPMINUW, M.VPMINSD, M.VPMINUD) else ">"
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={ls}) {{ "
+                        f"{lt} a, b; memcpy(&a, lhs.data()+n, {ls}); memcpy(&b, rhs.data()+n, {ls}); "
+                        f"const {lt} v = a {cmp_op} b ? a : b; memcpy({dst}.data()+n, &v, {ls}); }}{zero_hi} }}")
+            elif op in (M.VPAVGB, M.VPAVGW):
+                ls, ut = (1, "uint8_t") if op == M.VPAVGB else (2, "uint16_t")
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={ls}) {{ "
+                        f"{ut} a, b; memcpy(&a, lhs.data()+n, {ls}); memcpy(&b, rhs.data()+n, {ls}); "
+                        f"const {ut} v = static_cast<{ut}>((unsigned(a) + unsigned(b) + 1u) >> 1); memcpy({dst}.data()+n, &v, {ls}); }}{zero_hi} }}")
+            elif op in (M.VPMULHW, M.VPMULHUW, M.VPMULLW):
+                it = "int16_t" if op == M.VPMULHW else "uint16_t"
+                prod = ("static_cast<uint32_t>(int32_t(a) * int32_t(b)) >> 16" if op == M.VPMULHW
+                        else ("(uint32_t(a) * uint32_t(b)) >> 16" if op == M.VPMULHUW else "uint32_t(a) * uint32_t(b)"))
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=2) {{ "
+                        f"{it} a, b; memcpy(&a, lhs.data()+n, 2); memcpy(&b, rhs.data()+n, 2); "
+                        f"const uint16_t v = static_cast<uint16_t>({prod}); memcpy({dst}.data()+n, &v, 2); }}{zero_hi} }}")
+            elif op == M.VPMULLD:
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=4) {{ "
+                        f"uint32_t a, b; memcpy(&a, lhs.data()+n, 4); memcpy(&b, rhs.data()+n, 4); "
+                        f"const uint32_t v = a * b; memcpy({dst}.data()+n, &v, 4); }}{zero_hi} }}")
+            elif op in (M.VPMULDQ, M.VPMULUDQ):
+                it, ot = ("int32_t", "int64_t") if op == M.VPMULDQ else ("uint32_t", "uint64_t")
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=8) {{ "
+                        f"{it} a, b; memcpy(&a, lhs.data()+n, 4); memcpy(&b, rhs.data()+n, 4); "
+                        f"const {ot} v = {ot}(a) * {ot}(b); memcpy({dst}.data()+n, &v, 8); }}{zero_hi} }}")
+            elif op == M.VPMULHRSW:
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=2) {{ "
+                        f"int16_t a, b; memcpy(&a, lhs.data()+n, 2); memcpy(&b, rhs.data()+n, 2); "
+                        f"const int32_t t = ((int32_t(a) * int32_t(b)) >> 14) + 1; "
+                        f"const int16_t v = static_cast<int16_t>(t >> 1); memcpy({dst}.data()+n, &v, 2); }}{zero_hi} }}")
+            elif op == M.VPMADDWD:
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=4) {{ "
+                        f"int16_t a0, a1, b0, b1; memcpy(&a0, lhs.data()+n, 2); memcpy(&a1, lhs.data()+n+2, 2); "
+                        f"memcpy(&b0, rhs.data()+n, 2); memcpy(&b1, rhs.data()+n+2, 2); "
+                        f"const uint32_t v = static_cast<uint32_t>(int32_t(a0) * int32_t(b0)) + static_cast<uint32_t>(int32_t(a1) * int32_t(b1)); "
+                        f"memcpy({dst}.data()+n, &v, 4); }}{zero_hi} }}")
+            elif op == M.VPMADDUBSW:
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+=2) {{ "
+                        f"const int s = int(lhs[n]) * int(static_cast<int8_t>(rhs[n])) + int(lhs[n+1]) * int(static_cast<int8_t>(rhs[n+1])); "
+                        f"const int16_t v = static_cast<int16_t>(s < -32768 ? -32768 : (s > 32767 ? 32767 : s)); "
+                        f"memcpy({dst}.data()+n, &v, 2); }}{zero_hi} }}")
+            elif op == M.VPSADBW:
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t q=0; q<{nbytes}; q+=8) {{ uint64_t s = 0; "
+                        f"for (size_t k=0; k<8; ++k) {{ const int d = int(lhs[q+k]) - int(rhs[q+k]); s += static_cast<uint64_t>(d < 0 ? -d : d); }} "
+                        f"memcpy({dst}.data()+q, &s, 8); }}{zero_hi} }}")
+            else:  # M.VMPSADBW
+                imm = i.immediate(3)
+                stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t g=0; g<{nbytes // 16}; ++g) {{ "
+                        f"const size_t lo = 16 * g, s_off = (({imm}u >> (g ? 3u : 0u)) & 3u) * 4u, d_off = (({imm}u >> (g ? 5u : 2u)) & 1u) * 4u; "
+                        f"for (size_t j=0; j<8; ++j) {{ uint16_t s = 0; for (size_t k=0; k<4; ++k) {{ "
+                        f"const int d = int(lhs[lo+d_off+j+k]) - int(rhs[lo+s_off+k]); s += static_cast<uint16_t>(d < 0 ? -d : d); }} "
+                        f"memcpy({dst}.data()+lo+2*j, &s, 2); }} }}{zero_hi} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
