@@ -144,6 +144,18 @@ uint class32(float value) {
     if (magnitude != 0u) return negative ? 0x10u : 0x80u;
     return negative ? 0x20u : 0x40u;
 }
+// v_cmp_class_f16: the same ten classes from the binary16 encoding (the low 16 bits of a word), same bit order:
+// signaling NaN, quiet NaN (bit 9 of the encoding), -inf, -normal, -subnormal, -0, +0, +subnormal, +normal, +inf.
+uint class16(uint bits) {
+    bits &= 0xffffu;
+    uint magnitude = bits & 0x7fffu;
+    bool negative = (bits & 0x8000u) != 0u;
+    if (magnitude > 0x7c00u) return (bits & 0x0200u) != 0u ? 0x2u : 0x1u;
+    if (magnitude == 0x7c00u) return negative ? 0x4u : 0x200u;
+    if (magnitude >= 0x0400u) return negative ? 0x8u : 0x100u;
+    if (magnitude != 0u) return negative ? 0x10u : 0x80u;
+    return negative ? 0x20u : 0x40u;
+}
 // v_fract_f32: x - floor(x) clamped to 0x3f7fffff, so a tiny negative input cannot round up to 1.0.
 // D3D frac has no clamp and differs between adapters. NaN fails the comparison and propagates.
 float fract32(float value) {
@@ -554,8 +566,13 @@ def f16_bits(token, scalar, vector, pending, sample_pending):
 def f16_operand(token, scalar, vector, pending, sample_pending):
     """A binary16 source widened to binary32. Negation and absolute value act on bit 15 of the 16-bit value, as in
     hardware, before widening."""
+    return f"widen16({f16_encoding(token, scalar, vector, pending, sample_pending)})"
+
+
+def f16_encoding(token, scalar, vector, pending, sample_pending):
+    """The binary16 encoding of a source after its modifiers, as an unsigned expression: abs and neg act on bit 15."""
     if token in F16_CONSTANT or re.fullmatch(r"-\d+", token):
-        return f"widen16({f16_bits(token, scalar, vector, pending, sample_pending)})"
+        return f16_bits(token, scalar, vector, pending, sample_pending)
     negate = token.startswith("-")
     body = token[1:] if negate else token
     absolute = re.fullmatch(r"\|([^|]+)\||abs\(([^()]+)\)", body)
@@ -568,7 +585,7 @@ def f16_operand(token, scalar, vector, pending, sample_pending):
         bits = f"({bits} & 0x7fffu)"
     if negate:
         bits = f"({bits} ^ 0x8000u)"
-    return f"widen16({bits})"
+    return bits
 
 
 def f16_exponent(token, scalar, vector, pending, sample_pending):
@@ -1088,6 +1105,37 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             for j, reg in enumerate(regs):
                 scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
             lines.append(f"    bool cmp{i} = (class32({operand}) & {bits}) != 0u;")
+        elif m := match(rf"v_cmp_class_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)"):
+            # The class is read from the binary16 encoding itself (class16). The class mask is a 32-bit integer
+            # source, not a binary16 value, so a float constant there is refused.
+            dst, value, classes = m.groups()
+            regs = lane_mask(dst)
+            if mask != "entry" or pending.intersection(regs):
+                raise ValueError("Invalid comparison")
+            if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
+                bits = f"{int(classes, 0) & 0xffffffff}u"
+            elif re.fullmatch(r"[vs]\d+", classes):
+                bits = vector_u32(classes, scalar, vector, pending, sample_pending)
+            else:
+                raise ValueError("Unsupported class mask")
+            operand = f16_encoding(value, scalar, vector, pending, sample_pending)
+            for j, reg in enumerate(regs):
+                scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+            lines.append(f"    bool cmp{i} = (class16({operand}) & {bits}) != 0u;")
+        elif m := match(rf"v_cmp_({'|'.join(COMPARE)})_f16(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)"):
+            # Both sources are widened from their low halves. Widening binary16 to binary32 is exact (including
+            # subnormals, infinities and the NaN-ness of the operands), so every comparison of the widened values
+            # in binary32 gives the binary16 result, and the f32 predicate table applies unchanged.
+            op, dst, *tokens = m.groups()
+            regs = lane_mask(dst)
+            if mask != "entry" or pending.intersection(regs):
+                raise ValueError("Invalid comparison")
+            values = [f16_operand(t, scalar, vector, pending, sample_pending) for t in tokens]
+            for j, reg in enumerate(regs):
+                scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+            lines.append(f"    precise float cmpa{i} = {values[0]};")
+            lines.append(f"    precise float cmpb{i} = {values[1]};")
+            lines.append(f"    bool cmp{i} = {COMPARE[op].format(f'cmpa{i}', f'cmpb{i}')};")
         elif m := match(rf"v_cmp_({'|'.join(COMPARE)})_f32(?:_e32|_e64)? {LANE_MASK}, ([^,]+), ([^,]+)"):
             op, dst, *tokens = m.groups()
             regs = lane_mask(dst)
