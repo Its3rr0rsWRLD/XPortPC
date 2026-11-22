@@ -1,13 +1,14 @@
 {
   "parts": [
     {"name": "Shader converter: instruction forms", "state": "partial", "note": "Counts and shares are in the figures above."},
-    {"name": "Shader converter: control flow", "state": "partial", "note": "Uniform branches and loops work; branches that split lanes (exec masks) are not started."},
-    {"name": "Shader converter: other stages", "state": "not_started", "note": "Vertex, compute and other stages."},
-    {"name": "GPU memory loads", "state": "partial", "note": "Buffer, global and image loads are done; stores and LDS are not started."},
-    {"name": "Console Direct3D 12 layer (d3d12_xs)", "state": "not_started", "note": "Not started."},
+    {"name": "Shader converter: control flow", "state": "partial", "note": "Uniform branches and loops work. Branches that split lanes (exec masks) are partial: exec-mask algebra, skip branches, discard and divergent loops work; branch mode and the remaining shapes are not done."},
+    {"name": "Shader converter: other stages", "state": "partial", "note": "Vertex and compute translators exist with checks in code; their draws are not yet confirmed on both adapters, so only the pixel stage counts as supported. Other stages are not started."},
+    {"name": "GPU memory access", "state": "partial", "note": "Buffer, global and image loads are done. Buffer, global and typed stores, 32-bit atomics and 2D image stores and atomics are partial: lowered only while the lane is provably active; float and 64-bit atomics are refused. LDS is not started."},
+    {"name": "Console Direct3D 12 layer", "state": "not_started", "note": "Planned in docs/design/runtime.md: console D3D12 calls translated to desktop D3D12, shaders translated at pipeline creation."},
     {"name": "System libraries", "state": "partial", "note": "Desktop xmem.dll (graphics and heap memory) only."},
-    {"name": "Native launcher", "state": "done", "note": "Maps a program and resolves imports through shims, Windows or logged stubs; tested with source-built programs."},
-    {"name": "CPU patch layer", "state": "not_started", "note": "No CPU code is patched yet."},
+    {"name": "Native launcher", "state": "partial", "note": "Maps a program and resolves imports through shims, Windows or logged stubs; tested with source-built programs. Implicit TLS and the process's own module identity are not done."},
+    {"name": "Runtime milestone ladder", "state": "not_started", "note": "Furthest rung reached: none. Next is R1, a source-built program that starts and exits under the launcher with a machine-readable import report (docs/design/runtime.md, section 6)."},
+    {"name": "CPU patch layer", "state": "not_started", "note": "No CPU code is patched yet. Only needed for instructions a host CPU lacks."},
     {"name": "Running a title", "state": "not_started", "note": "No title runs yet."}
   ]
 }
