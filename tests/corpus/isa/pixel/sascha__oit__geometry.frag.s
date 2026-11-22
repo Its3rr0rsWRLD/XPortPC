@@ -1,0 +1,51 @@
+# Pixel Shader
+BB0:
+	s_mov_b32 s0, s3                                            ; be800303
+	s_movk_i32 s3, 0x8000                                       ; b0038000
+	s_load_dwordx4 s[8:11], s[2:3], 0x30                        ; f4080201 fa000030
+	s_not_b64 s[12:13], 0                                       ; be8c0880
+	s_and_saveexec_b64 s[12:13], s[12:13]                       ; be8c240c
+	s_cbranch_execz BB12                                        ; bf880012
+BB1:
+	s_bcnt1_i32_b64 s1, exec                                    ; be81107e
+	s_ff1_i32_b64 s7, exec                                      ; be87147e
+	s_lshl_b64 s[14:15], 1, s7                                  ; 8f8e0781
+	s_and_saveexec_b64 s[14:15], s[14:15]                       ; be8e240e
+	s_cbranch_execz BB7                                         ; bf880004
+BB2:
+	v_mov_b32_e32 v0, s1                                        ; 7e000201
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	buffer_atomic_add v0, off, s[8:11], 0 glc                   ; e0c84000 80020080
+BB7:
+	s_waitcnt_depctr 0xffe3                                     ; bfa3ffe3
+	s_mov_b64 exec, s[14:15]                                    ; befe040e
+	s_waitcnt vmcnt(0)                                          ; bf8c3f70
+	v_readfirstlane_b32 s1, v0                                  ; 7e020500
+	v_mbcnt_lo_u32_b32 v0, exec_lo, 0                           ; d7650000 0001007e
+	v_mbcnt_hi_u32_b32 v0, exec_hi, v0                          ; d7660000 0002007f
+	v_add_nc_u32_e32 v0, s1, v0                                 ; 4a000001
+BB12:
+	s_mov_b64 exec, s[12:13]                                    ; befe040c
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	buffer_load_dword v1, off, s[8:11], 0 offset:4              ; e0300004 80020180
+	s_waitcnt vmcnt(0)                                          ; bf8c3f70
+	s_waitcnt_depctr 0xfffe                                     ; bfa3fffe
+	v_cmpx_gt_u32_e32 v1, v0                                    ; 7da80101
+	s_cbranch_execz BB18                                        ; bf880014
+BB13:
+	s_clause 0x1                                                ; bfa10001
+	s_load_dwordx8 s[16:23], s[2:3], null                       ; f40c0401 fa000000
+	s_load_dwordx4 s[8:11], s[2:3], 0x40                        ; f4080201 fa000040
+	v_mov_b32_e32 v1, v0                                        ; 7e020300
+	s_waitcnt lgkmcnt(0)                                        ; bf8cc07f
+	image_atomic_swap v1, v3, s[16:23] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm glc a16 ; f03c3108 40040103
+	v_lshlrev_b32_e32 v0, 5, v0                                 ; 34000085
+	v_mov_b32_e32 v4, s0                                        ; 7e080200
+	v_lshrrev_b64 v[5:6], 0, s[4:5]                             ; d7000005 00000880
+	v_mov_b32_e32 v7, s6                                        ; 7e0e0206
+	s_waitcnt vmcnt(0)                                          ; bf8c3f70
+	v_mov_b32_e32 v3, v1                                        ; 7e060301
+	buffer_store_dwordx4 v[4:7], v0, s[8:11], 0 offen           ; e0781000 80020400
+	buffer_store_dwordx2 v[2:3], v0, s[8:11], 0 offen offset:16 ; e0741010 80020200
+BB18:
+	s_endpgm                                                    ; bf810000

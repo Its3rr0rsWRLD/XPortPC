@@ -3,6 +3,12 @@
 Measures which gfx1013 instruction forms open-source shaders use. Counts come from `tools/shader_corpus.py`
 over ISA dumps; the table's header comments carry the totals.
 
+The 250 pixel-shader dumps are committed in [tests/corpus/isa/pixel](../../tests/corpus/README.md) with the two
+licenses. `tools/corpus_translate.py` runs each whole program through the pixel translator and writes
+`corpus-translate.tsv`: translated, or the first refusal with its reason and the form or check that raised it. "All
+covered" (every form covered by a test) is not the same as translated; that file gives both. The `corpus_translate`
+test compiles every translated shader with DXC.
+
 ## Compiler route
 
 Mesa RADV 25.2.8 (Ubuntu `mesa-vulkan-drivers` 25.2.8-0ubuntu0.24.04.5) on the null winsys, no GPU:

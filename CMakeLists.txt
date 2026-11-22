@@ -1751,6 +1751,10 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600
         ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/pixel_aot_controls.txt")
+    # The committed corpus pixel shaders (tests/corpus) translated end to end; every translated one must compile.
+    add_test(NAME corpus_translate COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/corpus_translate_check.py" "${DXC_EXECUTABLE}" "${CMAKE_BINARY_DIR}/corpus_translate")
+    set_tests_properties(corpus_translate PROPERTIES TIMEOUT 600)
     foreach(adapter IN ITEMS hardware warp)
         add_test(NAME cpu_native_frame_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/cpu/native_frame_check.py" "$<TARGET_FILE:cpu_frame_guest>"
