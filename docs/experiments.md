@@ -3298,6 +3298,58 @@ The test compares the first bit of each field group with offsets transcribed fro
 
 The optional capture contains verified, top-down RGBA8 pixels converted from the GPU readback. The mip test binds both levels in one texture and renders to a half-size target so implicit derivatives select the lower mip. An original mode-6 fixture varies endpoints by block and indices by texel. The negative control shifts only the lower level's compressed blocks and requires a pixel mismatch. [Microsoft BC7 mode reference](https://learn.microsoft.com/en-us/windows/win32/direct3d11/bc7-format-mode-reference)
 
+### Decoding MDU rANS symbol streams
+
+`tools/bcpack_symbols.py` decodes an MDU entropy stream into per-lane integer
+symbols, consumed byte count, clock count and per-lane fragment/final-state
+diagnostics. Supply independently established symbol widths and a symbol count
+per lane. The implementation uses the public cycle-level entropy reference from
+[bcpack-rs by Ahmet Dedeler](https://github.com/Ahmet-Dedeler/bcpack-rs/tree/5bf5cc56ed56f1ababf1f9592300bd182ff90bd8),
+with Microsoft's MIT-licensed model tables and per-lane decoder semantics.
+[Source revision, extraction and licenses](../tools/_bcpack_rans/README.md).
+
+```powershell
+python -B tools/bcpack_symbols.py stream.bin --alphabet-bits 8 8 5 6 5 5 6 5 8 8 8 8 --symbols 64
+ctest --preset dev --no-tests=error -R '^bcpack_rans_symbols$' -V
+```
+
+The widths above describe the reference's twelve BC1 lanes; they are actual bit
+widths, not zero-based hardware alphabet indices. The wrapper accepts 1–16 lanes,
+widths of 1–9 bits, at most 1,048,576 total symbols and a nonempty input of at most
+2 MiB. It reads a bounded stream, handles changing model headers, alphabet
+narrowing, fragment flushes (restoring at most two omitted low zero bytes), long
+fragment lengths and shared-stream refills with the reference's eight-byte feed window and lockstep symbol outputs. All lanes
+must terminate legally and produce exactly the requested count. Zero padding
+may follow a completed stream; non-zero trailing bytes fail. Truncated streams,
+undefined alphabet selections and illegal terminal states also fail.
+
+Run `python -B tests/bcpack_symbols_check.py` on Linux or Windows without extra
+packages. The controls compare all 9,168 symbols of two unchanged, Rust-generated
+synthetic streams (12 × 64 and 12 × 700), including multiple fragments and more
+lanes than the feed window. A separate reverse-equation encoder checks all 144
+alphabet/model combinations, long headers, narrowed alphabets and flushed
+fragments. Table checks pin the upstream canonical digest and test inverse
+interval boundaries. Rejection controls cover truncation, trailing bytes, wrong
+counts, invalid headers, terminal states and argument limits. The existing
+mode-6 packet from [#442](https://github.com/R0Y00/Xbox2Windows/issues/442) also verifies all 32 symbols across 16 lanes and consumes its full 104 bytes.
+Those expected symbols were cross-checked with
+[Leonida revision 6a6704d](https://github.com/timelery/Leonida/tree/6a6704df1592e1dc4a3215ddf1423a78adb52045),
+which reconstructs the known BC7
+block exactly without provisional entries. Our test checks the entropy symbols
+only. That case requires the bounded flush-zero extension to the vendored
+reference; it fails without it. The CLI has a successful JSON output case and
+a nonzero-exit diagnostic case.
+
+Observed on Linux with Python 3.14.4: all eight entropy test methods passed.
+On Windows 11 build 26300.9974 with Python 3.12.8, the CTest selection
+`^bcpack_(rans_symbols|prefix_and_mip_tail)$` passed 2/2 tests after configuring
+with `INTAKE_PYTHON` pointing to that interpreter. These checks use no GPU.
+
+This adds entropy decoding. BC1 endpoint/codebook reconstruction, BC7 lane-to-field
+mapping, archive stream discovery and rendered pixels remain separate work.
+The existing prefix probe keeps its diagnostic behavior. No local archive or
+texture payload is used by these checks.
+
 ### Reading logical ranges and probing structured resources
 
 `tools/paged_resource.py` reads a logical byte range from an open archive and a supplied segment map. Each segment gives a physical offset, stored byte count excluding padding, decoded byte count, and codec. Raw and zlib segments may be mixed. The reader verifies the complete compressed stream and decoded size before returning bytes from it. Reads that touch an unknown codec fail. Segments after it remain independently addressable.
