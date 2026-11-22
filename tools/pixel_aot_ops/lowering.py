@@ -61,6 +61,7 @@ class Lowering:
         self.exported = False  # the done export has been emitted
         self.layout = None  # the outputs the done export returns, the same on every path (forms/exp.py)
         self.signature = None  # (return type, declaration) of main when it is not the preamble's float4 SV_Target0
+        self.broke = False  # CF-2e: the path left the loop through s_branch to its exit (ended is set with it)
         self.ended = False  # s_endpgm after the export
         # Stage hooks (docs/design/compute-stage.md): the stage being lowered, and the high word a descriptor-list
         # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).

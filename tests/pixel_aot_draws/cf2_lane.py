@@ -160,8 +160,8 @@ def check_cf2_lane_controls():
     assert st.lines[-1] == "    uint selw20 = true ? 1065353216u : 0u;", st.lines
     refused("Select mask is not a tracked comparison", st, 21, "v_cndmask_b32_e64 v14, 0, 1.0, s50")
 
-    # Through lower(): a narrowed EXEC cannot reach the export, and the lane bit or whole-quad mode differing between
-    # the paths of a uniform branch is refused at the join.
+    # Through lower(): a narrowed EXEC reaches the export, which discards the lanes that are off (CF-2d), and the lane
+    # bit differing between the paths of a uniform branch is joined (CF-2e).
     narrowed = with_constants(["v_cmp_lt_f32_e64 s[60:61], v12, v13", "s_and_b64 exec, exec, s[60:61]",
                                "v_mov_b32_e32 v12, 1.0"])
     assert "    if (!ex" in translate(narrowed)  # since CF-2d the export discards the lanes that are off
@@ -176,7 +176,8 @@ def check_cf2_lane_controls():
             assert "    if (!ex" in translate(twin)
     split = with_constants(["v_cmp_lt_f32_e64 s[60:61], v12, v13", "s_cmp_eq_u32 s44, s45", "s_cbranch_scc1 BB0_1",
                             "s_and_b64 exec, exec, s[60:61]", "BB0_1:"])
-    must_reject_for("Execution or load state differs at a join", translate, split)
+    # Since CF-2e the lane bit is joined (`bool jx_<tag>`) and the export discards the lanes that are off.
+    assert "bool jx_" in translate(split)
     # The ACO layout and the whole-quad work the draws render, checked for their HLSL here.
     body = translate(aco_shape(CF_IF_ELSE_BODY)).split("float4 main", 1)[1]
     assert "bool cf" in body and "} else {" in body and "tex.Sample" in body and " ? " not in body, body

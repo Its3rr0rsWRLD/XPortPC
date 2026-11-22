@@ -40,6 +40,12 @@ JOIN_POISON_MESSAGE = "Descriptor state differs at a join (the register is read 
 NULL_BLOCK = ["exp null off, off, off, off done vm", "s_endpgm"]
 
 
+# CF-2e (section 6): operations that read other lanes of the quad (implicit-LOD samples and gathers, interpolation,
+# DPP and the other cross-lane forms), refused inside a loop a lane may have left.
+DERIVATIVE = re.compile(r"^(image_(sample|gather4)(?!\w*_lz?\b)(?!\w*_lz?_)\w*|image_get_lod\w*|v_interp_\w+)\b"
+                        r"|_dpp\b|\bdpp8|quad_perm|row_\w+:|ds_swizzle|v_permlane|v_readlane|v_readfirstlane")
+
+
 def poisoned_operands(scalar, line):
     """The scalar registers an instruction names that hold POISON."""
     if POISON not in scalar.values() and JOIN_POISON not in scalar.values():
@@ -112,6 +118,16 @@ def atoms(lines, expression, depth=0):
         else:
             out |= atoms(lines, definition, depth + 1)
     return frozenset(out)
+
+
+def alias(lines, name):
+    """The bool a name is a copy of (`bool ex<i> = lm<j>;`), followed through such copies."""
+    for _ in range(16):
+        definition = defined_once(lines, name)
+        if definition is None or not re.fullmatch(r"[A-Za-z_]\w*", definition):
+            return name
+        name = definition
+    return name
 
 
 def defined_once(lines, name):
@@ -336,7 +352,8 @@ def program(st, blocks, labels, latch_of):
     def snapshot():
         return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc,
                 "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "vm_issued": st.vm_issued,
-                "sample_dest": dict(st.sample_dest), "exports": st.exports, "exported": st.exported, "ended": st.ended}
+                "sample_dest": dict(st.sample_dest), "exports": st.exports, "exported": st.exported, "ended": st.ended,
+                "broke": st.broke}
 
     def restore(state):
         st.scalar.clear(), st.vector.clear(), st.pending.clear(), st.sample_dest.clear()
@@ -345,6 +362,7 @@ def program(st, blocks, labels, latch_of):
         st.scc, st.ex, st.wqm, st.samples = state["scc"], state["ex"], state["wqm"], state["samples"]
         st.vm_issued, st.exported, st.ended = state["vm_issued"], state["exported"], state["ended"]
         st.exports = state["exports"]
+        st.broke = state.get("broke", False)
 
     def forget_scc():
         st.scc = None
@@ -379,7 +397,7 @@ def program(st, blocks, labels, latch_of):
                 or value[1] not in st.compares:
             raise ValueError("s_cbranch_vccz/vccnz needs VCC from a compare of wave-uniform operands")
         relation, position, ex = st.compares[value[1]]
-        if ex not in live and ex not in dead_skips:
+        if ex not in live and ex not in dead_skips and alias(st.lines, ex) not in {alias(st.lines, b) for b in live}:
             # VCC is the OR of the compare over the lanes active then; it equals the uniform relation only when the
             # wave had an active lane: this one (ex true), or one that kept it from skipping the enclosing region.
             raise ValueError("s_cbranch_vccz/vccnz on a compare made while the wave may have had no active lane")
@@ -401,6 +419,17 @@ def program(st, blocks, labels, latch_of):
 
     def run(instructions):
         for instruction in instructions:
+            text = instruction[1]
+            if any(ctx["divergent"] for ctx in loops) and DERIVATIVE.search(text):
+                # CF-2e (section 6): a quad neighbour may have left the HLSL loop, so its lanes are not there.
+                raise ValueError("Implicit-derivative operation in a divergent loop (derivative in divergent flow)")
+            if awaiting_restore:
+                # CF-2e: after a divergent loop EXEC is the wave's at its last exit, which this lane does not know;
+                # only scalar instructions may come before the restore of the mask saved before the loop.
+                if re.fullmatch(r"s_mov_b64 exec, s\[\d+:\d+\]", text):
+                    awaiting_restore.clear()
+                elif not text.startswith("s_") or "exec" in text:
+                    raise ValueError("EXEC must be restored after a divergent loop before vector work")
             before = st.ex
             yield instruction
             if narrow:
@@ -450,7 +479,9 @@ def program(st, blocks, labels, latch_of):
             narrow.append(implied)
         live.append(st.ex if not term[1] else "true")  # execz: the wave runs the region only with an active lane
         depth = len(live)
+        skips.append(depth)
         yield from walk_region(first, stop)
+        skips.pop()
         del live[depth - 1:]
         if implied is not None:
             narrow[:] = [region for region in narrow if region is not implied]
@@ -504,7 +535,13 @@ def program(st, blocks, labels, latch_of):
             if term is None or (ignore_last and k == stop - 1):
                 k += 1
                 continue
+            if awaiting_restore:
+                raise ValueError("EXEC must be restored after a divergent loop before vector work")
             target = labels[term[-2]]
+            if loops and target == loops[-1]["exit"] and loops[-1]["general"]:
+                yield from loop_exit(k, stop, term, block)
+                k += 1
+                continue
             if term[0] == "exec" and not term[1] and target > k and is_null(target):
                 # s_cbranch_execz to the all-lanes-dead block: not taken. The wave takes it only when no lane is left;
                 # a lane that falls through inactive must stay so to the end (narrow-only from here on).
@@ -547,7 +584,9 @@ def program(st, blocks, labels, latch_of):
             join = target
             other = None
             last = blocks[target - 1]["term"]
-            if last and last[0] == "br" and target - 1 > k:
+            if last and last[0] == "br" and target - 1 > k and not (
+                    loops and loops[-1]["general"] and labels[last[-2]] == loops[-1]["exit"]):
+                # (CF-2e: an arm that ends with s_branch to the loop's exit is an if whose arm breaks.)
                 other = labels[last[-2]]
                 exit_term = blocks[stop - 1]["term"] if ignore_last else None
                 if (other > stop and exit_term and exit_term[0] == "br" and labels[exit_term[-2]] == other
@@ -561,6 +600,7 @@ def program(st, blocks, labels, latch_of):
                 join = other
             cond = condition(term)
             before = snapshot()
+            narrow_mark = len(narrow)
             decl_at = len(st.lines) - 1
             # The fall-through arm runs when the branch is not taken: SCC clear for scc1, set for scc0.
             st.lines.append(f"    if ({'!' if term[1] == 1 else ''}{cond}) {{")
@@ -574,10 +614,10 @@ def program(st, blocks, labels, latch_of):
                 arms.append((snapshot(), len(st.lines)))
                 restore(before)
             st.lines.append("    }")
-            merge_if(before, arms, decl_at, term[-1])
+            merge_if(before, arms, decl_at, term[-1], narrow_mark)
             k = join
 
-    def merge_if(before, arms, decl_at, tag):
+    def merge_if(before, arms, decl_at, tag, narrow_mark):
         """Continue after an if or if-else: `arms` holds each arm's end state and the line where it ends."""
         ends = [state for state, _ in arms]
         total = before["samples"] + sum(state["samples"] - before["samples"] for state in ends)
@@ -585,12 +625,16 @@ def program(st, blocks, labels, latch_of):
         if len(arms) == 1:
             paths.append(before)  # the path that skips the arm
         if not paths:
+            if any(state["broke"] for state in ends):
+                raise ValueError("Every path of an if leaves the loop; the control flow is not structured")
             restore(dict(before, exported=True, ended=True, samples=total))
             return
+        exs = list(dict.fromkeys(state["ex"] for state in paths))
+        join_ex = len(exs) > 1 and not paths[0]["exported"]
         for state in paths[1:]:
             if state["exported"] != paths[0]["exported"]:
                 raise ValueError("Color export on only one path")
-            same_provenance(paths[0], state, "a join")
+            same_provenance(dict(paths[0], ex=state["ex"]) if join_ex else paths[0], state, "a join")
         if paths[0]["exported"]:
             # Every path has returned; only s_endpgm may follow, so no register needs to survive.
             registers, declarations, inserts = before, [], []
@@ -598,13 +642,181 @@ def program(st, blocks, labels, latch_of):
             declarations, joined, registers = plan_join(before, paths, tag, loop=False)
             held = {key: before[key[0]].get(key[1]) for key, info in joined.items() if info[0] == "word"}
             inserts = [(position, sync_lines(state, joined, held)) for state, position in arms if not state["ended"]]
+        if join_ex:
+            # CF-2e: the paths of a uniform branch leave the lane's EXEC bit different (a kill on one of them): it is
+            # joined like a lane mask. In a narrow-only region every path's bit must imply the region's.
+            name = f"jx_{tag}"
+            declarations.append(f"    bool {name} = {before['ex']};")
+            inserts = [(position, fixes + ([f"        {name} = {state['ex']};"] if state["ex"] != before["ex"] else []))
+                       for (position, fixes), (state, _) in zip(inserts, [arm for arm in arms if not arm[0]["ended"]])]
+            if len(narrow) > narrow_mark:
+                # A path skipped to the all-lanes-dead block: from there EXEC may only narrow on that path, which a
+                # join variable cannot express.
+                raise ValueError("Kill on one path of a uniform branch: its lanes are joined with live ones")
+            for implied in narrow:
+                if not all(implies(st.lines, bit, implied) for bit in exs):
+                    raise ValueError("EXEC re-enabled inside a skipped region (a mask saved outside it is restored)")
+                implied.add(name)
         for position, fixes in sorted(inserts, reverse=True):
             st.lines[position:position] = fixes
         st.lines[decl_at:decl_at] = declarations
         restore(dict(paths[0], scalar=dict(registers["scalar"]), vector=dict(registers["vector"]), scc=None,
                      samples=total))
+        if join_ex:
+            st.ex = name
+
+    def cf1_shape(header, latch):
+        """The CF-1 loops: a conditional back edge, or s_branch back to a header that leaves through its own
+        conditional branch to the block after the latch."""
+        term, exit_term = blocks[latch]["term"], blocks[header]["term"]
+        return term[0] != "br" or (header != latch and exit_term and exit_term[0] in ("cbr", "vcc")
+                                   and labels[exit_term[2]] == latch + 1)
+
+    def divergent_exit(header, latch):
+        """Whether the loop has a lane-local exit: s_cbranch_scc0 to the block after its latch (section 4)."""
+        return any(blocks[k]["term"] and blocks[k]["term"][:2] == ("cbr", 0)
+                   and labels[blocks[k]["term"][2]] == latch + 1 for k in range(header, latch))
+
+    def loop_exit(k, stop, term, block):
+        """CF-2e: a branch from the body of the innermost loop to the block after its latch. The lane-local exit
+        (s_andn2_b64 Sc, Sc, exec; s_cbranch_scc0 EXIT) leaves when this lane does not continue: the wave leaves only
+        when no lane does, and a lane whose bit is clear is inactive for the rest of the wave's loop. A uniform
+        conditional branch leaves with the wave; s_branch EXIT ends an arm."""
+        ctx = loops[-1]
+        if skips and skips[-1] > ctx["live"]:
+            raise ValueError("Loop exit inside a skipped region")
+        if term[0] == "cbr" and not term[1] and lane_mask_scc(block):
+            bit = st.lane_scc[1]
+            text = f"if (!{bit}) break;"
+            ctx["continuing"].add(bit)
+            live.append(bit)  # a lane past this test continues, so it is active: the wave has an active lane
+            # The lanes that left stay inactive for the rest of the wave's loop: EXEC may only narrow from the bit.
+            ctx["narrowed"].append({bit})
+            narrow.append(ctx["narrowed"][-1])
+        elif term[0] == "br":
+            if k != stop - 1:
+                raise ValueError("A break must end an arm of an if")
+            text = "break;"
+        elif term[0] in ("cbr", "vcc"):
+            cond = condition(term)
+            text = f"if ({'' if term[1] else '!'}{cond}) break;"
+        else:
+            raise ValueError("A skip branch on EXEC to a loop's exit")
+        ctx["ends"].append(snapshot())
+        if ctx["joined"] is not None:
+            st.lines.extend(sync_lines({"scalar": dict(st.scalar), "vector": dict(st.vector)}, ctx["joined"],
+                                       ctx["held"]))
+        st.lines.append(f"        {text}")
+        st.scc = None
+        if term[0] == "br":
+            st.ended = st.broke = True
+        yield from ()
+
+    def general_loop(header, latch):
+        """CF-2e: a loop with exits from anywhere in its body to the block after the latch (loop_exit), its back edge
+        s_branch or a conditional branch at the latch. The lane's EXEC bit is carried around it (`bool jx_<tag>`); in a
+        loop with a lane-local exit EXEC may only narrow from the header's bit, implicit derivatives are refused, the
+        scalars it changes are poisoned after it, and EXEC must be restored after it before vector work."""
+        tag = blocks[latch]["term"][-1]
+        divergent = divergent_exit(header, latch)
+        entry = snapshot()
+        mark = len(st.lines)
+        depth = len(live)
+        ends, backs, continuing = [], [], set()
+        yield from general_body(header, latch, None, {}, ends, backs, continuing, divergent)
+        if blocks[latch]["term"][0] == "br" and len(ends) == len(backs):
+            raise ValueError("A loop must leave through a branch to the block after its latch (it has no exit)")
+        # Whether a lane that comes around the back edge is active: its bit there is one a lane-local exit test
+        # passed (or the entry's, unchanged).
+        passed = {alias(st.lines, bit) for bit in continuing} | {entry["ex"]}
+        backs_continue = all(alias(st.lines, state["ex"]) in passed for state in backs)
+        del st.lines[mark:]
+        del live[depth:]
+        restore(entry)
+        for state in ends:
+            for key in ("wqm", "pending", "sample_dest", "exports"):
+                if entry[key] != state[key]:
+                    raise ValueError("Execution or load state differs at a loop exit or back edge")
+            if entry["sample_dest"] and entry["vm_issued"] != state["vm_issued"]:
+                raise ValueError("Execution or load state differs at a loop exit or back edge")
+            if state["exported"] or state["ended"] and not state["broke"]:
+                raise ValueError("Color export or program end inside a loop")
+        declarations, joined, joined_state = plan_join(entry, ends, tag, loop=True)
+        carry = None
+        if any(state["ex"] != entry["ex"] for state in backs):
+            carry = f"jx_{tag}"
+            declarations.append(f"    bool {carry} = {entry['ex']};")
+        st.lines.extend(declarations)
+        held = {key: joined_state[key[0]][key[1]] for key in joined}
+        for key in joined:
+            (st.scalar if key[0] == "scalar" else st.vector)[key[1]] = joined_state[key[0]][key[1]]
+        poisoned = {reg: value for reg, value in joined_state["scalar"].items() if value in (POISON, JOIN_POISON)}
+        st.scalar.update(poisoned)
+        if carry:
+            st.ex = carry
+            entry_live = entry["ex"] in live or entry["ex"] in dead_skips
+            if entry_live and backs_continue:
+                live.append(carry)  # every lane that comes around is active
+        starting = snapshot()
+        again, again_backs = [], []
+        yield from general_body(header, latch, joined, held, again, again_backs, set(), divergent, carry)
+        for state in again:
+            for space in ("scalar", "vector"):
+                for reg, value in starting[space].items():
+                    if (space, reg) not in joined and state[space].get(reg) != value:
+                        raise ValueError("Loop state is not stable; the program is refused")
+            if carry is None and state in again_backs and state["ex"] != entry["ex"]:
+                raise ValueError("Loop state is not stable; the program is refused")
+        del live[depth:]
+        exit_samples = st.samples
+        restore(entry)
+        for key in joined:
+            (st.scalar if key[0] == "scalar" else st.vector)[key[1]] = joined_state[key[0]][key[1]]
+        st.scalar.update(poisoned)
+        st.samples = exit_samples
+        if divergent:
+            # The wave goes on with the scalars after this lane left: those the loop changes are poisoned, unless
+            # every exit leaves them as the same constant.
+            for reg in set(entry["scalar"]).union(*(state["scalar"] for state in ends)):
+                values = [state["scalar"].get(reg) for state in ends]
+                if any(value != entry["scalar"].get(reg) for value in values):
+                    keep = all(value == values[0] for value in values) and scope_free(values[0])
+                    st.scalar[reg] = values[0] if keep else POISON
+            st.scc = None
+        if divergent or carry or any(state["ex"] != entry["ex"] for state in ends):
+            st.ex = "false"
+            awaiting_restore.append(True)
+
+    def general_body(header, latch, joined, held, ends, backs, continuing, divergent, carry=None):
+        term = blocks[latch]["term"]
+        st.lines.append("    [loop] while (true) {")
+        ctx = {"exit": latch + 1, "ends": ends, "joined": joined, "held": held, "continuing": continuing,
+               "divergent": divergent, "general": True, "live": len(live), "narrowed": []}
+        loops.append(ctx)
+        implied = {st.ex} if divergent else None
+        if implied is not None:
+            narrow.append(implied)
+        yield from walk_region(header, latch + 1, ignore_last=True, entered=header)
+        scoped = [implied, *ctx["narrowed"]]
+        narrow[:] = [region for region in narrow if not any(region is other for other in scoped)]
+        loops.pop()
+        if term[0] != "br":
+            cond = condition(term)
+            if joined is not None:
+                st.lines.extend(sync_lines({"scalar": dict(st.scalar), "vector": dict(st.vector)}, joined, held))
+            st.lines.append(f"        if ({'!' if term[1] else ''}{cond}) break;")
+        ends.append(snapshot())
+        backs.append(ends[-1])
+        if joined is not None:
+            st.lines.extend(sync_lines({"scalar": dict(st.scalar), "vector": dict(st.vector)}, joined, held))
+        if carry is not None and st.ex != carry:
+            st.lines.append(f"        {carry} = {st.ex};")
+        st.lines.append("    }")
 
     def walk_loop(header, latch):
+        if divergent_exit(header, latch) or not cf1_shape(header, latch):
+            yield from general_loop(header, latch)
+            return
         tag = blocks[latch]["term"][-1]
         entry = snapshot()
         mark = len(st.lines)
@@ -642,6 +854,7 @@ def program(st, blocks, labels, latch_of):
         """One lowering of a loop. With joined None this is the dry run that finds which registers the body changes."""
         term = blocks[latch]["term"]
         st.lines.append("    [loop] while (true) {")
+        loops.append({"general": False, "divergent": False, "exit": latch + 1})
 
         def leave(cond, breaks_when):
             if joined is not None:
@@ -669,7 +882,11 @@ def program(st, blocks, labels, latch_of):
         if joined is not None:
             st.lines.extend(sync_lines(snapshot_for_sync(), joined, held))
         st.lines.append("    }")
+        loops.pop()
 
+    loops = []  # CF-2e: the loops the walk is in, innermost last (general_loop)
+    skips = []  # the skipped regions the walk is in
+    awaiting_restore = []  # non-empty after a divergent loop until EXEC is restored
     narrow = []  # the implied sets of the narrow-only regions the walk is in (check_exec)
     null_targets = set()
     live = ["true"]  # lane bits under which the wave provably has an active lane (uniform_vcc), by region
