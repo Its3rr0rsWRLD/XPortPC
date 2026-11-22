@@ -16,7 +16,7 @@ Hardware reporters can use the [standalone package](tools/gpu-check/README.md). 
 
 The [first independent clean build](https://github.com/R0Y00/Xbox2Windows/issues/2#issuecomment-7063351821) records the toolchain and three smoke-test outcomes. If a clean build fails on your machine, open a [build bug report](https://github.com/R0Y00/Xbox2Windows/issues/new?template=bug_report.yml) with the commit, toolchain, first failing command and diagnostic. Link a feedback-driven fix to its report and ask the reporter to verify the change.
 
-Start with the [first build](README.md#first-build). Create the Python environment before configuring to include the script-path host and Python-driven script, texture, shader and PE checks. List the tests registered in your environment with `ctest --preset dev -N`, then run the closest group from the [experiment table](README.md#choose-an-experiment). Use `--no-tests=error` when checking a new filter so an empty selection fails.
+Start with the [first build](README.md#first-build). Create the Python environment before configuring to include the script-path host and Python-driven script, texture, shader and PE checks. List the tests registered in your environment with `ctest --preset dev -N`, then run the closest group from the [experiment table](README.md#working-on-xportpc). Use `--no-tests=error` when checking a new filter so an empty selection fails.
 
 | Location | What to work on |
 |---|---|
