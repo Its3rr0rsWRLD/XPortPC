@@ -264,6 +264,19 @@ class Model:
                         s[n] = self.descriptors[entry[1] + (at - start) // 4]
                         if entry[0] == "constants":
                             cbv_words = self.descriptors[entry[1]:entry[1] + 4]
+            elif name.startswith("s_buffer_load_dword") and ops[2].startswith("s"):
+                # A run-time byte offset (docs/design/compute-stage.md, dynamic scalar constant loads): the two low
+                # bits ignored, each dword wholly inside the 64 KiB binding read, any other dword 0.
+                base = span(ops[1])
+                assert [s[n] for n in base] in ([("cbv", j) for j in range(4)], cbv_words)
+                register, _, extra = ops[2].partition(" offset:")
+                low = M32 if "dyn_unmasked" in self.flaws else ~3  # a wrong reference keeps the two low bits
+                start = (0 if "dyn_ignored" in self.flaws else sreg(register) & low) + int(extra or "0", 0)
+                for j, n in enumerate(span(ops[0])):
+                    at = start + 4 * j
+                    if "dyn_wrap" in self.flaws:  # a wrong reference: no range check, the offset wraps at 64 KiB
+                        at %= 0x10000
+                    s[n] = self.constants[at // 4] if at + 4 <= 0x10000 else 0
             elif name.startswith("s_buffer_load_dword"):
                 base = span(ops[1])
                 assert [s[n] for n in base] in ([("cbv", j) for j in range(4)], cbv_words)
@@ -286,6 +299,10 @@ class Model:
                     address = (lo | hi << 32) + v[int(ops[1][1:])]
                 for j, n in enumerate(span(ops[0])):
                     v[n] = self.memory.word((address + imm + 4 * j) % (1 << 64))
+            elif name in ("s_lshl_b32", "s_and_b32", "s_or_b32"):
+                a, b = word(ops[1]), word(ops[2])
+                s[int(ops[0][1:])] = {"s_lshl_b32": (a << (b & 31)) & M32, "s_and_b32": a & b,
+                                      "s_or_b32": a | b}[name]
             elif name == "v_mov_b32":
                 v[int(ops[0][1:])] = word(ops[1])
             elif name in ("v_add_nc_u32", "v_and_b32", "v_xor_b32", "v_or_b32", "v_lshlrev_b32", "v_mul_u32_u24"):
@@ -1003,6 +1020,50 @@ def draw_wide(directory, compiler, renderer, backend):
     return run_sets(directory, compiler, renderer, backend, "wide", WIDE, WIDE_ROLES, sets, flaws)
 
 
+# s_buffer_load at a run-time byte offset made from push words (the shape of the corpus's cascade depth pass, which
+# indexes a matrix array by a push-constant cascade index): 64 * push0 | (push1 & 3), x4 and x2 at offset:0x3c. A
+# program with a run-time constant offset declares the whole 64 KiB binding (params[4096]), and the case binds all of it.
+DYNAMIC = [
+    "s_setprio 3",
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "v_add_nc_u32_e32 v0, s0, v0",
+    "s_movk_i32 s5, 0x8000",
+    "s_load_dwordx4 s[12:15], s[4:5], null",
+    "s_lshl_b32 s8, s6, 6",
+    "s_and_b32 s9, s7, 3",
+    "s_or_b32 s8, s8, s9",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dwordx4 s[16:19], s[12:15], s8",
+    "s_buffer_load_dwordx2 s[20:21], s[12:15], s8 offset:0x3c",
+    "s_waitcnt lgkmcnt(0)",
+    "v_cvt_f32_ubyte0_e32 v1, v0",
+    "v_add_nc_u32_e32 v2, s16, v0",
+    "v_mov_b32_e32 v3, s17",
+    "v_mov_b32_e32 v4, s18",
+    "v_xor_b32_e32 v5, s19, v0",
+    "v_mov_b32_e32 v6, s20",
+    "v_mov_b32_e32 v7, s21",
+    "exp pos0 v1, v2, v3, v4 done vm",
+    "exp param0 v5, v6, v7, v0",
+    "s_endpgm",
+]
+DYNAMIC_ROLES = {3: ("base_vertex",), 4: ("descriptors", HIGH, {0: ("constants",)}), 6: ("inline", 0),
+                 7: ("inline", 1)}
+
+
+def draw_dynamic(directory, compiler, renderer, backend):
+    """s_buffer_load_dwordx4/x2 at 64 * push0 | (push1 & 3) (+0x3c): the low bits ignored, the last dwords of the
+    64 KiB binding read, past it 0 dword by dword. Wrong references: the offset ignored, the offset wrapped at 64 KiB
+    in place of reading 0, the low bits kept in the range check."""
+    words = wide_constants(7, 16384)
+    sets = [(words, Memory([]), 4, 0, {"push": [3, 2]}), (words, Memory([]), 3, 5, {"push": [1022, 1]}),
+            (words, Memory([]), 3, 1, {"push": [1023, 3]}), (words, Memory([]), 2, 2, {"push": [1024, 1]}),
+            (words, Memory([]), 2, 0, {"push": [0x4000001, 0]})]
+    flaws = [{"dyn_ignored"}, {"dyn_wrap"}, {"dyn_unmasked"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "dynamic", DYNAMIC, DYNAMIC_ROLES, sets, flaws)
+
+
 def draw_trig(directory, compiler, renderer, backend):
     """Card V-4: v_sin_f32 and v_cos_f32 (e32, and e64 with the div:2 output modifier) on angles in revolutions, each
     result scaled and rounded to an integer before export (see TRIG)."""
@@ -1021,13 +1082,13 @@ def draw_carry(directory, compiler, renderer, backend):
 
 DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan,
                  "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance, "trig": draw_trig,
-                 "carry": draw_carry, "wide": draw_wide}
+                 "carry": draw_carry, "wide": draw_wide, "dynamic": draw_dynamic}
 PROGRAMS = ((FETCH, FETCH_ROLES, None), (MATRIX, MATRIX_ROLES, None), (VERTEX_ID, VERTEX_ID_ROLES, None),
             (NAN, NAN_ROLES, None), (NGG_FETCH, ngg_roles(FETCH_ROLES), None),
             (NGG_MATRIX, ngg_roles(MATRIX_ROLES), None), (NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES), None),
             (INSTANCE, INSTANCE_ROLES, None), (NGG_INSTANCE, ngg_roles(INSTANCE_ROLES), None),
             (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None),
-            (WIDE, WIDE_ROLES, None))
+            (WIDE, WIDE_ROLES, None), (DYNAMIC, DYNAMIC_ROLES, None))
 
 
 # --- controls (no DXC, no GPU) -----------------------------------------------------------------------------------------
@@ -1329,12 +1390,35 @@ def check_wide_controls():
         assert model(flaw) != model(), flaw
 
 
+def check_dynamic_controls():
+    """A run-time constant offset declares the whole binding and reads 0 past it; every wrong reference differs; the
+    neighbours stay refused: a misaligned offset: field, an offset register still being loaded, a descriptor load at an
+    SGPR offset."""
+    source, layout = lower(DYNAMIC, DYNAMIC_ROLES)
+    assert "uint4 params[4096];" in source and "& 0xfffffffcu;" in source and "<= 65468u ?" in source, source[:600]
+    words = wide_constants(7, 16384)
+    for flaw in ({"dyn_ignored"}, {"dyn_wrap"}, {"dyn_unmasked"}):
+        assert any(outputs(Model(DYNAMIC_ROLES, words, Memory([]), flaw, push=push), DYNAMIC, layout, range(3), 1)[0]
+                   != outputs(Model(DYNAMIC_ROLES, words, Memory([]), (), push=push), DYNAMIC, layout, range(3), 1)[0]
+                   for push in ([3, 2], [1023, 3], [1024, 1])), flaw
+    must_refuse([line.replace("offset:0x3c", "offset:0x3e") for line in DYNAMIC], DYNAMIC_ROLES, "misaligned")
+    early = [line for line in DYNAMIC if line != "s_waitcnt lgkmcnt(0)"]
+    must_refuse(early, DYNAMIC_ROLES)
+    chained = list(DYNAMIC)
+    chained.insert(chained.index("s_buffer_load_dwordx2 s[20:21], s[12:15], s8 offset:0x3c"),
+                   "s_buffer_load_dword s8, s[12:15], s16")  # its offset register is a load still outstanding
+    must_refuse(chained, DYNAMIC_ROLES)
+    must_refuse([line.replace("s_load_dwordx4 s[12:15], s[4:5], null", "s_load_dwordx4 s[12:15], s[4:5], s6")
+                 for line in DYNAMIC], DYNAMIC_ROLES, "immediate")
+
+
 def check_controls():
     check_reference_arithmetic()
     check_translation_shape()
     check_refusals()
     check_v4_controls()
     check_wide_controls()
+    check_dynamic_controls()
     # Every wrong reference of every family changes the model's output for at least one draw input; the draws check
     # that the renderer then reports the mismatch. Here: the model runs every family's program without error.
     model = Model(FETCH_ROLES, fetch_constants(vsharp(HIGH_BASE, 24, 8, 0), vsharp(HIGH_BASE, 12, 8, 1)),

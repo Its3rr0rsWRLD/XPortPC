@@ -192,9 +192,16 @@ uint fma_mix_sat(uint v, bool wide) {
 
 
 def need_fma_mix(st):
-    """Emit FMA_MIX_HELPERS once (fma_mix_round, fma_mix_sat and fm_f16_word are shared with v_pk_fma_f16)."""
-    if "fma_mix" not in st.helpers:
-        st.helpers.add("fma_mix")
+    """Emit FMA_MIX_HELPERS once (fma_mix_round, fma_mix_sat and fm_f16_word are shared with v_pk_fma_f16). The text is
+    placed by place_fma_mix once the program is lowered: inserting it before the preamble while lowering would move
+    every line the control-flow walk has recorded a position of (a loop's dry run, an if's join declarations)."""
+    st.helpers.add("fma_mix")
+
+
+def place_fma_mix(st):
+    """Insert FMA_MIX_HELPERS just before the preamble, where need_fma_mix used to insert it at first use (the text
+    after lowering is the same: nothing else is put before the preamble while lowering)."""
+    if "fma_mix" in st.helpers and FMA_MIX_HELPERS not in st.lines:
         st.lines.insert(st.lines.index(st.preamble), FMA_MIX_HELPERS)
 
 

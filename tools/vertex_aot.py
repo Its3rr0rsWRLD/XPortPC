@@ -42,6 +42,7 @@ from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import (HELPERS, MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS,  # noqa: E402
                                 TITLE_LOOKUP)
 from pixel_aot_ops.lowering import Lowering  # noqa: E402
+from pixel_aot_ops.forms.vop3p import place_fma_mix  # noqa: E402
 from pixel_aot_ops.registers import sgpr_name, sgpr_pair, vector_u32  # noqa: E402
 from vertex_corpus_report import features  # noqa: E402
 
@@ -592,6 +593,7 @@ def _layout(exports, vectors, stage, uses_instance):
 
 
 def _assemble(st, exports, vectors, root, uses_params, uses_vsharps, uses_instance):
+    place_fma_mix(st)
     lines = st.lines
     params = sorted(int(name[5:]) for name in exports if name.startswith("param"))
     # Output order matches what pixel_aot declares for its inputs: TEXCOORD0, SV_Position, then TEXCOORD1..N, so D3D12

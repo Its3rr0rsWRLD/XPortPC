@@ -196,9 +196,16 @@ def check_scalar_load_controls() -> None:
     refuses(translate, "exceeds", make("s_mov_b32 s96, 0xf8", "s_buffer_load_dwordx4 s[88:91], s[44:47], s96"))
     refuses(translate, "exceeds", make("s_mov_b32 s96, 0xe8", "s_buffer_load_dwordx4 s[88:91], s[44:47], s96 offset:0x10"))
     refuses(translate, "misaligned", make("s_mov_b32 s96, 0x3", "s_buffer_load_dword s94, s[44:47], s96"))
-    # An offset register must hold a value known when translating: a loaded word, a pending one and an unset one are not.
-    for loads in (["s_buffer_load_dword s96, s[44:47], 0x8", "s_waitcnt lgkmcnt(0)"], ["s_buffer_load_dword s96, s[44:47], 0x8"], []):
+    # An offset register that holds a loaded word is a run-time offset (forms/smem.dynamic_constant_load,
+    # docs/design/compute-stage.md): low two bits cleared, each dword read only inside the 256 bound bytes, else 0.
+    # A pending word and an unset register are refused, and so is an offset: field that is not a multiple of 4.
+    source = translate(make("s_buffer_load_dword s96, s[44:47], 0x8", "s_waitcnt lgkmcnt(0)",
+                            "s_buffer_load_dword s94, s[44:47], s96 offset:0x10"))
+    assert "= (params[0].z) & 0xfffffffcu;" in source and " <= 236u ? params[min(" in source, source
+    for loads in (["s_buffer_load_dword s96, s[44:47], 0x8"], []):
         refuses(translate, "known constant", make(*loads, "s_buffer_load_dword s94, s[44:47], s96"))
+    refuses(translate, "misaligned", make("s_buffer_load_dword s96, s[44:47], 0x8", "s_waitcnt lgkmcnt(0)",
+                                          "s_buffer_load_dword s94, s[44:47], s96 offset:0x12"))
     must_reject(translate, make("s_buffer_load_dword s94, s[44:47], 0x10 offset:0x10"))
     # Destination ranges: 64-bit pairs are even-aligned, wider ranges are 4-aligned, and s105 is the last SGPR.
     for load in ("s_buffer_load_dwordx16 s[66:81], s[44:47], 0x40", "s_buffer_load_dwordx16 s[96:111], s[44:47], 0x40",

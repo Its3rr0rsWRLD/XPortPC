@@ -229,7 +229,11 @@ def plan_join(entry, ends, tag, *, loop):
                 continue
             if any(value is None for value in new) or (old is None and loop):
                 continue
-            if any(reg in end["pending"] or reg in end["sample_dest"] for end in ends):
+            if any(reg in end["sample_dest"] for end in ends) or any(
+                    reg in end["pending"] and word_expr(value) is None for end, value in zip(ends, new)):
+                # An outstanding scalar load of a data word may be joined (docs/design/compute-stage.md, scalar loads
+                # across joins): its tracked value is the word the load returns, computed when it issues, and the
+                # register stays outstanding after the join (carried_pending), so no read sees it before lgkmcnt(0).
                 raise ValueError("Outstanding load at a join")
             if any(value in (POISON, JOIN_POISON) for value in new):
                 # CF-2c: poisoned on some path, so poisoned after the region (and, in a loop, from its first iteration).
@@ -250,6 +254,12 @@ def plan_join(entry, ends, tag, *, loop):
             elif not loop and all(value == new[0] for value in new):
                 state[space][reg] = new[0]
             elif not loop and space == "scalar":
+                state[space][reg] = JOIN_POISON
+            elif space == "scalar" and old is not None and len({word_expr(value) is None for value in [old, *new]}) > 1:
+                # A scalar register that holds provenance (a descriptor word) at the loop's entry and data at a back
+                # edge, or the reverse (a V# loaded into registers the body later reuses for data): at the header it
+                # holds one or the other by iteration, so it is unreadable there and after the loop, and the body
+                # must write it before it reads it (lowering refuses a read of JOIN_POISON). Not a VGPR.
                 state[space][reg] = JOIN_POISON
             else:
                 raise ValueError("Descriptor state differs at a join" if not loop else "Descriptor state differs at a loop back edge")
@@ -368,8 +378,12 @@ def program(st, blocks, labels, latch_of):
     def forget_scc():
         st.scc = None
 
-    def same_provenance(first, second, where):
+    def same_provenance(first, second, where, carried=False):
+        """carried: `first` is a loop's entry whose outstanding scalar loads include those of every back edge
+        (carried_pending), so `second` may have fewer outstanding."""
         for key in ("ex", "wqm", "pending", "sample_dest", "exports"):
+            if key == "pending" and carried and second[key] <= first[key]:
+                continue
             if first[key] != second[key]:
                 raise ValueError(f"Execution or load state differs at {where}")
         if first["sample_dest"] and first["vm_issued"] != second["vm_issued"]:
@@ -723,20 +737,23 @@ def program(st, blocks, labels, latch_of):
         entry = snapshot()
         mark = len(st.lines)
         depth = len(live)
-        ends, backs, continuing = [], [], set()
-        yield from general_body(header, latch, None, {}, ends, backs, continuing, divergent)
-        if blocks[latch]["term"][0] == "br" and len(ends) == len(backs):
-            raise ValueError("A loop must leave through a branch to the block after its latch (it has no exit)")
-        # Whether a lane that comes around the back edge is active: its bit there is one a lane-local exit test
-        # passed (or the entry's, unchanged).
-        passed = {alias(st.lines, bit) for bit in continuing} | {entry["ex"]}
-        backs_continue = all(alias(st.lines, state["ex"]) in passed for state in backs)
-        del st.lines[mark:]
-        del live[depth:]
-        restore(entry)
+        while True:
+            ends, backs, continuing = [], [], set()
+            yield from general_body(header, latch, None, {}, ends, backs, continuing, divergent)
+            if blocks[latch]["term"][0] == "br" and len(ends) == len(backs):
+                raise ValueError("A loop must leave through a branch to the block after its latch (it has no exit)")
+            # Whether a lane that comes around the back edge is active: its bit there is one a lane-local exit test
+            # passed (or the entry's, unchanged).
+            passed = {alias(st.lines, bit) for bit in continuing} | {entry["ex"]}
+            backs_continue = all(alias(st.lines, state["ex"]) in passed for state in backs)
+            del st.lines[mark:]
+            del live[depth:]
+            restore(entry)
+            if not carried_pending(entry, ends):
+                break
         for state in ends:
             for key in ("wqm", "pending", "sample_dest", "exports"):
-                if entry[key] != state[key]:
+                if entry[key] != state[key] and not (key == "pending" and state[key] <= entry[key]):
                     raise ValueError("Execution or load state differs at a loop exit or back edge")
             if entry["sample_dest"] and entry["vm_issued"] != state["vm_issued"]:
                 raise ValueError("Execution or load state differs at a loop exit or back edge")
@@ -764,8 +781,10 @@ def program(st, blocks, labels, latch_of):
         for state in again:
             for space in ("scalar", "vector"):
                 for reg, value in starting[space].items():
-                    if (space, reg) not in joined and state[space].get(reg) != value:
+                    if (space, reg) not in joined and state[space].get(reg) != value and value != JOIN_POISON:
                         raise ValueError("Loop state is not stable; the program is refused")
+            if not state["pending"] <= entry["pending"]:
+                raise ValueError("Loop state is not stable; the program is refused")
             if carry is None and state in again_backs and state["ex"] != entry["ex"]:
                 raise ValueError("Loop state is not stable; the program is refused")
         del live[depth:]
@@ -814,6 +833,19 @@ def program(st, blocks, labels, latch_of):
             st.lines.append(f"        {carry} = {st.ex};")
         st.lines.append("    }")
 
+    def carried_pending(entry, ends):
+        """Scalar loads as loop-carried state (docs/design/compute-stage.md): an SGPR whose scalar load is outstanding
+        at some back edge or exit is outstanding at the header from the first iteration on, a conservative superset
+        of the loads in flight (only lgkmcnt(0) completes them, and a read or write of an outstanding SGPR is
+        refused). When that adds registers to the entry, the entry (and st) is widened and True returned: the dry run
+        must run again from it, until no end adds one (the set only grows, so this stops)."""
+        carried = set(entry["pending"]).union(*(state["pending"] for state in ends))
+        if carried == entry["pending"]:
+            return False
+        entry["pending"] = carried
+        restore(entry)
+        return True
+
     def walk_loop(header, latch):
         if divergent_exit(header, latch) or not cf1_shape(header, latch):
             yield from general_loop(header, latch)
@@ -821,12 +853,15 @@ def program(st, blocks, labels, latch_of):
         tag = blocks[latch]["term"][-1]
         entry = snapshot()
         mark = len(st.lines)
-        ends = []
-        yield from loop_body(header, latch, None, {}, ends)
-        del st.lines[mark:]
-        restore(entry)
+        while True:
+            ends = []
+            yield from loop_body(header, latch, None, {}, ends)
+            del st.lines[mark:]
+            restore(entry)
+            if not carried_pending(entry, ends):
+                break
         for state in ends:
-            same_provenance(entry, state, "a loop back edge")
+            same_provenance(entry, state, "a loop back edge", carried=True)
             if state["exported"] or state["ended"]:
                 raise ValueError("Color export or program end inside a loop")
         declarations, joined, joined_state = plan_join(entry, ends, tag, loop=True)
@@ -842,8 +877,10 @@ def program(st, blocks, labels, latch_of):
         for state in again:
             for space in ("scalar", "vector"):
                 for reg, value in starting[space].items():
-                    if (space, reg) not in joined and state[space].get(reg) != value:
+                    if (space, reg) not in joined and state[space].get(reg) != value and value != JOIN_POISON:
                         raise ValueError("Loop state is not stable; the program is refused")
+            if not state["pending"] <= entry["pending"]:
+                raise ValueError("Loop state is not stable; the program is refused")
         exit_samples = st.samples
         restore(entry)
         for key in joined:

@@ -44,6 +44,7 @@ from pixel_aot_ops.control_flow import (find_loops, poisoned_operands, program, 
 from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
 from pixel_aot_ops.bindings import RADV_DESCRIPTOR_HIGH, SET_STRIDE, overlap, pointer_role, valid_key  # noqa: E402
 from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
+from pixel_aot_ops.forms.vop3p import place_fma_mix  # noqa: E402
 
 # Parameter order: 0 the constant words (params, b0), 1 the title ranges (t2), 2 the eight title-memory UAVs (u0..u7,
 # space 1), 3 the range count (b1).
@@ -236,6 +237,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
 
 
 def emit(st, numthreads):
+    place_fma_mix(st)
     lines = list(st.lines)
     pos = lines.index(PREAMBLE)
     head = ["// gfx1013 compute program translated by tools/compute_aot.py (docs/design/compute-stage.md).",
