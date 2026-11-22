@@ -93,6 +93,7 @@ CPU_FIXTURES = {
     "bmi2": "cpu_aot_bmi2",
     "sse41_int": "cpu_aot_sse41_int",
     "sse41_extend": "cpu_aot_sse41_extend",
+    "sse2_sat_mul": "cpu_aot_sse2_sat_mul",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
