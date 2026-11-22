@@ -217,4 +217,5 @@ def binary_fixtures():
 
 
 def draw(directory, compiler, renderer, backend):
-    run_programs(directory, compiler, renderer, backend, "atomics", PROGRAMS, CONSTANTS)
+    # The references start from initial() (cmpswap's matching words, inc's and dec's edge cases), so the GPU must too.
+    run_programs(directory, compiler, renderer, backend, "atomics", PROGRAMS, CONSTANTS, initial())

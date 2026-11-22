@@ -244,10 +244,11 @@ PROGRAMS = (
 CONSTANTS = [0, 0, 0, C1, C2, R0 & M32, R0 >> 32, 0, *VS_A, *VS_B, *VS_C] + [0] * 44
 
 
-def run_programs(directory, compiler, renderer, backend, family, programs, constants):
-    """Compile each program, draw it with the right expected memory, then with every wrong one."""
+def run_programs(directory, compiler, renderer, backend, family, programs, constants, initial=None):
+    """Compile each program, draw it with the right expected memory, then with every wrong one. initial is the memory
+    the references start from (the case's initial slots): the plain Memory() unless the family sets words up first."""
     case = directory / f"{family}.case"
-    initial = Memory()
+    initial = Memory() if initial is None else initial
     for index, (body, reference, flaws) in enumerate(programs):
         source, shader = directory / f"{family}{index}.hlsl", directory / f"{family}{index}.cso"
         source.write_text(translate(program(*body)), encoding="ascii")
