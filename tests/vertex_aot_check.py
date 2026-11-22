@@ -21,6 +21,7 @@ block read both as constants and by offen buffer loads, global loads through a 6
 clip and cull distances under PA_CL_VS_OUT_CNTL state. No corpus binary is used.
 """
 from fractions import Fraction
+import math
 import os
 from pathlib import Path
 import re
@@ -188,6 +189,7 @@ class Model:
     def run(self, program, vertex_id, base_vertex, instance_id=0, start_instance=0):
         s, v = {}, {}
         cbv_words = None
+        carries = {}
         for number, role in self.roles.items():
             if role[0] == "descriptors":
                 s[number] = ("pointer", number)
@@ -209,7 +211,7 @@ class Model:
             return value
 
         def word(token):
-            if token.startswith("-"):
+            if token.startswith("-") and not re.fullmatch(r"-\d+", token):
                 return word(token[1:]) ^ 0x80000000
             if re.fullmatch(r"v\d+", token):
                 return v[int(token[1:])]
@@ -290,6 +292,35 @@ class Model:
                     "v_add_nc_u32": (a + b) & M32, "v_and_b32": a & b, "v_xor_b32": a ^ b, "v_or_b32": a | b,
                     "v_lshlrev_b32": (b << (a & 31)) & M32, "v_mul_u32_u24": ((a & 0xffffff) * (b & 0xffffff)) & M32,
                 }[name]
+            elif name in ("v_sin_f32", "v_cos_f32", "v_rndne_f32"):
+                source, _, modifier = ops[1].partition(" ")
+                value = f32_fraction(checked(word(source)))
+                if name == "v_rndne_f32":
+                    result = round_f32(Fraction(round(value)))  # ties to even
+                else:
+                    result = round_f32(Fraction(self.trig(name, float(value))))
+                    if modifier == "div:2" and "div2_ignored" not in self.flaws:
+                        result = round_f32(f32_fraction(result) / 2)
+                v[int(ops[0][1:])] = result
+            elif re.fullmatch(r"v_(add|sub|subrev)_co_(ci_)?u32", name):
+                kind = name.split("_")[1]
+                a, b = word(ops[2]), word(ops[3])
+                if kind == "subrev" and "subrev_swapped" not in self.flaws:
+                    a, b = b, a
+                mask = ops[1].replace("vcc_lo", "vcc")
+                carry_in = 0
+                if name.endswith("_ci_u32"):
+                    carry_in = 0 if "no_carry_in" in self.flaws else carries[ops[4].replace("vcc_lo", "vcc")]
+                if kind == "add":
+                    total = a + b + carry_in
+                    out = total >> 32
+                else:
+                    total = a - b - carry_in
+                    out = 1 if total < 0 else 0
+                    if "no_borrow" in self.flaws:
+                        out = 0
+                carries[mask] = out
+                v[int(ops[0][1:])] = total & M32
             elif name == "v_cvt_f32_ubyte0":
                 v[int(ops[0][1:])] = round_f32(Fraction(word(ops[1]) & 0xff))
             elif name == "v_mul_f32":
@@ -310,6 +341,13 @@ class Model:
             else:
                 raise AssertionError(f"Model has no instruction {line}")
         return exports
+
+    def trig(self, name, revolutions):
+        """v_sin_f32 and v_cos_f32 take their argument in revolutions. "radians" is the wrong reference that does not
+        scale it, "sin_cos_swapped" exchanges the two."""
+        angle = revolutions if "radians" in self.flaws else 2 * math.pi * revolutions
+        swapped = "sin_cos_swapped" in self.flaws
+        return math.sin(angle) if (name == "v_sin_f32") != swapped else math.cos(angle)
 
     def fetch(self, ops, v, s, span):
         """buffer_load_dword* idxen with an instruction offset: gfx10 range rules as tools/pixel_aot_ops/hlsl.py cites
@@ -859,13 +897,89 @@ def draw_distance(directory, compiler, renderer, backend):
                     [{"base_ignored"}, {"swap_distances"}], vs_out_cntl=DISTANCE_CNTL)
 
 
+# Card V-4: v_sin_f32 and v_cos_f32 (the argument in revolutions) and the carry-in adds and subtractions. Every
+# transcendental result is scaled and rounded to an integer before it is exported, at angles (n + 0.5) / 16 revolutions
+# whose scaled sine and cosine lie at least 0.05 from a rounding tie, so the result does not depend on the last bits of
+# the desktop's sin and cos.
+TRIG = [
+    "s_setprio 3",
+    "v_add_nc_u32_e32 v1, s3, v0",
+    "v_cvt_f32_ubyte0_e32 v2, v1",
+    "v_add_f32_e32 v3, 0.5, v2",
+    "v_mul_f32_e32 v4, 0x3d800000, v3",
+    "v_sin_f32_e32 v5, v4",
+    "v_cos_f32_e32 v6, v4",
+    "v_mul_f32_e32 v7, 0x41000000, v5",
+    "v_rndne_f32_e32 v7, v7",
+    "v_mul_f32_e32 v8, 0x41000000, v6",
+    "v_rndne_f32_e32 v8, v8",
+    "v_sin_f32_e64 v9, v4 div:2",
+    "v_mul_f32_e32 v9, 0x41800000, v9",
+    "v_rndne_f32_e32 v9, v9",
+    "v_cos_f32_e64 v10, v4 div:2",
+    "v_mul_f32_e32 v10, 0x41800000, v10",
+    "v_rndne_f32_e32 v10, v10",
+    "v_mov_b32_e32 v11, 1.0",
+    "exp pos0 v7, v8, v9, v11 done vm",
+    "exp param0 v10, v1, off, off",
+    "s_endpgm",
+]
+TRIG_ROLES = {3: ("base_vertex",)}
+
+# 64-bit style limbs from the vertex id: v2 and v3 hold bit 0 and bit 1 of the id in bit 31, so v2 + v3 carries when
+# both are set, and v3 - v2 borrows when only bit 1 is. The carry-in forms run in VCC and in a lane-mask SGPR, as the
+# add, subtract and reverse subtract, each reading a mask the previous instruction wrote.
+CARRY = [
+    "s_setprio 3",
+    "v_add_nc_u32_e32 v1, s3, v0",
+    "v_lshlrev_b32_e32 v2, 31, v1",
+    "v_lshlrev_b32_e32 v3, 30, v1",
+    "v_mov_b32_e32 v5, -1",
+    "v_mov_b32_e32 v6, 0",
+    "v_add_co_u32 v4, vcc_lo, v2, v3",
+    "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo",
+    "v_add_co_ci_u32_e32 v8, vcc_lo, 0, v6, vcc_lo",
+    "v_sub_co_u32 v9, vcc_lo, v3, v2",
+    "v_sub_co_ci_u32_e32 v10, vcc_lo, v1, v5, vcc_lo",
+    "v_sub_co_u32 v13, vcc_lo, v3, v2",
+    "v_subrev_co_ci_u32_e32 v11, vcc_lo, v1, v5, vcc_lo",
+    "v_add_co_u32 v12, s10, v2, v3",
+    "v_add_co_ci_u32_e64 v14, s12, v1, v6, s10",
+    "v_add_co_ci_u32_e64 v15, s10, v5, v6, s12",
+    "v_subrev_co_u32 v16, s12, v3, v2",
+    "v_sub_co_ci_u32_e64 v17, s10, v6, v6, s12",
+    "exp pos0 v4, v7, v8, v9 done vm",
+    "exp param0 v10, v11, v12, v13",
+    "exp param1 v14, v15, v16, v17",
+    "s_endpgm",
+]
+CARRY_ROLES = {3: ("base_vertex",)}
+
+
+def draw_trig(directory, compiler, renderer, backend):
+    """Card V-4: v_sin_f32 and v_cos_f32 (e32, and e64 with the div:2 output modifier) on angles in revolutions, each
+    result scaled and rounded to an integer before export (see TRIG)."""
+    sets = [([0] * 64, Memory([]), 16, 0), ([0] * 64, Memory([]), 8, 3)]
+    flaws = [{"sin_cos_swapped"}, {"radians"}, {"div2_ignored"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "trig", TRIG, TRIG_ROLES, sets, flaws)
+
+
+def draw_carry(directory, compiler, renderer, backend):
+    """Card V-4: v_add_co_ci_u32, v_sub_co_ci_u32 and v_subrev_co_ci_u32 reading the carry or borrow of the previous
+    instruction, in VCC and in an SGPR lane mask, with ids that wrap the 32-bit base-vertex add."""
+    sets = [([0] * 64, Memory([]), 8, 0), ([0] * 64, Memory([]), 6, 0x7ffffffe), ([0] * 64, Memory([]), 5, 0xfffffffd)]
+    flaws = [{"no_carry_in"}, {"no_borrow"}, {"subrev_swapped"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "carry", CARRY, CARRY_ROLES, sets, flaws)
+
+
 DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan,
-                 "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance}
+                 "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance, "trig": draw_trig,
+                 "carry": draw_carry}
 PROGRAMS = ((FETCH, FETCH_ROLES, None), (MATRIX, MATRIX_ROLES, None), (VERTEX_ID, VERTEX_ID_ROLES, None),
             (NAN, NAN_ROLES, None), (NGG_FETCH, ngg_roles(FETCH_ROLES), None),
             (NGG_MATRIX, ngg_roles(MATRIX_ROLES), None), (NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES), None),
             (INSTANCE, INSTANCE_ROLES, None), (NGG_INSTANCE, ngg_roles(INSTANCE_ROLES), None),
-            (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL))
+            (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None))
 
 
 # --- controls (no DXC, no GPU) -----------------------------------------------------------------------------------------
@@ -1096,10 +1210,66 @@ def check_v3_refusals():
                 INSTANCE_ROLES, "typed vertex fetch")
 
 
+def check_v4_controls():
+    """Card V-4: the model's results against values worked out by hand, every wrong reference of the two families
+    differing from the right one on some id, the translation shape, and the refused neighbours."""
+    def run(program, roles, flaws=(), count=16, base=0):
+        source, layout = lower(program, roles)
+        model = Model(roles, [0] * 64, Memory([]), flaws)
+        return outputs(model, program, layout, range(count), base)[0]
+
+    # Angle (n + 0.5) / 16 revolutions: the eighths of sin and cos rounded to integers (exported as floats).
+    words = run(TRIG, TRIG_ROLES)
+    for n in range(16):
+        angle = 2 * math.pi * (n + 0.5) / 16
+        assert all(abs(8 * x % 1 - 0.5) > 0.04 for x in (math.sin(angle), math.cos(angle))), n
+        sin8, cos8 = round(8 * math.sin(angle)), round(8 * math.cos(angle))
+        got = [struct.unpack("<f", struct.pack("<I", w))[0] for w in words[8 * n:8 * n + 5]]
+        assert got == [sin8, cos8, sin8, 1.0, cos8], (n, got)
+    # The carry chain by integer arithmetic, limb by limb as the program's comments describe it.
+    words = run(CARRY, CARRY_ROLES, count=8)
+    for n in range(8):
+        v2, v3, v5 = (n << 31) & M32, (n << 30) & M32, M32
+        c1 = (v2 + v3) >> 32
+        b1 = int(v3 < v2)
+        want = [(v2 + v3) & M32, (v5 + c1) & M32, (v5 + c1) >> 32, (v3 - v2) & M32,    # pos0: v4 v7 v8 v9
+                (n - v5 - b1) & M32, (v5 - n - b1) & M32, (v2 + v3) & M32, (v3 - v2) & M32,  # param0: v10 v11 v12 v13
+                (n + c1) & M32, v5, (v2 - v3) & M32, -int(v2 < v3) & M32]                 # param1: v14 v15 v16 v17
+        assert words[12 * n:12 * n + 12] == want, (n, words[12 * n:12 * n + 12], want)
+    for program, roles, flaws, count in ((TRIG, TRIG_ROLES, ({"sin_cos_swapped"}, {"radians"}, {"div2_ignored"}, {"base_ignored"}), 16),
+                                         (CARRY, CARRY_ROLES, ({"no_carry_in"}, {"no_borrow"}, {"subrev_swapped"}, {"base_ignored"}), 8)):
+        right = run(program, roles, count=count, base=3)
+        for flaw in flaws:
+            assert run(program, roles, flaw, count, 3) != right, flaw
+    source, _ = lower(CARRY, CARRY_ROLES)
+    assert "coc" in source and source.count("bool cmp") >= 9
+    source, _ = lower(TRIG, TRIG_ROLES)
+    assert "sin((" in source and "cos((" in source and "6.283185307179586f" in source
+    # The wave64 spellings (VCC and SGPR pairs) lower like the wave32 ones.
+    wide = [line.replace("vcc_lo", "vcc").replace("s10", "s[10:11]").replace("s12", "s[12:13]") for line in CARRY]
+    assert lower(wide, CARRY_ROLES)[0] == lower(CARRY, CARRY_ROLES)[0]
+    # Refused neighbours: a carry-in no instruction produced, one from another mask, one that is a pair
+    # mask whose second half was never written, clamp on the carry-in forms, an output modifier on the e32 sine, an extra operand, and
+    # the binary16 sine.
+    head = CARRY[:6]
+    must_refuse([*head, "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo", "s_endpgm"], CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, s10, v2, v3", "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo", "s_endpgm"],
+                CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, vcc_lo, v2, v3", "v_add_co_ci_u32_e64 v7, s10, v5, v6, s11", "s_endpgm"],
+                CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, vcc_lo, v2, v3", "v_add_co_ci_u32_e64 v7, s10, v5, v6, vcc_lo clamp",
+                 "s_endpgm"], CARRY_ROLES, "Unsupported")
+    must_refuse([*TRIG[:5], "v_sin_f32_e32 v5, v4 div:2", "s_endpgm"], TRIG_ROLES, "Invalid arithmetic")
+    must_refuse([*TRIG[:5], "v_sin_f32_e64 v5, v4 clamp mul:2 extra", "s_endpgm"], TRIG_ROLES, "Unsupported")
+    must_refuse([*TRIG[:5], "v_sin_f32_e32 v5, v4, v3", "s_endpgm"], TRIG_ROLES)
+    must_refuse([*TRIG[:5], "v_sin_f16_e32 v5, v4", "s_endpgm"], TRIG_ROLES, "Unsupported")
+
+
 def check_controls():
     check_reference_arithmetic()
     check_translation_shape()
     check_refusals()
+    check_v4_controls()
     # Every wrong reference of every family changes the model's output for at least one draw input; the draws check
     # that the renderer then reports the mismatch. Here: the model runs every family's program without error.
     model = Model(FETCH_ROLES, fetch_constants(vsharp(HIGH_BASE, 24, 8, 0), vsharp(HIGH_BASE, 12, 8, 1)),

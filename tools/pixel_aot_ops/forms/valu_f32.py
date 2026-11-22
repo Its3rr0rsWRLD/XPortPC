@@ -12,6 +12,8 @@ ALU = {
     # transcendental rule of the e32 draws holds: its draws use only inputs whose reciprocal is exact.
     "rcp_iflag": (1, "(1.0f / {0})"),
     "sqrt": (1, "sqrt({0})"), "rsq": (1, "rsqrt({0})"),
+    # The source is in revolutions, the same scaling as v_sin_f32_dpp (forms/dpp.py OWN). Hardware accepts |x| < 256.
+    "sin": (1, "sin(({0}) * 6.283185307179586f)"), "cos": (1, "cos(({0}) * 6.283185307179586f)"),
     "floor": (1, "floor({0})"), "ceil": (1, "ceil({0})"), "fract": (1, "fract32({0})"),
     "trunc": (1, "trunc({0})"), "rndne": (1, "round({0})"),  # HLSL round is DXIL Round_ne: ties to even
     "add": (2, "({0} + {1})"), "mul": (2, "({0} * {1})"),
@@ -32,7 +34,7 @@ VOP3_ONLY = ("fma", "mad", "min3", "max3", "med3")
 # the forms whose draws (vop3_f32) measure it, the ones the corpus uses it with and their neighbours; the others,
 # including the denormal-flushing mad and mac, still refuse it.
 OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
-OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3")
+OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "sin", "cos", "rndne", "min3", "max3", "med3")
 
 SALU_HELPERS["med3_f32"] = (
     "float med3_f32(float a, float b, float c) {\n"
@@ -101,7 +103,7 @@ def move(st, i, m):
         st.lines.append(f"    precise float alu{i} = {value};")
 
 
-@form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
+@form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|sin|cos|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
       r"|min3|max3|med3)_f32(_e32|_e64)? (v\d+), (.+?)( clamp)?( mul:2| mul:4| div:2)?")
 def arithmetic(st, i, m):
     op, suffix, dst, operands, clamp, omod = m.groups()

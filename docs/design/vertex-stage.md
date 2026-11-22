@@ -2,9 +2,12 @@
 
 Status: cards V-1, V-2 and V-3 are implemented and await their draws on the PC (CTest `vertex_aot_<family>_<adapter>`,
 families `ngg`, `instance` and `distance` for V-2 and V-3); V-4 onward are proposed. `tools/vertex_corpus_translate.py`
-runs every corpus vertex shader through the translator: 199 of 244 translate in the legacy build and the same 199 in the
-NGG build (V-1 and V-3 shaders 155 + 44; the 10 V-1-class shaders that do not translate bind two uniform blocks, read
-past the first 256 bytes of one, or index descriptors or constants by an SGPR). The corpus measurement is
+runs every corpus vertex shader through the translator: 210 of 244 translate in the legacy build (199 before the
+V-4 body forms v_sin_f32, v_cos_f32 and the carry-in adds, `vertex_aot_trig_*` and `vertex_aot_carry_*`; the NGG build
+was not re-run for them). The 34 that do not: 11 embedded constants (s_getpc_b64), 9 that bind two uniform blocks
+(or a block the contract cannot resolve), 5 with control flow, 4 that read past the first 256 bytes of the block,
+2 that index a descriptor by an SGPR, 1 that indexes constants by an SGPR, 1 with a partial vmcnt wait over loads of
+two kinds, 1 with an image sample. The corpus measurement is
 `tools/vertex_corpus_report.py` (checked by `tests/vertex_corpus_report_check.py`). V-1 is `tools/vertex_aot.py`
 (the vertex entry contract and exports over the `tools/pixel_aot_ops` forms), `tests/vertex_aot_check.py` (Python
 integer references, wrong-reference controls, GPU-free refusals; CTest `vertex_aot_controls` and

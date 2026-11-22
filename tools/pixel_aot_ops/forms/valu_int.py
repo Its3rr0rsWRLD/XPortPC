@@ -273,3 +273,37 @@ def add_sub_carry(st, i, m):
     for j, reg in enumerate(regs):
         st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.vector[dst] = ("uint", f"valu{i}")
+
+
+# V_ADD_CO_CI_U32 D = S0 + S1 + carry-in, V_SUB_CO_CI_U32 D = S0 - S1 - carry-in, V_SUBREV_CO_CI_U32 D = S1 - S0 -
+# carry-in, modulo 2^32 (VOP2 with VCC, or VOP3b with lane masks). The carry-in is a tracked comparison, read as
+# v_cndmask_b32 reads it, and the carry out (the borrow of the subtractions) replaces the mask written. The carry out
+# of an add is set when S0 + S1 wraps, or the sum with the carry-in does: the two cannot both happen.
+@form(rf"v_(add|sub|subrev)_co_ci_u32(?:_e32|_e64)? (v\d+), {LANE_MASK}, ([^,\s]+), ([^,\s]+), {LANE_MASK}")
+def add_sub_carry_in(st, i, m):
+    op, dst, carry, first, second, source = m.groups()
+    regs, in_regs = lane_mask(carry), lane_mask(source)
+    condition = st.scalar.get(in_regs[0])
+    if (st.ex != "true" or st.pending.intersection(regs) or st.pending.intersection(in_regs)
+            or not isinstance(condition, tuple) or condition[0] != "condition"
+            or [st.scalar.get(r) for r in in_regs] != [(*condition[:2], j, len(in_regs))
+                                                       for j in range(len(in_regs))]):
+        raise ValueError("Carry-in mask is not a tracked comparison")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    a, b = (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second))
+    st.lines.append(f"    uint coa{i} = {a};")
+    st.lines.append(f"    uint cob{i} = {b};")
+    st.lines.append(f"    uint coc{i} = {condition[1]} ? 1u : 0u;")
+    if op == "add":
+        st.lines.append(f"    uint cot{i} = coa{i} + cob{i};")
+        st.lines.append(f"    uint valu{i} = cot{i} + coc{i};")
+        st.lines.append(f"    bool cmp{i} = (cot{i} < coa{i}) || (valu{i} < cot{i});")
+    else:
+        x, y = (f"coa{i}", f"cob{i}") if op == "sub" else (f"cob{i}", f"coa{i}")
+        st.lines.append(f"    uint cot{i} = {x} - {y};")
+        st.lines.append(f"    uint valu{i} = cot{i} - coc{i};")
+        st.lines.append(f"    bool cmp{i} = ({x} < {y}) || (cot{i} < coc{i});")
+    for j, reg in enumerate(regs):
+        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+    st.vector[dst] = ("uint", f"valu{i}")
