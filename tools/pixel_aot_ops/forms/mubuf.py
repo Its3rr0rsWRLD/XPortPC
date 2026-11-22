@@ -3,6 +3,7 @@ forms), and the typed buffer_load_format_x..xyzw for the 32-bit integer formats.
 import re
 
 from ..dispatch import form
+from ..registers import inactive
 from ..registers import registers, vector_u32, vgprs
 
 # Sub-dword loads: name -> (bytes, sign-extend, half written by a d16 form or None).
@@ -44,7 +45,7 @@ def buffer_operands(st, i, addr_token, rsrc_token, soffset_token, modifiers, ext
             flags.add(modifier)
         else:
             raise ValueError(f"Unsupported buffer load modifier {modifier}")
-    if st.ex != "true" or inst_offset > 4095:
+    if inactive(st) or inst_offset > 4095:
         raise ValueError("Invalid buffer load")
     offen, idxen = "offen" in flags, "idxen" in flags
     if addr_token == "off":

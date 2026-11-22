@@ -16,6 +16,7 @@ Ported from R0Y00/Xbox2Windows#436 by Joacoorandom (the expressions and the v_bf
 the ("uint", expr) register model: no value is routed through a float type.
 """
 from ..dispatch import form
+from ..registers import inactive
 from ..hlsl import SALU_HELPERS
 from ..registers import vector_u32
 
@@ -47,7 +48,7 @@ BITS_UNARY = {
 @form(r"v_bfe_(u32|i32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
 def bitfield_extract(st, i, m):
     kind, dst, *tokens = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -64,7 +65,7 @@ def bitfield_extract(st, i, m):
 @form(rf"({'|'.join(BITS_BINARY)})(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+)")
 def bits_binary(st, i, m):
     op, dst, *tokens = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -76,7 +77,7 @@ def bits_binary(st, i, m):
 @form(rf"({'|'.join(BITS_UNARY)})(?:_e32|_e64)? (v\d+), ([^,\s]+)")
 def bit_scan(st, i, m):
     op, dst, token = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")

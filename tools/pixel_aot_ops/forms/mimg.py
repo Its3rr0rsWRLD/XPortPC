@@ -59,7 +59,8 @@ def sample(st, i, m):
     st.vm_issue(names, "sample")
 
 
-@form(r"image_(load|load_mip|get_resinfo|gather4|gather4_lz_o|gather4_lz) (v\d+|v\[\d+:\d+\]), (v\d+|v\[\d+:\d+\]), "
+@form(r"image_(load|load_mip|get_resinfo|gather4|gather4_lz_o|gather4_lz) (v\d+|v\[\d+:\d+\]), "
+      r"(v\d+|v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\]), "
       r"s\[(\d+):(\d+)\](?:, s\[(\d+):(\d+)\])? dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D((?: (?:unorm|glc|slc|dlc|d16))*)")
 def load_query_gather(st, i, m):
     # MIMG loads, level queries and gathers of a 2D T#, with the descriptor provenance rules of image_sample. Cache
@@ -74,7 +75,9 @@ def load_query_gather(st, i, m):
     if len(set(flags)) != len(flags) or ("unorm" in flags and op.startswith("gather4")) or (d16 and op == "get_resinfo"):
         raise ValueError("Repeated or unsupported image modifier")
     dmask = int(dmask_digit, 16)
-    if st.ex != "true" or not dmask:
+    # The compute stage (docs/design/compute-stage.md, C-3) also loads while the lane may be inactive: a load has no
+    # side effect and lower() masks its destination writes; the pixel stage keeps refusing it.
+    if (st.ex != "true" and st.stage == "pixel") or not dmask:
         raise ValueError("Invalid image operation")
     if op == "gather4":
         raise ValueError("image_gather4 picks its mip level from derivatives, which Gather* cannot reproduce; "
@@ -90,7 +93,12 @@ def load_query_gather(st, i, m):
     values_count = 4 if gather else len(channels)
     dests = vgprs(dst_token, values_count // 2 if d16 and values_count % 2 == 0 else values_count)
     addr_width = {"load": 2, "load_mip": 3, "get_resinfo": 1, "gather4": 2, "gather4_lz": 2, "gather4_lz_o": 3}[op]
-    addrs = vgprs(addr_token, addr_width)
+    if addr_token.startswith("["):  # a non-sequential (NSA) address list
+        addrs = addr_token[1:-1].split(", ")
+        if len(addrs) != addr_width:
+            raise ValueError("Image address width mismatch")
+    else:
+        addrs = vgprs(addr_token, addr_width)
     image = [f"s{n}" for n in registers(f0, f1, 8)]
     descriptor = [st.scalar.get(r) for r in image]
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)

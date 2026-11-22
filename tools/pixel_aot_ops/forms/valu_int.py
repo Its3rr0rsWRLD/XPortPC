@@ -3,6 +3,7 @@ subtract with carry out, v_cvt_f32_ubyte and the conversions between binary32 an
 import re
 
 from ..dispatch import form
+from ..registers import inactive
 from ..registers import LANE_MASK, fp_operand, lane_mask, vector_u32
 
 # Integer add, subtract, multiply and three-input forms. Semantics: AMD RDNA 2 ISA guide (instruction pseudocode in
@@ -152,7 +153,7 @@ OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
 @form(r"v_cvt_f32_(i32|u32)(_e32|_e64)? (v\d+), ([^,\s]+)( clamp)?( mul:2| mul:4| div:2)?")
 def convert_to_float(st, i, m):
     kind, suffix, dst, src, clamp, omod = m.groups()
-    if st.ex != "true" or ((clamp or omod) and suffix != "_e64"):
+    if inactive(st) or ((clamp or omod) and suffix != "_e64"):
         raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -175,7 +176,7 @@ def source_modified(token):
 @form(r"v_cvt_(i32|u32)_f32(_e32|_e64)? (v\d+), ([^,\s]+)")
 def convert_to_int(st, i, m):
     kind, suffix, dst, src = m.groups()
-    if st.ex != "true" or (source_modified(src) and suffix != "_e64"):
+    if inactive(st) or (source_modified(src) and suffix != "_e64"):
         raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -208,7 +209,7 @@ def ordered(kind, words):
 @form(r"v_(max|min)_(i32|u32)(_e32|_e64)? (v\d+), ([^,\s]+), ([^,\s]+)")
 def min_max(st, i, m):
     op, kind, _, dst, first, second = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -221,7 +222,7 @@ def min_max(st, i, m):
 @form(r"v_med3_(i32|u32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
 def median(st, i, m):
     kind, dst, *tokens = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -240,7 +241,7 @@ def median(st, i, m):
 @form(r"v_(min3|max3)_(i32|u32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
 def min_max3(st, i, m):
     op, kind, dst, *tokens = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")

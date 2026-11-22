@@ -71,7 +71,9 @@ class Memory:
             self.slots[hit[0]][hit[1]:hit[1] + 4] = (value & M32).to_bytes(4, "little")
 
 
-def case_bytes(groups, constants, ranges, before, after):
+def case_bytes(groups, constants, ranges, before, after, textures=(), images=()):
+    """textures: (index 0|1, width, height, RGBA8 bytes); images: (slot, format 1|4|8, width, height, bytes before,
+    bytes expected after), as tests/compute_aot_render.cpp reads them."""
     assert len(constants) == 64 and len(before) == len(after)
     out = struct.pack("<5I", 0x43573258, *groups, 0) + struct.pack("<64I", *constants)
     out += titlemem.section(ranges, before)
@@ -79,7 +81,31 @@ def case_bytes(groups, constants, ranges, before, after):
     for blob, old in zip(after, before):
         assert len(blob) == len(old)  # the renderer checks the sizes too
         out += struct.pack("<I", len(blob)) + bytes(blob)
+    if textures:
+        out += struct.pack("<2I", 0x54573258, len(textures))
+        for index, width, height, texels in textures:
+            assert len(texels) == 4 * width * height
+            out += struct.pack("<3I", index, width, height) + bytes(texels)
+    if images:
+        out += struct.pack("<2I", 0x49573258, len(images))
+        for slot, fmt, width, height, initial, expected in images:
+            assert len(initial) == len(expected) == (16 if fmt == 4 else 4) * width * height
+            out += struct.pack("<4I", slot, fmt, width, height) + bytes(initial) + bytes(expected)
     return out
+
+
+def outcome(result):
+    """What a dispatch is compared on: title memory after it and every storage image after it."""
+    return result[4], tuple(image[5] for image in (result[6] if len(result) > 6 else ()))
+
+
+def case_of(result, wrong=None):
+    groups, constants, ranges, before, after, *extra = result
+    textures, images = extra if extra else ((), ())
+    if wrong is not None:
+        after = wrong[4]
+        images = [(*image[:5], other[5]) for image, other in zip(images, wrong[6] if len(wrong) > 6 else ())]
+    return case_bytes(groups, constants, ranges, before, after, textures, images)
 
 
 def vsharp(base, stride, records, select, swizzle=False, add_tid=False):
@@ -190,15 +216,15 @@ def run_family(directory, compiler, renderer, backend, name, programs):
         dispatch = [renderer, backend, "--check-compute-case", shader, case]
         separated = [False] * len(flaws)
         for inputs in cases:
-            groups, constants, ranges, before, after = reference(inputs, ())
-            case.write_bytes(case_bytes(groups, constants, ranges, before, after))
+            right = reference(inputs, ())
+            case.write_bytes(case_of(right))
             subprocess.run(dispatch, check=True)
             for k, flaw in enumerate(flaws):
-                wrong = reference(inputs, flaw)[4]
-                if wrong == after:
+                wrong = reference(inputs, flaw)
+                if outcome(wrong) == outcome(right):
                     continue
                 separated[k] = True
-                case.write_bytes(case_bytes(groups, constants, ranges, before, wrong))
+                case.write_bytes(case_of(right, wrong))
                 result = subprocess.run(dispatch, capture_output=True, text=True)
                 if result.returncode != 1 or "compute_mismatch" not in result.stderr:
                     raise AssertionError(f"A wrong {name} result escaped detection in program {index}, {sorted(flaw)}")
@@ -212,10 +238,13 @@ def check_separation(name, programs):
         lower(program, contract)
         results = [reference(inputs, ()) for inputs in cases]
         for flaw in flaws:
-            assert any(reference(inputs, flaw)[4] != right[4] for inputs, right in zip(cases, results)), \
+            assert any(outcome(reference(inputs, flaw)) != outcome(right) for inputs, right in zip(cases, results)), \
                 (name, index, sorted(flaw))
         for right in results:
-            assert right[4] != right[3], (name, index, "a case that stores nothing checks nothing")
+            images = right[6] if len(right) > 6 else ()
+            assert right[4] != right[3] or any(image[4] != image[5] for image in images), \
+                (name, index, "a case that stores nothing checks nothing")
+            case_of(right)  # well formed
 
 
 # Family `ids`: SV_GroupID and SV_GroupThreadID in the roles of the workgroup-id SGPRs (s3, s4, s5 here, after the
@@ -525,7 +554,413 @@ INTEGRATE_PROGRAMS = [
      integrate_reference("B"), INTEGRATE_FLAWS),
 ]
 
-FAMILIES = {"ids": IDS_PROGRAMS, "store": STORE_PROGRAMS, "integrate": INTEGRATE_PROGRAMS}
+# Cards C-2 to C-4 (docs/design/compute-stage.md): images, control flow and stage-neutral forms in the compute stage.
+def sub(a, b):
+    return add(a, b ^ 0x80000000)
+
+
+def fmax(a, b):
+    """v_max_f32 of two finite values (no NaN in these draws); +0 and -0 do not meet."""
+    return a if f32_value(a) >= f32_value(b) else b
+
+
+def unorm8_bits(k):
+    """The binary32 a read of the RGBA8_UNORM byte k returns: k / 255 rounded to nearest."""
+    return f32_bits(Fraction(k, 255))
+
+
+def unorm8(bits, flaws=()):
+    """The typed store of a binary32 value to an 8-bit UNORM channel: clamp to [0, 1], times 255, rounded to nearest. The
+    draws keep the scaled value away from a half, where D3D allows the conversion a tolerance."""
+    value = f32_value(bits)
+    if "abs" in flaws:
+        value = abs(value)
+    value = min(max(value, Fraction(0)), Fraction(1)) * 255
+    n, rest = divmod(value, 1)
+    assert abs(rest - Fraction(1, 2)) > Fraction(1, 10), "a UNORM store near a half is not checked"
+    return int(n) + (rest > Fraction(1, 2))
+
+
+def rgba8_texels(seed, width, height):
+    state, out = seed, bytearray()
+    for _ in range(width * height * 4):
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        out.append((state >> 16) & 0xff)
+    return bytes(out)
+
+
+def texel(texels, width, height, x, y):
+    if not (0 <= x < width and 0 <= y < height):
+        return None
+    at = 4 * (y * width + x)
+    return texels[at:at + 4]
+
+
+def image_put(image, width, x, y, channels):
+    at = 4 * (y * width + x)
+    image[at:at + 4] = bytes(channels)
+
+
+# Family `image` (C-2): program A (the corpus's neighbourhood-filter shape) reads a read-only RGBA8 image with image_load,
+# once through a non-sequential address at (x - 1, y) and once at (x, y), and stores r = t.r + n.r, g = t.g - n.g and
+# b = max(t.b, n.b) with dmask 0x7 to an RGBA8_UNORM storage image, whose alpha the store writes as 0. Both T#s come from
+# one s_load_dwordx16. Reads outside the 20x16 image return 0; the 26x17 storage image has texels no thread writes.
+# Program B (the corpus's threshold shape) tests the thread against two bounds, skips the rest under s_cbranch_execz and,
+# in the skipped region, samples at ((x + 0.5) * sx, (y + 0.5) * sy) with image_sample_lz through the S# at 0x50 (the
+# harness's point sampler with clamp addressing) and stores (r, g, 1 - b, 1) under the narrowed EXEC.
+IMAGE_A = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx16 s[16:31], s[2:3], null",
+    "v_lshl_add_u32 v3, s4, 3, v1",
+    "v_lshl_add_u32 v2, s0, 3, v0",
+    "v_add_nc_u32_e32 v4, -1, v2",
+    "s_waitcnt lgkmcnt(0)",
+    "s_clause 0x1",
+    "image_load v[6:8], [v4, v3], s[16:23] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm",
+    "image_load v[9:12], v[2:3], s[16:23] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+    "s_waitcnt vmcnt(0)",
+    "v_add_f32_e32 v14, v9, v6",
+    "v_sub_f32_e32 v15, v10, v7",
+    "v_max_f32_e32 v16, v11, v8",
+    "image_store v[14:16], v[2:3], s[24:31] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm",
+    "s_endpgm",
+]
+IMAGE_A_CONTRACT = {"numthreads": (8, 8, 1), "wave": 64, "local_ids": 2,
+                    "sgprs": {"s2": "descriptors", "s3": "group_id.x", "s4": "group_id.y"},
+                    "textures": {0: 0}, "storage_images": {0x20: (0, "r8g8b8a8_unorm")}}
+TEX_A, OUT_A, GROUPS_A = (20, 16), (26, 17), (3, 2, 1)
+
+
+def image_a_reference(inputs, flaws):
+    seed, = inputs
+    tex = rgba8_texels(seed, *TEX_A)
+    before = rgba8_texels(seed + 7, *OUT_A)
+    out = bytearray(before)
+    for y in range(8 * GROUPS_A[1]):
+        for x in range(8 * GROUPS_A[0]):
+            def load(at_x):
+                if "oob_edge" in flaws:
+                    at_x = min(max(at_x, 0), TEX_A[0] - 1)
+                found = texel(tex, *TEX_A, at_x, y if "oob_edge" not in flaws else min(y, TEX_A[1] - 1))
+                return [0] * 4 if found is None else [unorm8_bits(k) for k in found]
+            t = load(x)
+            n = t if "same_texel" in flaws else load(x - 1)
+            channels = [unorm8(add(t[0], n[0])), unorm8(sub(t[1], n[1]), flaws), unorm8(fmax(t[2], n[2])),
+                        255 if "alpha_one" in flaws else 0]
+            sx, sy = (y, x) if "swap_xy" in flaws else (x, y)
+            if sx < OUT_A[0] and sy < OUT_A[1]:
+                image_put(out, OUT_A[0], sx, sy, channels)
+    return (GROUPS_A, [0] * 64, [], [], [], [(0, *TEX_A, tex)], [(0, 8, *OUT_A, before, bytes(out))])
+
+
+IMAGE_B = [
+    "v_lshl_add_u32 v2, s7, 3, v0",
+    "v_lshl_add_u32 v3, s8, 3, v1",
+    "v_cmp_gt_u32_e32 vcc, s3, v2",
+    "v_cmp_gt_u32_e64 s[0:1], s4, v3",
+    "s_and_b64 exec, s[0:1], vcc",
+    "s_cbranch_execz BB1",
+    "s_movk_i32 s3, 0x8000",
+    "s_clause 0x2",
+    "s_load_dwordx8 s[8:15], s[2:3], null",
+    "s_load_dwordx4 s[16:19], s[2:3], 0x50",
+    "s_load_dwordx8 s[24:31], s[2:3], 0x60",
+    "v_cvt_f32_u32_e32 v0, v2",
+    "v_cvt_f32_u32_e32 v1, v3",
+    "v_add_f32_e32 v0, 0.5, v0",
+    "v_add_f32_e32 v1, 0.5, v1",
+    "v_mul_f32_e32 v0, s5, v0",
+    "v_mul_f32_e32 v1, s6, v1",
+    "s_waitcnt lgkmcnt(0)",
+    "image_sample_lz v[4:6], v[0:1], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_2D",
+    "v_mov_b32_e32 v7, 1.0",
+    "s_waitcnt vmcnt(0)",
+    "v_sub_f32_e32 v6, 1.0, v6",
+    "image_store v[4:7], v[2:3], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+    "BB1:",
+    "s_endpgm",
+]
+IMAGE_B_CONTRACT = {"numthreads": (8, 8, 1), "wave": 64, "local_ids": 2,
+                    "sgprs": {"s2": "descriptors", **{f"s{3 + n}": f"user:{n}" for n in range(4)},
+                              "s7": "group_id.x", "s8": "group_id.y"},
+                    "textures": {0: 0}, "sampler": 0x50, "storage_images": {0x60: (1, "r8g8b8a8_unorm")}}
+TEX_B, OUT_B, GROUPS_B = (16, 16), (24, 24), (3, 3, 1)
+
+
+def image_b_reference(inputs, flaws):
+    seed, bound_x, bound_y, scale_y = inputs
+    tex = rgba8_texels(seed, *TEX_B)
+    before = rgba8_texels(seed + 3, *OUT_B)
+    out = bytearray(before)
+    constants = [0] * 64
+    constants[0:4] = [bound_x, bound_y, 0x3d800000, scale_y]  # sx = 1/16
+    for y in range(8 * GROUPS_B[1]):
+        for x in range(8 * GROUPS_B[0]):
+            inside = x < bound_x and (y < bound_y or "mask_x_only" in flaws)
+            if not (inside or "no_mask" in flaws):
+                continue
+            # Point sampling of a texel-centred coordinate: texel floor(u * 16), clamped to the edge.
+            u = f32_value(mul(0x3d800000, add(f32_bits(Fraction(x)), 0x3f000000))) * 16
+            v = f32_value(mul(0x3d800000 if "row_scale_x" in flaws else scale_y, add(f32_bits(Fraction(y)), 0x3f000000))) * 16
+            tx, ty = int(u), int(v)
+            if "wrap" in flaws:
+                tx, ty = tx % 16, ty % 16
+            found = texel(tex, *TEX_B, min(tx, 15), min(ty, 15))
+            r, g, b = (unorm8_bits(k) for k in found[:3])
+            channels = [unorm8(r), unorm8(g), unorm8(b if "no_flip" in flaws else sub(0x3f800000, b)), 255]
+            image_put(out, OUT_B[0], x, y, channels)
+    return (GROUPS_B, constants, [], [], [], [(0, *TEX_B, tex)], [(1, 8, *OUT_B, before, bytes(out))])
+
+
+IMAGE_PROGRAMS = [
+    (IMAGE_A, IMAGE_A_CONTRACT, [(5,), (77,)], image_a_reference,
+     [{"same_texel"}, {"swap_xy"}, {"alpha_one"}, {"abs"}, {"oob_edge"}]),
+    (IMAGE_B, IMAGE_B_CONTRACT, [(9, 21, 19, 0x3d800000), (31, 24, 13, 0x3d000000)], image_b_reference,
+     [{"no_mask"}, {"mask_x_only"}, {"wrap"}, {"no_flip"}, {"row_scale_x"}]),
+]
+
+
+# Family `cf` (C-3): program A (the corpus's particle shape) narrows EXEC with v_cmpx to the threads below a count and
+# skips the rest with s_cbranch_execz; inside, s_and_saveexec_b64 narrows it again to the threads whose loaded word is
+# even, which store word + 0x100 at offset 4, and s_mov_b64 restores it; then every thread of the outer region stores
+# word ^ 0x5a5a5a5a, loads its own offset-4 word back (a load after a store, of this lane's own address) and stores it
+# plus its index. Program B runs a uniform SCC loop under an EXEC that v_cmpx narrowed, with no skip branch, through
+# forms that write only VGPRs (v_bfe_u32, v_min_u32, v_cvt_f32_u32): an inactive thread must keep its registers and
+# store nothing. Both use the V# at descriptor 0 (constant words 8 to 11) over 256 items of 8 bytes.
+CF_BASE, CF_ITEMS = 0x2_4000_0000, 256
+CF_A = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshl_add_u32 v0, s0, 6, v0",
+    "v_cmpx_gt_u32_e32 s4, v0",
+    "s_cbranch_execz BB9",
+    "v_lshlrev_b32_e32 v1, 3, v0",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dword v2, v1, s[8:11], 0 offen",
+    "s_waitcnt vmcnt(0)",
+    "v_and_b32_e32 v3, 1, v2",
+    "v_cmp_eq_u32_e32 vcc, 0, v3",
+    "s_and_saveexec_b64 s[12:13], vcc",
+    "s_cbranch_execz BB3",
+    "v_add_nc_u32_e32 v4, 0x100, v2",
+    "buffer_store_dword v4, v1, s[8:11], 0 offen offset:4",
+    "BB3:",
+    "s_mov_b64 exec, s[12:13]",
+    "v_xor_b32_e32 v5, 0x5a5a5a5a, v2",
+    "buffer_store_dword v5, v1, s[8:11], 0 offen",
+    "buffer_load_dword v6, v1, s[8:11], 0 offen offset:4",
+    "s_waitcnt vmcnt(0)",
+    "v_add_nc_u32_e32 v6, v6, v0",
+    "buffer_store_dword v6, v1, s[8:11], 0 offen offset:4",
+    "BB9:",
+    "s_endpgm",
+]
+CF_B = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshl_add_u32 v0, s0, 6, v0",
+    "v_lshlrev_b32_e32 v1, 3, v0",
+    "v_mov_b32_e32 v4, 0",
+    "v_cmpx_gt_u32_e32 s4, v0",
+    "s_mov_b32 s6, 0",
+    "BB1:",
+    "v_bfe_u32 v3, v0, s6, 4",
+    "v_min_u32_e32 v3, 9, v3",
+    "v_add_nc_u32_e32 v4, v4, v3",
+    "s_add_u32 s6, s6, 4",
+    "s_cmp_lt_u32 s6, s5",
+    "s_cbranch_scc1 BB1",
+    "v_cvt_f32_u32_e32 v5, v4",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dwordx2 v[4:5], v1, s[8:11], 0 offen",
+    "s_endpgm",
+]
+CF_CONTRACT = {"numthreads": (64, 1, 1), "wave": 64, "local_ids": 1,
+               "sgprs": {"s2": "descriptors", "s3": "group_id.x", "s4": "user:0", "s5": "user:1"},
+               "buffer_descriptors": {0: 8}}
+
+
+def cf_memory(seed):
+    state, words = seed, []
+    for _ in range(2 * CF_ITEMS):
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        words.append(((state >> 7) * 2654435761) & M32)
+    return struct.pack(f"<{2 * CF_ITEMS}I", *words)
+
+
+def cf_reference(program):
+    def reference(inputs, flaws):
+        seed, count, limit = inputs
+        before = cf_memory(seed)
+        memory = Memory([(CF_BASE, CF_BASE + len(before), 0)], [before])
+        constants = [0] * 64
+        constants[0], constants[1] = count, limit
+        constants[8:12] = vsharp(CF_BASE, 0, len(before), 3)
+        for idx in range(CF_ITEMS):
+            if idx >= count and "no_exec" not in flaws:
+                continue
+            at = CF_BASE + 8 * idx
+            if program == "A":
+                word = memory.load(at)
+                stale = memory.load(at + 4)
+                if (word & 1) == (1 if "inverted" in flaws else 0) or "no_inner" in flaws:
+                    memory.store(at + 4, word + 0x100)
+                memory.store(at, word ^ 0x5a5a5a5a)
+                back = stale if "stale_load" in flaws else memory.load(at + 4)
+                memory.store(at + 4, back + (0 if "no_idx" in flaws else idx))
+            else:
+                total, shift = 0, 0
+                while True:
+                    field = (idx >> shift) & 15
+                    total += field if "no_min" in flaws else min(9, field)
+                    shift += 4
+                    if shift >= limit or "one_iter" in flaws:
+                        break
+                memory.store(at, total)
+                memory.store(at + 4, f32_bits(Fraction(total)))
+        return (CF_ITEMS // 64, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+    return reference
+
+
+CF_PROGRAMS = [
+    (CF_A, CF_CONTRACT, [(3, 200, 0), (17, 77, 0)], cf_reference("A"),
+     [{"no_exec"}, {"no_inner"}, {"inverted"}, {"stale_load"}, {"no_idx"}]),
+    (CF_B, CF_CONTRACT, [(5, 150, 12), (8, 230, 4)], cf_reference("B"), [{"no_exec"}, {"no_min"}, {"one_iter"}]),
+]
+
+
+# Family `neutral` (C-4): stage-neutral VALU and SALU forms in the compute stage, one 32x2 workgroup (wave64), each
+# thread on its own 32 bytes: v_pk_fmac_f16 (fused per half), v_pack_b32_f16 with a literal, v_lshrrev_b64 by the
+# flattened index (0 to 63), s_mov_b32 of src_scc, v_cndmask_b32 on the uniform mask of s_cselect_b64, v_cmp_class_f32
+# of neg(1) (the negative subnormal 0x80000001, class bit 4), v_fma_mixlo_f16 into the local id y register (its high
+# half is kept) and s_mov_b32 null, 0. Inputs: v4 and v5 are binary16 pairs, v6 a binary16 pair (the accumulator),
+# v7 a binary32 value; the user words s16..s18 are scalar data.
+NEUTRAL = [
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshl_add_u32 v9, v1, 5, v0",
+    "v_lshlrev_b32_e32 v10, 5, v9",
+    "s_mov_b32 null, 0",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dwordx4 v[4:7], v10, s[8:11], 0 offen",
+    "s_cmp_lt_u32 s16, s17",
+    "s_mov_b32 s20, src_scc",
+    "s_cmp_lg_u32 s18, 0",
+    "s_cselect_b64 s[22:23], -1, 0",
+    "s_waitcnt vmcnt(0)",
+    "v_mov_b32_e32 v12, v6",
+    "v_pk_fmac_f16 v12, v4, v5",
+    "v_pack_b32_f16 v13, 0x3c33, v4",
+    "v_lshrrev_b64 v[14:15], v9, v[4:5]",
+    "v_mov_b32_e32 v16, s20",
+    "v_cndmask_b32_e64 v17, v4, v5, s[22:23]",
+    "v_cmp_class_f32_e64 s[24:25], neg(1), v4",
+    "v_cndmask_b32_e64 v18, 0, 1, s[24:25]",
+    "v_fma_mixlo_f16 v1, 1.0, v7, -0.5 op_sel_hi:[0,0,1]",
+    "v_mov_b32_e32 v19, v1",
+    "buffer_store_dwordx4 v[12:15], v10, s[8:11], 0 offen",
+    "buffer_store_dwordx4 v[16:19], v10, s[8:11], 0 offen offset:16",
+    "s_endpgm",
+]
+NEUTRAL_CONTRACT = {"numthreads": (32, 2, 1), "wave": 64, "local_ids": 2,
+                    "sgprs": {"s2": "descriptors", **{f"s{16 + n}": f"user:{n}" for n in range(3)}},
+                    "buffer_descriptors": {0: 8}}
+
+
+def f16_value(h):
+    sign = -1 if h >> 15 else 1
+    exponent, mantissa = (h >> 10) & 0x1f, h & 0x3ff
+    assert exponent != 0x1f
+    if exponent == 0:
+        return sign * Fraction(mantissa, 1 << 24)
+    return sign * Fraction(mantissa | 1 << 10) * Fraction(2) ** (exponent - 25)
+
+
+def f16_bits(value, zero_sign=0):
+    """binary16 round to nearest even with gradual underflow; an overflow gives infinity."""
+    if value == 0:
+        return zero_sign << 15
+    sign = 1 if value < 0 else 0
+    q = abs(value)
+    exponent = q.numerator.bit_length() - q.denominator.bit_length()
+    if Fraction(2) ** exponent > q:
+        exponent -= 1
+    exponent = max(exponent, -14)
+    scaled = q / Fraction(2) ** (exponent - 10)
+    n, rest = divmod(scaled.numerator, scaled.denominator)
+    if 2 * rest > scaled.denominator or (2 * rest == scaled.denominator and n & 1):
+        n += 1
+    if n == 1 << 11:
+        n, exponent = 1 << 10, exponent + 1
+    if exponent > 15:
+        return sign << 15 | 0x7c00
+    if n < 1 << 10:
+        return sign << 15 | n
+    return sign << 15 | (exponent + 15) << 10 | (n - (1 << 10))
+
+
+def f16_fma(a, b, c, flaws=()):
+    if "pk_unfused" in flaws:
+        product = f16_value(f16_bits(f16_value(a) * f16_value(b)))
+    else:
+        product = f16_value(a) * f16_value(b)
+    total = product + f16_value(c)
+    return f16_bits(total, (a ^ b) >> 15 & c >> 15)
+
+
+def neutral_half(state):
+    """A normal binary16 of magnitude in [2^-4, 2^4): an fma of three of them stays normal and finite."""
+    return (state & 1) << 15 | (11 + (state >> 3) % 8) << 10 | (state >> 7) & 0x3ff
+
+
+def neutral_reference(inputs, flaws):
+    seed, s16, s17, s18 = inputs
+    base = 0x1_8000_0000
+    words, state = [], seed
+    for n in range(64):
+        row = []
+        for k in range(8):
+            state = (state * 1103515245 + 12345) & 0x7fffffff
+            if k < 3:
+                low, high = neutral_half(state), neutral_half(state >> 9)
+                row.append(high << 16 | low)
+            elif k == 3:
+                row.append(((state & 1) << 31) | (124 + (state >> 4) % 6) << 23 | (state * 40503 >> 5) & 0x7fffff)
+            else:
+                row.append((state * 2654435761) & M32)
+        words.append(row)
+    before = b"".join(struct.pack("<8I", *row) for row in words)
+    memory = Memory([(base, base + len(before), 0)], [before])
+    constants = [0] * 64
+    constants[0:3] = [s16, s17, s18]
+    constants[8:12] = vsharp(base, 0, len(before), 3)
+    for index in range(64):
+        a, b, c, d = words[index][:4]
+        lanes = [f16_fma((a >> s) & 0xffff, (b >> s) & 0xffff, (c >> s) & 0xffff, flaws) for s in (0, 16)]
+        packed = lanes[0] | lanes[1] << 16
+        pack = (0x3c33 << 16 | (a & 0xffff)) if "pack_swap" in flaws else ((a & 0xffff) << 16 | 0x3c33)
+        wide = (b << 32 | a) >> (index & (31 if "shift32" in flaws else 63))
+        scc = int(s16 < s17) ^ (1 if "scc_inverted" in flaws else 0)
+        chosen = b if s18 != 0 else a
+        class_bit = (a >> (3 if "class_bit3" in flaws else 4)) & 1
+        mix = f16_bits(f32_value(d) + Fraction(1, 2) * (1 if "mix_no_neg" in flaws else -1))
+        out = [packed, pack, wide & M32, wide >> 32 & M32, scc, chosen, class_bit, mix]
+        for k, word in enumerate(out):
+            memory.store(base + 32 * index + 4 * k, word)
+    return (1, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+NEUTRAL_PROGRAMS = [
+    (NEUTRAL, NEUTRAL_CONTRACT, [(11, 3, 9, 0), (4242, 9, 3, 5)], neutral_reference,
+     [{"pk_unfused"}, {"pack_swap"}, {"shift32"}, {"scc_inverted"}, {"class_bit3"}, {"mix_no_neg"}]),
+]
+
+
+FAMILIES = {"ids": IDS_PROGRAMS, "store": STORE_PROGRAMS, "integrate": INTEGRATE_PROGRAMS,
+            "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS}
 
 
 def check_reference_arithmetic():
@@ -549,12 +984,15 @@ def check_lowering_controls():
         assert text in source, text
     for text in ("Texture2D", "SV_Target", "SamplerState", "\nByteAddressBuffer", "return float4"):
         assert text not in source, text
-    assert compute_aot.COMPUTE_ROOT == ("CBV(b0), SRV(t2), DescriptorTable(UAV(u0, space=1, numDescriptors=8)), "
-                                        "RootConstants(num32BitConstants=1, b1)")
+    assert compute_aot.COMPUTE_ROOT.startswith("CBV(b0), SRV(t2), DescriptorTable(UAV(u0, space=1, numDescriptors=8)), "
+                                               "RootConstants(num32BitConstants=1, b1), DescriptorTable(SRV(t0, "
+                                               "numDescriptors=2)), DescriptorTable(UAV(u0, space=2, numDescriptors=32)), "
+                                               "StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_POINT,")
     # The C++ harness binds the parameters in this order (tests/compute_aot_render.cpp).
     render = (HERE / "compute_aot_render.cpp").read_text(encoding="utf-8")
     for call in ("SetComputeRootConstantBufferView(0,", "SetComputeRootShaderResourceView(1,",
-                 "SetComputeRootDescriptorTable(2,", "SetComputeRoot32BitConstants(3, 1,"):
+                 "SetComputeRootDescriptorTable(2,", "SetComputeRoot32BitConstants(3, 1,",
+                 "SetComputeRootDescriptorTable(4,", "SetComputeRootDescriptorTable(5,"):
         assert call in render, call
     # An empty program (the corpus has one) is a valid dispatch with nothing to do.
     assert "void main" in lower(["s_endpgm"], {"numthreads": (1, 1, 1), "wave": 64, "sgprs": {}})
@@ -583,7 +1021,8 @@ def check_refusals():
                 "s_bcnt1_i32_b64 s5, exec", "s_ff1_i32_b64 s5, exec", "v_permlane16_b32 v5, v0, s0, s0",
                 "buffer_atomic_add v0, v4, s[8:11], 0 offen", "global_store_dword v[4:5], v0, off",
                 "image_store v[0:3], v4, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_1D unorm",
-                "s_branch _L0", "s_cbranch_execz _L0", "_L0:", "s_getpc_b64 s[4:5]", "s_sendmsg sendmsg(MSG_DEALLOC_VGPRS)",
+                "s_branch _L0", "s_cbranch_execz _L0", "s_getpc_b64 s[4:5]", "s_setpc_b64 s[4:5]",
+                "s_sendmsg sendmsg(MSG_DEALLOC_VGPRS)",
                 "s_wqm_b64 exec, exec", "v_mov_b32_dpp v5, v0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf",
                 "exp mrt0 v0, v0, v0, v0 done compr vm", "v_interp_p1_f32_e32 v5, v0, attr0.x",
                 "buffer_store_byte v0, v4, s[8:11], 0 offen", "buffer_store_short v0, v4, s[8:11], 0 offen",
@@ -599,14 +1038,73 @@ def check_refusals():
                 "buffer_store_dword v0, v9, s[8:11], 0 offen", "buffer_store_dword v0, v4, s[12:15], 0 offen",
                 "buffer_store_dword v0, v4, s[8:11], s70 offen", "buffer_store_dword v0, v4, s[8:11], 0 offen glc glc"):
         must_reject(program(bad))
-    # Store data from a load that has not completed, a load after a store, and a store while the lane may be inactive.
+    # Store data from a load that has not completed. A load after a store is lowered since C-3 (one D3D12 thread sees
+    # its own UAV writes in program order; another lane's store without a barrier is a race on the console as well).
     load = "buffer_load_dword v6, v4, s[8:11], 0 offen offset:4"
     assert "buffer_load32" in program(load, "s_waitcnt vmcnt(0)", "buffer_store_dword v6, v4, s[8:11], 0 offen")()
     must_reject(program(load, "buffer_store_dword v6, v4, s[8:11], 0 offen"))
-    must_reject(program(store, "buffer_load_dword v6, v4, s[8:11], 0 offen offset:4"))
+    assert "buffer_load32" in program(store, load, "s_waitcnt vmcnt(0)", "buffer_store_dword v6, v4, s[8:11], 0 offen")()
+    # C-3: a store while the lane may be inactive is emitted under `if (ex)`; a store after EXEC is restored is not.
     masked = ["v_cmp_gt_u32_e64 s[20:21], 5, v0", "s_mov_b64 s[22:23], exec", "s_and_b64 exec, exec, s[20:21]"]
     assert "buffer_store32(rsrc" in program(*masked[:2], store)()
-    must_reject(program(*masked, store))
+    guarded = program(*masked, store)()
+    assert any(line.startswith("    if (ex") and "buffer_store32(" in line for line in guarded.splitlines()), guarded
+    restored = program(*masked, "s_mov_b64 exec, s[22:23]", store)()
+    assert not any(line.startswith("    if (") and "buffer_store32(" in line for line in restored.splitlines())
+    # The pixel stage keeps refusing a store and the VGPR-only forms while the lane may be inactive.
+    must_reject(common.translate, common.with_constants([
+        "v_cmp_gt_u32_e64 s[60:61], 5, v12", "s_and_b64 exec, exec, s[60:61]", "v_cvt_f32_u32_e32 v13, v12"]))
+    # C-3 control flow: an unstructured branch (into a loop), an EXEC re-enabled inside a skipped region, and a branch
+    # on a divergent VCC stay refused.
+    must_reject(program("v_cmpx_gt_u32_e32 5, v0", "s_cbranch_execz _L1", "_L0:", "s_mov_b32 s5, 0", "_L1:",
+                        "s_cbranch_scc1 _L0"))
+    must_reject(program("v_cmp_gt_u32_e64 s[20:21], 5, v0", "s_and_saveexec_b64 s[22:23], s[20:21]",
+                        "s_cbranch_execz _L0", "s_mov_b64 exec, -1", store, "_L0:"))
+    must_reject(program("v_cmp_gt_u32_e32 vcc, 5, v0", "s_cbranch_vccz _L0", store, "_L0:"))
+    # C-2: image refusals. Implicit-LOD forms (no derivatives in a compute thread), an image the contract does not
+    # bind, an atomic, a store to a texel every thread of the group shares, a read-only image written, a storage image
+    # sampled, an RGBA8 store in the pixel stage, a mip store to RGBA8, and a sampler that is not the declared S#.
+    images = {**base, "local_ids": 2, "textures": {0x40: 0}, "storage_images": {0x60: (0, "r8g8b8a8_unorm")},
+              "sampler": 0x80}
+    ihead = ["s_movk_i32 s3, 0x8000", "s_load_dwordx8 s[16:23], s[2:3], 0x40", "s_load_dwordx8 s[24:31], s[2:3], 0x60",
+             "s_load_dwordx4 s[12:15], s[2:3], 0x80", "s_load_dwordx4 s[8:11], s[2:3], null", "s_waitcnt lgkmcnt(0)"]
+
+    def image_program(*body):
+        return lambda: compute_aot.lower_compute([*ihead, *body, "s_endpgm"], **images)
+
+    istore = "image_store v[4:7], v[0:1], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm"
+    fill = ["v_mov_b32_e32 v4, 1.0", "v_mov_b32_e32 v5, 0", "v_mov_b32_e32 v6, 0.5", "v_mov_b32_e32 v7, 0"]
+    assert "image_store0(" in image_program(*fill, istore)()
+    assert "tex.SampleLevel(samp" in image_program(
+        "image_sample_lz v[4:6], v[0:1], s[16:23], s[12:15] dmask:0x7 dim:SQ_RSRC_IMG_2D", "s_waitcnt vmcnt(0)")()
+    for bad in ("image_sample v[4:7], v[0:1], s[16:23], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D",
+                "image_sample_b v[4:7], v[0:2], s[16:23], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D",
+                "image_gather4 v[4:7], v[0:1], s[16:23], s[12:15] dmask:0x1 dim:SQ_RSRC_IMG_2D",
+                "image_get_lod v[4:5], v[0:1], s[16:23], s[12:15] dmask:0x3 dim:SQ_RSRC_IMG_2D",
+                "image_load v[4:7], v[0:1], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                "image_sample_lz v[4:6], v[0:1], s[24:31], s[12:15] dmask:0x7 dim:SQ_RSRC_IMG_2D",
+                "image_sample_lz v[4:6], v[0:1], s[16:23], s[8:11] dmask:0x7 dim:SQ_RSRC_IMG_2D",
+                "image_atomic_add v4, v[0:1], s[24:31] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm glc",
+                "image_store v[4:7], v[0:1], s[16:23] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                "image_store_mip v[4:7], v[0:2], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                "image_store v[4:7], v[0:1], s[24:31] dmask:0x0 dim:SQ_RSRC_IMG_2D unorm"):
+        must_reject(image_program(*fill, bad))
+    must_reject(image_program(*fill, "v_mov_b32_e32 v8, s3", "v_mov_b32_e32 v9, 0",
+                              "image_store v[4:7], v[8:9], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm"))
+    for change in ({"textures": {0x40: 2}}, {"textures": {0x44: 0}}, {"storage_images": {0x60: (4, "r8g8b8a8_unorm")}},
+                   {"storage_images": {0x60: (0, "r8g8b8a8_snorm")}}, {"sampler": 0x88},
+                   {"textures": {0x40: 0, 0x50: 1}}, {"storage_images": {0x60: (0, "r32_uint"), 0x80: (1, "r32_uint")}}):
+        must_reject(image_program(*fill, istore) if False else
+                    (lambda change=change: compute_aot.lower_compute([*ihead, *fill, istore, "s_endpgm"],
+                                                                     **{**images, **change})))
+    # A descriptor word outside every declared descriptor, and a pointer of an undeclared set.
+    must_reject(image_program("s_load_dwordx4 s[40:43], s[2:3], 0xa0"))
+    must_reject(lambda: compute_aot.lower_compute(
+        ["s_movk_i32 s5, 0x8000", "s_load_dwordx8 s[16:23], s[4:5], 0x40", "s_endpgm"], **images))
+    # C-4 neighbours: v_pk_fmac_f16 with a constant src0, v_pack_b32_f16 with modifiers, src_scc without a tracked SCC.
+    for bad in ("v_pk_fmac_f16 v5, 1.0, v0", "v_pack_b32_f16 v5, -v0, v0", "v_pack_b32_f16 v5, v0, v0 op_sel:[1,0,0]",
+                "s_mov_b32 s5, src_scc"):
+        must_reject(program(bad, store))
     # Entry registers without a role, and a descriptor pointer completed with another high word.
     must_reject(program("buffer_store_dword v1, v4, s[8:11], 0 offen"))  # v1 is not a local id with local_ids=1
     must_reject(program("v_mov_b32_e32 v5, s5", store))  # s5 has no role
@@ -673,11 +1171,31 @@ def check_binary(directory, assembler, objcopy, library):
             source, obj, binary = (directory / f"{name}{index}.{ext}" for ext in ("s", "o", "bin"))
             source.write_text("\n".join(program) + "\n", encoding="ascii")
             subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013",
-                            *(["-mattr=+wavefrontsize32"] if contract["wave"] == 32 else []),
-                            "-filetype=obj", source, "-o", obj], check=True)
+                            f"-mattr=+wavefrontsize{contract['wave']}", "-filetype=obj", source, "-o", obj], check=True)
             subprocess.run([objcopy, "-O", "binary", "--only-section=.text", obj, binary], check=True)
-            decoded = disassemble(binary.read_bytes(), library)
+            # The lane-mask operands print as vcc/exec only in a wave64 disassembly.
+            decoded = disassemble(binary.read_bytes(), library, features=f"+wavefrontsize{contract['wave']}".encode())
             assert lower(decoded, contract) == lower(program, contract), (name, index)
+    # A title container (upstream's compute envelope, R0Y00/Xbox2Windows#483): integrate shape A, wave64, read through
+    # compute_aot.container_program, whose PSV gives the workgroup size; the translate CLI does the same.
+    from pixel_aot_check import envelope
+    from pixel_aot import _read_named_container
+    program, contract = INTEGRATE_PROGRAMS[0][:2]
+    source, obj, binary = (directory / f"container.{ext}" for ext in ("s", "o", "bin"))
+    source.write_text("\n".join(program) + "\n", encoding="ascii")
+    subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-mattr=+wavefrontsize64", "-filetype=obj",
+                    source, "-o", obj], check=True)
+    subprocess.run([objcopy, "-O", "binary", "--only-section=.text", obj, binary], check=True)
+    code = binary.read_bytes()
+    padded = code + bytes.fromhex("00009fbf") * (4 - (len(code) // 4 + 10) % 4)  # s_code_end padding, as #483 pads
+    payload = envelope(padded, directory_end=(40 + len(padded), 288 + len(padded)), compute_width=64)
+    container = directory / "integrate.dxbc"
+    container.write_bytes(_read_named_container(payload, 1 + len(b"fixture") + 1))
+    with patch("pixel_aot.disassemble", lambda code, llvm: disassemble(code, llvm, features=b"+wavefrontsize64")):
+        instructions, numthreads = compute_aot.container_program(container, library)
+    assert numthreads == (64, 1, 1)
+    others = {k: v for k, v in contract.items() if k != "numthreads"}
+    assert lower(instructions, {**others, "numthreads": numthreads}) == lower(program, contract)
 
 
 def check_render(directory, compiler, renderer, backend, families=None):
