@@ -263,7 +263,10 @@ def fma_mix(st, i, m):
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     old = st.vector.get(dst)
-    if op != "mix_f32" and old is not None and tracked_word(old) is None:
+    kept = tracked_word(old) if old is not None else None
+    if kept is None and st.stage == "compute" and isinstance(old, tuple) and len(old) == 2 and old[0] == "uint":
+        kept = old[1]  # the compute stage keeps the half of any integer word (a local id, say)
+    if op != "mix_f32" and old is not None and kept is None:
         raise ValueError("Unsupported arithmetic destination")
     need_fma_mix(st)
     selects = [int(x or 0) for x in (s0, s1, s2)]
@@ -275,10 +278,10 @@ def fma_mix(st, i, m):
     if clamp:
         expression = f"fma_mix_sat({expression}, {'true' if wide else 'false'})"
     if op == "mixlo_f16":
-        keep = f"({tracked_word(old)} & 0xffff0000u)" if old is not None else "0u"
+        keep = f"({kept} & 0xffff0000u)" if old is not None else "0u"
         expression = f"{keep} | {expression}"
     elif op == "mixhi_f16":
-        keep = f"({tracked_word(old)} & 0xffffu)" if old is not None else "0u"
+        keep = f"({kept} & 0xffffu)" if old is not None else "0u"
         expression = f"{keep} | ({expression} << 16u)"
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = asfloat({expression});")
@@ -591,4 +594,28 @@ def dot(st, i, m):
     else:
         call = f"{op}(" + ", ".join(packed_word(st, t, f16=False) for t in tokens) + f", {sat})"
     st.lines.append(f"    uint valu{i} = {call};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+@form(r"v_pk_fmac_f16(?:_e32)? (v\d+), (v\d+), (v\d+)")
+def pk_fmac_f16(st, i, m):
+    # VOP2 packed fused multiply-accumulate (compute-stage.md, C-4): D.lo = fma(S0.lo, S1.lo, D.lo) and D.hi = fma(S0.hi,
+    # S1.hi, D.hi), which is v_pk_fma_f16 D, S0, S1, D with the default op_sel and op_sel_hi. VOP2 has no modifiers;
+    # src0 is a VGPR here, since what a packed instruction reads from the high half of a constant src0 is not modelled.
+    dst, a, b = m.groups()
+    pk_f16(st, i, re.fullmatch(r"v_pk_(fma)_f16 (v\d+), (.+)", f"v_pk_fma_f16 {dst}, {a}, {b}, {dst}"))
+
+
+@form(r"v_pack_b32_f16(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+)")
+def pack_b32_f16(st, i, m):
+    # D = S1.f16 << 16 | S0.f16 (compute-stage.md, C-4): the low halves of the two sources, moved as bits (LLVM's
+    # isCanonicalized passes the sources' canonicalization through, so the pack itself neither flushes nor quiets).
+    # op_sel, neg and abs are not in this grammar; a constant source is read as packed_word reads it.
+    dst, *tokens = m.groups()
+    if int(dst[1:]) > 255:
+        raise ValueError("Invalid pack destination")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    low, high = declare_words(st, i, "pkw", tokens, True)
+    st.lines.append(f"    uint valu{i} = ({low} & 0xffffu) | (({high} & 0xffffu) << 16u);")
     st.vector[dst] = ("uint", f"valu{i}")

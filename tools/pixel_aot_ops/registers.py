@@ -98,6 +98,9 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
     source must then hold one of them."""
     if re.fullmatch(r"-\d+", token):
         return f"asfloat({int(token) & 0xffffffff}u)"
+    if negated := re.fullmatch(r"neg\((\d+)\)", token):
+        # LLVM's spelling of the neg modifier on an integer inline constant: the sign bit of its word flipped.
+        return f"asfloat({(int(negated[1]) ^ 0x80000000) & 0xffffffff}u)"
     if token.startswith("-"):
         if token.startswith("--"):
             raise ValueError(f"Malformed modifier {token}")
@@ -255,3 +258,10 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
     if re.fullmatch(r"s\d+", token) and token not in scalar:
         raise ValueError(f"Read of unset scalar register {token}")
     return scalar_u32(token, scalar, pending)
+
+
+def inactive(st):
+    """Whether a form that writes only VGPRs must refuse because this lane may be inactive. The pixel stage refuses
+    (CF-2a: those forms predate the masked-write rule there); the compute stage (docs/design/compute-stage.md, C-3)
+    lowers them, and lowering.masked_writes keeps an inactive lane's old value in every VGPR they write."""
+    return st.ex != "true" and st.stage == "pixel"

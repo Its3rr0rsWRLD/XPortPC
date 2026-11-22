@@ -5,6 +5,77 @@ from ..dispatch import form
 from ..registers import registers, sgpr_name, sgpr_pair
 
 
+# A descriptor-list pointer of the compute stage (tools/compute_aot.py): set 0 is "texture_ptr", the pixel stage's name,
+# and set N > 0 is "texture_ptr.N"; both are completed with st.descriptor_high. A descriptor of set N is keyed by
+# N * SET_STRIDE + its byte offset in the set (SMEM offsets are 20 bits, so the keys of two sets never meet).
+SET_STRIDE = 0x100000
+
+
+def table_set(st, values):
+    """The descriptor set whose pointer the two address words hold, or None."""
+    if len(values) != 2 or values[1] != st.descriptor_high or not isinstance(values[0], str):
+        return None
+    if values[0] == "texture_ptr":
+        return 0
+    if m := re.fullmatch(r"texture_ptr\.([1-7])", values[0]):
+        return int(m[1])
+    return None
+
+
+@form(r"s_load_dword(x2|x4|x8|x16)? (s\d+|s\[\d+:\d+\]), (s\[\d+:\d+\]), (null|0x[0-9a-f]+)( glc)?( dlc)?",
+      when=lambda st, m: st.stage == "compute")
+def compute_descriptor_load(st, i, m):
+    # The compute stage reads every descriptor through this form (docs/design/compute-stage.md): each destination word
+    # is the word of the declared descriptor that covers it, a T# (st.bindings, sampled or read-only images, 32 bytes),
+    # a storage-image T# (st.storage_images, 32 bytes), a sampler S# (st.sampler_offsets, 16 bytes, tracked as
+    # ("sampler", j)), the constant-buffer V# (16 bytes) or a buffer V# (16 bytes, its words in params). One load may
+    # span several descriptors, as s_load_dwordx16 of two adjacent T#s does. A word no declared descriptor covers is
+    # refused, as is an offset that is not a translation-time constant.
+    width, dst_token, base_token, soffset, _glc, _dlc = m.groups()
+    count = int(width[1:]) if width else 1
+    if count == 1:
+        dst = [sgpr_name(dst_token)]
+    else:
+        if not (span := re.fullmatch(r"s\[(\d+):(\d+)\]", dst_token)):
+            raise ValueError("Scalar load destination width mismatch")
+        first, last = map(int, span.groups())
+        if last - first + 1 != count or first % (2 if count == 2 else 4) or last > 105:
+            raise ValueError("Invalid scalar load destination registers")
+        dst = [f"s{n}" for n in range(first, last + 1)]
+    base = sgpr_pair(base_token)
+    table = table_set(st, [st.scalar.get(r) for r in base])
+    if table is None or st.pending.intersection(base):
+        raise ValueError("Unresolved descriptor-list pointer")
+    offset = 0 if soffset == "null" else int(soffset, 16)
+    if offset % 4 or offset > 0xfffff:
+        raise ValueError("Scalar load offset is misaligned or out of range")
+    words = []
+    for j in range(count):
+        at = table * SET_STRIDE + offset + 4 * j
+        texture = next((k for k in st.bindings if k <= at < k + 32), None)
+        image = next((k for k in st.storage_images if k <= at < k + 32), None)
+        sampler = next((k for k in st.sampler_offsets if k <= at < k + 16), None)
+        vsharp = next((k for k in st.vsharp_words if k <= at < k + 16), None)
+        if texture is not None:
+            words.append((st.bindings[texture], (at - texture) // 4))
+        elif image is not None:
+            words.append((f"image{st.storage_images[image][0]}", (at - image) // 4))
+        elif sampler is not None:
+            words.append(("sampler", (at - sampler) // 4))
+        elif st.constant_descriptor is not None and st.constant_descriptor <= at < st.constant_descriptor + 16:
+            words.append(("cbv", (at - st.constant_descriptor) // 4))
+        elif vsharp is not None:
+            word = st.vsharp_words[vsharp] + (at - vsharp) // 4
+            words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+        else:
+            raise ValueError("Descriptor table word is not a tracked descriptor")
+    for n, value in zip(dst, words):
+        if n in st.pending:
+            raise ValueError("Write overlaps an outstanding scalar load")
+        st.scalar[n] = value
+        st.pending.add(n)
+
+
 @form(r"s_load_dwordx8 s\[(\d+):(\d+)\], s\[(\d+):(\d+)\], (null|0x[0-9a-f]+)",
       when=lambda st, m: (0 if m[5] == "null" else int(m[5], 16)) in st.bindings.keys() | st.storage_images.keys())
 def texture_descriptor(st, i, m):

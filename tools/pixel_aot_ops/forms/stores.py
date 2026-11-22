@@ -78,16 +78,27 @@ SUB_STORE = {"byte": (1, 0), "byte_d16_hi": (1, 16), "short": (2, 0), "short_d16
 
 def writing(st, *, dword_store=False):
     """Refuse a memory write unless this lane is provably active outside whole-quad mode, and bind memory writable.
-    The compute stage (tools/compute_aot.py, card C-1 of docs/design/compute-stage.md) lowers only the whole-dword
+    The compute stage (tools/compute_aot.py, docs/design/compute-stage.md) lowers only the whole-dword
     buffer_store_dword..x4 through this module, with the same address and range rules; every other store and atomic is
-    refused there until its card."""
+    refused there until its card. In the compute stage (C-3) a store may also run while the lane may be inactive: it is
+    emitted under `if (ex)` (guarded), so only an active lane writes, and HLSL flow around it stays as it was."""
     if st.stage != "pixel" and not dword_store:
         raise ValueError("This store or atomic is lowered in the pixel stage only")
-    if st.ex != "true" or st.wqm:
+    if (st.ex != "true" and st.stage == "pixel") or st.wqm:
         raise ValueError("A memory write needs this lane provably active outside whole-quad mode (CF-2a)")
     st.uses_memory = True
     st.writes_memory = True
     st.memory_helpers.setdefault("stores", STORE_HELPERS)
+
+
+def guarded(st, text):
+    """A store statement as emitted: under `if (ex)` while this lane may be inactive (compute stage only, see
+    writing), as it is otherwise."""
+    if st.ex == "true":
+        return text
+    if st.stage == "pixel":
+        raise ValueError("A memory write needs this lane provably active (CF-2a)")
+    return f"    if ({st.ex}) {text.strip()}"
 
 
 def data_words(st, token, count):
@@ -109,7 +120,7 @@ def buffer_store(st, i, m):
         raise ValueError("Store data overlaps an outstanding load")
     rsrc, soffset, voffset, inst_offset, vindex, _ = buffer_operands(st, i, addr_token, rsrc_token, soffset_token, modifiers)
     for j, word in enumerate(words):
-        st.lines.append(f"    buffer_store32({rsrc}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {j}u, {word});")
+        st.lines.append(guarded(st, f"    buffer_store32({rsrc}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {j}u, {word});"))
 
 
 @form(r"buffer_store_(" + "|".join(sorted(SUB_STORE, key=len, reverse=True)) + r") (v\d+), " + OPERANDS)

@@ -1,20 +1,27 @@
 """Offline lowering for a gfx1013 compute shader to an HLSL compute shader (design: docs/design/compute-stage.md).
 
-Card C-1: a straight-line program (no label, branch or LDS, no barrier, no cross-lane operation) that reads the thread
-ids, loads through buffer V#s and scalar constants and stores whole dwords with buffer_store_dword{,x2,x3,x4}. The
-instruction forms are the pixel stage's (tools/pixel_aot_ops/forms); this module supplies the compute entry contract
-(what each entry register holds), the stage's refusals and the HLSL around the body:
+Cards C-1 to C-4: a program that reads the thread ids, loads through buffer V#s and scalar constants, stores whole dwords
+with buffer_store_dword{,x2,x3,x4}, reads images (image_load, explicit-LOD image_sample_lz/_l and their offset forms),
+writes images (image_store), branches as the pixel stage's control flow does (CF-1 and CF-2: uniform branches, EXEC
+masks, skip branches, loops), and uses any stage-neutral VALU or SALU form. The instruction forms are the pixel stage's
+(tools/pixel_aot_ops/forms) and the control-flow walk is pixel_aot_ops.control_flow; this module supplies the compute
+entry contract (what each entry register holds), the stage's refusals and the HLSL around the body:
 
     one HLSL thread = one console lane = one invocation, [numthreads] = the workgroup size, SV_GroupID = the workgroup
     id SGPRs, SV_GroupThreadID = the local id VGPRs v0, v1, v2 (gfx10 passes them unpacked).
 
 Title memory is the pixel stage's (src/title_va_lookup.hlsli), declared read-write: RWByteAddressBuffer title_memory[8]
-at u0..u7 in space 1. The root signature is embedded in the HLSL (COMPUTE_ROOT) and matches tests/compute_aot_render.cpp.
+at u0..u7 in space 1. Read images are Texture2D<float4> tex (t0) and tex1 (t1) with a static point sampler (s0), as the
+pixel stage binds them; storage images are RWTexture2D at u(8 * slot), space 2 (forms/image_writes.py). The root
+signature is embedded in the HLSL (COMPUTE_ROOT) and matches tests/compute_aot_render.cpp.
+
+A store while the lane may be inactive (a narrowed EXEC, a skipped region) is emitted under `if (ex)`, so only the
+active lanes write (forms/stores.guarded).
 
 Usage:
     python tools/compute_aot.py translate PROGRAM.s --numthreads X Y Z --wave 64 --sgpr s2=descriptors
         --sgpr s3=group_id.x [--local-ids N] [--constant-descriptor OFFSET] [--buffer-descriptor OFFSET=WORD]...
-        --output OUT.hlsl
+        [--texture OFFSET=INDEX]... [--storage-image OFFSET=SLOT:FORMAT]... [--sampler OFFSET] --output OUT.hlsl
     python tools/compute_aot.py survey --isa DIR [--status site/status.json] [--json OUT]
 
 PROGRAM.s is instruction text, one per line, as llvm-mc prints it or as a RADV dump writes it (a leading "BB0:" label and
@@ -32,15 +39,23 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_LOOKUP  # noqa: E402
-from pixel_aot_ops.lowering import Lowering, masked_writes  # noqa: E402
+from pixel_aot_ops.control_flow import find_loops, poisoned_operands, program, split_blocks  # noqa: E402
+from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
+from pixel_aot_ops.forms.smem import SET_STRIDE  # noqa: E402
+from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
 
 # RADV completes a 32-bit descriptor-list pointer with s_movk_i32 s(n+1), 0x8000, which sign-extends to 0xffff8000
 # (its address32_hi on gfx10).
 RADV_DESCRIPTOR_HIGH = 0xffff8000
 # Parameter order: 0 the constant words (params, b0), 1 the title ranges (t2), 2 the eight title-memory UAVs (u0..u7,
 # space 1), 3 the range count (b1).
+# 4 the read images (t0, t1: tex, tex1), 5 the storage images (u0..u31, space 2, eight levels per slot), and the
+# point sampler of the pixel harness (tests/pixel_aot_vs.hlsl).
 COMPUTE_ROOT = ("CBV(b0), SRV(t2), DescriptorTable(UAV(u0, space=1, numDescriptors=8)), "
-                "RootConstants(num32BitConstants=1, b1)")
+                "RootConstants(num32BitConstants=1, b1), DescriptorTable(SRV(t0, numDescriptors=2)), "
+                "DescriptorTable(UAV(u0, space=2, numDescriptors=32)), StaticSampler(s0, filter=FILTER_MIN_MAG_MIP_POINT, "
+                "addressU=TEXTURE_ADDRESS_CLAMP, addressV=TEXTURE_ADDRESS_CLAMP, addressW=TEXTURE_ADDRESS_CLAMP)")
+TEXTURE_NAMES = ("tex", "tex1")
 TITLE_DECLARATIONS_RW = """StructuredBuffer<TitleRange> title_ranges : register(t2);
 RWByteAddressBuffer title_memory[8] : register(u0, space1);
 cbuffer TitleCount : register(b1) { uint title_range_count; };
@@ -65,10 +80,12 @@ LATER = (
     (r"v_mbcnt_\w+.*", "v_mbcnt depends on the wave size and the lane order (card C-8)"),
     (r"(v_permlane\w*|v_swap_rel\w*|v_movrel\w*)\b.*", "a cross-lane permutation is refused (no card)"),
     (r"(buffer|global|flat|image)_atomic\w*.*", "atomics are card C-8"),
-    (r"image_\w+.*", "image access in the compute stage is card C-2"),
+    (r"(image_sample|image_sample_o|image_sample_b\w*|image_sample_c\w*|image_sample_\w*cl\w*|image_sample_d_o|"
+     r"image_gather4|image_gather4_\w*[bc]\w*|image_get_lod)\b.*",
+     "implicit-LOD sampling needs derivatives, which a compute thread has not (explicit-LOD forms only)"),
     (r"(global|flat|scratch)_store\w*.*", "global stores are card C-5"),
-    (r"(buffer|tbuffer)_store_(byte|short|format)\w*.*", "sub-dword and typed stores are not planned in C-1"),
-    (r"(s_branch|s_cbranch_\w+|s_setpc_b64|s_swappc_b64|s_getpc_b64)\b.*", "control flow is card C-3"),
+    (r"(buffer|tbuffer)_store_(byte|short|format)\w*.*", "sub-dword and typed buffer stores are not planned"),
+    (r"(s_setpc_b64|s_swappc_b64|s_getpc_b64)\b.*", "indirect control flow is refused in the compute stage"),
     (r"s_sendmsg\w*.*|s_ttracedata.*", "messages are refused in the compute stage"),
 )
 WAVE64_ONLY = re.compile(r"(?<![\w])(exec|vcc)(?![\w])")
@@ -77,9 +94,9 @@ MEMORY_LOAD = re.compile(r"(buffer_load|tbuffer_load|global_load|flat_load|scrat
 
 
 def parse_role(token):
-    """An entry-SGPR role: 'descriptors' (the 32-bit descriptor-list pointer), 'group_id.x|y|z' or 'user:N' (the
-    inline user-data word N of params, such as a push constant)."""
-    if token in ("descriptors", *GROUP_ROLES):
+    """An entry-SGPR role: 'descriptors' (the 32-bit pointer to descriptor set 0), 'descriptors.N' (set N, 1 to 7),
+    'group_id.x|y|z' or 'user:N' (the inline user-data word N of params, such as a push constant)."""
+    if token in ("descriptors", *GROUP_ROLES) or re.fullmatch(r"descriptors\.[1-7]", token):
         return token
     if m := re.fullmatch(r"user:(\d+)", token):
         if int(m[1]) < 64:
@@ -88,14 +105,22 @@ def parse_role(token):
 
 
 def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_ids=False, constant_descriptor=None,
-                  buffer_descriptors=None):
-    """Lower a straight-line gfx1013 compute program to HLSL source (card C-1).
+                  buffer_descriptors=None, textures=None, storage_images=None, sampler=None,
+                  descriptor_high=RADV_DESCRIPTOR_HIGH):
+    """Lower a gfx1013 compute program to HLSL source (cards C-1 to C-4).
 
     numthreads: the workgroup size (x, y, z). wave: 32 or 64, the console wave size the program was compiled for; it
     only decides which lane-mask spellings are legal, since no accepted program depends on it. sgprs: {"sN": role}
     (parse_role). local_ids: how many of v0, v1, v2 hold the local ids (COMPUTE_PGM_RSRC2.TIDIG_COMP_CNT + 1).
-    constant_descriptor: the descriptor-table byte offset of the constant-buffer V# (its words are params[]).
-    buffer_descriptors: {descriptor-table byte offset of a buffer V#: index of its first word in params}."""
+    Descriptor keys are byte offsets in descriptor set 0, or SET_STRIDE * N + offset in set N (role descriptors.N).
+    constant_descriptor: the key of the constant-buffer V# (its words are params[]). buffer_descriptors: {key of a
+    buffer V#: index of its first word in params}. textures: {key of a 32-byte T# the program reads: 0 (tex, t0) or 1
+    (tex1, t1)}, bound as RGBA8 SRVs. storage_images: {key of a 32-byte T# the program writes: (slot 0..3, format)},
+    a format of forms/image_writes.py. sampler: the key of the 16-byte S# the explicit-LOD samples read (the harness's
+    static point sampler). descriptor_high: the high word the program completes a descriptor-list pointer with (RADV's
+    0xffff8000; a title's container may use another, such as 0 in R0Y00/Xbox2Windows#483's fixtures)."""
+    if not isinstance(descriptor_high, int) or not 0 <= descriptor_high <= 0xffffffff:
+        raise ValueError("Invalid descriptor high word")
     if (len(numthreads) != 3 or any(not isinstance(n, int) or n < 1 for n in numthreads) or numthreads[0] > 1024
             or numthreads[1] > 1024 or numthreads[2] > 64 or numthreads[0] * numthreads[1] * numthreads[2] > 1024):
         raise ValueError("Invalid workgroup size: D3D12 allows x, y <= 1024, z <= 64 and at most 1024 threads")
@@ -112,7 +137,9 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
         role = parse_role(token)
         roles[role] += 1
         if role == "descriptors":
-            scalar[reg] = "texture_ptr"  # the provenance smem.scalar_load expects of a descriptor-table base
+            scalar[reg] = "texture_ptr"  # the provenance forms/smem.py expects of a descriptor-list base
+        elif role.startswith("descriptors."):
+            scalar[reg] = f"texture_ptr.{role[12:]}"
         elif role.startswith("user:"):
             word = int(role[5:])
             scalar[reg] = ("uint", f"params[{word // 4}].{'xyzw'[word % 4]}")
@@ -122,29 +149,39 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
         raise ValueError("An entry SGPR role is given twice")
     vsharp_words = dict(buffer_descriptors or {})
     for offset, word in vsharp_words.items():
-        if offset < 0 or offset % 16 or not 0 <= word <= 60:
+        if not valid_key(offset, 16) or not 0 <= word <= 60:
             raise ValueError("Invalid buffer descriptor offset or constant word")
-    starts = sorted([*vsharp_words, *([constant_descriptor] if constant_descriptor is not None else [])])
-    if len(set(starts)) != len(starts) or any(b < a + 16 for a, b in zip(starts, starts[1:])):
-        raise ValueError("Descriptor-table entries overlap")
-    if constant_descriptor is not None and (constant_descriptor < 0 or constant_descriptor % 16):
+    if constant_descriptor is not None and not valid_key(constant_descriptor, 16):
         raise ValueError("Invalid constant descriptor offset")
+    textures, storage_images = dict(textures or {}), dict(storage_images or {})
+    if any(not valid_key(k, 32) or v not in (0, 1) for k, v in textures.items()) or len(set(textures.values())) != len(textures):
+        raise ValueError("Invalid texture offset or index (0 or 1, each once)")
+    slots = [entry[0] if isinstance(entry, tuple) and len(entry) == 2 else None for entry in storage_images.values()]
+    for (key, entry), slot in zip(storage_images.items(), slots):
+        if (not valid_key(key, 32) or slot not in range(4) or slots.count(slot) != 1
+                or entry[1] not in {**IMAGE_FORMATS, **UNORM_FORMATS}):
+            raise ValueError("Invalid storage image offset, slot or format")
+    if sampler is not None and not valid_key(sampler, 16):
+        raise ValueError("Invalid sampler offset")
+    spans = sorted([*((k, 16) for k in vsharp_words), *((k, 32) for k in (*textures, *storage_images)),
+                    *([(constant_descriptor, 16)] if constant_descriptor is not None else []),
+                    *([(sampler, 16)] if sampler is not None else [])])
+    if any(b < a + size for (a, size), (b, _) in zip(spans, spans[1:])):
+        raise ValueError("Descriptor-table entries overlap")
     users = {int(r[5:]) for r in roles if r.startswith("user:")}
     if any(w <= u < w + 4 for u in users for w in vsharp_words.values()):
         raise ValueError("A user-data word overlaps the words of a buffer V#")
     vector = {f"v{n}": ("uint", LOCAL_IDS[n]) for n in range(local_ids)}
     lines = [PREAMBLE]
     # Without a constant buffer, its offset lies below the table (-16), where no descriptor load can reach.
-    st = Lowering(scalar, vector, lines, {}, [0, 0, 0, 0], -16 if constant_descriptor is None else constant_descriptor,
-                  vsharp_words)
+    st = Lowering(scalar, vector, lines, {k: TEXTURE_NAMES[v] for k, v in textures.items()},
+                  () if sampler is None else tuple(("sampler", j) for j in range(4)),
+                  -16 if constant_descriptor is None else constant_descriptor, vsharp_words)
     st.stage = "compute"
-    st.descriptor_high = RADV_DESCRIPTOR_HIGH
-    stored = False
+    st.descriptor_high = descriptor_high
+    st.storage_images.update(storage_images)
+    st.sampler_offsets = () if sampler is None else (sampler,)
     for i, line in enumerate(instructions):
-        if st.ended:
-            raise ValueError(f"Instruction {i} follows program end: {line}")
-        if line.endswith(":"):
-            raise ValueError(f"Labels mean control flow, card C-3: {line}")
         for pattern, reason in LATER:
             if re.fullmatch(pattern, line):
                 raise ValueError(f"Instruction {i}: {reason}: {line}")
@@ -154,22 +191,36 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(f"Instruction {i} writes a 64-bit lane mask in a wave32 program: {line}")
         if wave == 64 and re.fullmatch(r"v_cmpx?_\w+_e64 s\d+,.*", line):
             raise ValueError(f"Instruction {i} writes a 32-bit lane mask in a wave64 program: {line}")
-        if stored and MEMORY_LOAD.fullmatch(line):
-            # A load after a store in the same program is ordered through vscnt, which C-1 does not model.
-            raise ValueError(f"Instruction {i}: a memory load after a store is not lowered in C-1: {line}")
+    blocks, labels = split_blocks(instructions)
+    latch_of = find_loops(blocks, labels)
+    for i, line in program(st, blocks, labels, latch_of):
+        if st.ended:
+            raise ValueError(f"Instruction {i} follows program end: {line}")
         if line == "s_endpgm":
             st.ended = True
             continue
-        if st.ex == "true":
-            dispatch(st, i, line)
-        else:
-            ex, before = st.ex, dict(st.vector)
-            dispatch(st, i, line)
-            masked_writes(st, i, ex, before)
-        stored = stored or line.startswith("buffer_store")
+        poisoned = poisoned_operands(st.scalar, line)
+        try:
+            if st.ex == "true":
+                dispatch(st, i, line)
+            else:
+                ex, before = st.ex, dict(st.vector)
+                dispatch(st, i, line)
+                masked_writes(st, i, ex, before)
+        except ValueError as error:
+            if poisoned:
+                raise ValueError(poison_message(st, poisoned)) from error
+            raise
+        if poisoned and set(poisoned) & set(poisoned_operands(st.scalar, line)):
+            raise ValueError(poison_message(st, poisoned))
     if not st.ended:
         raise ValueError("Missing s_endpgm")
     return emit(st, numthreads)
+
+
+def valid_key(key, size):
+    """A descriptor key (set * SET_STRIDE + byte offset) of a descriptor of `size` bytes in one of sets 0 to 7."""
+    return isinstance(key, int) and 0 <= key < 8 * SET_STRIDE and key % 16 == 0 and key % SET_STRIDE + size <= SET_STRIDE
 
 
 def emit(st, numthreads):
@@ -178,6 +229,10 @@ def emit(st, numthreads):
     head = ["// gfx1013 compute program translated by tools/compute_aot.py (docs/design/compute-stage.md).",
             "cbuffer Constants : register(b0) { uint4 params[16]; };"]
     defs = [body for name, body in SALU_HELPERS.items() if name in st.helpers]
+    head += [f"Texture2D<float4> {name} : register(t{TEXTURE_NAMES.index(name)});" for name in sorted(set(st.bindings.values()))]
+    if st.sampler:
+        head.append("SamplerState samp : register(s0);")
+    defs = [*st.declarations.values(), *defs]
     if st.uses_memory:
         defs = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS_RW, MEMORY_HELPERS,
                 *st.memory_helpers.values(), *defs]
@@ -200,6 +255,23 @@ def read_program(path):
     if out and re.fullmatch(r"\w+:", out[0]) and not any(out[0][:-1] in t.split() for t in out[1:]):
         out = out[1:]
     return out
+
+
+def container_program(path, llvm):
+    """The instructions and workgroup size of a compute program in a title's DXBC container, through upstream's
+    extraction (R0Y00/Xbox2Windows#483: pixel_aot.container_code with stage 5, the PSV0 runtime info). The PSV layout
+    is the one tools/compute_store_aot.group_width reads; this reader takes any x, y and z the D3D12 limits allow."""
+    import struct
+    from pixel_aot import container_code, disassemble
+    from resource_inventory import parts
+    chunks = parts(Path(path).read_bytes())
+    psv = chunks.get(b"PSV0", b"")
+    size = struct.unpack_from("<I", psv)[0] if len(psv) >= 4 else 0
+    if not 48 <= size <= len(psv) - 4 or psv[28] != 5:
+        raise ValueError("Expected compute PSV runtime info with thread dimensions")
+    numthreads = struct.unpack_from("<3I", psv, 40)
+    code = container_code(chunks.get(b"DXIL", b""), stage=5)
+    return disassemble(code, llvm), tuple(numthreads)
 
 
 # Survey of a corpus compile (docs/design/compute-stage.md, "What the corpus shows").
@@ -279,17 +351,30 @@ def survey(isa_dir, status=None):
     return report
 
 
+def key_arg(text):
+    """A descriptor key on the command line: OFFSET in set 0, or SET:OFFSET."""
+    if ":" in text:
+        table, offset = text.split(":", 1)
+        return int(table, 0) * SET_STRIDE + int(offset, 0)
+    return int(text, 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
     tr = sub.add_parser("translate")
-    tr.add_argument("program", type=Path)
-    tr.add_argument("--numthreads", type=int, nargs=3, required=True)
+    tr.add_argument("program", type=Path, help="instruction text, or a DXBC container with --container")
+    tr.add_argument("--container", metavar="LIBLLVM", help="read PROGRAM as a title container, disassembled with LIBLLVM")
+    tr.add_argument("--descriptor-high", type=lambda t: int(t, 0), default=RADV_DESCRIPTOR_HIGH)
+    tr.add_argument("--numthreads", type=int, nargs=3, help="required for instruction text; a container's PSV gives it")
     tr.add_argument("--wave", type=int, choices=(32, 64), required=True)
     tr.add_argument("--sgpr", action="append", default=[], help="sN=ROLE: descriptors, group_id.x|y|z or user:N")
     tr.add_argument("--local-ids", type=int, default=3)
-    tr.add_argument("--constant-descriptor", type=lambda s: int(s, 0))
+    tr.add_argument("--constant-descriptor", type=key_arg)
     tr.add_argument("--buffer-descriptor", action="append", default=[], help="OFFSET=WORD")
+    tr.add_argument("--texture", action="append", default=[], help="OFFSET=0|1 (tex or tex1)")
+    tr.add_argument("--storage-image", action="append", default=[], help="OFFSET=SLOT:FORMAT")
+    tr.add_argument("--sampler", type=key_arg)
     tr.add_argument("--output", type=Path, required=True)
     sv = sub.add_parser("survey")
     sv.add_argument("--isa", type=Path, required=True)
@@ -309,10 +394,25 @@ def main():
         parser.error("Choose an HLSL destination distinct from the input")
     try:
         sgprs = dict(item.split("=", 1) for item in args.sgpr)
-        buffers = {int(k, 0): int(v, 0) for k, v in (item.split("=", 1) for item in args.buffer_descriptor)}
-        source = lower_compute(read_program(args.program), numthreads=tuple(args.numthreads), wave=args.wave,
+        buffers = {key_arg(k): int(v, 0) for k, v in (item.split("=", 1) for item in args.buffer_descriptor)}
+        textures = {key_arg(k): int(v, 0) for k, v in (item.split("=", 1) for item in args.texture)}
+        images = {}
+        for item in args.storage_image:
+            k, v = item.split("=", 1)
+            slot, fmt = v.split(":", 1)
+            images[key_arg(k)] = (int(slot), fmt)
+        if args.container:
+            instructions, numthreads = container_program(args.program, args.container)
+            if args.numthreads and tuple(args.numthreads) != numthreads:
+                raise ValueError(f"--numthreads differs from the container's {numthreads}")
+        elif args.numthreads:
+            instructions, numthreads = read_program(args.program), tuple(args.numthreads)
+        else:
+            raise ValueError("--numthreads is required for instruction text")
+        source = lower_compute(instructions, numthreads=numthreads, wave=args.wave, descriptor_high=args.descriptor_high,
                                sgprs=sgprs, local_ids=args.local_ids, constant_descriptor=args.constant_descriptor,
-                               buffer_descriptors=buffers)
+                               buffer_descriptors=buffers, textures=textures, storage_images=images,
+                               sampler=args.sampler)
     except (ValueError, KeyError, OSError) as exc:
         parser.exit(1, f"Translation failed: {exc}\n")
     dest.parent.mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,7 @@ class Lowering:
         self.preamble = PREAMBLE  # that entry: PREAMBLE, or UNSAMPLED_PREAMBLE for a program bound without a sampler
         self.bindings = bindings  # descriptor-table byte offset of a T# -> HLSL texture name
         self.sampler = sampler  # the four sampler descriptor words bound to s0; () when no sampler is bound
+        self.sampler_offsets = ()  # compute stage: descriptor keys of sampler S#s (forms/smem.compute_descriptor_load)
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.uses_memory = False  # emit the title-memory helpers

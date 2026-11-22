@@ -2,6 +2,7 @@
 import re
 
 from ..dispatch import form
+from ..registers import inactive
 from ..registers import sgpr_pair, vector_u32, vgprs
 from .mubuf import SUB_DWORD, sub_dword_word
 
@@ -20,7 +21,7 @@ def global_operands(st, addr_token, saddr_token, modifiers):
             flags.add(modifier)
         else:
             raise ValueError(f"Unsupported global load modifier {modifier}")
-    if st.ex != "true" or not -2048 <= immediate <= 2047:
+    if inactive(st) or not -2048 <= immediate <= 2047:
         raise ValueError("Invalid global load")
     if saddr_token == "off":
         if not addr_token.startswith("v["):
