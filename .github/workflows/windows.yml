@@ -69,6 +69,7 @@ jobs:
           python -B tests/dependency_paths_check.py
           python -B tests/intake/paths_check.py
           python -B tests/shader_probe_check.py
+          python -B tests/shader_census_check.py
           python -B tests/dxil_retarget_check.py
           python -B tests/rdna2_tools_check.py
           python -B tests/pso_readiness_check.py

@@ -2763,6 +2763,8 @@ if(EXISTS "${INTAKE_PYTHON}")
         DEPENDS tests/buffer_ops.hlsl VERBATIM)
     add_custom_target(dxil_retarget_fixture DEPENDS "${retarget_copy_blocks}")
     add_dependencies(root_device_probe dxil_retarget_fixture)
+    add_test(NAME shader_metadata_census COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/shader_census_check.py")
     add_test(NAME dxil_retarget_probe COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/dxil_retarget_check.py" "$<TARGET_FILE:root_probe>"
         "${CMAKE_CURRENT_BINARY_DIR}/compute_root.cso" "${retarget_copy_blocks}"
