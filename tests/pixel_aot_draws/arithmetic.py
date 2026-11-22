@@ -92,7 +92,7 @@ def controls(directory):
     for old, new in (("v18, v12", "v18, v0"), ("v18, v12", "v18, v30"),
                      ("v19, s46", "v19, s28"), ("v19, s46", "v19, -s46"), ("v19, s46", "v19, s46 clamp"),
                      ("v18, v12", "v18, v12, v13"), ("v14, -0.5, v14", "v14, v14"),
-                     ("v19, v13, v19", "v19, v13, v19, v18"), ("s45 clamp", "s45 clamp mul:2")):
+                     ("v19, v13, v19", "v19, v13, v19, v18")):
         changed = [line.replace(old, new) for line in program]
         assert changed != program
         must_reject(translate, changed)

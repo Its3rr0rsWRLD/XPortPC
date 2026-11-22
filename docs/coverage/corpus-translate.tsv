@@ -1,11 +1,10 @@
 # End-to-end translation of the corpus pixel shaders (tools/corpus_translate.py; inputs
 # tests/corpus/isa/pixel, sources and licenses tests/corpus/README.md). all_covered is the site's measure
 # (every form covered by a test); translated means lower() accepted the whole program and produced HLSL.
-# Pixel: shaders 250; translated 53; all_covered 197; all_covered_translated 53.
+# Pixel: shaders 250; translated 72; all_covered 197; all_covered_translated 71.
 # Refusal reasons, most shaders first: shaders (all_covered shaders), kind, place, reason.
 # Reason 77 (60)	contract	smem.scalar_load	Unresolved constant buffer binding
 # Reason 50 (42)	contract	smem.texture_descriptor	Texture address differs from binding contract
-# Reason 22 (20)	refused	valu_f32.arithmetic	Unsupported output modifier
 # Reason 12 (3)	contract	sop1.move_32	Read of unset scalar register s3
 # Reason 8 (5)	contract	lowering.lower	Texture and constant descriptors overlap
 # Reason 4 (4)	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset
@@ -16,11 +15,13 @@
 # Reason 2 (2)	no_form	dispatch	no form matches s_endpgm
 # Reason 2 (2)	refused	valu_f32.arithmetic	Read of unset vector register v2
 # Reason 2 (0)	refused	vintrp.interpolate	Unknown interpolation context
+# Reason 2 (2)	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333
 # Reason 1 (0)	contract	sop1.move_32	Read of unset scalar register s2
 # Reason 1 (0)	contract	sop2.bitfield_extract	Read of unset scalar register s2
 # Reason 1 (0)	contract	valu_f32.arithmetic	Read of unset scalar register s2
 # Reason 1 (0)	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode
 # Reason 1 (1)	refused	exp.pack_e64	Unsupported pack operand s2
+# Reason 1 (0)	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word
 # Reason 1 (1)	refused	vop3p.fma_mix	Unsupported arithmetic destination
 # Reason 1 (0)	refused	vopc.cmpx_f32	Read of unset vector register v2
 # Columns: shader, all_covered (0/1), status, kind, place, reason, first refused instruction.
@@ -28,17 +29,17 @@ sascha__base__textoverlay.frag.s	1	refused	contract	smem.texture_descriptor	Text
 sascha__base__uioverlay.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__bloom__colorpass.frag.s	1	translated				
 sascha__bloom__gaussblur.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
-sascha__bloom__phongpass.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	55: v_mad_f32 v20, v17, -v12, v20 mul:2
+sascha__bloom__phongpass.frag.s	1	translated				
 sascha__bloom__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__bufferdeviceaddress__cube.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__computecloth__cloth.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-sascha__computecloth__sphere.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	44: v_mad_f32 v14, v9, -v5, v14 mul:2
+sascha__computecloth__sphere.frag.s	1	translated				
 sascha__computecullandlod__indirectdraw.frag.s	1	translated				
 sascha__computenbody__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
 sascha__computeparticles__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
 sascha__computeraytracing__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__computeshader__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-sascha__conditionalrender__model.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	47: v_mad_f32 v14, v9, -v5, v14 mul:2
+sascha__conditionalrender__model.frag.s	1	translated				
 sascha__conservativeraster__fullscreen.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__conservativeraster__triangle.frag.s	1	translated				
 sascha__conservativeraster__triangleoverlay.frag.s	1	translated				
@@ -64,17 +65,17 @@ sascha__dynamicrendering__texture.frag.s	1	refused	contract	smem.texture_descrip
 sascha__dynamicrenderinglocalread__scene.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__dynamicuniformbuffer__base.frag.s	1	translated				
 sascha__fragmentshaderbarycentrics__scene.frag.s	0	refused	contract	sop2.bitfield_extract	Read of unset scalar register s2	1: s_bfe_u32 s2, s2, 0x20016
-sascha__gears__gears.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	25: v_mad_f32 v11, v13, -v12, v11 mul:2
+sascha__gears__gears.frag.s	1	translated				
 sascha__geometryshader__base.frag.s	1	translated				
-sascha__geometryshader__mesh.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__geometryshader__mesh.frag.s	1	translated				
 sascha__gltfloading__mesh.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__gltfscenerendering__scene.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__gltfskinning__skinnedmodel.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
-sascha__graphicspipelinelibrary__uber.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	53: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__graphicspipelinelibrary__uber.frag.s	1	translated				
 sascha__hdr__bloom.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x60
 sascha__hdr__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__hdr__gbuffer.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-sascha__imgui__scene.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__imgui__scene.frag.s	1	translated				
 sascha__imgui__ui.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__indirectdraw__ground.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__indirectdraw__indirectdraw.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
@@ -86,16 +87,16 @@ sascha__instancing__planet.frag.s	1	refused	contract	smem.scalar_load	Unresolved
 sascha__instancing__starfield.frag.s	1	translated				
 sascha__multisampling__mesh.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__multisamplingalphatocoverage__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
-sascha__multithreading__phong.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	37: v_mad_f32 v11, v9, -v5, v11 mul:2
+sascha__multithreading__phong.frag.s	1	translated				
 sascha__multithreading__starsphere.frag.s	1	translated				
-sascha__multiview__multiview.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__multiview__multiview.frag.s	1	translated				
 sascha__multiview__viewdisplay.frag.s	0	refused	contract	lowering.lower	Texture and constant descriptors overlap	
 sascha__negativeviewportheight__quad.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__occlusionquery__mesh.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	8: v_interp_p1_f32_e32 v2, v0, attr0.y
 sascha__occlusionquery__occluder.frag.s	1	translated				
 sascha__occlusionquery__simple.frag.s	1	translated				
 sascha__offscreen__mirror.frag.s	0	refused	refused	vopc.cmpx_f32	Read of unset vector register v2	12: v_cmpx_lt_f32_e32 0, v2
-sascha__offscreen__phong.frag.s	0	refused	refused	valu_f32.arithmetic	Unsupported output modifier	25: v_mad_f32 v13, v15, -v14, v13 mul:2
+sascha__offscreen__phong.frag.s	0	translated				
 sascha__offscreen__quad.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__oit__color.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	1: s_load_dwordx2 s[0:1], s[0:1], null
 sascha__oit__geometry.frag.s	0	refused	contract	sop1.move_32	Read of unset scalar register s3	1: s_mov_b32 s0, s3
@@ -113,28 +114,28 @@ sascha__pbrtexture__irradiancecube.frag.s	0	refused	contract	smem.texture_descri
 sascha__pbrtexture__pbrtexture.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x1a0
 sascha__pbrtexture__prefilterenvmap.frag.s	0	refused	contract	sop1.move_32	Read of unset scalar register s3	1: s_mov_b32 s0, s3
 sascha__pbrtexture__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-sascha__pipelines__phong.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	60: v_mad_f32 v18, v13, -v9, v18 mul:2
+sascha__pipelines__phong.frag.s	1	refused	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333	76: v_fma_mixlo_f16 v23, 0x3333, v8, v5
 sascha__pipelines__toon.frag.s	1	translated				
 sascha__pipelines__wireframe.frag.s	1	translated				
-sascha__pipelinestatistics__scene.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__pipelinestatistics__scene.frag.s	1	translated				
 sascha__pushconstants__pushconstants.frag.s	1	translated				
 sascha__pushdescriptors__cube.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__radialblur__colorpass.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	20: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__radialblur__phongpass.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	20: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__radialblur__radialblur.frag.s	1	refused	contract	lowering.lower	Texture and constant descriptors overlap	
 sascha__renderheadless__triangle.frag.s	1	translated				
-sascha__screenshot__mesh.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v15, v9, -v5, v15 mul:2
-sascha__shaderobjects__phong.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	60: v_mad_f32 v18, v13, -v9, v18 mul:2
+sascha__screenshot__mesh.frag.s	1	translated				
+sascha__shaderobjects__phong.frag.s	1	refused	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333	76: v_fma_mixlo_f16 v23, 0x3333, v8, v5
 sascha__shadowmapping__offscreen.frag.s	1	translated				
 sascha__shadowmapping__quad.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__shadowmapping__scene.frag.s	0	refused	contract	smem.scalar_load	Unresolved constant buffer binding	24: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__shadowmappingcascade__debugshadowmap.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__shadowmappingcascade__depthpass.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__shadowmappingcascade__scene.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[6:7], null
-sascha__shadowmappingomni__cubemapdisplay.frag.s	0	refused	refused	valu_f32.arithmetic	Unsupported output modifier	18: v_sub_f32_e64 v5, v5, v6 mul:2
+sascha__shadowmappingomni__cubemapdisplay.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
 sascha__shadowmappingomni__offscreen.frag.s	1	translated				
 sascha__shadowmappingomni__scene.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-sascha__specializationconstants__uber.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	53: v_mad_f32 v15, v9, -v5, v15 mul:2
+sascha__specializationconstants__uber.frag.s	1	translated				
 sascha__sphericalenvmapping__sem.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__ssao__blur.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	5: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__ssao__composition.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
@@ -146,7 +147,7 @@ sascha__subpasses__gbuffer.frag.s	1	refused	refused	valu_f32.arithmetic	Read of 
 sascha__terraintessellation__skysphere.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__terraintessellation__terrain.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__tessellation__base.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
-sascha__textoverlay__mesh.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	44: v_mad_f32 v14, v9, -v5, v14 mul:2
+sascha__textoverlay__mesh.frag.s	1	translated				
 sascha__textoverlay__text.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 sascha__texture3d__texture3d.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 sascha__texture__texture.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
@@ -162,7 +163,7 @@ sascha__variablerateshading__scene.frag.s	0	refused	contract	smem.texture_descri
 sascha__vertexattributes__scene.frag.s	1	refused	contract	sop1.move_32	Read of unset scalar register s3	1: s_mov_b32 s6, s3
 sascha__viewportarray__scene.frag.s	1	translated				
 sascha__vulkanscene__logo.frag.s	1	translated				
-sascha__vulkanscene__mesh.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	25: v_mad_f32 v13, v15, -v14, v13 mul:2
+sascha__vulkanscene__mesh.frag.s	1	translated				
 sascha__vulkanscene__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 vksamples__16bit_arithmetic__visualize.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], null
 vksamples__async_compute__composite.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], null
@@ -170,7 +171,7 @@ vksamples__async_compute__shadow.frag.s	1	refused	no_form	dispatch	no form match
 vksamples__buffer_device_address__glsl__render.frag.s	1	translated				
 vksamples__color_write_enable__glsl__triangle_separate_channels.frag.s	1	translated				
 vksamples__compute_nbody__glsl__particle.frag.s	1	refused	contract	lowering.lower	Second texture descriptor must have a distinct aligned offset	
-vksamples__conditional_rendering__glsl__model.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	47: v_mad_f32 v14, v9, -v5, v14 mul:2
+vksamples__conditional_rendering__glsl__model.frag.s	1	translated				
 vksamples__conservative_rasterization__glsl__fullscreen.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 vksamples__conservative_rasterization__glsl__triangle.frag.s	1	translated				
 vksamples__conservative_rasterization__glsl__triangleoverlay.frag.s	1	translated				
@@ -192,7 +193,7 @@ vksamples__dynamic_rendering__glsl__gbuffer.frag.s	1	refused	contract	smem.scala
 vksamples__dynamic_rendering_local_read__glsl__scene_opaque.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	16: v_mad_f32 v2, 2.0, v2, -1.0
 vksamples__dynamic_uniform_buffers__glsl__base.frag.s	1	translated				
 vksamples__extended_dynamic_state2__glsl__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-vksamples__extended_dynamic_state2__glsl__baseline.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	54: v_mad_f32 v15, v5, -v9, v15 mul:2
+vksamples__extended_dynamic_state2__glsl__baseline.frag.s	1	translated				
 vksamples__extended_dynamic_state2__glsl__tess.frag.s	1	translated				
 vksamples__fragment_density_map__sky.frag.s	1	translated				
 vksamples__fragment_density_map__texture.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
@@ -200,7 +201,7 @@ vksamples__fragment_shader_barycentric__glsl__object.frag.s	0	refused	contract	s
 vksamples__fragment_shader_barycentric__glsl__skybox.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 vksamples__fragment_shading_rate__glsl__scene.frag.s	1	refused	contract	sopc.compare_32	Read of unset scalar register s3	3: s_cmp_eq_i32 s3, 0
 vksamples__fragment_shading_rate_dynamic__scene.frag.s	1	refused	contract	sopc.compare_32	Read of unset scalar register s3	3: s_cmp_eq_i32 s3, 0
-vksamples__graphics_pipeline_library__glsl__uber.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	50: v_mad_f32 v14, v9, -v5, v14 mul:2
+vksamples__graphics_pipeline_library__glsl__uber.frag.s	1	translated				
 vksamples__gshader_to_mshader__glsl__gshader_to_mshader.frag.s	1	translated				
 vksamples__gshader_to_mshader__glsl__gshader_to_mshader_base.frag.s	1	translated				
 vksamples__gshader_to_mshader__glsl__gshader_to_mshader_mesh.frag.s	1	translated				
@@ -214,7 +215,7 @@ vksamples__instancing__glsl__instancing.frag.s	0	refused	contract	smem.scalar_lo
 vksamples__instancing__glsl__planet.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
 vksamples__instancing__glsl__starfield.frag.s	1	translated				
 vksamples__logic_op_dynamic_state__glsl__background.frag.s	1	refused	contract	smem.scalar_load	Unresolved constant buffer binding	4: s_load_dwordx8 s[8:15], s[2:3], 0x20
-vksamples__logic_op_dynamic_state__glsl__baseline.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	54: v_mad_f32 v15, v5, -v9, v15 mul:2
+vksamples__logic_op_dynamic_state__glsl__baseline.frag.s	1	translated				
 vksamples__mobile_nerf__merged.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 vksamples__mobile_nerf__merged_morpheus.frag.s	0	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null
 vksamples__mobile_nerf__raster.frag.s	1	refused	contract	smem.texture_descriptor	Texture address differs from binding contract	4: s_load_dwordx8 s[8:15], s[2:3], null

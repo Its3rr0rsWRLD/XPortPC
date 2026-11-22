@@ -27,12 +27,26 @@ ALU = {
 }
 # Forms that exist only in the VOP3 encoding: an _e32 spelling of them is not an instruction.
 VOP3_ONLY = ("fma", "mad", "min3", "max3", "med3")
-# VOP3 output modifiers (omod) scale the result by 2, 4 or 0.5 before clamp. A power-of-two scale is exact for every
-# result that stays a normal number; a result scaled into the denormal range is not drawn. omod is accepted only on
-# the forms whose draws (vop3_f32) measure it, the ones the corpus uses it with and their neighbours; the others,
-# including the denormal-flushing mad and mac, still refuse it.
+# VOP3 output modifiers (omod) scale the result by 2, 4 or 0.5 after the operation and before clamp (ISA order).
+#
+# Mode. The ISA says omod is ignored while binary32 denormals are enabled. The hardware mode these lowerings model is
+# the graphics default, IEEE bit clear and binary32 denormals flushed (LLVM SIModeRegisterDefaults; the same mode that
+# makes v_mad_f32, v_mac_f32 and the transcendentals flush, see mad32 in hlsl.py), and a compiler emits omod only
+# where it is honoured (SIFoldOperands::tryFoldOMod). So omod is applied, and a scaled result that is subnormal is
+# flushed to a zero of its sign, as every flush-mode result is. A program that ran with denormals enabled would have
+# omod ignored; this translator does not model that mode.
+# Exactness. The scale is a power of two, so the multiply is exact except at the two edges, and both are handled
+# without any rounding step: a result that scales past the largest finite binary32 becomes infinity (the IEEE
+# overflow of the multiply, which the hardware gives too), and one that scales below the smallest normal number is
+# zeroed by ftz32, an operation on the bits that cannot change a normal value. The operation's own result is not
+# flushed before the scale (add, sub, mul, fma and min/max leave their results as the operation gives them), so a
+# subnormal result of the operation itself is where the scale and the flush could be ordered either way; the draws
+# keep every operation result a normal number.
+# omod is accepted on the e64 spellings of arithmetic, min/max, the multiply-adds and the forms the transcendental
+# draws measure; the rounding forms floor, ceil, fract and trunc and rcp_iflag still refuse it.
 OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
-OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3")
+OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3",
+              "add", "sub", "subrev", "mul", "mul_legacy", "min", "max", "fma", "fmac", "mad", "mac")
 
 SALU_HELPERS["med3_f32"] = (
     "float med3_f32(float a, float b, float c) {\n"
@@ -140,7 +154,7 @@ def arithmetic(st, i, m):
     if op == "med3":
         st.helpers.add("med3_f32")
     if omod:
-        expression = f"({expression} * {OMOD[omod]})"
+        expression = f"ftz32(({expression} * {OMOD[omod]}))"
     if clamp:
         expression = f"saturate({expression})"
     st.vector[dst] = f"alu{i}"
