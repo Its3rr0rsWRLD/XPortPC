@@ -109,6 +109,7 @@ add_custom_command(OUTPUT "${pixel_vs}" COMMAND "${DXC_EXECUTABLE}" -T vs_6_0 -E
     DEPENDS tests/pixel_aot_vs.hlsl VERBATIM)
 target_sources(offscreen_check PRIVATE tests/pixel_aot_render.cpp "${pixel_vs}")
 target_sources(offscreen_check PRIVATE tests/vertex_aot_render.cpp)
+target_sources(offscreen_check PRIVATE tests/compute_aot_render.cpp)
 target_sources(offscreen_check PRIVATE tests/binding_mips.cpp tests/ffx_recurrent_views.cpp)
 target_sources(offscreen_check PRIVATE tests/ffx_rcas_views.cpp)
 foreach(storage IN ITEMS Native Packed)
@@ -1970,6 +1971,32 @@ if(EXISTS "${INTAKE_PYTHON}")
                 ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/vertex_aot_${family}_${adapter}.txt")
             if(adapter STREQUAL "hardware")
                 set_tests_properties(vertex_aot_${family}_hardware PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
+        endforeach()
+    endforeach()
+    # One compute_aot test per draw family and adapter (docs/design/compute-stage.md), listed by the script itself as
+    # for pixel_aot, with the programs each test translated recorded for tools/form_coverage.py.
+    execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py" --list-families
+        OUTPUT_VARIABLE COMPUTE_AOT_FAMILIES RESULT_VARIABLE compute_aot_list_status OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT compute_aot_list_status EQUAL 0 OR COMPUTE_AOT_FAMILIES STREQUAL "")
+        message(FATAL_ERROR "tests/compute_aot_check.py --list-families failed (status ${compute_aot_list_status})")
+    endif()
+    string(REPLACE "\r" "" COMPUTE_AOT_FAMILIES "${COMPUTE_AOT_FAMILIES}")
+    string(REPLACE "\n" ";" COMPUTE_AOT_FAMILIES "${COMPUTE_AOT_FAMILIES}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py")
+    add_test(NAME compute_aot_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py" controls)
+    set_tests_properties(compute_aot_controls PROPERTIES TIMEOUT 600
+        ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/compute_aot_controls.txt")
+    foreach(adapter IN ITEMS hardware warp)
+        foreach(family IN LISTS COMPUTE_AOT_FAMILIES)
+            add_test(NAME compute_aot_${family}_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+                "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py" draw "${DXC_EXECUTABLE}"
+                "$<TARGET_FILE:offscreen_check>" ${adapter} --family ${family})
+            set_tests_properties(compute_aot_${family}_${adapter} PROPERTIES TIMEOUT 600
+                ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/compute_aot_${family}_${adapter}.txt")
+            if(adapter STREQUAL "hardware")
+                set_tests_properties(compute_aot_${family}_hardware PROPERTIES SKIP_RETURN_CODE 77)
             endif()
         endforeach()
     endforeach()

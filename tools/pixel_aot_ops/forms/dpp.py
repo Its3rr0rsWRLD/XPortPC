@@ -171,6 +171,8 @@ def _word(st, reg):
 
 def _prepare(st, i, dst, operands, count, *, mods):
     """Check the instruction-wide conditions and split the operand text. Returns (tokens, perm, dpp8)."""
+    if st.stage != "pixel":
+        raise ValueError("Quad-local DPP needs pixel quads; compute lanes are not 2x2 quads")
     if st.ex != "true" or st.wqm:
         raise ValueError("DPP is lowered only where every lane is active and the wave is not in whole-quad mode")
     if not 0 <= int(dst[1:]) <= 255:

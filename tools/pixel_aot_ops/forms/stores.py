@@ -76,8 +76,13 @@ void buffer_store_format(uint4 rsrc, uint soffset, uint voffset, uint inst_offse
 SUB_STORE = {"byte": (1, 0), "byte_d16_hi": (1, 16), "short": (2, 0), "short_d16_hi": (2, 16)}
 
 
-def writing(st):
-    """Refuse a memory write unless this lane is provably active outside whole-quad mode, and bind memory writable."""
+def writing(st, *, dword_store=False):
+    """Refuse a memory write unless this lane is provably active outside whole-quad mode, and bind memory writable.
+    The compute stage (tools/compute_aot.py, card C-1 of docs/design/compute-stage.md) lowers only the whole-dword
+    buffer_store_dword..x4 through this module, with the same address and range rules; every other store and atomic is
+    refused there until its card."""
+    if st.stage != "pixel" and not dword_store:
+        raise ValueError("This store or atomic is lowered in the pixel stage only")
     if st.ex != "true" or st.wqm:
         raise ValueError("A memory write needs this lane provably active outside whole-quad mode (CF-2a)")
     st.uses_memory = True
@@ -98,8 +103,10 @@ def buffer_store(st, i, m):
     # Whole dwords through a runtime V#, each range-checked on its own as the loads are; glc, slc and dlc are cache
     # policy and accepted, every other modifier is refused by buffer_operands.
     width, data_token, addr_token, rsrc_token, soffset_token, modifiers = m.groups()
-    writing(st)
+    writing(st, dword_store=True)
     words = data_words(st, data_token, int(width[1]) if width else 1)
+    if any(r in st.sample_dest for r in vgprs(data_token, len(words))):
+        raise ValueError("Store data overlaps an outstanding load")
     rsrc, soffset, voffset, inst_offset, vindex, _ = buffer_operands(st, i, addr_token, rsrc_token, soffset_token, modifiers)
     for j, word in enumerate(words):
         st.lines.append(f"    buffer_store32({rsrc}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {j}u, {word});")

@@ -47,6 +47,10 @@ class Lowering:
         self.layout = None  # the outputs the done export returns, the same on every path (forms/exp.py)
         self.signature = None  # (return type, declaration) of main when it is not the preamble's float4 SV_Target0
         self.ended = False  # s_endpgm after the export
+        # Stage hooks (docs/design/compute-stage.md): the stage being lowered, and the high word a descriptor-list
+        # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).
+        self.stage = "pixel"
+        self.descriptor_high = 0
 
     @property
     def sample_pending(self):

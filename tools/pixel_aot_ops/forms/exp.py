@@ -96,6 +96,8 @@ def _width_type(width):
 @form(EXPORT.pattern)
 def export(st, i, m):
     target, *sources, done, compr, vm = m.groups()
+    if st.stage != "pixel":
+        raise ValueError("A color export belongs to the pixel stage")
     if re.fullmatch(r"pos\d+|param\d+|prim", target):
         raise ValueError(f"exp {target} is a vertex or primitive export; a pixel program exports to mrt0..mrt7, mrtz and null")
     if not re.fullmatch(r"mrt[0-7]|mrtz|null", target):

@@ -193,7 +193,7 @@ def save_exec(st, i, m):
 
 # Whole-quad mode turns on every lane of a quad with an active lane, so it keeps ex true and could only re-enable an
 # inactive lane: refused unless the lane is provably active. Entering it twice is refused as before.
-@form(r"s_wqm_b64 exec, exec", when=lambda st, m: st.ex == "true" and not st.wqm)
+@form(r"s_wqm_b64 exec, exec", when=lambda st, m: st.ex == "true" and not st.wqm and st.stage == "pixel")
 def whole_quad_mode(st, i, m):
     st.wqm = True
     st.scc = None

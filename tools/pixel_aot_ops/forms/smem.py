@@ -48,7 +48,7 @@ def scalar_load(st, i, m):
         if high - low != 3 or low % 4 or high > 105:
             raise ValueError("Invalid scalar buffer registers")
         base = [f"s{n}" for n in range(low, high + 1)]
-    expected = ["texture_ptr", 0] if descriptor else [("cbv", n) for n in range(4)]
+    expected = ["texture_ptr", st.descriptor_high] if descriptor else [("cbv", n) for n in range(4)]
     if st.constant_descriptor is None or st.pending.intersection(base) or [st.scalar.get(r) for r in base] != expected:
         raise ValueError("Unresolved constant buffer binding")
     if soffset.startswith("s"):

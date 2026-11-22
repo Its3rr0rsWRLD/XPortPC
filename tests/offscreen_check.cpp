@@ -452,6 +452,8 @@ int main(int argc, char** argv)
             check_pixel_outputs(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case") {
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
+        } else if (argc == 5 && operation == "--check-compute-case") {
+            check_translated_compute(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case-mips") {
             check_translated_pixel_mips(device.Get(), argv[3], argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case-f64") {
