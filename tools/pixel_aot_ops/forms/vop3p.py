@@ -247,8 +247,6 @@ def fma_mix(st, i, m):
     # its high half; the printer omits an all-zero op_sel or op_sel_hi. Output modifiers, DPP and SDWA are not in
     # this grammar. A binary16 result replaces only its half of the destination, as v_cvt_f16_f32 does.
     op, dst, *tokens, s0, s1, s2, h0, h1, h2, clamp = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid arithmetic operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     old = st.vector.get(dst)

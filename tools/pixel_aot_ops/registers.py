@@ -184,7 +184,8 @@ def f16_exponent(token, scalar, vector, pending, sample_pending):
 # select. These are tagged by name so that the places that accepted a tracked numeric value (a float string) before
 # raw words had their own representation accept exactly the same registers now. jv_ and js_ are the join variables
 # of control flow (docs/design/control-flow.md): raw 32-bit bits per register, declared where a branch or loop starts.
-RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_")
+# exw is a masked write of a raw word over a raw word while the lane may be inactive (lowering.masked_writes).
+RAW_WORD_PREFIXES = ("params[", "movw", "selw", "jv_", "js_", "exw")
 
 
 def tracked_word(value):

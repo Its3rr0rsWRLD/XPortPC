@@ -42,7 +42,7 @@ def sdwa_dest(result, sel, unused, old):
 @form(r"v_mov_b32_sdwa (v\d+), (sext\()?([vs]\d+|-?\d+(?:\.\d+)?)(\))? dst_sel:(BYTE_[0-3]|WORD_[01]|DWORD) dst_unused:(UNUSED_PAD|UNUSED_SEXT|UNUSED_PRESERVE) src0_sel:(BYTE_[0-3]|WORD_[01]|DWORD)")
 def move_sdwa(st, i, m):
     dst, sext, src, close, dst_sel, unused, src_sel = m.groups()
-    if st.mask != "entry" or bool(sext) != bool(close):
+    if bool(sext) != bool(close):
         raise ValueError("Invalid register move")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -56,8 +56,6 @@ def move_sdwa(st, i, m):
 def widen_sdwa(st, i, m):
     # The SDWA form widens the selected half; modifiers apply after widening, as in the e64 form.
     dst, negate, bars, plain, clamp, src_sel = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     word = word_of(bars or plain, st.scalar, st.vector, st.pending, st.sample_pending)
@@ -79,7 +77,7 @@ def arithmetic_sdwa(st, i, m):
     op, dst, operands, clamp, dst_sel, unused, src1_sel = m.groups()
     tokens = operands.split(", ")
     arity, template = ALU[op]
-    if st.mask != "entry" or len(tokens) != arity or bool(src1_sel) != (arity == 2):
+    if len(tokens) != arity or bool(src1_sel) != (arity == 2):
         raise ValueError("Invalid arithmetic operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -98,7 +96,7 @@ def compare_sdwa(st, i, m):
     # would compare zero-extended fields as binary32 and are refused.
     op, dst, *tokens = m.groups()
     regs = lane_mask(dst)
-    if st.mask != "entry" or st.pending.intersection(regs):
+    if st.ex != "true" or st.pending.intersection(regs):
         raise ValueError("Invalid comparison")
     values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     for j, reg in enumerate(regs):

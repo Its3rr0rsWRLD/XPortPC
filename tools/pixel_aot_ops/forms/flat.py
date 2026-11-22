@@ -23,7 +23,7 @@ def global_load(st, i, m):
             flags.add(modifier)
         else:
             raise ValueError(f"Unsupported global load modifier {modifier}")
-    if st.mask != "entry" or not -2048 <= immediate <= 2047:
+    if st.ex != "true" or not -2048 <= immediate <= 2047:
         raise ValueError("Invalid global load")
     dsts = vgprs(dst_token, count)
     if saddr_token == "off":

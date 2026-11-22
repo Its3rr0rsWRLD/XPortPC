@@ -1,14 +1,15 @@
 """lower(): one pass over a gfx1013 pixel program that tracks every register symbolically and emits HLSL. The forms
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
-from .control_flow import find_loops, program, split_blocks
+from .control_flow import find_loops, program, split_blocks, word_expr
 from .dispatch import dispatch
 from .hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP
+from .registers import tracked_word
 from . import forms  # noqa: F401  (registers every form)
 
 
 class Lowering:
     """The state of one lower() call. Forms read and write it as `st`; the control-flow walk snapshots and restores
-    the per-path part (scalar, vector, pending, scc, mask, samples, sample_pending, sample_dest, exported, ended)."""
+    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_pending, sample_dest, exported, ended)."""
 
     def __init__(self, scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words):
         self.scalar = scalar  # SGPR name (and "m0", "vcc") -> tracked value, see registers.py
@@ -22,13 +23,50 @@ class Lowering:
         self.pending = set()  # SGPRs an outstanding scalar load writes (cleared by lgkmcnt(0))
         self.scc = None  # SCC as an HLSL bool expression, or None when it is not tracked
         self.helpers = set()  # names of SALU_HELPERS (hlsl.py) the program uses
-        self.mask = "entry"  # the execution mask: "entry" or "quad"
+        # This lane's EXEC bit (docs/design/control-flow.md, CF-2 section 2): an HLSL bool expression, "true" when the
+        # lane is provably active. Every lane starts active; desktop helper invocations run with ex true throughout.
+        self.ex = "true"
+        self.wqm = False  # s_wqm_b64 exec, exec has put the wave in whole-quad mode (attribute interpolation needs it)
         self.samples = 0  # samples taken on the path so far
         self.sample_pending = False  # a sample or vector memory load is outstanding (cleared by vmcnt(0))
         self.sample_dest = set()  # VGPRs that load writes
         self.flat_attrs = set()  # attributes read without interpolation
         self.exported = False  # the color export has been emitted
         self.ended = False  # s_endpgm after the export
+
+    @property
+    def mask(self):
+        """Deprecated, read-only: the execution mask as it was before CF-2a ("entry", "quad"), for forms written
+        against it. It is never "entry" in whole-quad mode or while a lane may be inactive, so such a form keeps
+        refusing exactly where it refused before. New forms test `ex` (and `wqm`) instead."""
+        if self.ex != "true":
+            return "partial"
+        return "quad" if self.wqm else "entry"
+
+    def exec_and(self, i, bit):
+        """EXEC &= a mask whose bit for this lane is `bit` (a bool expression): this lane's ex becomes ex && bit. A
+        new ex other than "true" is held in `bool ex<i>`."""
+        if bit != "true":
+            expression = bit if self.ex == "true" else f"{self.ex} && {bit}"
+            self.lines.append(f"    bool ex{i} = {expression};")
+            self.ex = f"ex{i}"
+
+
+def masked_writes(st, i, ex, before):
+    """The masked-write rule for instruction i, run while this lane's EXEC bit was `ex` (not "true"): a VGPR the
+    instruction wrote keeps its old value when the lane is inactive, `v = ex ? new : old`. A register with no value
+    before takes the new one (a refinement of an undefined register). Both values must be 32-bit words."""
+    for reg, value in list(st.vector.items()):
+        old = before.get(reg)
+        if old is None or value == old:
+            continue
+        new_word, old_word = word_expr(value), word_expr(old)
+        if new_word is None or old_word is None:
+            raise ValueError("Masked write of a register that does not hold a 32-bit word")
+        # exw: both sides are raw words that the float readers accept (registers.RAW_WORD_PREFIXES); exv: an integer result.
+        name = f"{'exw' if tracked_word(value) and tracked_word(old) else 'exv'}{i}_{reg[1:]}"
+        st.lines.append(f"    uint {name} = {ex} ? {new_word} : {old_word};")
+        st.vector[reg] = ("uint", name)
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
@@ -73,7 +111,12 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             raise ValueError("Instruction follows program end")
         if st.exported and line != "s_endpgm":
             raise ValueError("Unexpected instruction after color export")
-        dispatch(st, i, line)
+        if st.ex == "true":
+            dispatch(st, i, line)
+        else:
+            ex, before = st.ex, dict(st.vector)
+            dispatch(st, i, line)
+            masked_writes(st, i, ex, before)
     if not st.ended or st.samples != (2 if second_texture_offset is not None else 1):
         raise ValueError("Unexpected sample count or missing color export")
     if st.helpers:

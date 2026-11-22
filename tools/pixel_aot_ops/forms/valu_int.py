@@ -63,7 +63,7 @@ def int_ternary(op, a, b, c):
 def convert_ubyte(st, i, m):
     # D.f32 = float((S0 >> 8N) & 0xff); clamp exists only in the e64 encoding.
     byte, suffix, dst, src, clamp = m.groups()
-    if st.mask != "entry" or (clamp and suffix != "_e64"):
+    if clamp and suffix != "_e64":
         raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -80,8 +80,6 @@ def bitwise(st, i, m):
     # Bitwise operations and shifts. The shift forms take the count in the first source and mask it to
     # five bits; the arithmetic shift replicates the sign of the second source.
     op, dst, first, second = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     a = vector_u32(first, st.scalar, st.vector, st.pending, st.sample_pending)
@@ -98,8 +96,6 @@ def bitwise(st, i, m):
 @form(r"v_(not|bfrev)_b32(?:_e32|_e64)? (v\d+), ([^,\s]+)")
 def not_bfrev(st, i, m):
     op, dst, src = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     word = vector_u32(src, st.scalar, st.vector, st.pending, st.sample_pending)
@@ -110,7 +106,7 @@ def not_bfrev(st, i, m):
 @form(r"v_(" + "|".join(INT_VOP2 + INT_VOP3) + r")(_e32|_e64)? (v\d+), ([^,\s]+), ([^,\s]+)( clamp)?")
 def binary(st, i, m):
     op, suffix, dst, first, second, clamp = m.groups()
-    if st.mask != "entry" or (op in INT_VOP3 and suffix == "_e32") or (clamp and (suffix == "_e32" or op not in INT_CLAMPED)):
+    if (op in INT_VOP3 and suffix == "_e32") or (clamp and (suffix == "_e32" or op not in INT_CLAMPED)):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -123,8 +119,6 @@ def binary(st, i, m):
 @form(r"v_(" + "|".join(INT_TERNARY) + r")(_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
 def ternary(st, i, m):
     op, _, dst, first, second, third = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     a, b, c = (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second, third))

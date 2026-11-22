@@ -161,29 +161,28 @@ def program(st, blocks, labels, latch_of):
     """Yield (index, text) for each instruction of the blocks in program order. The walk emits the HLSL structure
     into st.lines around them and snapshots and restores st at branches and loops; lower() lowers each one."""
     def snapshot():
-        return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc, "mask": st.mask,
-                "samples": st.samples, "sample_pending": st.sample_pending, "sample_dest": set(st.sample_dest),
-                "exported": st.exported, "ended": st.ended}
+        return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc,
+                "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "sample_pending": st.sample_pending,
+                "sample_dest": set(st.sample_dest), "exported": st.exported, "ended": st.ended}
 
     def restore(state):
         st.scalar.clear(), st.vector.clear(), st.pending.clear(), st.sample_dest.clear()
         st.scalar.update(state["scalar"]), st.vector.update(state["vector"])
         st.pending.update(state["pending"]), st.sample_dest.update(state["sample_dest"])
-        st.scc, st.mask, st.samples = state["scc"], state["mask"], state["samples"]
+        st.scc, st.ex, st.wqm, st.samples = state["scc"], state["ex"], state["wqm"], state["samples"]
         st.sample_pending, st.exported, st.ended = state["sample_pending"], state["exported"], state["ended"]
 
     def forget_scc():
         st.scc = None
 
     def same_provenance(first, second, where):
-        for key in ("mask", "sample_pending", "pending", "sample_dest"):
+        for key in ("ex", "wqm", "sample_pending", "pending", "sample_dest"):
             if first[key] != second[key]:
                 raise ValueError(f"Execution or load state differs at {where}")
 
     def condition(term):
-        """Capture the SCC of a branch in a local, so that join assignments cannot change it."""
-        if st.mask != "entry":
-            raise ValueError("Branches are not supported in quad execution mode")
+        """Capture the SCC of a branch in a local, so that join assignments cannot change it. The SCC comes from uniform
+        scalar data, so every lane, active or not and in whole-quad mode or not, takes the same edge."""
         if st.scc is None:
             raise ValueError("Branch condition requires a tracked SCC from uniform scalar data")
         st.lines.append(f"    bool cf{term[-1]} = {st.scc};")
@@ -212,8 +211,6 @@ def program(st, blocks, labels, latch_of):
                 raise ValueError("Unstructured loop: a back edge must close a loop that starts at its target")
             if target > stop:
                 raise ValueError("Branch leaves its region: the control flow is multi-exit or irreducible")
-            if st.mask != "entry":
-                raise ValueError("Branches are not supported in quad execution mode")
             if term[0] == "br":
                 if target != k + 1:
                     raise ValueError("Unconditional branch is not the end of an if-else arm or a loop")

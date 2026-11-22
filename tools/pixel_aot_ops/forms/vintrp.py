@@ -5,7 +5,7 @@ from ..dispatch import form
 @form(r"v_interp_p([12])_f32_e32 (v\d+), (v\d+), attr0\.([xy])")
 def interpolate(st, i, m):
     phase, dst, src, component = m.groups()
-    if st.mask != "quad" or st.scalar.get("m0") != "interp_base":
+    if not st.wqm or st.ex != "true" or st.scalar.get("m0") != "interp_base":
         raise ValueError("Unknown interpolation context")
     if phase == "1" and st.vector[src] == "bary_i":
         st.vector[dst] = ("partial", component)
@@ -26,7 +26,7 @@ def interpolate_move(st, i, m):
     # three vertex values. Attribute N is TEXCOORDN. Attribute 0 is the interpolated TEXCOORD0 read by
     # v_interp_p1 and p2 and cannot also be flat.
     dst, param, attr, channel = m.groups()
-    if st.mask != "quad" or st.scalar.get("m0") != "interp_base":
+    if not st.wqm or st.ex != "true" or st.scalar.get("m0") != "interp_base":
         raise ValueError("Unknown interpolation context")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")

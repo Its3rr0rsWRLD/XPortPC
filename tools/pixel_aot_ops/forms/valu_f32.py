@@ -23,8 +23,6 @@ def cube(st, i, m):
     # LLVM ConstantFoldAMDGCNCubeIntrinsic: z, then y, then x is the major axis; a face is negative
     # only for a nonzero, non-NaN negative coordinate.
     op, dst, *tokens, clamp = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid cube operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     x, y, z = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
@@ -50,7 +48,7 @@ def literal_fma(st, i, m):
     # denormal-flushing multiply-add of v_mad_f32 (mad32), so it takes the same lowering as v_mad_f32 and v_mac_f32.
     op, dst, *tokens = m.groups()
     literal = tokens[2] if op.endswith("ak") else tokens[1]
-    if st.mask != "entry" or not re.fullmatch(r"0x[0-9a-f]{1,8}", literal):
+    if not re.fullmatch(r"0x[0-9a-f]{1,8}", literal):
         raise ValueError("Invalid literal multiply-add")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -63,8 +61,6 @@ def literal_fma(st, i, m):
 def move(st, i, m):
     # A bit copy of a numeric value; integer inline constants are bit patterns.
     dst, src = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid register move")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     if raw_source(src, st.scalar, st.vector):
@@ -85,7 +81,7 @@ def arithmetic(st, i, m):
     if op in ("fmac", "mac"):
         tokens.append(dst)
     arity, template = ALU[op]
-    if st.mask != "entry" or len(tokens) != arity:
+    if len(tokens) != arity:
         raise ValueError("Invalid arithmetic operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")

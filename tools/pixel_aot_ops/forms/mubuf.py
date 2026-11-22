@@ -23,7 +23,7 @@ def buffer_load(st, i, m):
             flags.add(modifier)
         else:
             raise ValueError(f"Unsupported buffer load modifier {modifier}")
-    if st.mask != "entry" or inst_offset > 4095:
+    if st.ex != "true" or inst_offset > 4095:
         raise ValueError("Invalid buffer load")
     offen, idxen = "offen" in flags, "idxen" in flags
     dsts = vgprs(dst_token, count)

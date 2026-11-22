@@ -227,12 +227,13 @@ CF_PROGRAMS = (
 )
 
 
-def check_cf_uniform_draws(directory, compiler, renderer, backend):
-    case = directory / "cf.case"
-    for index, (body, reference, sets, bugs) in enumerate(CF_PROGRAMS):
-        source = directory / f"cf{index}.hlsl"
-        shader = directory / f"cf{index}.cso"
-        source.write_text(translate(with_constants(body)), encoding="ascii")
+def check_cf_uniform_draws(directory, compiler, renderer, backend, programs=CF_PROGRAMS, name="cf", build=with_constants):
+    """Draw each (body, reference, sets, bugs) of `programs`, built into a full program by `build`."""
+    case = directory / f"{name}.case"
+    for index, (body, reference, sets, bugs) in enumerate(programs):
+        source = directory / f"{name}{index}.hlsl"
+        shader = directory / f"{name}{index}.cso"
+        source.write_text(translate(build(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
         draw = [renderer, backend, "--check-pixel-case", shader, case]
         separated = [False] * len(bugs)
@@ -332,11 +333,14 @@ def check_cf_uniform_controls():
     must_reject_for("A loop must leave", translate, with_constants(["s_mov_b32 s48, 0", "BB0_1:", "s_add_u32 s48, s48, 1", "s_branch BB0_1"]))
     # An unconditional branch that is neither an else jump nor a loop edge.
     must_reject_for("Unconditional branch", translate, with_constants(["s_branch BB0_2", "s_nop 0", "BB0_2:", "s_nop 0"]))
-    # A branch in quad execution mode.
+    # A uniform branch in whole-quad mode is an ordinary branch (CF-2a): every lane takes the same edge. Leaving
+    # whole-quad mode on one path only is refused at the join.
     program = with_constants([])
     wqm = program.index("s_wqm_b64 exec, exec")
     program[wqm + 1:wqm + 1] = ["s_mov_b32 s60, 0", "s_cmp_eq_u32 s60, 0", "s_cbranch_scc1 BB0_9", "BB0_9:"]
-    must_reject_for("quad", translate, program)
+    assert "    bool cf4 = (0u == 0u);\n    float4 sample20 = " in translate(program)
+    program[wqm + 4:wqm + 4] = ["s_and_b64 exec, exec, s[50:51]"]
+    must_reject_for("Execution or load state differs at a join", translate, program)
     # A register defined on only one path is unset after the join; a loop-local register is unset after the loop.
     must_reject_for("unset", translate, with_constants([
         "v_mov_b32_e32 v18, 1", "s_cmp_eq_u32 s44, s45", "s_cbranch_scc1 BB0_1", "v_mov_b32_e32 v19, 2", "BB0_1:",

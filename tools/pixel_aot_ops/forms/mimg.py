@@ -10,7 +10,7 @@ def sample(st, i, m):
                                   for k, width in zip((0,2,4,6), (4,2,8,4))]
     descriptor = [st.scalar.get(f"s{n}") for n in image]
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
-    if (st.mask != "entry" or any(f"s{n}" in st.pending for n in (*image, *state))
+    if (st.ex != "true" or any(f"s{n}" in st.pending for n in (*image, *state))
             or texture is None
             or [st.scalar.get(f"s{n}") for n in state] != list(st.sampler)):
         raise ValueError("Unsupported image or sampler binding")
@@ -37,7 +37,7 @@ def load_query_gather(st, i, m):
     if len(set(flags)) != len(flags) or ("unorm" in flags and op.startswith("gather4")):
         raise ValueError("Repeated or unsupported image modifier")
     dmask = int(dmask_digit, 16)
-    if st.mask != "entry" or not dmask:
+    if st.ex != "true" or not dmask:
         raise ValueError("Invalid image operation")
     if op == "gather4":
         raise ValueError("image_gather4 picks its mip level from derivatives, which Gather* cannot reproduce; "
@@ -111,7 +111,7 @@ def sample_level(st, i, m):
     if len(set(flags)) != len(flags):
         raise ValueError("Repeated image modifier")
     dmask = int(dmask_digit, 16)
-    if st.mask != "entry" or not dmask:
+    if st.ex != "true" or not dmask:
         raise ValueError("Invalid image operation")
     channels = [c for c in range(4) if dmask >> c & 1]
     dests = vgprs(dst_token, len(channels))

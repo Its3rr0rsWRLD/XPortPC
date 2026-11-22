@@ -110,8 +110,10 @@ def controls(directory):
     assert "= 1.0f;" in late and "= sample16.x;" not in late
     pos = program.index("v_cvt_pkrtz_f16_f32_e32 v17, v14, v15")
     must_reject(translate, program[:pos] + ["v_mov_b32_e32 v20, v16"] + program[pos:])
+    # VALU in whole-quad mode is lowered as anywhere else (CF-2a: every lane is active there); a second s_wqm_b64 is not.
     pos = program.index("s_wqm_b64 exec, exec") + 1
-    must_reject(translate, program[:pos] + ["v_mov_b32_e32 v20, 1.0"] + program[pos:])
+    assert "    precise float alu2 = 1.0f;" in translate(program[:pos] + ["v_mov_b32_e32 v20, 1.0"] + program[pos:])
+    must_reject(translate, program[:pos] + ["s_wqm_b64 exec, exec"] + program[pos:])
     pos = program.index("v_interp_p1_f32_e32 v9, v0, attr0.y")
     partial = program[:pos] + ["v_interp_p1_f32_e32 v10, v0, attr0.x"] + program[pos:]
     translate(partial)  # an unpaired first phase is allowed, but its partial value is not numeric

@@ -19,8 +19,6 @@ F16_ALU = {
 @form(r"v_cvt_f32_f16(?:_e32|_e64)? (v\d+), (-?)(?:\|([vs]\d+|0x[0-9a-f]{1,8}|\d+)\||abs\(([vs]\d+|0x[0-9a-f]{1,8}|\d+)\)|([vs]\d+|0x[0-9a-f]{1,8}|\d+))( clamp)?")
 def widen(st, i, m):
     dst, negate, bars, call, plain, clamp = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     source = bars or call or plain
@@ -44,8 +42,6 @@ def narrow(st, i, m):
     # GFX10 16-bit results replace only the low half; the high half of the destination is kept
     # (LLVM GCNSubtarget::zeroesHigh16BitsOfDest). A destination with no tracked value contributes zero.
     dst, src = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid conversion")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     old = st.vector.get(dst)
@@ -66,7 +62,7 @@ def arithmetic_f16(st, i, m):
     # binary32 value before narrowing, the same as saturating the binary16 result because 0 and 1 are exact.
     op, form, dst, operands, clamp = m.groups()
     tokens = operands.split(", ")
-    if st.mask != "entry" or len(tokens) != (1 if op in ("floor", "ceil", "trunc", "rndne", "fract") else 2):
+    if len(tokens) != (1 if op in ("floor", "ceil", "trunc", "rndne", "fract") else 2):
         raise ValueError("Invalid arithmetic operation")
     if clamp and form != "e64":
         raise ValueError("Invalid arithmetic operation")

@@ -21,7 +21,7 @@ COMPARE = {
 def class_f32(st, i, m):
     dst, value, classes = m.groups()
     regs = lane_mask(dst)
-    if st.mask != "entry" or st.pending.intersection(regs):
+    if st.ex != "true" or st.pending.intersection(regs):
         raise ValueError("Invalid comparison")
     if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
         bits = f"{int(classes, 0) & 0xffffffff}u"
@@ -41,7 +41,7 @@ def class_f16(st, i, m):
     # source, not a binary16 value, so a float constant there is refused.
     dst, value, classes = m.groups()
     regs = lane_mask(dst)
-    if st.mask != "entry" or st.pending.intersection(regs):
+    if st.ex != "true" or st.pending.intersection(regs):
         raise ValueError("Invalid comparison")
     if re.fullmatch(r"-?\d+|0x[0-9a-f]{1,8}", classes):
         bits = f"{int(classes, 0) & 0xffffffff}u"
@@ -62,7 +62,7 @@ def compare_f16(st, i, m):
     # in binary32 gives the binary16 result, and the f32 predicate table applies unchanged.
     op, dst, *tokens = m.groups()
     regs = lane_mask(dst)
-    if st.mask != "entry" or st.pending.intersection(regs):
+    if st.ex != "true" or st.pending.intersection(regs):
         raise ValueError("Invalid comparison")
     values = [f16_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     for j, reg in enumerate(regs):
@@ -76,7 +76,7 @@ def compare_f16(st, i, m):
 def compare_f32(st, i, m):
     op, dst, *tokens = m.groups()
     regs = lane_mask(dst)
-    if st.mask != "entry" or st.pending.intersection(regs):
+    if st.ex != "true" or st.pending.intersection(regs):
         raise ValueError("Invalid comparison")
     values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     for j, reg in enumerate(regs):
@@ -89,7 +89,7 @@ def select(st, i, m):
     dst, unset, chosen, source = m.groups()
     regs = lane_mask(source)
     condition = st.scalar.get(regs[0])
-    if (st.mask != "entry" or st.pending.intersection(regs) or not isinstance(condition, tuple)
+    if (st.pending.intersection(regs) or not isinstance(condition, tuple)
             or condition[0] != "condition"
             or [st.scalar.get(r) for r in regs] != [(*condition[:2], j, len(regs)) for j in range(len(regs))]):
         raise ValueError("Select mask is not a tracked comparison")

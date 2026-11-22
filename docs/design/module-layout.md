@@ -15,7 +15,7 @@ same command lines, outputs and CTest names as before.
 | `hlsl.py` | `PREAMBLE`, title-memory helpers, `SALU_HELPERS` (helper functions emitted by name from `st.helpers`) |
 | `forms/<family>.py` | the forms of one family and the tables only they use |
 
-Families today: `sopp`, `sop1`, `sop2`, `sopc`, `exec_mask`, `smem`, `valu_f32`, `valu_int`, `valu_f16`, `vopc`,
+Families today: `sopp`, `sop1`, `sop2`, `sopc`, `exec_mask`, `smem`, `valu_f32`, `valu_int`, `valu_f16`, `valu_f64`, `vopc`,
 `sdwa`, `vop3p`, `vintrp`, `mimg`, `mubuf`, `flat`, `exp`. A table another module needs is imported from its family
 (`sdwa` uses `ALU` from `valu_f32` and `COMPARE` from `vopc`). `tools/pixel_aot.py` re-exports the names it always
 had (`lower`, `ALU`, `TITLE_LOOKUP`, ...); new code imports from the package.
@@ -23,7 +23,10 @@ had (`lower`, `ALU`, `TITLE_LOOKUP`, ...); new code imports from the package.
 ### Adding a form
 
 Put it in the module of its family, or in a new `forms/<family>.py`; every module in `forms/` is imported in name order
-and needs no registration line. A form is a function of the state, the instruction index and the match:
+and needs no registration line. A VALU form writes `st.vector` and needs no execution-mask check: while the lane may be
+inactive (`st.ex != "true"`), `lower()` turns each VGPR it wrote into `ex ? new : old`. A form that cannot be masked
+(a lane-mask write, a load, an export) refuses `st.ex != "true"` (control-flow.md, CF-2a).
+A form is a function of the state, the instruction index and the match:
 
 ```python
 from ..dispatch import form
@@ -33,8 +36,6 @@ from ..registers import vector_u32
 @form(r"v_example_b32(?:_e32|_e64)? (v\d+), ([^,\s]+)")
 def example(st, i, m):
     dst, src = m.groups()
-    if st.mask != "entry":
-        raise ValueError("Invalid integer operation")
     st.lines.append(f"    uint valu{i} = {vector_u32(src, st.scalar, st.vector, st.pending, st.sample_pending)};")
     st.vector[dst] = ("uint", f"valu{i}")
 ```

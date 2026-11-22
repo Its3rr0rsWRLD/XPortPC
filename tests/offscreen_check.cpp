@@ -356,6 +356,23 @@ bool supports_cs_6_5(ID3D12Device* device)
     return model.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
 }
 
+// Doubles are optional in D3D12. A shader that uses them is only drawn when DoublePrecisionFloatShaderOps is set,
+// which Microsoft documents as equivalent to Direct3D 11's ExtendedDoublesShaderInstructions (fma, DDIV and DRCP
+// on top of the basic double instructions). XBOX2WINDOWS_TEST_NO_DOUBLES=1 makes this report the capability as
+// absent, so the skip path can be tested on an adapter that has it.
+bool supports_doubles(ID3D12Device* device)
+{
+    wchar_t forced[2]{};
+    if (GetEnvironmentVariableW(L"XBOX2WINDOWS_TEST_NO_DOUBLES", forced, 2) > 0 && forced[0] != L'0') {
+        std::puts("double_precision_float_shader_ops=forced_off");
+        return false;
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+    check(check_feature(device, D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)), "Query double precision support");
+    std::printf("double_precision_float_shader_ops=%d\n", options.DoublePrecisionFloatShaderOps ? 1 : 0);
+    return options.DoublePrecisionFloatShaderOps != FALSE;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 3) return 2;
@@ -429,6 +446,9 @@ int main(int argc, char** argv)
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
         } else if (argc == 5 && operation == "--check-pixel-case-mips") {
             check_translated_pixel_mips(device.Get(), argv[3], argv[4]);
+        } else if (argc == 5 && operation == "--check-pixel-case-f64") {
+            if (!supports_doubles(device.Get())) return 77;
+            check_translated_pixel(device.Get(), argv[3], false, argv[4]);
         } else if (operation == "--check-pixel") {
             if (argc != 5 || (std::string_view(argv[4]) != "rgba" && std::string_view(argv[4]) != "bgra"))
                 throw std::runtime_error("Expected --check-pixel <pixel.cso> rgba|bgra");

@@ -16,7 +16,7 @@ def pack_e32(st, i, m):
             st.lines.append(f"    precise float alu{i}_{n} = asfloat({value[1]});")
             value = f"alu{i}_{n}"
         pair.append(value)
-    if st.mask != "entry" or st.sample_pending or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair):
+    if st.ex != "true" or st.sample_pending or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair):
         raise ValueError("Unsupported pack operand")
     st.vector[dst] = tuple(pair)
 
@@ -33,7 +33,7 @@ def pack_e64(st, i, m):
     if clamp:
         raise ValueError("clamp on v_cvt_pkrtz_f16_f32_e64 is refused: its hardware behaviour is unverified "
                          "(LLVM issue 60591 reports it is ignored on GFX10.3)")
-    if st.mask != "entry" or st.sample_pending or dst in st.sample_dest:
+    if st.ex != "true" or st.sample_pending or dst in st.sample_dest:
         raise ValueError("Unsupported pack operand")
     pair = []
     for n, token in enumerate(tokens):
@@ -48,7 +48,7 @@ def pack_e64(st, i, m):
 @form(r"exp mrt0,? (v\d+), \1, (v\d+), \2 done compr vm")
 def export(st, i, m):
     pairs = [st.vector[v] for v in m.groups()]
-    if st.mask != "entry" or st.exported or not all(isinstance(p, tuple) and len(p)==2 and
+    if st.ex != "true" or st.exported or not all(isinstance(p, tuple) and len(p)==2 and
             all(v.startswith(("sample", "alu")) for v in p) for p in pairs):
         raise ValueError("Unsupported export")
     args = [f"export16({v})" for pair in pairs for v in pair]
