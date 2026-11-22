@@ -35,9 +35,17 @@ import re
 from ..dispatch import form
 from ..registers import registers, vector_u32, vgprs
 from .atomics import OPS, ORDERED, REFUSED, returned
+from .stores import guarded
 
 # Storage image format -> (HLSL texel type, channels, dmask). Only formats whose texels are the raw words.
 FORMATS = {"r32_uint": ("uint", 1, 0x1), "r32g32b32a32_uint": ("uint4", 4, 0xf)}
+# Compute stage only (docs/design/compute-stage.md, C-2): R8G8B8A8_UNORM, the corpus's storage-image format. The data
+# words are binary32 (binary16 halves with d16), converted by the typed store: clamp to [0, 1], NaN to 0, times 255,
+# rounded to nearest. A value whose scaled form lies near a half (D3D allows 0.6 ULP of tolerance there) and a NaN are
+# not checked by the draws. The dmask may name any channels: the data VGPRs hold the named channels in order and a
+# channel outside the dmask is written as 0 (ACO drops a constant-zero channel from the dmask of an image store on that
+# rule, visit_image_store in Mesa; not measured here).
+UNORM_FORMATS = {"r8g8b8a8_unorm": ("unorm float4", 4, 0xf)}
 
 ADDRESS = r"(v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\])"
 DATA = r"(v\d+|v\[\d+:\d+\])"
@@ -95,7 +103,7 @@ def atomic_helper(slot):
 
 DEFINITION = re.compile(r"^\s*(?:precise\s+)?(?:(?:uint|int|float|bool)[234]?\s+)?([A-Za-z_]\w*)\s*=\s*(.+?);\s*$", re.M)
 IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
-VARYING = re.compile(r"uv|frag_position|attr\d+")
+VARYING = re.compile(r"uv|frag_position|attr\d+|local_id")  # local_id: the compute stage's SV_GroupThreadID
 
 
 def lane_varying(st, expression):
@@ -123,7 +131,8 @@ def lane_varying(st, expression):
 
 
 def writing(st):
-    if st.ex != "true" or st.wqm:
+    # The compute stage also writes while the lane may be inactive, under `if (ex)` (stores.guarded).
+    if (st.ex != "true" and st.stage == "pixel") or st.wqm:
         raise ValueError("An image write needs this lane provably active outside whole-quad mode (CF-2a)")
 
 
@@ -135,8 +144,16 @@ def image_operands(st, op, f0, f1, addr_token, width):
     if entry is None or int(f0) % 4 or int(f1) > 105 or any(r in st.pending for r in image):
         raise ValueError("Unsupported storage image binding")
     slot, fmt = entry
+    if fmt in UNORM_FORMATS and st.stage == "compute" and op == "store":
+        return slot, fmt, [vector_u32(r, st.scalar, st.vector, st.pending, st.sample_pending)
+                           for r in address_registers(addr_token, width)]
     if fmt not in FORMATS:
         raise ValueError(f"Storage image format {fmt} is not lowered exactly")
+    words = [vector_u32(r, st.scalar, st.vector, st.pending, st.sample_pending) for r in address_registers(addr_token, width)]
+    return slot, fmt, words
+
+
+def address_registers(addr_token, width):
     if addr_token.startswith("["):
         addrs = addr_token[1:-1].split(", ")
         if len(addrs) != width:
@@ -145,8 +162,7 @@ def image_operands(st, op, f0, f1, addr_token, width):
         addrs = vgprs(addr_token, width)
     if any(int(r[1:]) > 255 for r in addrs):
         raise ValueError("Image address register out of range")
-    words = [vector_u32(r, st.scalar, st.vector, st.pending, st.sample_pending) for r in addrs]
-    return slot, fmt, words
+    return addrs
 
 
 def shared(st, words):
@@ -167,6 +183,8 @@ def image_store(st, i, m):
     d16 = "d16" in flags_of(modifiers, {"unorm", "glc", "slc", "dlc", "d16"})
     writing(st)
     slot, fmt, address = image_operands(st, op, f0, f1, addr_token, 3 if op == "store_mip" else 2)
+    if fmt in UNORM_FORMATS:
+        return unorm_store(st, slot, fmt, address, data_token, int(dmask_digit, 16), d16)
     kind, channels, mask = FORMATS[fmt]
     if int(dmask_digit, 16) != mask:
         raise ValueError(f"An image store to {fmt} needs dmask {mask:#x}")
@@ -181,7 +199,29 @@ def image_store(st, i, m):
     value = values[0] if channels == 1 else f"uint4({', '.join(values)})"
     st.declarations.setdefault(f"image{slot}", store_helper(slot, kind))
     mip = address[2] if op == "store_mip" else "0u"
-    st.lines.append(f"    image_store{slot}({address[0]}, {address[1]}, {mip}, {value});")
+    st.lines.append(guarded(st, f"    image_store{slot}({address[0]}, {address[1]}, {mip}, {value});"))
+
+
+def unorm_store(st, slot, fmt, address, data_token, dmask, d16):
+    """image_store to an R8G8B8A8_UNORM image in the compute stage (see UNORM_FORMATS)."""
+    kind, channels, _ = UNORM_FORMATS[fmt]
+    named = [c for c in range(channels) if dmask >> c & 1]
+    if not named:
+        raise ValueError("An image store needs a nonzero dmask")
+    if shared(st, address):
+        raise ValueError("An image store to a texel every lane shares is order-dependent")
+    regs = vgprs(data_token, (len(named) + 1) // 2 if d16 else len(named))
+    words = [vector_u32(r, st.scalar, st.vector, st.pending, st.sample_pending) for r in regs]
+    if d16:
+        halves = [f"f16tof32({words[k // 2]})" if k % 2 == 0 else f"f16tof32(({words[k // 2]}) >> 16)"
+                  for k in range(len(named))]
+    else:
+        halves = [f"asfloat({w})" for w in words]
+    value = ["0.0f"] * channels
+    for c, text in zip(named, halves):
+        value[c] = text
+    st.declarations.setdefault(f"image{slot}", store_helper(slot, kind))
+    st.lines.append(guarded(st, f"    image_store{slot}({address[0]}, {address[1]}, 0u, float4({', '.join(value)}));"))
 
 
 @form(r"image_atomic_([a-z]+) " + DATA + ", " + ADDRESS + r", s\[(\d+):(\d+)\] dmask:0x([0-9a-f]) "

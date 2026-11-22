@@ -13,6 +13,7 @@ same command lines, outputs and CTest names as before.
 | `registers.py` | the register model and operand readers: `("uint", expr)` words, `vector_u32`, `word_of`, `tracked_word`, `RAW_WORD_PREFIXES`, `fp_operand`, the binary16 readers |
 | `control_flow.py` | CF-1 ([control-flow.md](control-flow.md)): blocks, `plan_join`, `sync_lines`, and `program()`, the structured walk |
 | `quad.py` | quad lanes: the quad-local DPP16 (`quad_perm`) and DPP8 controls, and `quad_read`, the HLSL quad reads of a uint word |
+| `bindings.py` | `PixelBindings`, the binding description of `lower(bindings=...)` ([pixel-bindings.md](pixel-bindings.md)), and the descriptor-key helpers the compute stage shares |
 | `hlsl.py` | `PREAMBLE`, title-memory helpers, `SALU_HELPERS` (helper functions emitted by name from `st.helpers`) |
 | `forms/<family>.py` | the forms of one family and the tables only they use |
 

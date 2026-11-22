@@ -6,13 +6,14 @@ sources to 16 bits before it uses v_cvt_pk_u16_u32 to pack two halves on GFX6/7,
 need. The forms take no source modifiers and no clamp (llvm-mc refuses both); the sources are unsigned words.
 """
 from ..dispatch import form
+from ..registers import inactive
 from ..registers import vector_u32
 
 
 @form(r"v_cvt_pk_(u16_u32|i16_i32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+)")
 def pack_16(st, i, m):
     kind, dst, *tokens = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")

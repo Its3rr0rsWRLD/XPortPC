@@ -65,3 +65,20 @@ def bitset_64(st, i, m):
         f"uint2({d0} & ~salu{i}_m.x, {d1} & ~salu{i}_m.y)"
     st.lines.append(f"    uint2 salu{i} = {expr};")
     st.scalar[regs[0]], st.scalar[regs[1]] = ("uint", f"salu{i}.x"), ("uint", f"salu{i}.y")
+
+
+@form(r"s_mov_b32 (s\d+), src_scc")
+def move_scc(st, i, m):
+    # SCC read as a source operand: 1 when set, 0 when clear (ACO keeps a comparison's SCC this way). SCC must be
+    # tracked from uniform scalar data.
+    dst = m[1]
+    if dst in st.pending or st.scc is None:
+        raise ValueError("src_scc needs a tracked SCC")
+    st.lines.append(f"    uint sccw{i} = ({st.scc}) ? 1u : 0u;")
+    st.scalar[dst] = ("uint", f"sccw{i}")
+
+
+@form(r"s_mov_b32 null, (0x[0-9a-f]+|-?\d+)")
+def move_null(st, i, m):
+    # A write to the null register is discarded (ACO emits s_mov_b32 null, 0 as a scheduling filler).
+    pass

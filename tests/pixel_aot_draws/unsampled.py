@@ -60,16 +60,19 @@ def controls(directory):
         source = translate_attribute(code)
         assert "main(float4 uv : TEXCOORD0" in source and "SamplerState" not in source, source
         must_reject(lambda: lower(code, 14, 8, None))  # m0 holds another register than the interpolation base
-        must_reject(lambda: lower(code, 8, 14, [1, 2, 3, 4]))  # a sampler bound: entry interpolation is refused
+        must_reject(lambda: lower(code, 8, 14, [1, 2, 3, 4]))  # a sampler bound and no sample taken
         must_reject(translate_attribute, [s.replace("v8, v1, attr0.w", "v8, v1, attr0.z") for s in code])
         must_reject(translate_attribute, [s.replace("v9, v0, attr0.z", "v9, v1, attr0.z") for s in code])
-        must_reject(translate_attribute, [s.replace("attr0.z", "attr1.z") for s in code])
+        # p2 of another attribute than its p1 (attr1 itself is interpolated as any other: family interp_attrs).
+        must_reject(translate_attribute, [s.replace("v1, attr0.z", "v1, attr1.z") for s in code])
         # p1 at the entry mask cannot pair with p2 in whole-quad mode.
         p2 = next(n for n, s in enumerate(code) if s.startswith("v_interp_p2"))
         must_reject(translate_attribute, code[:p2] + ["s_wqm_b64 exec, exec"] + code[p2:])
-    # In whole-quad mode only x and y are interpolated, as before.
+    # In whole-quad mode every component is a helper-lane value an implicit-level sample may read (family
+    # interp_attrs): TEXCOORD0 is then float4.
     wqm = assembly(False)
-    must_reject(lower, [s.replace("attr0.y", "attr0.z") for s in wqm], 20, 24, [1, 2, 3, 4])
+    source = lower([s.replace("attr0.y", "attr0.z") for s in wqm], 20, 24, [1, 2, 3, 4])
+    assert "main(float4 uv : TEXCOORD0" in source and ".Sample(samp, float2(uv.x, alu" in source, source
 
 
 def binary_fixtures():

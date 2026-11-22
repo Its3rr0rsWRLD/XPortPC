@@ -3,6 +3,7 @@ sub-dword selections."""
 import re
 
 from ..dispatch import form
+from ..registers import inactive
 from ..registers import (LANE_MASK, f16_encoding, fp_operand, lane_mask, tracked_word, vector_u32, word_of)
 from .valu_bits import BITS_UNARY
 from .valu_f16 import F16_ALU
@@ -337,7 +338,7 @@ def compare_int16_sdwa(st, i, m):
 @form(rf"v_(max|min)_(i32|u32)_sdwa (v\d+), ([^,\s]+), ([^,\s]+){DST_FIELDS}{SRC0}{SRC1}")
 def min_max_sdwa(st, i, m):
     op, kind, dst, first, second, dst_sel, unused, sel0, sel1 = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     words = [int_source(st, t, sel) for t, sel in ((first, sel0), (second, sel1))]
     if kind == "i32":
@@ -349,7 +350,7 @@ def min_max_sdwa(st, i, m):
 @form(rf"v_({'|'.join(op[2:] for op in BITS_UNARY)})_sdwa (v\d+), ([^,\s]+){DST_FIELDS}{SRC0}")
 def bit_scan_sdwa(st, i, m):
     op, dst, src, dst_sel, unused, sel = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid integer operation")
     word = int_source(st, src, sel)
     st.lines.append(f"    uint scan{i} = {word};")
@@ -361,7 +362,7 @@ def bit_scan_sdwa(st, i, m):
 @form(rf"v_cvt_f32_(i32|u32)_sdwa (v\d+), ([^,\s]+){DST_FIELDS}{SRC0}")
 def int_to_float_sdwa(st, i, m):
     kind, dst, src, dst_sel, unused, sel = m.groups()
-    if st.ex != "true" or dst in st.sample_dest:
+    if inactive(st) or dst in st.sample_dest:
         raise ValueError("Invalid conversion")
     st.lines.append(f"    uint cvtw{i} = {int_source(st, src, sel)};")
     # As the e32 conversion: the high and low halves are converted exactly and the one binary32 add rounds.
@@ -374,7 +375,7 @@ def int_to_float_sdwa(st, i, m):
 def float_to_int_sdwa(st, i, m):
     # The e32 lowering of valu_int.convert_to_int on the whole-dword source, whose result is placed as a word.
     kind, dst, src, dst_sel, unused = m.groups()
-    if st.ex != "true":
+    if inactive(st):
         raise ValueError("Invalid conversion")
     value = fp_operand(src, st.scalar, st.vector, st.pending, st.sample_pending)
     st.lines.append(f"    uint cvtb{i} = asuint({value});")

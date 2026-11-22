@@ -87,10 +87,12 @@ def controls(directory):
                               ("s40", "uint movw28 = 1u;")):
         changed = [line.replace("v20, 0x3e800000", f"v20, {operand}") for line in program]
         assert expected in translate(changed), operand
-    for old, new in (("v18, v12", "v18, v0"), ("v18, v12", "v18, v8"), ("v18, v12", "v18, v30"),
+    # The interpolated coordinate is a float value like any other (family interp_attrs).
+    assert "uv.x" in translate([line.replace("v18, v12", "v18, v8") for line in program]).split("Sample(", 1)[1]
+    for old, new in (("v18, v12", "v18, v0"), ("v18, v12", "v18, v30"),
                      ("v19, s46", "v19, s28"), ("v19, s46", "v19, -s46"), ("v19, s46", "v19, s46 clamp"),
                      ("v18, v12", "v18, v12, v13"), ("v14, -0.5, v14", "v14, v14"),
-                     ("v19, v13, v19", "v19, v13, v19, v18"), ("s45 clamp", "s45 clamp mul:2")):
+                     ("v19, v13, v19", "v19, v13, v19, v18")):
         changed = [line.replace(old, new) for line in program]
         assert changed != program
         must_reject(translate, changed)

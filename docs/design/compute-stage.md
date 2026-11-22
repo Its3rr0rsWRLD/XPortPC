@@ -1,9 +1,10 @@
 # Compute stage: design
 
-Status: C-1 is implemented (`tools/compute_aot.py`, checked by `tests/compute_aot_check.py` and
-`tests/compute_aot_render.cpp`); C-2 to C-8 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
+Status: C-1 to C-4 are implemented (`tools/compute_aot.py`, checked by `tests/compute_aot_check.py` and
+`tests/compute_aot_render.cpp`); C-5 to C-8 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
 the instruction lowerings stay in `tools/pixel_aot_ops/forms/` and are shared, and the compute stage adds only its entry
-contract, its terminator, its refusals and its test harness.
+contract, its terminator, its refusals and its test harness. With C-4, 12 of the 27 corpus compute shaders translate
+(see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18.
 
 ## What the corpus shows
 The corpus has 27 compute shaders (10 from Sascha Willems' Vulkan samples, 17 from Khronos Vulkan-Samples; licenses in
@@ -226,6 +227,61 @@ C-1's families:
 - `integrate`: the corpus's two particle-integration shapes (64 threads with a voffset, wave64; one thread with the
   index in soffset and dt scaled by a literal, wave32) over 256 particles. Wrong references: fused multiply-add,
   denormals kept, group id ignored, local id ignored, dt from the wrong constant word, the velocity offset ignored.
+
+## Where C-2 to C-4 stand
+Measured with the corpus dumps and contracts deduced from them (entry SGPRs from the table above, each descriptor
+classified by the instruction that reads it): 12 of 27 translate. Newly translated: edgedetect, emboss, sharpen,
+game_of_life_init, game_of_life_mutate (C-2), sascha computeparticles/particle, async_compute/threshold (C-3) and cloth
+(C-4). Still refused among the shaders the projection gave to C-2 to C-4:
+- multi_draw_indirect/cull: nested loops whose inner loop leaves through the outer loop's exit (a two-level break),
+  which CF-2e does not structure.
+- game_of_life_update: reads T# word 1 as data (`s_bfe_u32` of the image width, imageSize), which needs a descriptor
+  word model of the bound image.
+- raytracing: two uniform buffers (the constant words are one) and `s_buffer_load` at a runtime SGPR offset.
+- the three 16bit_arithmetic shaders: `s_buffer_load` at a runtime SGPR offset (the constant words are read only at
+  translation-time offsets).
+
+What the cards added:
+- **Contract.** `textures={key: 0|1}` (read images, bound as RGBA8 SRVs tex/tex1, t0/t1), `storage_images={key: (slot,
+  format)}` (RWTexture2D at u(8 * slot), space 2, as the pixel stage), `sampler=key` (an S# in the descriptor table;
+  the harness's static point sampler with clamp addressing), the role `descriptors.N` for the pointer to descriptor set
+  N (a key of set N is `N * 0x100000 + offset`; RADV's push-constant pointer is declared this way, its words mapped onto
+  params as a buffer V#'s are), and `descriptor_high`. In the compute stage every `s_load_dword*` from a descriptor
+  list goes through `smem.compute_descriptor_load`, which resolves each word to the declared descriptor covering it, so
+  `s_load_dwordx16` of two adjacent T#s is one load. A title container can be read with upstream's extraction
+  (R0Y00/Xbox2Windows#483: `pixel_aot.container_code(stage=5)`, the PSV0 thread dimensions): `translate --container`.
+- **C-2.** `image_load` (also with a non-sequential address), `image_sample_lz`/`_l` and their offset forms, and
+  `image_store` to `r8g8b8a8_unorm` (binary32 data, binary16 with d16; channels outside the dmask are written as 0,
+  the rule ACO's dmask trimming relies on), besides the raw-word formats of the pixel stage. A texel address that does
+  not depend on SV_GroupThreadID is shared by the threads of a group and refused, as in the pixel stage. A UNORM store
+  of a value whose scaled form lies near a half, and of a NaN, is not checked by the draws (D3D allows a tolerance
+  there); a read-write image (a typed UAV load) is not lowered.
+- **C-3.** The pixel stage's control-flow walk (`control_flow.program`), unchanged. While a lane may be inactive, a
+  store is emitted under `if (ex)` (`stores.guarded`), loads and the VGPR-only forms that the pixel stage still
+  refuses there (conversions, integer min/max/med3, bit-field forms, binary64, `v_cvt_pk_*`, SDWA ones) are lowered
+  under the masked-write rule (`registers.inactive`). A load after a store is lowered: one D3D12 thread observes its
+  own UAV writes in program order, and a load of another lane's store without a barrier is a race on the console too.
+  The NumWorkgroups words were not needed by any shader this card unlocks and are not modelled.
+- **C-4.** `v_pk_fmac_f16`, `v_pack_b32_f16`, `s_mov_b32 D, src_scc`, `s_mov_b32 null, K`, `v_cndmask_b32` on the
+  uniform mask of `s_cselect_b64 D, -1, 0`, the `neg(N)` spelling of an integer inline constant, and `v_fma_mix*` into
+  a register that holds an integer word. The NaN-through-store check is not done (the draws store finite values).
+
+Draw families of C-2 to C-4 (each also runs its wrong references; `controls` checks the refusals):
+- `image`: image_load at (x - 1, y) through an NSA address and at (x, y) from two T#s of one x16 load, a dmask 0x7
+  UNORM store (alpha written 0), reads outside the image (0); and the threshold shape: two bounds, a skip region with
+  image_sample_lz at texel centres (edge clamp) and a UNORM store under the narrowed EXEC. Wrong references: the same
+  texel twice, x and y swapped, alpha 1, |x| before the conversion, edge clamping of out-of-range loads; no mask, a
+  mask on x only, wrapped addressing, b not inverted, the row scale taken from the column scale.
+- `cf`: v_cmpx plus s_cbranch_execz around a nested s_and_saveexec region whose store only even words take, then a
+  store, a load of the lane's own word after it and a store again; a uniform SCC loop under a v_cmpx mask through
+  v_bfe_u32, v_min_u32 and v_cvt_f32_u32. Wrong references: no mask, inner store unconditional or inverted, the load
+  reading the value before the inner store, the index not added; no min, one iteration.
+- `neutral`: the C-4 forms above plus v_lshrrev_b64 by 0 to 63 and v_cmp_class_f32 of neg(1). Wrong references: the
+  packed fma rounded twice, pack halves swapped, the shift masked to 5 bits, SCC inverted, class bit 3, the mix
+  addend not negated.
+
+The harness reads two optional sections after the expected memory ('X2WT' read images, 'X2WI' storage images with
+their expected texels, see tests/compute_aot_render.cpp) and binds root parameters 4 (two SRVs) and 5 (32 UAVs).
 
 ## Cards
 Counts are corpus shaders whose first translatable card it is (`tools/compute_aot.py survey`, "first_card"),

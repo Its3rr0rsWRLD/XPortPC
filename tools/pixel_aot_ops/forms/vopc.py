@@ -205,7 +205,11 @@ def select(st, i, m):
     dst, unset, chosen, source = m.groups()
     regs = lane_mask(source)
     condition = st.scalar.get(regs[0])
-    if (st.pending.intersection(regs) or not isinstance(condition, tuple)
+    bits = {getattr(st.scalar.get(r), "bit", None) for r in regs}
+    if len(bits) == 1 and None not in bits and not st.pending.intersection(regs):
+        # The uniform mask of s_cselect_b64 D, -1, 0 (exec_mask.UniformMask): the same bit for every lane.
+        condition = ("condition", bits.pop(), 0, len(regs))
+    elif (st.pending.intersection(regs) or not isinstance(condition, tuple)
             or condition[0] != "condition"
             or [st.scalar.get(r) for r in regs] != [(*condition[:2], j, len(regs)) for j in range(len(regs))]):
         raise ValueError("Select mask is not a tracked comparison")
