@@ -89,6 +89,7 @@ CPU_FIXTURES = {
     "sse2_shifts_pack": "cpu_aot_sse2_shifts_pack",
     "crypto_aes_pclmul": "cpu_aot_crypto_aes_pclmul",
     "crypto_sha": "cpu_aot_crypto_sha",
+    "avx_packed_fp": "cpu_aot_avx_packed_fp",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

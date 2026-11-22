@@ -969,6 +969,17 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_aot_crypto_sha COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/crypto_sha.py"
         check "$<TARGET_FILE:cpu_crypto_sha>" "$<TARGET_FILE:cpu_crypto_sha_lifted>")
     set_tests_properties(cpu_aot_crypto_sha PROPERTIES SKIP_RETURN_CODE 77)
+    cpu_asm_fixture(cpu_avx_packed_fp avx_packed_fp)
+    set(avx_packed_fp_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_avx_packed_fp_lifted.cpp")
+    add_custom_command(OUTPUT "${avx_packed_fp_fixture}"
+        COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/avx_packed_fp.py"
+            emit "$<TARGET_FILE:cpu_avx_packed_fp>" "${avx_packed_fp_fixture}"
+        DEPENDS cpu_avx_packed_fp tests/cpu/avx_packed_fp.py tools/ffx_version_query.py
+            tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+    add_library(cpu_avx_packed_fp_lifted SHARED "${avx_packed_fp_fixture}")
+    add_test(NAME cpu_aot_avx_packed_fp COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/avx_packed_fp.py"
+        check "$<TARGET_FILE:cpu_avx_packed_fp>" "$<TARGET_FILE:cpu_avx_packed_fp_lifted>")
+    set_tests_properties(cpu_aot_avx_packed_fp PROPERTIES SKIP_RETURN_CODE 77)
     cpu_translation(cpu_callback cpu_chained_aot call_context CALLBACK_OFFSET 8)
     cpu_asm_fixture(cpu_xlatb xlatb)
     # The lifted DLL and three mutated controls that the check requires to mismatch.

@@ -272,6 +272,16 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
     sha_ops = {M.SHA1MSG1, M.SHA1MSG2, M.SHA1NEXTE, M.SHA1RNDS4, M.SHA256MSG1, M.SHA256MSG2, M.SHA256RNDS2}
     has_wide = has_wide or any(i.mnemonic in (M.VMOVUPS, M.MOVDQU) or i.mnemonic in sha_ops for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    wide_any = {**wide, **wide_xmm}
+    avx_fp_ops = {
+        M.VMOVUPD,
+        M.VADDPS, M.VSUBPS, M.VMULPS, M.VDIVPS, M.VSQRTPS, M.VMINPS, M.VMAXPS,
+        M.VANDPS, M.VANDNPS, M.VORPS, M.VXORPS, M.VADDSUBPS, M.VHADDPS, M.VHSUBPS, M.VMOVMSKPS,
+        M.VADDPD, M.VSUBPD, M.VMULPD, M.VDIVPD, M.VSQRTPD, M.VMINPD, M.VMAXPD,
+        M.VANDPD, M.VANDNPD, M.VORPD, M.VXORPD, M.VADDSUBPD, M.VHADDPD, M.VHSUBPD, M.VMOVMSKPD,
+    }
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in avx_fp_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -1050,6 +1060,92 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             else:  # M.SHA256RNDS2
                 stmt = (f"{{ uint32_t d[4], wk[4]; memcpy(d, {dst}.data(), 16); {src_init} "
                         f"memcpy(wk, wide0.data(), 16); sha256_rnds2(d, s, wk); memcpy({dst}.data(), d, 16); }}")
+        elif op == M.VMOVUPD and i.encoding == EncodingKind.VEX and has_wide:
+            if i.op0_kind == K.REGISTER and i.op0_register in wide_any and i.op1_kind == K.MEMORY:
+                dst = wide_any[i.op0_register]
+                nbytes = 32 if i.op0_register in wide else 16
+                stmt = f"{dst} = {{}}; memcpy({dst}.data(), reinterpret_cast<const void*>({address()}), {nbytes});"
+            elif i.op0_kind == K.MEMORY and i.op1_kind == K.REGISTER and i.op1_register in wide_any:
+                src = wide_any[i.op1_register]
+                nbytes = 32 if i.op1_register in wide else 16
+                stmt = f"memcpy(reinterpret_cast<void*>({address()}), {src}.data(), {nbytes});"
+            elif i.op0_kind == K.REGISTER and i.op0_register in wide_any and i.op1_kind == K.REGISTER and i.op1_register in wide_any:
+                dst, src = wide_any[i.op0_register], wide_any[i.op1_register]
+                nbytes = 32 if i.op0_register in wide else 16
+                stmt = f"{{ auto t = {src}; {dst} = {{}}; memcpy({dst}.data(), t.data(), {nbytes}); }}"
+            else:
+                raise ValueError(f"unsupported VMOVUPD form at {i.ip:#x}: {i}")
+        elif (op in (M.VMOVMSKPS, M.VMOVMSKPD) and i.encoding == EncodingKind.VEX and has_wide
+              and i.op0_kind == K.REGISTER and RegisterExt.size(i.op0_register) in (4, 8)
+              and i.op1_kind == K.REGISTER and i.op1_register in wide_any):
+            src = wide_any[i.op1_register]
+            nbytes = 32 if i.op1_register in wide else 16
+            lane_size = 4 if op == M.VMOVMSKPS else 8
+            lanes = nbytes // lane_size
+            stmt = (f"{{ uint32_t m = 0; for (size_t k=0; k<{lanes}; ++k) {{ "
+                    f"if ({src}[(k + 1) * {lane_size} - 1] & 0x80u) m |= (1u << k); }} {write('m')} }}")
+        elif (op in avx_fp_ops and op not in (M.VMOVUPD, M.VMOVMSKPS, M.VMOVMSKPD)
+              and i.encoding == EncodingKind.VEX and has_wide
+              and i.op0_kind == K.REGISTER and i.op0_register in wide_any):
+            dst = wide_any[i.op0_register]
+            nbytes = 32 if i.op0_register in wide else 16
+            zero_hi = f" memset({dst}.data()+16, 0, 16);" if nbytes == 16 else ""
+            if op in (M.VSQRTPS, M.VSQRTPD):
+                if i.op1_kind == K.REGISTER and i.op1_register in wide_any:
+                    s_init = f"std::array<uint8_t,32> rhs = {wide_any[i.op1_register]};"
+                elif i.op1_kind == K.MEMORY:
+                    s_init = f"std::array<uint8_t,32> rhs{{}}; memcpy(rhs.data(), reinterpret_cast<const void*>({address()}), {nbytes});"
+                else:
+                    raise ValueError(f"unsupported AVX sqrt source at {i.ip:#x}: {i}")
+                ftype, lane_size = ("float", 4) if op == M.VSQRTPS else ("double", 8)
+                stmt = (f"{{ {s_init} for (size_t n=0; n<{nbytes}; n+={lane_size}) {{ "
+                        f"{ftype} b; memcpy(&b, rhs.data()+n, {lane_size}); "
+                        f"const {ftype} v = std::sqrt(b); memcpy({dst}.data()+n, &v, {lane_size}); }}{zero_hi} }}")
+            else:
+                if i.op1_kind != K.REGISTER or i.op1_register not in wide_any:
+                    raise ValueError(f"unsupported AVX src1 at {i.ip:#x}: {i}")
+                src1 = wide_any[i.op1_register]
+                if i.op2_kind == K.REGISTER and i.op2_register in wide_any:
+                    s2_init = f"std::array<uint8_t,32> rhs = {wide_any[i.op2_register]};"
+                elif i.op2_kind == K.MEMORY:
+                    s2_init = f"std::array<uint8_t,32> rhs{{}}; memcpy(rhs.data(), reinterpret_cast<const void*>({address()}), {nbytes});"
+                else:
+                    raise ValueError(f"unsupported AVX src2 at {i.ip:#x}: {i}")
+                if op in (M.VANDPS, M.VANDPD, M.VANDNPS, M.VANDNPD, M.VORPS, M.VORPD, M.VXORPS, M.VXORPD):
+                    expr = {M.VANDPS: "a & b", M.VANDPD: "a & b", M.VANDNPS: "(~a) & b", M.VANDNPD: "(~a) & b",
+                            M.VORPS: "a | b", M.VORPD: "a | b", M.VXORPS: "a ^ b", M.VXORPD: "a ^ b"}[op]
+                    stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; ++n) {{ "
+                            f"const uint8_t a = lhs[n], b = rhs[n]; {dst}[n] = static_cast<uint8_t>({expr}); }}{zero_hi} }}")
+                elif op in (M.VADDSUBPS, M.VADDSUBPD):
+                    ftype, lane_size = ("float", 4) if op == M.VADDSUBPS else ("double", 8)
+                    lanes = nbytes // lane_size
+                    stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t k=0; k<{lanes}; ++k) {{ "
+                            f"{ftype} a, b; memcpy(&a, lhs.data()+k*{lane_size}, {lane_size}); memcpy(&b, rhs.data()+k*{lane_size}, {lane_size}); "
+                            f"const {ftype} v = (k & 1u) ? (a + b) : (a - b); memcpy({dst}.data()+k*{lane_size}, &v, {lane_size}); }}{zero_hi} }}")
+                elif op in (M.VHADDPS, M.VHSUBPS):
+                    sign = "+" if op == M.VHADDPS else "-"
+                    stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t lane=0; lane<{nbytes}; lane+=16) {{ "
+                            f"float a[4], b[4]; memcpy(a, lhs.data()+lane, 16); memcpy(b, rhs.data()+lane, 16); "
+                            f"const float r[4] = {{a[0] {sign} a[1], a[2] {sign} a[3], b[0] {sign} b[1], b[2] {sign} b[3]}}; "
+                            f"memcpy({dst}.data()+lane, r, 16); }}{zero_hi} }}")
+                elif op in (M.VHADDPD, M.VHSUBPD):
+                    sign = "+" if op == M.VHADDPD else "-"
+                    stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t lane=0; lane<{nbytes}; lane+=16) {{ "
+                            f"double a[2], b[2]; memcpy(a, lhs.data()+lane, 16); memcpy(b, rhs.data()+lane, 16); "
+                            f"const double r[2] = {{a[0] {sign} a[1], b[0] {sign} b[1]}}; "
+                            f"memcpy({dst}.data()+lane, r, 16); }}{zero_hi} }}")
+                else:  # VADD/VSUB/VMUL/VDIV/VMIN/VMAX PS/PD
+                    is_ps = op in (M.VADDPS, M.VSUBPS, M.VMULPS, M.VDIVPS, M.VMINPS, M.VMAXPS)
+                    ftype, lane_size = ("float", 4) if is_ps else ("double", 8)
+                    expr = {
+                        M.VADDPS: "a + b", M.VADDPD: "a + b", M.VSUBPS: "a - b", M.VSUBPD: "a - b",
+                        M.VMULPS: "a * b", M.VMULPD: "a * b", M.VDIVPS: "a / b", M.VDIVPD: "a / b",
+                        M.VMINPS: "(a < b) ? a : b", M.VMINPD: "(a < b) ? a : b",
+                        M.VMAXPS: "(a > b) ? a : b", M.VMAXPD: "(a > b) ? a : b",
+                    }[op]
+                    stmt = (f"{{ auto lhs = {src1}; {s2_init} for (size_t n=0; n<{nbytes}; n+={lane_size}) {{ "
+                            f"{ftype} a, b; memcpy(&a, lhs.data()+n, {lane_size}); memcpy(&b, rhs.data()+n, {lane_size}); "
+                            f"const {ftype} v = {expr}; memcpy({dst}.data()+n, &v, {lane_size}); }}{zero_hi} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
