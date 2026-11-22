@@ -2,3 +2,8 @@ LIBRARY d3d12_xs
 EXPORTS
     D3D12SerializeVersionedRootSignature=d3d12_xs_SerializeVersionedRootSignature
     D3D12CreateRootSignatureDeserializer=d3d12_xs_CreateRootSignatureDeserializer
+    D3D12CreateDevice=d3d12_xs_CreateDevice
+    D3D12GetDebugInterface=d3d12_xs_GetDebugInterface
+    X2WGfxCreateSwapChainForHwnd
+    X2WGfxSetLogSink
+    X2WGfxGetCounters

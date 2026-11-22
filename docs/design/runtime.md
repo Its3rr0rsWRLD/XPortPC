@@ -270,6 +270,10 @@ Today: the launcher test (`launch_check.py`) already starts and exits a source-b
 stderr, so R1 is mostly there. Missing for R1: the JSON report, argument and caller logging in stubs, and the
 first-unimplemented-call line. Furthest rung today: none.
 
+R2 program: `tests/runtime/r2_clear.cpp` over the graphics shim skeleton in `d3d12_xs.dll` (work item 2; tests and
+wrapped interfaces in [experiments.md](../experiments.md#graphics-shim-skeleton-runtime-rung-r2)). It runs directly,
+not under `x2w_launch`, until `pe_map` maps implicit TLS.
+
 ## 7. Game report
 
 `x2w_report` is the tool the owner runs on his own titles, from his own copy. It produces one Markdown file and one
