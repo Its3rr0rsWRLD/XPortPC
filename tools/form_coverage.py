@@ -85,6 +85,7 @@ CPU_FIXTURES = {
     "fma_scalar": "cpu_aot_fma_scalar",
     "fma_packed": "cpu_aot_fma_packed",
     "ssse3_int": "cpu_aot_ssse3_int",
+    "sse2_int": "cpu_aot_sse2_int",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
