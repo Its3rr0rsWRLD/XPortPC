@@ -224,6 +224,68 @@ uint fract16(float value) {
 float4 main(float2 uv : TEXCOORD0) : SV_Target0 {"""
 
 
+# Title memory for buffer and global loads (see docs/experiments.md). The declarations match the pixel root signature
+# of the harness (tests/pixel_aot_vs.hlsl); src/title_va_lookup.hlsli is read at translation time.
+TITLE_LOOKUP = Path(__file__).resolve().parents[1] / "src" / "title_va_lookup.hlsli"
+TITLE_DECLARATIONS = """StructuredBuffer<TitleRange> title_ranges : register(t2);
+ByteAddressBuffer title_memory[8] : register(t0, space1);
+cbuffer TitleCount : register(b1) { uint title_range_count; };
+"""
+# Buffer resource (V#) on gfx10, as four words w0..w3:
+#   base = w0 | (w1 & 0xffff) << 32, stride = (w1 >> 16) & 0x3fff, num_records = w2, OOB_SELECT = (w3 >> 28) & 3,
+#   SWIZZLE_ENABLE = w1 bit 31, ADD_TID_ENABLE = w3 bit 23.
+# Sources:
+#   AMD RDNA Shader ISA (document 70652, 2020-09-25), Table 37 "Buffer Resource Descriptor": base address bits 47:0,
+#     stride 61:48, swizzle enable 63, num_records 95:64, add tid enable 119, OOB_SELECT 125:124; section 8.1.5:
+#     Final Address = const_base + sgpr_offset + buffer_offset, "the sgpr_offset is not a part of the offset term",
+#     out-of-range reads return zero, Load/store-Dword-x{2,3,4} are range-checked per component.
+#   Mesa src/amd/common/ac_descriptors.c, ac_set_buf_desc_word3 (android.googlesource.com mirror of Mesa), whose comment
+#     gives OOB_SELECT for GFX10 as: 0: (index >= NUM_RECORDS) || (offset >= STRIDE); 1: index >= NUM_RECORDS;
+#     2: NUM_RECORDS == 0; 3: swizzle_address >= NUM_RECORDS if SWIZZLE_ENABLE else offset >= NUM_RECORDS.
+#     ac_build_buffer_descriptor puts va in w0, va >> 32 and the stride in w1 and the size in w2.
+# Where they differ the code follows Mesa: the ISA table has "offset > stride" for 0 and "offset + payload > NumRecords"
+# (with NumRecords reduced by sgpr_offset in raw mode) for 3. Per component, a dword is out of range when its own offset
+# (voffset + inst_offset + 4 * dword) fails the rule; SWIZZLE_ENABLE and ADD_TID_ENABLE are not modelled and read zero,
+# as does an offset sum that wraps 32 bits.
+MEMORY_HELPERS = """uint2 add64(uint2 a, uint2 b) {
+    uint low = a.x + b.x;
+    return uint2(low, a.y + b.y + (low < a.x ? 1u : 0u));
+}
+uint2 mul_stride(uint stride, uint index) {
+    uint low = stride * (index & 0xffffu);
+    uint high = stride * (index >> 16);
+    return add64(uint2(low, 0u), uint2(high << 16, high >> 16));
+}
+uint title_load32(uint2 address) {
+    uint slot;
+    uint offset;
+    if (!TitleLookup(title_ranges, title_range_count, address, 4, slot, offset)) return 0u;
+    return title_memory[NonUniformResourceIndex(slot)].Load(offset);
+}
+uint buffer_load32(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, uint dword) {
+    uint stride = (rsrc.y >> 16) & 0x3fffu;
+    uint num_records = rsrc.z;
+    uint oob_select = (rsrc.w >> 28) & 3u;
+    bool unmodelled = (rsrc.y >> 31) != 0u || ((rsrc.w >> 23) & 1u) != 0u;
+    uint partial = voffset + inst_offset;
+    uint offset = partial + 4u * dword;
+    bool wrapped = partial < voffset || offset < partial;
+    bool in_range;
+    if (oob_select == 0u) in_range = index < num_records && offset < stride;
+    else if (oob_select == 1u) in_range = index < num_records;
+    else if (oob_select == 2u) in_range = num_records != 0u;
+    else in_range = offset < num_records;
+    if (unmodelled || wrapped || !in_range) return 0u;
+    uint2 address = add64(uint2(rsrc.x, rsrc.y & 0xffffu), uint2(soffset, 0u));
+    address = add64(address, mul_stride(stride, index));
+    return title_load32(add64(address, uint2(offset, 0u)));
+}
+uint global_load32(uint2 base, uint voffset, uint2 immediate, uint dword) {
+    return title_load32(add64(add64(base, uint2(voffset, 0u)), add64(immediate, uint2(4u * dword, 0u))));
+}
+"""
+
+
 def registers(first, last, count):
     first, last = int(first), int(last)
     if last - first + 1 != count:
@@ -378,6 +440,15 @@ def sgpr_pair(token):
     return [f"s{n}" for n in regs]
 
 
+def vgprs(token, count):
+    """Name the consecutive vector registers of a load destination: vN for one dword, v[N:M] for several."""
+    if m := re.fullmatch(r"v\[(\d+):(\d+)\]", token):
+        return [f"v{n}" for n in registers(*m.groups(), count)]
+    if count != 1 or not re.fullmatch(r"v\d+", token):
+        raise ValueError("Load destination width mismatch")
+    return [token]
+
+
 def scalar_u32(token, scalar, pending):
     if re.fullmatch(r"s\d+", token):
         sgpr_name(token)
@@ -445,6 +516,8 @@ def fp_operand(token, scalar, vector, pending, sample_pending):
         if isinstance(value, int):
             return f"asfloat({value}u)"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
+            if sample_pending and value[1].startswith("mem"):
+                raise ValueError("Memory load used before vmcnt wait")
             return f"asfloat({value[1]})"
         if not isinstance(value, str) or not value.startswith(("sample", "alu", "params[")):
             raise ValueError("Expected a numeric register")
@@ -522,6 +595,8 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
         if value is None:
             raise ValueError(f"Read of unset vector register {token}")
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
+            if sample_pending and value[1].startswith("mem"):
+                raise ValueError("Memory load used before vmcnt wait")
             return value[1]
         if not isinstance(value, str) or not value.startswith(("sample", "alu", "params[")):
             raise ValueError(f"Expected a numeric register: {token}")
@@ -624,7 +699,8 @@ def int_ternary(op, a, b, c):
     }[op]
 
 
-def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None):
+def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
+          buffer_descriptors=None):
     """Track descriptor provenance, interpolation and packed exports through register writes."""
     if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
             or len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
@@ -645,6 +721,18 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if constant_descriptor is not None and any(
             start < constant_descriptor + 16 and constant_descriptor < start + 32 for start in bindings):
         raise ValueError("Texture and constant descriptors overlap")
+    # buffer_descriptors maps the byte offset of a descriptor-table entry, as s_load_dwordx4 names it, to the index of the
+    # first of four constant-buffer words that hold that buffer resource at runtime.
+    vsharp_words = dict(buffer_descriptors or {})
+    if vsharp_words and constant_descriptor is None:
+        raise ValueError("Buffer descriptors need a constant descriptor")
+    for offset, word in vsharp_words.items():
+        if offset < 0 or offset % 16 or not 0 <= word <= 60:
+            raise ValueError("Invalid buffer descriptor offset or constant word")
+        if (any(start < offset + 16 and offset < start + 32 for start in bindings)
+                or constant_descriptor < offset + 16 and offset < constant_descriptor + 16):
+            raise ValueError("Buffer and texture or constant descriptors overlap")
+    uses_memory = False
     pending = set()
     scc = None
     helpers = set()
@@ -781,7 +869,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             expected = ["texture_ptr", 0] if descriptor else [("cbv", n) for n in range(4)]
             if constant_descriptor is None or pending.intersection(base) or [scalar.get(r) for r in base] != expected:
                 raise ValueError("Unresolved constant buffer binding")
-            if descriptor and offset != constant_descriptor:
+            if descriptor and offset != constant_descriptor and offset not in vsharp_words:
                 raise ValueError("Constant descriptor differs from binding contract")
             if not descriptor and (offset % 4 or offset + 4 * len(dst) > 256):
                 raise ValueError("Constant read exceeds binding or is unaligned")
@@ -789,7 +877,11 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 if f"s{n}" in pending:
                     raise ValueError("Write overlaps an outstanding scalar load")
                 word = offset // 4 + j
-                scalar[f"s{n}"] = ("cbv", j) if descriptor else f"params[{word // 4}].{'xyzw'[word % 4]}"
+                if descriptor and offset in vsharp_words:
+                    word = vsharp_words[offset] + j
+                    scalar[f"s{n}"] = ("uint", f"asuint(params[{word // 4}].{'xyzw'[word % 4]})")
+                else:
+                    scalar[f"s{n}"] = ("cbv", j) if descriptor else f"params[{word // 4}].{'xyzw'[word % 4]}"
                 pending.add(f"s{n}")
         elif m := match(r"v_cube(id|sc|tc|ma)_f32(?:_e64)? (v\d+), ([^,]+), ([^,]+), ([^,]+?)( clamp)?"):
             # LLVM ConstantFoldAMDGCNCubeIntrinsic: z, then y, then x is the major axis; a face is negative
@@ -1108,6 +1200,102 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             args = [f"export16({v})" for pair in pairs for v in pair]
             lines.append(f"    return float4({', '.join(args)});")
             exported = True
+        elif m := match(r"buffer_load_dword(x[234])? (v\d+|v\[\d+:\d+\]), (off|v\d+|v\[\d+:\d+\]), (s\[\d+:\d+\]), (s\d+|0|off)((?: \S+)*)"):
+            # MUBUF loads of whole dwords through a runtime V#. glc, slc and dlc select cache behavior and do not change
+            # the loaded value; tfe, lds and every other modifier are refused.
+            width, dst_token, addr_token, rsrc_token, soffset_token, modifiers = m.groups()
+            count = int(width[1]) if width else 1
+            flags = set()
+            inst_offset = 0
+            for modifier in modifiers.split():
+                if bm := re.fullmatch(r"offset:(\d+)", modifier):
+                    if "offset" in flags:
+                        raise ValueError("Repeated buffer offset")
+                    flags.add("offset")
+                    inst_offset = int(bm[1])
+                elif modifier in ("offen", "idxen", "glc", "slc", "dlc") and modifier not in flags:
+                    flags.add(modifier)
+                else:
+                    raise ValueError(f"Unsupported buffer load modifier {modifier}")
+            if mask != "entry" or inst_offset > 4095:
+                raise ValueError("Invalid buffer load")
+            offen, idxen = "offen" in flags, "idxen" in flags
+            dsts = vgprs(dst_token, count)
+            if addr_token == "off":
+                voffset = vindex = "0u"
+                if offen or idxen:
+                    raise ValueError("Buffer address register missing")
+            elif addr_token.startswith("v["):
+                first, last = map(int, re.findall(r"\d+", addr_token))
+                if not (offen and idxen) or last != first + 1:
+                    raise ValueError("Buffer address register pair needs both idxen and offen")
+                vindex = vector_u32(f"v{first}", scalar, vector, pending, sample_pending)
+                voffset = vector_u32(f"v{last}", scalar, vector, pending, sample_pending)
+            else:
+                if offen == idxen:
+                    raise ValueError("A single buffer address register needs exactly one of idxen and offen")
+                word = vector_u32(addr_token, scalar, vector, pending, sample_pending)
+                voffset, vindex = (word, "0u") if offen else ("0u", word)
+            rsrc = [f"s{n}" for n in registers(*re.findall(r"\d+", rsrc_token), 4)]
+            if int(rsrc[0][1:]) % 4 or int(rsrc[3][1:]) > 105:
+                raise ValueError("Buffer resource registers must be four aligned scalar registers")
+            words = [vector_u32(r, scalar, vector, pending, sample_pending) for r in rsrc]
+            soffset = "0u" if soffset_token in ("0", "off") else vector_u32(soffset_token, scalar, vector, pending, sample_pending)
+            if any(d in sample_dest for d in dsts):
+                raise ValueError("Write overlaps an outstanding sample")
+            uses_memory = True
+            lines.append(f"    uint4 rsrc{i} = uint4({', '.join(words)});")
+            for j, d in enumerate(dsts):
+                lines.append(f"    uint mem{i}_{j} = buffer_load32(rsrc{i}, {soffset}, {voffset}, {inst_offset}u, {vindex}, {j}u);")
+                vector[d] = ("uint", f"mem{i}_{j}")
+            sample_dest.update(dsts)
+            sample_pending = True
+        elif m := match(r"global_load_dword(x[234])? (v\d+|v\[\d+:\d+\]), (v\d+|v\[\d+:\d+\]), (off|s\[\d+:\d+\])((?: \S+)*)"):
+            # Global loads of whole dwords: a 64-bit VGPR pair with saddr off, or an SGPR pair plus a 32-bit VGPR offset,
+            # then the signed 12-bit instruction offset. Cache modifiers are accepted as above; the rest are refused.
+            width, dst_token, addr_token, saddr_token, modifiers = m.groups()
+            count = int(width[1]) if width else 1
+            flags = set()
+            immediate = 0
+            for modifier in modifiers.split():
+                if gm := re.fullmatch(r"offset:(-?\d+)", modifier):
+                    if "offset" in flags:
+                        raise ValueError("Repeated global offset")
+                    flags.add("offset")
+                    immediate = int(gm[1])
+                elif modifier in ("glc", "slc", "dlc") and modifier not in flags:
+                    flags.add(modifier)
+                else:
+                    raise ValueError(f"Unsupported global load modifier {modifier}")
+            if mask != "entry" or not -2048 <= immediate <= 2047:
+                raise ValueError("Invalid global load")
+            dsts = vgprs(dst_token, count)
+            if saddr_token == "off":
+                if not addr_token.startswith("v["):
+                    raise ValueError("Global load without saddr needs a 64-bit address register pair")
+                first, last = map(int, re.findall(r"\d+", addr_token))
+                if last != first + 1:
+                    raise ValueError("Invalid global address register pair")
+                base = [vector_u32(f"v{first}", scalar, vector, pending, sample_pending),
+                        vector_u32(f"v{last}", scalar, vector, pending, sample_pending)]
+                voffset = "0u"
+            else:
+                if addr_token.startswith("v["):
+                    raise ValueError("Global load with saddr needs a 32-bit offset register")
+                base = [vector_u32(r, scalar, vector, pending, sample_pending) for r in sgpr_pair(saddr_token)]
+                voffset = vector_u32(addr_token, scalar, vector, pending, sample_pending)
+            if any(d in sample_dest for d in dsts):
+                raise ValueError("Write overlaps an outstanding sample")
+            bits = immediate & 0xffffffffffffffff
+            uses_memory = True
+            for j, d in enumerate(dsts):
+                lines.append(f"    uint mem{i}_{j} = global_load32(uint2({base[0]}, {base[1]}), {voffset}, "
+                             f"uint2({bits & 0xffffffff}u, {bits >> 32}u), {j}u);")
+                vector[d] = ("uint", f"mem{i}_{j}")
+            sample_dest.update(dsts)
+            sample_pending = True
+        elif line.startswith("flat_load"):
+            raise ValueError("flat loads are not lowered")
         elif line == "s_endpgm" and exported:
             ended = True
         else:
@@ -1118,6 +1306,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         defs = [body for name, body in SALU_HELPERS.items() if name in helpers]
         pos = lines.index(PREAMBLE)
         lines[pos:pos] = defs
+    if uses_memory:
+        pos = lines.index(PREAMBLE)
+        lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS]
     return "\n".join([*lines, "}",""])
 
 

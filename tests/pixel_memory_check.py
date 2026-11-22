@@ -36,9 +36,13 @@ def section(ranges, slots, magic=0x4d573258, trailing=b""):
     return out + trailing
 
 
+def case_file(constants, expected, memory):
+    """A pixel case: 64 constant words (b0), the expected float4 repeated for the 64 pixels, then the memory section."""
+    return struct.pack("<64I", *constants) + struct.pack("<4f", *expected) * 64 + memory
+
+
 def case_bytes(addresses, expected, memory):
-    words = [w for a in addresses for w in address(a)] + [0] * 56
-    return struct.pack("<64I", *words) + struct.pack("<4f", *expected) * 64 + memory
+    return case_file([w for a in addresses for w in address(a)] + [0] * 56, expected, memory)
 
 
 GOOD = section([(BASE0, BASE0 + SIZE0, 0), (BASE1, BASE1 + SIZE1, 1)], SLOTS)
