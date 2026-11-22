@@ -274,3 +274,34 @@ static inline X87Value x87_subr(X87Value a, X87Value b) { return x87_sub(b, a); 
 // and pseudo-denormals keep their bits.
 static inline X87Value x87_chs(X87Value v) { v.se ^= 0x8000; return v; }
 static inline X87Value x87_abs(X87Value v) { v.se &= 0x7fff; return v; }
+
+// FILD: a 16-, 32- or 64-bit two's-complement integer converts exactly, and zero gives +0. The precision
+// control does not apply to loads.
+static inline X87Value x87_from_integer(int64_t n) {
+    if (n == 0) return {0, 0};
+    const bool negative = n < 0;
+    const uint64_t magnitude = negative ? 0 - static_cast<uint64_t>(n) : static_cast<uint64_t>(n);
+    const int shift = x87_clz(magnitude);
+    return {magnitude << shift, static_cast<uint16_t>((negative ? 0x8000 : 0) | (16383 + 63 - shift))};
+}
+
+// FIST, FISTP and FISTTP: ST(0) rounded to an integer (to nearest-even, or toward zero when chop is set)
+// as two's-complement bits in the low `bits` bits. A NaN, an infinity, an unsupported encoding or a
+// rounded value outside the destination range gives the integer indefinite (only the sign bit set), the
+// masked invalid-operation response. The precision control does not apply.
+static inline uint64_t x87_to_integer(X87Value v, int bits, bool chop) {
+    const uint64_t indefinite = 1ull << (bits - 1);
+    const uint64_t mask = bits == 64 ? ~0ull : (1ull << bits) - 1;
+    if (x87_unsupported(v) || x87_exp(v) == 0x7fff) return indefinite;
+    if (v.sig == 0) return 0;
+    const int shift = 16383 + 63 - (x87_exp(v) == 0 ? 1 : static_cast<int>(x87_exp(v)));  // v = sig * 2^-shift
+    if (shift < 0) return indefinite;
+    uint64_t magnitude = shift >= 64 ? 0 : v.sig >> shift;
+    if (!chop && shift > 0 && shift <= 64) {  // a value below one half (shift > 64) rounds to 0
+        const uint64_t rest = shift == 64 ? v.sig : v.sig & ((1ull << shift) - 1);
+        const uint64_t half = 1ull << (shift - 1);
+        if (rest > half || (rest == half && (magnitude & 1))) ++magnitude;
+    }
+    if (magnitude > indefinite - (x87_sign(v) ? 0 : 1)) return indefinite;
+    return (x87_sign(v) ? 0 - magnitude : magnitude) & mask;
+}

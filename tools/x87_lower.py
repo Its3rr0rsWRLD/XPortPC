@@ -4,6 +4,7 @@ The profile accepts:
 - FLD and FSTP with an m32, m64 or m80 operand, and FST with an m32 or m64 operand;
 - FLD, FST, FSTP and FXCH with ST(i), and FCHS and FABS;
 - the constant loads FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2 and FLDLN2;
+- FILD, FISTP and FISTTP with an m16, m32 or m64 integer operand, and FIST with m16 or m32;
 - FADD, FSUB, FSUBR, FMUL, FDIV and FDIVR with an m32 or m64 operand, with ST(0), ST(i) and with
   ST(i), ST(0), and their popping forms FADDP, FSUBP, FSUBRP, FMULP, FDIVP and FDIVRP ST(i), ST(0) for
   i from 1 to 7.
@@ -22,7 +23,7 @@ from iced_x86 import Code as C, FlowControl, MemorySize as S, Mnemonic as M, OpK
 
 X87_HEADER = Path(__file__).with_name("x87_soft.h").read_text(encoding="ascii")
 X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FLD1, M.FLDZ, M.FLDPI, M.FLDL2T, M.FLDL2E,
-                     M.FLDLG2, M.FLDLN2, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
+                     M.FLDLG2, M.FLDLN2, M.FILD, M.FIST, M.FISTP, M.FISTTP, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
                      M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP})
 DECLARATION = "X87Value x87_slot[8]{};"
 
@@ -43,6 +44,9 @@ POPPING = frozenset({M.FADDP, M.FSUBP, M.FSUBRP, M.FMULP, M.FDIVP, M.FDIVRP})
 CONSTANTS = {M.FLD1: (0x8000000000000000, 0x3FFF), M.FLDZ: (0, 0), M.FLDPI: (0xC90FDAA22168C235, 0x4000),
              M.FLDL2T: (0xD49A784BCD1B8AFE, 0x4000), M.FLDL2E: (0xB8AA3B295C17F0BC, 0x3FFF),
              M.FLDLG2: (0x9A209A84FBCFF799, 0x3FFD), M.FLDLN2: (0xB17217F7D1CF79AC, 0x3FFE)}
+# Integer memory operands: (signed type, unsigned type, bits).
+INTEGERS = {S.INT16: ("int16_t", "uint16_t", 16), S.INT32: ("int32_t", "uint32_t", 32),
+            S.INT64: ("int64_t", "uint64_t", 64)}
 # Undocumented aliases of FSTP ST(i) (DF D0+i, DF D8+i) and FXCH ST(i) (DD C8+i, DF C8+i). Assemblers do
 # not emit them and the fixtures do not measure them, so they stay outside the profile.
 ALIASES = frozenset({C.FSTP_STI_DFD0, C.FSTP_STI_DFD8, C.FXCH_ST0_STI_DDC8, C.FXCH_ST0_STI_DFC8})
@@ -72,6 +76,16 @@ def _effect(i, depth):
         if depth <= i.op1_register - R.ST0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth
+    if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
+        if i.op0_kind != K.MEMORY or i.memory_size not in INTEGERS:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        if op == M.FILD:
+            if depth == 8:
+                raise ValueError(f"x87 stack overflow at {i.ip:#x}: {i}")
+            return depth + 1
+        if depth == 0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth if op == M.FIST else depth - 1
     if op in CONSTANTS:
         if depth == 8:
             raise ValueError(f"x87 stack overflow at {i.ip:#x}: {i}")
@@ -162,6 +176,14 @@ def statement(i, depth, address):
     if op == M.FXCH:
         k = top - (i.op1_register - R.ST0)
         return f"{{ const X87Value t = x87_slot[{top}]; x87_slot[{top}] = x87_slot[{k}]; x87_slot[{k}] = t; }}  // fxch"
+    if op in (M.FILD, M.FIST, M.FISTP, M.FISTTP):
+        signed, unsigned, bits = INTEGERS[i.memory_size]
+        if op == M.FILD:
+            return (f"{{ const word a = {address()}; "
+                    f"x87_slot[{depth}] = x87_from_integer(static_cast<{signed}>(load<{unsigned}>(a))); }}")
+        chop = "true" if op == M.FISTTP else "false"
+        return (f"{{ const word a = {address()}; "
+                f"store<{unsigned}>(a, static_cast<{unsigned}>(x87_to_integer(x87_slot[{top}], {bits}, {chop}))); }}")
     if op in CONSTANTS:
         sig, se = CONSTANTS[op]
         name = next(n for n, v in vars(M).items() if v == op).lower()

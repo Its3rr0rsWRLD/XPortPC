@@ -1,0 +1,19 @@
+EXPORTS
+    fild_i16
+    fild_i32
+    fild_i64
+    fild_i64_m64
+    fild_i64_m32
+    fild_i32_add
+    fistp_i16
+    fistp_i32
+    fistp_i64
+    fist_i16
+    fist_i32
+    fisttp_i16
+    fisttp_i32
+    fisttp_i64
+    fild_fistp_i64
+    fild_fisttp_i16
+    fistp_two
+    fild_depth8

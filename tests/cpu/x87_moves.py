@@ -308,7 +308,7 @@ def check_rejections():
         "fstp st(1) as DF D9": (attempt(f"{fld} {fld} df d9 {fstp} c3"), "unsupported x87 encoding"),
         "fxch st(1) as DD C9": (attempt(f"{fld} {fld} dd c9 {fstp} {fstp} c3"), "unsupported x87 encoding"),
         "fxch st(1) as DF C9": (attempt(f"{fld} {fld} df c9 {fstp} {fstp} c3"), "unsupported x87 encoding"),
-        "fist m32": (attempt(f"{fld} db 11 {fstp} c3"), "unsupported x87 operation"),
+        "fbstp m80": (attempt(f"{fld} df 32 c3"), "unsupported x87 operation"),
         "fsin": (attempt(f"{fld} d9 fe {fstp} c3"), "unsupported x87 operation"),
         "ffree st(1)": (attempt(f"{fld} dd c1 {fstp} c3"), "unsupported x87 operation"),
         "fdecstp": (attempt(f"{fld} d9 f6 {fstp} c3"), "unsupported x87 operation"),
