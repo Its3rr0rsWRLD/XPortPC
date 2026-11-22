@@ -397,7 +397,7 @@ int main(int argc, char** argv)
     } else if ((operation == "--depth-mask" || operation == "--depth-mask-swapped")) {
         if (argc != 6) return 2;
     } else if (operation == "--compute-root-file" || operation == "--ffx-immediate-conversion" ||
-               operation == "--spirv-address-window") {
+               operation == "--spirv-address-window" || operation == "--spirv-sampler-views") {
         if (argc != 4) return 2;
     } else {
         if (argc != 3 && argc != 5 && argc != 6) return 2;
@@ -471,6 +471,15 @@ int main(int argc, char** argv)
         if (argc == 3 && needs_cs_6_5(operation) && !supports_cs_6_5(device.Get())) return 77;
         if (argc == 3 && (operation == "--compute-root" || operation == "--compute-tables")) {
             check_compute(device.Get(), operation == "--compute-tables");
+        } else if (operation == "--spirv-sampler-views") {
+            D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_6};
+            auto hr = check_feature(device.Get(), D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
+            if (hr != E_INVALIDARG) check(hr, "Query sampler fixture shader model");
+            if (hr == E_INVALIDARG || model.HighestShaderModel < D3D_SHADER_MODEL_6_6) {
+                std::puts("skip: sampler fixture requires SM 6.6");
+                return 77;
+            }
+            check_sampler_views(device.Get(), argv[3]);
         } else if (operation == "--spirv-address-window") {
             D3D12_FEATURE_DATA_D3D12_OPTIONS1 options{};
             check(check_feature(device.Get(), D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options)),

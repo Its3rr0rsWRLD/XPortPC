@@ -3371,3 +3371,23 @@ readbacks matched 128 output words and 192 guards. Exchanging expected positions
 
 With SPIRV-Tools and SPIRV-Cross available at configure time, run
 `ctest --preset dev --no-tests=error -R spirv_ballot_extract -V`.
+
+### Ordinary and comparison sampler views in the SPIR-V bridge
+
+The named profile can use one indexed sampler table for ordinary samples and
+depth-reference operations. In mixed modules SPIRV-Cross infers one comparison
+type for that table. The bridge keeps ordinary accesses at set 0, binding 1.
+For each depth-reference use it loads the same descriptor index from set 3,
+binding 1. The host must populate both views from the guest sampler descriptors,
+using ordinary filters in the first and comparison filters and the guest
+comparison function in the second. Both operations retain their texture and
+coordinates. Set 3 must be free. The supported path has a direct access chain,
+sampler load and sampled image. Decorated sampler paths require separate support.
+
+Run `ctest --preset dev --no-tests=error -R spirv_sampler_views -V` with
+SPIRV-Tools and SPIRV-Cross installed. The source-built PS uses implicit LOD,
+the CS uses explicit LOD, and both compare against a depth reference. The CS
+readback on RTX 4060 Laptop and WARP sampled 0.25 and 0.75 and compared them to
+0.5, yielding 0 and 1. Reversing the ordinary wrap/clamp descriptors exchanged
+only the sampled values. Reversing the comparison descriptors exchanged only
+the two comparison results.

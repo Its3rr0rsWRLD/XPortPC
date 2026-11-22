@@ -11,6 +11,7 @@ HRESULT check_feature(ID3D12Device* device, D3D12_FEATURE feature, void* data, U
 Microsoft::WRL::ComPtr<ID3D12Resource> resource(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc,
     D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear = nullptr);
 void check_compute(ID3D12Device* device, bool tables);
+void check_sampler_views(ID3D12Device* device, const char* shader_path);
 void check_spirv_window(ID3D12Device* device, const char* shader_path);
 void check_compute_file(ID3D12Device* device, const char* path, bool conversion_pair, const char* reference = nullptr);
 void check_ffx_device_init(ID3D12Device* device);
