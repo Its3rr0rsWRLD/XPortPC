@@ -11,6 +11,7 @@ from .registers import tracked_word
 from . import bindings as binding_names
 from .bindings import PixelBindings
 from . import forms  # noqa: F401  (registers every form)
+from .forms.vop3p import place_fma_mix
 
 
 # What may come between the done export and s_endpgm: an export-counter wait and the scheduling hints s_nop and
@@ -310,6 +311,7 @@ def finish(st, instructions, samples=None):
         raise ValueError("Missing color export")
     if not st.ended or samples is not None and st.samples != (0 if empty else samples):
         raise ValueError("Unexpected sample count or missing color export")
+    place_fma_mix(st)
     if st.helpers:
         defs = [body for name, body in SALU_HELPERS.items() if name in st.helpers]
         pos = st.lines.index(st.preamble)

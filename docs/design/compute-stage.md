@@ -6,7 +6,9 @@ the instruction lowerings stay in `tools/pixel_aot_ops/forms/` and are shared, a
 contract, its terminator, its refusals and its test harness. With C-4, 12 of the 27 corpus compute shaders translate
 (see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18. C-7's lane reads add headless
 (see [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)) and descriptor words as data add
-game_of_life_update (see [Descriptor words as data](#descriptor-words-as-data)): 14 of 27.
+game_of_life_update (see [Descriptor words as data](#descriptor-words-as-data)): 14 of 27. Scalar constant loads at a
+run-time offset, carried around loops, add 16bit_arithmetic/compute_buffer (see
+[Dynamic scalar constant loads](#dynamic-scalar-constant-loads)): 15 of 27.
 
 ## What the corpus shows
 The corpus has 27 compute shaders (10 from Sascha Willems' Vulkan samples, 17 from Khronos Vulkan-Samples; licenses in
@@ -241,7 +243,8 @@ game_of_life_init, game_of_life_mutate (C-2), sascha computeparticles/particle, 
   word model of the bound image (since added, see [Descriptor words as data](#descriptor-words-as-data)).
 - raytracing: two uniform buffers (the constant words are one) and `s_buffer_load` at a runtime SGPR offset.
 - the three 16bit_arithmetic shaders: `s_buffer_load` at a runtime SGPR offset (the constant words are read only at
-  translation-time offsets).
+  translation-time offsets); since lowered for compute_buffer, see
+  [Dynamic scalar constant loads](#dynamic-scalar-constant-loads).
 
 What the cards added:
 - **Contract.** `textures={key: 0|1}` (read images, bound as RGBA8 SRVs tex/tex1, t0/t1), `storage_images={key: (slot,
@@ -353,6 +356,92 @@ the else arm's EXEC not inverted, EXEC not restored to -1. `controls` checks tha
 `descriptor_data` is refused, the invalid `descriptor_data` contracts, and EXEC = -1 in a partial wave (48 threads in
 wave64), in a loop, in a skipped region and in the pixel stage. The pixel stage's binding description
 (`PixelBindings`) does not take descriptor data yet.
+
+## Dynamic scalar constant loads
+`s_buffer_load_dword{,x2,x4,x8,x16} D, V#, sN [offset:K]` whose SGPR offset holds a run-time data word (a loop
+counter, a group id, a push word) is lowered by `forms/smem.dynamic_constant_load` in every stage that reads constant
+words through a constant-buffer V# (pixel, vertex, compute). The 16bit_arithmetic shaders index their position array
+this way inside nested loops, and the corpus vertex shader sascha shadowmappingcascade/depthpass indexes a matrix array
+by a push-constant cascade index.
+
+Semantics, per dword j of the load:
+- **Unit and alignment.** sN is a byte offset. SMEM reads whole dwords: the two low bits of the address are ignored
+  (RDNA 2 ISA, scalar memory), so the read starts at `E = sN & ~3`. The `offset:` field must be a multiple of 4
+  (refused otherwise, as for an immediate offset), and dword j reads byte `E + K + 4j`.
+- **Range.** The dword is read only when it lies wholly inside the bound constant words: `E + K + 4j + 4 <=
+  constant_limit` (256 bytes, the 64 words the pixel and compute contracts bind; 64 KiB in the vertex stage). Any other
+  dword reads 0, dword by dword, as AMD's buffer range check returns for a dword past `num_records`. The comparison is
+  made without overflow (`E <= limit - 4 - K - 4j`), so a 32-bit sum that would wrap reads 0, and the array index is
+  clamped so that the HLSL never reads past `params[]`. The bound is the binding the contract declares, not the V#'s
+  `num_records` (whose words are provenance here, not data): the runtime must bind the whole declared range, with
+  the title's buffer padded with zeros past its `num_records`. A vertex program with a run-time offset therefore
+  declares `params[4096]` and its case binds all 16384 words. A constant slot other than b0 (pixel bindings' params1
+  to params3) is accepted only with its 64-word binding.
+- **When the offset is read.** The load captures its offset when it issues (`uint smo<i> = sN & ~3u;`) and its words
+  in locals (`smw<i>_<j>`), so a later write of sN, which the corpus does to its loop counter while the load is
+  outstanding, does not change them.
+- Still refused: an offset register that is itself an outstanding load, unset, or a descriptor word; a descriptor load
+  (`s_load_dword*` of a descriptor list) at an SGPR offset that is not a translation-time constant (descriptor
+  indexing: it selects a T# or V# at run time, which needs descriptor arrays); `s_buffer_load` through a buffer V#
+  whose words are data (a storage buffer read by scalar loads, see below).
+
+### Scalar loads and descriptor words across loops
+The control-flow walk (CF-1, CF-2e) used to require the same outstanding scalar loads at a loop's entry and at every
+back edge and exit. The 16bit_arithmetic shaders issue the load in the outer loop body and wait for it (`s_waitcnt
+lgkmcnt(0)`) only in the innermost body, which may run no trip, so the load can stay outstanding around both inner
+back edges and into the next outer iteration. The walk now treats outstanding loads as loop-carried state
+(`control_flow.carried_pending`):
+
+- **Outstanding set.** An SGPR whose load is outstanding at some back edge or exit is outstanding at the header from
+  the first iteration on: the dry run is repeated from the widened entry until no end adds a register (the set only
+  grows). This is a superset of the loads really in flight, and only `lgkmcnt(0)` completes a load (a nonzero count is
+  refused), so a read of a register that may still be loading, or a write over one, is refused on every path. Back
+  edges and exits may have fewer outstanding loads than the header; after the loop the registers of the carried set
+  are outstanding.
+- **Joining an outstanding word.** The tracked value of a scalar load result is the word the load returns, computed
+  when the load issues. A register outstanding at a back edge whose value is a data word is joined as any data word
+  (`js_<reg>_<tag>`): the join variable is assigned the loaded word before the console's register holds it, which no
+  read can observe, because the register is still outstanding after the join. An outstanding descriptor word (a V#
+  being loaded) and an outstanding VGPR load are still refused at a join.
+- **A V# register reused for data.** A scalar register that holds a descriptor word at a loop's entry and a data word
+  at a back edge (fp16 reuses V# word 3, s11, as its innermost counter) holds one or the other by iteration. It is
+  JOIN_POISON at the header and after the loop: the body must write it before it reads it, and any read is refused
+  (lowering's poison check). This applies to SGPRs only; a VGPR whose kind differs at a back edge is still refused.
+
+Tests: the compute family `dynsmem` (`tests/compute_aot_check.py`). Program A, 72 one-thread groups: x2 at
+`(4g | (g & 3)) + 8` and x1 at the same offset, crossing the end of the 64 words; wrong references: the offset ignored,
+no range check (wrapping), a whole load zeroed for one dword outside, the offset as a dword index, the low bits kept.
+Program B, the 16bit_arithmetic shape: an outer loop that reloads the constant V#, loads x2 at `8i + 4g`, increments
+its offset register while the load is outstanding, and reads the words only in an innermost loop whose counter reuses
+V# word 3 (cases with one, two and no inner trips, and offsets past the 64 words); wrong references: the offset
+ignored, no range check, the whole load zeroed, the offset read at use, the first iteration's words reused. The vertex
+draw `dynamic` (`tests/vertex_aot_check.py`): x4 and x2 at `64 * push0 | (push1 & 3)` up to and past the 64 KiB
+binding; wrong references: the offset ignored, wrapped at 64 KiB, the low bits kept in the range check. Refusal
+controls in all three checks: a misaligned `offset:` field, an offset register that is an outstanding load or a V#
+word, a descriptor load at an SGPR offset, a read before the wait inside the loop, a V# reload over outstanding words,
+the zero-trip path's read of a register still loading, and a read of the reused V# register at the middle loop's
+header and after it.
+
+Corpus effect: compute 14 to 15 of 27 (16bit_arithmetic/compute_buffer). Still refused:
+- compute_buffer_fp16 and its fallback: `v_mov_b32_sdwa ... dst_unused:UNUSED_PRESERVE` into a VGPR that is
+  undefined after the loop (it is written only in the body); the next instruction overwrites the kept half, so the
+  register is defined, but the register model has no partially defined word.
+- generate_shading_rate: one V# (descriptor 0x40) read both by `s_buffer_load` at a run-time offset and by
+  `buffer_load_dwordx2 ... offen`, a storage buffer. The compute contract has no path for a scalar load through a
+  buffer V# whose words are data (no ByteAddressBuffer path with SMEM's range rule), so it is not lowered.
+- raytracing: two V#s from one x16 load (a uniform buffer and a storage buffer of spheres and planes read by
+  `s_buffer_load` at run-time offsets): the compute contract binds one constant buffer, and the storage buffer would
+  need the same scalar-load path as generate_shading_rate.
+Pixel: unchanged (140 of 250); its five "Scalar load offset register must hold a known constant" refusals are
+descriptor loads at SGPR offsets (descriptor indexing and descriptor heaps), and its five "Constant read exceeds
+binding" refusals are immediate offsets past the 64 bound words, which need a larger constant binding in the pixel
+contract and harness. Vertex: 214 to 215 of 244 (shadowmappingcascade/depthpass); descriptor loads at SGPR offsets
+stay refused.
+
+The change also fixes a latent bug that the 16bit shader exposed: `vop3p.need_fma_mix` inserted its helpers before
+the preamble at first use, which moved every line whose position the control-flow walk had recorded (a loop's dry
+run deleted one line too few, dropping a definition before the loop). The helpers are now placed after lowering
+(`vop3p.place_fma_mix`, called by the three emitters) at the same place, so the text of every program is unchanged.
 
 ## Cards
 Counts are corpus shaders whose first translatable card it is (`tools/compute_aot.py survey`, "first_card"),

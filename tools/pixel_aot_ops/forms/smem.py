@@ -2,7 +2,7 @@
 import re
 
 from ..dispatch import form
-from ..registers import DescriptorWord, registers, sgpr_name, sgpr_pair
+from ..registers import DescriptorWord, registers, scalar_u32, sgpr_name, sgpr_pair
 from .. import bindings
 
 
@@ -163,6 +163,10 @@ def scalar_load(st, i, m):
         resolved = array is not None and values == [(values[0][0], n) for n in range(4)]
     if not resolved or st.pending.intersection(base):
         raise ValueError("Unresolved constant buffer binding")
+    if not descriptor and soffset.startswith("s") and soffset not in st.pending \
+            and st.scalar.get(sgpr_name(soffset)) is not None and not isinstance(st.scalar[soffset], int):
+        dynamic_constant_load(st, i, array, dst, soffset, int(extra or "0x0", 16))
+        return
     if soffset.startswith("s"):
         value = st.scalar.get(sgpr_name(soffset))
         if soffset in st.pending or not isinstance(value, int):
@@ -195,4 +199,38 @@ def scalar_load(st, i, m):
         if n in st.pending:
             raise ValueError("Write overlaps an outstanding scalar load")
         st.scalar[n] = value
+        st.pending.add(n)
+
+
+def dynamic_constant_load(st, i, array, dst, soffset, extra):
+    """s_buffer_load_dword* of constant words at a run-time SGPR offset (docs/design/compute-stage.md, dynamic scalar
+    constant loads). The SGPR is a byte offset; the two low bits of the address are ignored (SMEM reads whole dwords),
+    and the offset: field must be a multiple of 4. Dword j reads byte E + extra + 4j of the binding, E = S & ~3; a dword
+    that does not lie wholly inside the bound constant words (st.constant_limit bytes, the binding the contract
+    declares) reads 0, as AMD's buffer range check returns for a dword past num_records. The offset is captured in a
+    local when the load issues, so a later write of S (a loop counter) does not change the words; the words are
+    locals too, and the control-flow walk joins them as any data word."""
+    limit = st.constant_limit
+    if extra % 4 or extra > 0xfffff:
+        raise ValueError("Scalar load offset is misaligned or out of range")
+    source = scalar_u32(soffset, st.scalar, st.pending)
+    if array == "params":
+        # The whole binding is declared, so that every in-range dword is in params[] (vertex_aot sizes it by this).
+        st.constant_words = max(st.constant_words, limit // 4)
+    elif limit != 256:
+        raise ValueError("A run-time offset into a constant slot other than b0 needs its 64-word binding")
+    base = f"smo{i}"
+    st.lines.append(f"    uint {base} = ({source}) & 0xfffffffcu;")
+    for j, n in enumerate(dst):
+        if n in st.pending:
+            raise ValueError("Write overlaps an outstanding scalar load")
+        reach = extra + 4 * j  # bytes past E of dword j
+        name = f"smw{i}_{j}"
+        if reach + 4 > limit:
+            st.lines.append(f"    uint {name} = 0u;")
+        else:
+            at = f"min({base} + {reach}u, {limit - 4}u)" if reach else f"min({base}, {limit - 4}u)"
+            st.lines.append(f"    uint {name} = {base} <= {limit - 4 - reach}u ? "
+                            f"{array}[{at} >> 4][({at} >> 2) & 3u] : 0u;")
+        st.scalar[n] = ("uint", name)
         st.pending.add(n)

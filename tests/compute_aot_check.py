@@ -1204,8 +1204,154 @@ LANES_PROGRAMS = [
 ]
 
 
+# Family `dynsmem`: s_buffer_load_dword* at a run-time SGPR byte offset (docs/design/compute-stage.md, dynamic scalar
+# constant loads). Program A reads, per group g, the words at byte (4g | (g & 3)) + 8 and +12 (x2) and at the same
+# offset (x1): the two low bits are ignored, and a dword that is not wholly inside the 64 bound words reads 0, dword by
+# dword. Program B is the 16bit_arithmetic shape: an outer loop reloads the constant V# and loads two words at
+# 8i + 4g, the loop's offset register changes while the load is outstanding, and the words are read only in an
+# innermost loop that may run no trip (the load stays outstanding across the back edges), whose counter reuses a V#
+# register.
+DYNSMEM_BASE = 0x2_0000_4000
+DYNSMEM_CONTRACT = {"numthreads": (1, 1, 1), "wave": 64, "local_ids": 1,
+                    "sgprs": {"s2": "descriptors", "s3": "group_id.x"}, "buffer_descriptors": {0: 8},
+                    "constant_descriptor": 0x10}
+DYNSMEM_A = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx8 s[8:15], s[2:3], null",
+    "s_lshl_b32 s1, s0, 2",
+    "s_and_b32 s6, s0, 3",
+    "s_or_b32 s1, s1, s6",
+    "s_lshl_b32 s7, s0, 4",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dwordx2 s[4:5], s[12:15], s1 offset:0x8",
+    "s_buffer_load_dword s16, s[12:15], s1",
+    "s_waitcnt lgkmcnt(0)",
+    "v_mov_b32_e32 v0, s4",
+    "v_mov_b32_e32 v1, s5",
+    "v_mov_b32_e32 v2, s16",
+    "buffer_store_dwordx3 v[0:2], off, s[8:11], s7",
+    "s_endpgm",
+]
+DYNSMEM_B = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "s_mov_b32 s16, 0",
+    "v_mov_b32_e32 v1, 0",
+    "BB1:",
+    "s_cmp_ge_u32 s16, s4",
+    "s_cbranch_scc1 BB15",
+    "s_waitcnt lgkmcnt(0)",
+    "s_load_dwordx4 s[12:15], s[2:3], 0x10",
+    "s_lshl_b32 s17, s16, 3",
+    "s_lshl_b32 s6, s0, 2",
+    "s_add_u32 s17, s17, s6",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dwordx2 s[12:13], s[12:15], s17",
+    "s_add_u32 s17, s17, 4",
+    "s_mov_b32 s18, 0",
+    "BB5:",
+    "s_cmp_ge_u32 s18, 2",
+    "s_cbranch_scc1 BB14",
+    "s_mov_b32 s15, 0",
+    "BB9:",
+    "s_cmp_ge_u32 s15, s5",
+    "s_cbranch_scc1 BB13",
+    "s_waitcnt lgkmcnt(0)",
+    "v_add_nc_u32_e32 v1, s12, v1",
+    "v_xor_b32_e32 v1, s13, v1",
+    "v_add_nc_u32_e32 v1, s17, v1",
+    "v_lshl_add_u32 v1, v1, 1, s15",
+    "s_add_u32 s15, s15, 1",
+    "s_branch BB9",
+    "BB13:",
+    "s_add_u32 s18, s18, 1",
+    "s_branch BB5",
+    "BB14:",
+    "s_add_u32 s16, s16, 1",
+    "s_branch BB1",
+    "BB15:",
+    "s_lshl_b32 s1, s0, 2",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dword v1, off, s[8:11], s1",
+    "s_endpgm",
+]
+DYNSMEM_B_CONTRACT = {**DYNSMEM_CONTRACT, "sgprs": {"s2": "descriptors", "s3": "group_id.x", "s4": "user:60",
+                                                    "s5": "user:61"}}
+
+
+def dynsmem_constants(seed):
+    return [(0x9e3779b1 * (n + 1) + seed * 0x1003f) & M32 for n in range(64)]
+
+
+def dynsmem_word(constants, offset, flaws, whole=None):
+    """The dword s_buffer_load reads at byte `offset` past the cleared low bits: 0 unless it lies inside the 256 bound
+    bytes. whole: the bytes the load reads in all (the wrong reference that zeroes a load with any dword outside)."""
+    if "nozero" in flaws:
+        return constants[(offset >> 2) % 64]
+    if offset + 4 > 256 or (whole is not None and whole > 256):
+        return 0
+    return constants[offset >> 2]
+
+
+def dynsmem_a_reference(inputs, flaws):
+    seed, = inputs
+    groups = 72
+    before = bytes((seed * 7 + 3 * i) & 0xff for i in range(16 * groups))
+    memory = Memory([(DYNSMEM_BASE, DYNSMEM_BASE + len(before), 0)], [before])
+    constants = dynsmem_constants(seed)
+    constants[8:12] = vsharp(DYNSMEM_BASE, 0, len(before), 3)
+    for g in range(groups):
+        soffset = 4 * g | g & 3
+        base = 0 if "ignored" in flaws else 4 * soffset if "dwords" in flaws else soffset & ~3
+        if "unmasked" in flaws:
+            # The low bits kept: the range check sees the byte offset as given.
+            words = [0 if soffset + at + 4 > 256 else constants[(soffset + at) >> 2] for at in (8, 12, 0)]
+        else:
+            whole = [base + 16, base + 16, base + 4] if "whole" in flaws else [None] * 3
+            words = [dynsmem_word(constants, base + at, flaws, end) for at, end in zip((8, 12, 0), whole)]
+        for j, word in enumerate(words):
+            memory.store(DYNSMEM_BASE + 16 * g + 4 * j, word)
+    return (groups, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+def dynsmem_b_reference(inputs, flaws):
+    seed, outer, inner = inputs
+    groups = 8
+    before = bytes((seed * 5 + 11 * i) & 0xff for i in range(4 * groups))
+    memory = Memory([(DYNSMEM_BASE, DYNSMEM_BASE + len(before), 0)], [before])
+    constants = dynsmem_constants(seed)
+    constants[8:12] = vsharp(DYNSMEM_BASE, 0, len(before), 3)
+    constants[60:62] = [outer, inner]
+    for g in range(groups):
+        acc = 0
+        for i in range(outer):
+            offset = 0 if "ignored" in flaws else 8 * (0 if "stale" in flaws else i) + 4 * g
+            if "late" in flaws:
+                offset += 4  # the offset register read when the words are used, after it changed
+            whole = offset + 8 if "whole" in flaws else None
+            w0, w1 = (dynsmem_word(constants, offset + 4 * j, flaws, whole) for j in range(2))
+            after = 8 * i + 4 * g + 4
+            for _ in range(2):
+                for c in range(inner):
+                    acc = ((((acc + w0) & M32) ^ w1) + after) & M32
+                    acc = (2 * acc + c) & M32
+        memory.store(DYNSMEM_BASE + 4 * g, acc)
+    return (groups, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+DYNSMEM_PROGRAMS = [
+    (DYNSMEM_A, DYNSMEM_CONTRACT, [(1,), (6,)], dynsmem_a_reference,
+     [{"ignored"}, {"nozero"}, {"whole"}, {"dwords"}, {"unmasked"}]),
+    (DYNSMEM_B, DYNSMEM_B_CONTRACT, [(2, 31, 2), (3, 6, 0), (4, 3, 1)], dynsmem_b_reference,
+     [{"ignored"}, {"nozero"}, {"whole"}, {"late"}, {"stale"}]),
+]
+
+
 FAMILIES = {"ids": IDS_PROGRAMS, "store": STORE_PROGRAMS, "integrate": INTEGRATE_PROGRAMS,
-            "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS, "lanes": LANES_PROGRAMS}
+            "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS, "lanes": LANES_PROGRAMS,
+            "dynsmem": DYNSMEM_PROGRAMS}
 
 
 def check_reference_arithmetic():
@@ -1425,6 +1571,55 @@ def check_refusals():
     must_reject(common.translate, common.with_constants(["buffer_store_dword v12, v12, s[52:55], 0 offen"]))
 
 
+def check_dynsmem_refusals():
+    """Neighbours of the dynsmem programs (dynamic scalar constant loads, loads carried around loops) that must stay
+    refused, each with the reason it must give."""
+    def refuses(program, contract, reason):
+        try:
+            compute_aot.lower_compute(program, **contract)
+        except ValueError as error:
+            assert reason in str(error), (reason, str(error))
+            return
+        raise AssertionError(f"Accepted a program that must be refused ({reason})")
+
+    a, b = DYNSMEM_A, DYNSMEM_B
+
+    def edit(program, old, *new):
+        at = program.index(old)
+        return [*program[:at], *new, *program[at + 1:]]
+
+    # The offset: field of a run-time offset must be a multiple of 4.
+    refuses(edit(a, "s_buffer_load_dwordx2 s[4:5], s[12:15], s1 offset:0x8",
+                 "s_buffer_load_dwordx2 s[4:5], s[12:15], s1 offset:0x6"), DYNSMEM_CONTRACT, "misaligned")
+    # The offset register holds a V# word, or a load still outstanding.
+    refuses(edit(a, "s_buffer_load_dword s16, s[12:15], s1", "s_buffer_load_dword s16, s[12:15], s14"),
+            DYNSMEM_CONTRACT, "numeric scalar register")
+    refuses(edit(a, "s_buffer_load_dword s16, s[12:15], s1", "s_buffer_load_dword s16, s[12:15], s4"),
+            DYNSMEM_CONTRACT, "known constant")
+    # A descriptor load at a run-time offset (a descriptor index) is not lowered.
+    refuses(edit(a, "s_load_dwordx8 s[8:15], s[2:3], null", "s_load_dwordx8 s[8:15], s[2:3], s1"),
+            DYNSMEM_CONTRACT, "known constant")
+    # A run-time offset into a constant slot other than b0: none in the compute stage; the words of a buffer V#.
+    refuses(edit(a, "s_buffer_load_dword s16, s[12:15], s1", "s_buffer_load_dword s16, s[8:11], s1"),
+            DYNSMEM_CONTRACT, "Unresolved constant buffer binding")
+    # The load is outstanding at the header from the first iteration on: a read before the wait in the innermost loop,
+    # a reload of the V# over the words without the wait at the outer header, and the store's V# read on the path
+    # where the outer loop runs no trip (its own load is then still outstanding) are refused.
+    inner = b.index("s_cbranch_scc1 BB13")
+    late_wait = [*b[:inner + 1], b[inner + 2], b[inner + 1], *b[inner + 3:]]
+    assert late_wait[inner + 2] == "s_waitcnt lgkmcnt(0)"
+    refuses(late_wait, DYNSMEM_B_CONTRACT, "before load completion")
+    body = b.index("s_cbranch_scc1 BB15")
+    refuses([*b[:body + 1], *b[body + 2:]], DYNSMEM_B_CONTRACT, "outstanding scalar load")
+    tail = len(b) - 1 - b[::-1].index("s_waitcnt lgkmcnt(0)")
+    refuses([*b[:tail], *b[tail + 1:]], DYNSMEM_B_CONTRACT, "before load completion")
+    # The V# word reused as the innermost counter holds a descriptor word on the middle loop's first trip and data
+    # after: unreadable at the middle loop's header and after it.
+    refuses(edit(b, "s_cbranch_scc1 BB14", "s_cbranch_scc1 BB14", "v_add_nc_u32_e32 v1, s15, v1"), DYNSMEM_B_CONTRACT,
+            "s15")
+    refuses(edit(b, "BB14:", "BB14:", "v_add_nc_u32_e32 v1, s15, v1"), DYNSMEM_B_CONTRACT, "Descriptor state differs")
+
+
 def check_adapter_skip(directory):
     """Without a hardware adapter the renderer exits 77 and every family must report that skip, not a failure."""
     compiler, renderer = "stub-dxc", "stub-offscreen"
@@ -1451,6 +1646,7 @@ def check_controls(directory):
     for name, programs in FAMILIES.items():
         check_separation(name, programs)
     check_refusals()
+    check_dynsmem_refusals()
     check_adapter_skip(directory)
 
 
