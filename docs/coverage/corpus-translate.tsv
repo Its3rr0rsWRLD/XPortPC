@@ -8,7 +8,7 @@
 # Reason 6 (0)	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word
 # Reason 6 (3)	refused	vintrp.interpolate	Unknown interpolation context
 # Reason 5 (3)	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant
-# Reason 5 (0)	no_form	dispatch	no form matches v_readfirstlane_b32
+# Reason 5 (0)	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)
 # Reason 5 (1)	refused	smem.scalar_load	Constant read exceeds binding
 # Reason 4 (3)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9
 # Reason 4 (3)	refused	valu_f32.arithmetic	Read of unset vector register v2
@@ -70,7 +70,7 @@ sascha__deferredshadows__deferred.frag.s	0	refused	refused	smem.scalar_load	Cons
 sascha__deferredshadows__mrt.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	47: v_cvt_pkrtz_f16_f32_e64 v0, v0, 1.0
 sascha__descriptorbuffer__cube.frag.s	1	translated				
 sascha__descriptorheap__cube.frag.s	0	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	5: s_load_dwordx4 s[8:11], s[0:1], s4
-sascha__descriptorindexing__descriptorindexing.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	18: v_readfirstlane_b32 s4, v3
+sascha__descriptorindexing__descriptorindexing.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	18: v_readfirstlane_b32 s4, v3
 sascha__descriptorsets__cube.frag.s	1	translated				
 sascha__deviceaddresscommands__cube.frag.s	1	translated				
 sascha__displacement__base.frag.s	1	translated				
@@ -196,13 +196,13 @@ vksamples__debug_utils__glsl__gbuffer.frag.s	1	refused	no_form	dispatch	no form 
 vksamples__deferred__geometry.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	30: v_cvt_pkrtz_f16_f32_e64 v3, v3, 1.0
 vksamples__descriptor_buffer_basic__glsl__cube.frag.s	1	translated				
 vksamples__descriptor_heap__glsl__cube.frag.s	0	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	5: s_load_dwordx4 s[8:11], s[0:1], s4
-vksamples__descriptor_indexing__glsl__nonuniform-quads.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	17: v_readfirstlane_b32 s4, v3
+vksamples__descriptor_indexing__glsl__nonuniform-quads.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	17: v_readfirstlane_b32 s4, v3
 vksamples__descriptor_indexing__glsl__update-after-bind-quads.frag.s	1	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	8: s_load_dwordx8 s[16:23], s[2:3], s4
 vksamples__device_fault__glsl__render.frag.s	1	translated				
 vksamples__dynamic_blending__glsl__blending.frag.s	1	translated				
 vksamples__dynamic_line_rasterization__glsl__base.frag.s	1	translated				
 vksamples__dynamic_line_rasterization__glsl__grid.frag.s	0	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	25: v_subrev_f32_dpp v0, v5, v5 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
-vksamples__dynamic_multisample_rasterization__glsl__model.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	19: v_readfirstlane_b32 s3, v2
+vksamples__dynamic_multisample_rasterization__glsl__model.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	19: v_readfirstlane_b32 s3, v2
 vksamples__dynamic_primitive_clipping__glsl__primitive_clipping.frag.s	1	translated				
 vksamples__dynamic_rendering__glsl__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches image_sample	29: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
 vksamples__dynamic_rendering_local_read__glsl__scene_opaque.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	16: v_mad_f32 v2, 2.0, v2, -1.0
@@ -237,7 +237,7 @@ vksamples__mobile_nerf__raster.frag.s	1	refused	refused	vintrp.interpolate	Unkno
 vksamples__mobile_nerf__raster_combo.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	27: v_interp_p1_f32_e32 v12, v0, attr0.w
 vksamples__mobile_nerf__raster_morpheus.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	30: v_cvt_pkrtz_f16_f32_e64 v14, v14, 1.0
 vksamples__mobile_nerf__raster_morpheus_combo.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	31: v_cvt_pkrtz_f16_f32_e64 v14, v14, 1.0
-vksamples__multi_draw_indirect__multi_draw_indirect.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	7: v_readfirstlane_b32 s1, v2
+vksamples__multi_draw_indirect__multi_draw_indirect.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	7: v_readfirstlane_b32 s1, v2
 vksamples__oit_depth_peeling__background.frag.s	1	translated				
 vksamples__oit_depth_peeling__combine.frag.s	0	refused	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000	15: v_lshrrev_b64 v[0:1], 0, 0x3f800000
 vksamples__oit_depth_peeling__gather.frag.s	0	refused	no_form	dispatch	no form matches image_load	5: image_load v3, v3, s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
@@ -250,7 +250,7 @@ vksamples__patch_control_points__glsl__tess.frag.s	1	translated
 vksamples__postprocessing__chromatic_aberration.frag.s	1	translated				
 vksamples__postprocessing__outline.frag.s	1	refused	refused	valu_int.bitwise	Read of unset vector register v2	16: v_lshrrev_b32_e32 v9, 16, v2
 vksamples__postprocessing__outline_ms_depth.frag.s	1	refused	no_form	dispatch	no form matches image_load	15: image_load v7, v2, s[24:31] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
-vksamples__profiles__glsl__profiles.frag.s	0	refused	no_form	dispatch	no form matches v_readfirstlane_b32	18: v_readfirstlane_b32 s4, v3
+vksamples__profiles__glsl__profiles.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	18: v_readfirstlane_b32 s4, v3
 vksamples__push_descriptors__glsl__cube.frag.s	1	translated				
 vksamples__rasterization_order_attachment_access__glsl__background.frag.s	1	translated				
 vksamples__render_octomap__glsl__gltf.frag.s	1	translated				
