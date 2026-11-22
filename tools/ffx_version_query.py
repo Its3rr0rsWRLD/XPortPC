@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 from pathlib import Path
+import re
 
 import pefile
 from iced_x86 import Code as C, Decoder, EncodingKind, MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
@@ -16,6 +17,7 @@ UPSCALER = "faff02f294a7e9149ce079dffe3dedbcabe99b1f180ab14222aa8689e00a75fa"
 REGS = {getattr(R, n.upper()): n for n in "rax rbx rcx rdx rsi rdi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15".split()}
 HIGH_BYTE = {R.AH, R.BH, R.CH, R.DH}
 UINT = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}
+FRAME_WORDS = 16  # the lowered function's own frame array, at which RSP points on entry
 # String instructions by Code: the SSE2 scalar MOVSD and CMPSD share their mnemonics.
 STRING_OPS = {
     C.MOVSB_M8_M8: ("movs", 1), C.MOVSW_M16_M16: ("movs", 2), C.MOVSD_M32_M32: ("movs", 4), C.MOVSQ_M64_M64: ("movs", 8),
@@ -30,6 +32,7 @@ INTEGER_HEADER = """#include <array>
 #include <cstdint>
 #include <cstring>
 #include <intrin.h>
+#include <type_traits>
 #include <emmintrin.h>
 #include <pmmintrin.h>
 #include <smmintrin.h>
@@ -37,10 +40,17 @@ using std::memcpy;
 using std::memset;
 using word = uint64_t;
 static_assert(sizeof(void*) == sizeof(word));
+// A read of host data, or of the lowered function's own frame array, which cannot fault.
 template<class T> T load(word address) {
     T v; memcpy(&v, reinterpret_cast<const void*>(address), sizeof v); return v;
 }
-template<class T> T load_always(word address) {
+// Every guest read, once per memory operand: the compiler must perform it even when its value is unused,
+// because the original faults on an inaccessible address either way. A scalar is one access at its width;
+// a vector operand is read byte by byte, which faults on the same addresses.
+template<class T> typename std::enable_if<std::is_arithmetic<T>::value, T>::type load_always(word address) {
+    return *reinterpret_cast<const volatile T*>(address);
+}
+template<class T> typename std::enable_if<!std::is_arithmetic<T>::value, T>::type load_always(word address) {
     T v;
     const volatile auto* p = reinterpret_cast<const volatile uint8_t*>(address);
     auto* q = reinterpret_cast<uint8_t*>(&v);
@@ -272,18 +282,19 @@ def string_op(i):
     else:
         repeat = "rep" if i.has_rep_prefix else None
     t = UINT[size]
+    # Each element read is a guest read (load_always), performed in each iteration even when its value is unused.
     if kind == "movs":
-        step = f"store<{t}>(rdi, load<{t}>(rsi)); rsi += step; rdi += step;"
+        step = f"store<{t}>(rdi, load_always<{t}>(rsi)); rsi += step; rdi += step;"
     elif kind == "stos":
         step = f"store<{t}>(rdi, static_cast<{t}>(rax)); rdi += step;"
     elif kind == "lods":
         # AL and AX merge into RAX; a 32-bit load zero-extends.
-        value = f"(rax & ~{(1 << (8*size)) - 1}ull) | load<{t}>(rsi)" if size < 4 else f"load<{t}>(rsi)"
+        value = f"(rax & ~{(1 << (8*size)) - 1}ull) | load_always<{t}>(rsi)" if size < 4 else f"load_always<{t}>(rsi)"
         step = f"rax = {value}; rsi += step;"
     else:
-        lhs = f"static_cast<{t}>(rax)" if kind == "scas" else f"load<{t}>(rsi)"
+        lhs = f"static_cast<{t}>(rax)" if kind == "scas" else f"load_always<{t}>(rsi)"
         advance = "rdi += step;" if kind == "scas" else "rsi += step; rdi += step;"
-        step = (f"{{ const {t} a = {lhs}, b = load<{t}>(rdi); zero = a == b; carry = a < b; "
+        step = (f"{{ const {t} a = {lhs}, b = load_always<{t}>(rdi); zero = a == b; carry = a < b; "
                 f"overflow = (((a ^ b) & (a ^ static_cast<{t}>(a - b))) >> {size * 8 - 1}) != 0; }} {advance}")
     stop = {"repe": " if (!zero) break;", "repne": " if (zero) break;"}.get(repeat, "")
     # A zero count performs no iteration and leaves the pointers and flags unchanged.
@@ -293,7 +304,7 @@ def string_op(i):
 
 def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     """Emit only query integer operations. All external edges and calls need named bindings."""
-    lines = ["word frame[16]{};", "word " + ", ".join(r + "=0" for r in REGS.values()) + ";",
+    lines = [f"word frame[{FRAME_WORDS}]{{}};", "word " + ", ".join(r + "=0" for r in REGS.values()) + ";",
              "bool zero=false, carry=false, overflow=false, sign=false;", "rsp = reinterpret_cast<word>(frame);", *initial]
     allowed = {i.ip for i in body} | set(exits)
     # The x87 profile checks every x87 instruction of the body before any of it is lowered. x87 is True for
@@ -496,8 +507,37 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
         lines.append("std::array<uint8_t,32> wide0{}, wide1{}, wide2{}, wide3{};")
+    # RSP points at the private frame array for the whole body when nothing outside the host
+    # replacements names RSP as a register (so no instruction moves it) and no binding mentions it.
+    rsp_fixed = (not any(i.ip not in (host_ops or {}) and any(
+                     i.op_kind(n) == K.REGISTER and RegisterExt.full_register(i.op_register(n)) == R.RSP
+                     for n in range(i.op_count)) for i in body)
+                 and not any(re.search(r"\brsp\b", text) for text in (*initial, *calls.values(), *exits.values())))
     for index, i in enumerate(body):
         op = i.mnemonic
+        captured = {}  # the declaration of the local that holds the instruction's one guest read
+
+        def in_frame():
+            """The memory operand lies inside the function's own frame array, which a read cannot fault on."""
+            size = MemorySizeExt.size(i.memory_size)
+            return (rsp_fixed and i.memory_base == R.RSP and i.memory_index == R.NONE
+                    and i.segment_prefix == R.NONE and 0 <= i.memory_displacement
+                    and i.memory_displacement + size <= 8 * FRAME_WORDS)
+
+        def guest(ctype):
+            """The instruction's memory operand, read once as ctype into the local mem before the rest of the
+            statement (see the end of the loop), through the volatile load: the original faults on an
+            inaccessible operand even when the value is never used. A frame read stays an ordinary load."""
+            if in_frame():
+                return f"load<{ctype}>({address()})"
+            declaration = f"const {ctype} mem = load_always<{ctype}>({address()});"
+            if captured.setdefault("mem", declaration) != declaration:
+                raise ValueError(f"memory operand read at two widths at {i.ip:#x}: {i}")
+            return "mem"
+
+        def vector(n):
+            """guest() for an n-byte vector operand, as a byte array."""
+            return guest(f"std::array<uint8_t,{n}>")
 
         def address():
             if i.is_ip_rel_memory_operand:
@@ -525,7 +565,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     return f"static_cast<uint8_t>({reg(register)} >> 8)"
                 return f"static_cast<{UINT[RegisterExt.size(register)]}>({reg(register)})"
             if kind == K.MEMORY:
-                return f"load<{UINT[MemorySizeExt.size(i.memory_size)]}>({address()})"
+                return guest(UINT[MemorySizeExt.size(i.memory_size)])
             return f"{i.immediate(n)}ull"
 
         def write(expr):
@@ -606,11 +646,9 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     M.CMOVLE: "zero || (sign != overflow)", M.CMOVG: "!zero && (sign == overflow)",
                     M.CMOVS: "sign", M.CMOVNS: "!sign",
                     M.CMOVO: "overflow", M.CMOVNO: "!overflow"}[op]
-            if i.op1_kind == K.MEMORY:
-                width = UINT[MemorySizeExt.size(i.memory_size)]
-                stmt = f"{{ const {width} src = load_always<{width}>({address()}); {write(f'({cond}) ? src : {operand(0)}')} }}"
-            else:
-                stmt = write(f"({cond}) ? {operand(1)} : {operand(0)}")
+            # A memory source is read whether or not the condition holds: guest() reads it before the
+            # condition is evaluated.
+            stmt = write(f"({cond}) ? {operand(1)} : {operand(0)}")
         elif op == M.LEA:
             stmt = write(address())
         elif op == M.MOVBE:
@@ -916,7 +954,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             if op == M.XADD:
                 src_dst = reg(i.op1_register)
                 if i.op0_kind == K.MEMORY:
-                    stmt = (f"{{ const word addr = {address()}; const {width} a = load<{width}>(addr), b = {operand(1)}, "
+                    stmt = (f"{{ const word addr = {address()}; const {width} a = {operand(0)}, b = {operand(1)}, "
                             f"v = static_cast<{width}>(a + b); carry = v < a; zero = v == 0; overflow = ((~(a ^ b) & (a ^ v)) >> {8 * size - 1}) != 0; "
                             f"{src_dst} = a; store<{width}>(addr, v); }}")
                 else:
@@ -925,7 +963,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             else:  # M.CMPXCHG
                 if i.op0_kind == K.MEMORY:
                     stmt = (f"{{ const word addr = {address()}; const {width} acc = static_cast<{width}>(rax), "
-                            f"d = load<{width}>(addr), s = {operand(1)}; zero = acc == d; carry = acc < d; overflow = (((acc ^ d) & (acc ^ (acc - d))) >> {8 * size - 1}) != 0; "
+                            f"d = {operand(0)}, s = {operand(1)}; zero = acc == d; carry = acc < d; overflow = (((acc ^ d) & (acc ^ (acc - d))) >> {8 * size - 1}) != 0; "
                             f"if (zero) {{ store<{width}>(addr, s); }} else {{ rax = d; }} }}")
                 else:
                     stmt = (f"{{ const {width} acc = static_cast<{width}>(rax), d = {operand(0)}, s = {operand(1)}; "
@@ -952,7 +990,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             lanes = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
             if i.op1_kind == K.MEMORY and op != M.VMOVHPD:
                 dst = lanes[i.op0_register]
-                stmt = f"{dst} = {{}}; memcpy({dst}.data(), reinterpret_cast<const void*>({address()}), 8);"
+                stmt = f"{{ const uint64_t v = {guest('uint64_t')}; {dst} = {{}}; memcpy({dst}.data(), &v, 8); }}"
             elif i.op0_kind == K.MEMORY:
                 start = 8 if op == M.VMOVHPD else 0
                 stmt = f"memcpy(reinterpret_cast<void*>({address()}), {lanes[i.op1_register]}.data()+{start}, 8);"
@@ -961,7 +999,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif has_wide and op in (M.VPADDD, M.VPSRLD):
             lanes = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
             src, dst = lanes[i.op1_register], lanes[i.op0_register]
-            operation = (f"+ load<uint32_t>(({address()}) + n)" if op == M.VPADDD
+            operation = (f"+ load<uint32_t>(reinterpret_cast<word>({vector(16)}.data() + n))" if op == M.VPADDD
                          else f">> {i.immediate(2)}")
             if op == M.VPSRLD and i.immediate(2) >= 32:
                 raise ValueError("unsupported packed shift count")
@@ -970,7 +1008,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     f"memcpy({dst}.data()+n, &v, 4); }} }}")
         elif op == M.MOVDQU and i.encoding == EncodingKind.LEGACY and has_wide:
             if i.op0_kind == K.REGISTER and i.op0_register in wide_xmm and i.op1_kind == K.MEMORY:
-                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), reinterpret_cast<const void*>({address()}), 16);"
+                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), {vector(16)}.data(), 16);"
             elif i.op0_kind == K.MEMORY and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
                 stmt = f"memcpy(reinterpret_cast<void*>({address()}), {wide_xmm[i.op1_register]}.data(), 16);"
             elif (i.op0_kind == K.REGISTER and i.op0_register in wide_xmm
@@ -983,7 +1021,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             if i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
                 src_init = f"uint32_t s[4]; memcpy(s, {wide_xmm[i.op1_register]}.data(), 16);"
             elif i.op1_kind == K.MEMORY:
-                src_init = f"uint32_t s[4]; memcpy(s, reinterpret_cast<const void*>({address()}), 16);"
+                src_init = f"uint32_t s[4]; memcpy(s, {vector(16)}.data(), 16);"
             else:
                 raise ValueError(f"unsupported SHA source at {i.ip:#x}: {i}")
             if op == M.SHA1MSG1:
@@ -1110,7 +1148,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             vec_size = RegisterExt.size(i.op0_register)
             w = UINT[elem_size]
             dst = wide_any[i.op0_register]
-            src_expr = (f"load<{w}>({address()})" if i.op1_kind == K.MEMORY
+            src_expr = (guest(w) if i.op1_kind == K.MEMORY
                         else f"load<{w}>(reinterpret_cast<word>({wide_any[i.op1_register]}.data()))")
             stmt = (f"{{ const {w} elem = {src_expr}; {dst} = {{}}; "
                     f"for (size_t n = 0; n < {vec_size}; n += {elem_size}) memcpy({dst}.data() + n, &elem, {elem_size}); }}")
@@ -1120,8 +1158,8 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             vec_size = RegisterExt.size(i.op0_register)
             dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
             if i.op2_kind == K.MEMORY:
-                cnt_init = f"const word caddr = {address()};"
-                cnt_expr = f"load<{w}>(caddr + n)"
+                cnt_init = f"const auto in2 = {vector(vec_size)};"
+                cnt_expr = f"load<{w}>(reinterpret_cast<word>(in2.data() + n))"
             else:
                 cnt_init = f"const auto in2 = {wide_any[i.op2_register]};"
                 cnt_expr = f"load<{w}>(reinterpret_cast<word>(in2.data() + n))"
@@ -1141,7 +1179,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             raise ValueError(f"unsupported AVX2 permute register at {i.ip:#x}: {i}")
         elif has_wide and i.encoding == EncodingKind.VEX and op == M.VBROADCASTI128 and i.op1_kind == K.MEMORY:
             dst = wide[i.op0_register]
-            stmt = (f"{{ const auto lane = load_always<std::array<uint8_t,16>>({address()}); "
+            stmt = (f"{{ const auto lane = {vector(16)}; "
                     f"memcpy({dst}.data(), lane.data(), 16); memcpy({dst}.data() + 16, lane.data(), 16); }}")
         elif has_wide and i.encoding == EncodingKind.VEX and op == M.VEXTRACTI128:
             src = wide[i.op1_register]
@@ -1154,7 +1192,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif has_wide and i.encoding == EncodingKind.VEX and op == M.VINSERTI128:
             dst, src1 = wide[i.op0_register], wide[i.op1_register]
             off = 16 if (i.immediate(3) & 1) else 0
-            src2_expr = (f"load_always<std::array<uint8_t,16>>({address()})" if i.op2_kind == K.MEMORY
+            src2_expr = (vector(16) if i.op2_kind == K.MEMORY
                          else f"load<std::array<uint8_t,16>>(reinterpret_cast<word>({wide_any[i.op2_register]}.data()))")
             stmt = f"{{ auto out = {src1}; const auto lane = {src2_expr}; memcpy(out.data() + {off}, lane.data(), 16); {dst} = out; }}"
         elif has_wide and i.encoding == EncodingKind.VEX and op == M.VPBLENDD:
@@ -1162,7 +1200,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
             imm = i.immediate(3)
             if i.op2_kind == K.MEMORY:
-                s2_init = f"const auto in2 = load_always<std::array<uint8_t,{vec_size}>>({address()});"
+                s2_init = f"const auto in2 = {vector(vec_size)};"
             else:
                 s2_init = f"const auto in2 = {wide_any[i.op2_register]};"
             s2_ptr = "load<uint32_t>(reinterpret_cast<word>(in2.data() + n))"
@@ -1173,7 +1211,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif has_wide and i.encoding == EncodingKind.VEX and op == M.VPERM2I128:
             dst, src1 = wide[i.op0_register], wide[i.op1_register]
             imm = i.immediate(3)
-            s2_init = (f"const auto in2 = load_always<std::array<uint8_t,32>>({address()});" if i.op2_kind == K.MEMORY
+            s2_init = (f"const auto in2 = {vector(32)};" if i.op2_kind == K.MEMORY
                        else f"const auto in2 = {wide[i.op2_register]};")
             def _lane_copy(sel, out_off):
                 if sel & 8:
@@ -1183,7 +1221,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             stmt = f"{{ const auto in1 = {src1}; {s2_init} {_lane_copy(imm & 0xf, 0)} {_lane_copy((imm >> 4) & 0xf, 16)} }}"
         elif has_wide and i.encoding == EncodingKind.VEX and op in (M.VPERMD, M.VPERMPS):
             dst, idx_reg = wide[i.op0_register], wide[i.op1_register]
-            s2_init = (f"const auto src = load_always<std::array<uint8_t,32>>({address()});" if i.op2_kind == K.MEMORY
+            s2_init = (f"const auto src = {vector(32)};" if i.op2_kind == K.MEMORY
                        else f"const auto src = {wide[i.op2_register]};")
             stmt = (f"{{ const auto idx = {idx_reg}; {s2_init} {dst} = {{}}; "
                     f"for (size_t lane = 0; lane < 8; ++lane) {{ "
@@ -1192,7 +1230,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif has_wide and i.encoding == EncodingKind.VEX and op in (M.VPERMQ, M.VPERMPD):
             dst = wide[i.op0_register]
             imm = i.immediate(2)
-            s1_init = (f"const auto src = load_always<std::array<uint8_t,32>>({address()});" if i.op1_kind == K.MEMORY
+            s1_init = (f"const auto src = {vector(32)};" if i.op1_kind == K.MEMORY
                        else f"const auto src = {wide[i.op1_register]};")
             stmt = (f"{{ {s1_init} {dst} = {{}}; "
                     f"for (size_t lane = 0; lane < 4; ++lane) {{ "
@@ -1204,7 +1242,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             if i.op1_kind != K.MEMORY and (i.op1_kind != K.REGISTER or i.op1_register not in wide_xmm):
                 raise ValueError(f"unsupported query operation at {i.ip:#x}: {i}")
             dst = wide_xmm[i.op0_register]
-            s2_init = (f"const auto in2 = load<std::array<uint8_t,16>>({address()});" if i.op1_kind == K.MEMORY
+            s2_init = (f"const auto in2 = {vector(16)};" if i.op1_kind == K.MEMORY
                        else f"const auto in2 = load<std::array<uint8_t,16>>(reinterpret_cast<word>({wide_xmm[i.op1_register]}.data()));")
             minmax = {
                 M.PMINSB: ("int8_t", 1, "<"), M.PMAXSB: ("int8_t", 1, ">"),
@@ -1253,7 +1291,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             dst_t = f"int{8 * dst_sz}_t" if signed else UINT[dst_sz]
             dst = wide_xmm[i.op0_register]
             if i.op1_kind == K.MEMORY:
-                src_init = f"const auto in1 = load<std::array<uint8_t,{lanes * src_sz}>>({address()});"
+                src_init = f"const auto in1 = {vector(lanes * src_sz)};"
             elif i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
                 src_init = f"const auto in1 = {wide_xmm[i.op1_register]};"
             else:
@@ -1266,7 +1304,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             if i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
                 src_init = f"std::array<uint8_t,16> rhs; memcpy(rhs.data(), {wide_xmm[i.op1_register]}.data(), 16);"
             elif i.op1_kind == K.MEMORY:
-                src_init = f"std::array<uint8_t,16> rhs; memcpy(rhs.data(), reinterpret_cast<const void*>({address()}), 16);"
+                src_init = f"std::array<uint8_t,16> rhs = {vector(16)};"
             else:
                 raise ValueError(f"unsupported SSE2 integer source at {i.ip:#x}: {i}")
             if op in (M.PADDSB, M.PSUBSB, M.PADDSW, M.PSUBSW):
@@ -1484,7 +1522,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 if i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
                     s_init = f"uint8_t s[16]; memcpy(s, {wide_xmm[i.op1_register]}.data(), 16);"
                 elif i.op1_kind == K.MEMORY:
-                    s_init = f"uint8_t s[16]; memcpy(s, reinterpret_cast<const void*>({address()}), 16);"
+                    s_init = f"uint8_t s[16]; memcpy(s, {vector(16)}.data(), 16);"
                 else:
                     raise ValueError(f"unsupported crypto source at {i.ip:#x}: {i}")
                 if op in (M.AESIMC, M.VAESIMC):
@@ -1500,7 +1538,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 if i.op_kind(src2_idx) == K.REGISTER and i.op_register(src2_idx) in wide_xmm:
                     s2_init = f"uint8_t s2[16]; memcpy(s2, {wide_xmm[i.op_register(src2_idx)]}.data(), 16);"
                 elif i.op_kind(src2_idx) == K.MEMORY:
-                    s2_init = f"uint8_t s2[16]; memcpy(s2, reinterpret_cast<const void*>({address()}), 16);"
+                    s2_init = f"uint8_t s2[16]; memcpy(s2, {vector(16)}.data(), 16);"
                 else:
                     raise ValueError(f"unsupported crypto source2 at {i.ip:#x}: {i}")
                 if op in (M.PCLMULQDQ, M.VPCLMULQDQ):
@@ -1523,7 +1561,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             dst, src1 = wide_xmm[i.op0_register], wide_xmm[i.op1_register]
             s0 = f"load<{ftype}>(reinterpret_cast<word>({dst}.data()))"
             s1 = f"load<{ftype}>(reinterpret_cast<word>({src1}.data()))"
-            s2 = (f"load<{ftype}>({address()})" if i.op2_kind == K.MEMORY
+            s2 = (guest(ftype) if i.op2_kind == K.MEMORY
                   else f"load<{ftype}>(reinterpret_cast<word>({wide_xmm[i.op2_register]}.data()))")
             neg_p = "true" if kind in ("nmadd", "nmsub") else "false"
             neg_c = "true" if kind in ("msub", "nmsub") else "false"
@@ -2620,7 +2658,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 raise ValueError(f"unsupported packed FMA register at {i.ip:#x}: {i}")
             dst, src1 = wide_any[i.op0_register], wide_any[i.op1_register]
             if i.op2_kind == K.MEMORY:
-                memory_src = f"const auto in2 = load_always<std::array<uint8_t,{vec_size}>>({address()}); "
+                memory_src = f"const auto in2 = {vector(vec_size)}; "
                 src2 = "in2"
             else:
                 memory_src = ""
@@ -2642,7 +2680,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     f"const {ftype} r = fma_x86<{ftype}, {utype}>(s0, s1, s2, {order}, {neg_p}, {neg_c}); "
                     f"memcpy(result.data() + n, &r, {sz}); }} {dst} = result; }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
-            stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
+            stmt = f"{wide[i.op0_register]} = {vector(32)};"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
             if i.op1_register in wide:
                 stmt = f"store({address()}, {wide[i.op1_register]});"
@@ -2654,7 +2692,7 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif op == M.VZEROUPPER:
             stmt = " ".join(f"memset({v}.data()+16, 0, 16);" for v in wide.values()) if has_wide else ";"
         elif op == M.VMOVDQU and i.op1_kind == K.MEMORY:
-            stmt = f"{xmm[i.op0_register]} = load<__m128i>({address()});"
+            stmt = f"{xmm[i.op0_register]} = {guest('__m128i')};"
         elif op == M.VPSRLDQ:
             stmt = f"{xmm[i.op0_register]} = _mm_srli_si128({xmm[i.op1_register]}, {i.immediate(2)});"
         elif op == M.VPADDD:
@@ -2697,13 +2735,20 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             table = f"{reg(i.memory_base)} + static_cast<uint8_t>(rax)"
             if RegisterExt.size(i.memory_base) == 4:
                 table = f"static_cast<uint32_t>({table})"
-            stmt = f"rax = (rax & ~0xffull) | load<uint8_t>({table});"
+            stmt = f"rax = (rax & ~0xffull) | load_always<uint8_t>({table});"  # a guest read, used once
         elif op == M.RET:
             stmt = "return rax;" if checked is None or x87_depth is None else x87_lower.return_statement(checked)
         elif x87_depth is not None and op in x87_lower.X87_OPS:
-            stmt = x87_lower.statement(i, x87_depth[i.ip], address, checked, parity)
+            stmt = x87_lower.statement(i, x87_depth[i.ip], address, checked, parity,
+                                       "load" if i.op_count == 1 and i.op0_kind == K.MEMORY and in_frame()
+                                       else "load_always")
         else:
             raise ValueError(f"unsupported query operation at {i.ip:#x}: {i}")
+        if captured:
+            # The guest read comes first, before any write of the instruction. A read whose value nothing
+            # uses (CMP or TEST without a flag consumer) is still performed.
+            parts = [captured["mem"], stmt] if re.search(r"\bmem\b", stmt) else [captured["mem"], "static_cast<void>(mem);", stmt]
+            stmt = "{ " + " ".join(parts) + ("\n}" if "//" in stmt else " }")
         lines.append(f"block_{i.ip:x}: {stmt}")
         if (op not in (M.RET, M.JMP) and
                 (index + 1 == len(body) or body[index + 1].ip != i.next_ip)):
