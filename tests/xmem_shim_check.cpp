@@ -6,13 +6,23 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
+
+#include "adapter_identity.h"
+#include "xmem_gpu_usage.h"
 
 extern "C" __declspec(dllimport) void* XMemAlloc(SIZE_T bytes, ULONGLONG attributes);
 extern "C" __declspec(dllimport) void XMemFree(void* allocation, ULONGLONG attributes);
@@ -63,8 +73,10 @@ bool export_checks()
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(GetProcAddress(module, "XMemAlloc")), &owner) ||
         owner != module) return false;
-    // Routing graphics memory through era_title_gpu must not make xmem.dll load D3D12.
-    if (GetModuleHandleW(L"d3d12.dll")) return false;
+    // Routing graphics memory through era_title_gpu must not make xmem.dll load D3D12, and
+    // XMemGetWorkingSetStatistics loads DXGI only when called. This executable delay-loads both
+    // for its GPU scenarios.
+    if (GetModuleHandleW(L"d3d12.dll") || GetModuleHandleW(L"dxgi.dll")) return false;
     std::printf("exports=%u\n", found);
     return true;
 }
@@ -141,20 +153,228 @@ bool query_checks()
     return !null_output && null_error == ERROR_NOACCESS;
 }
 
+// The AMD callers' 128-byte stack buffer, filled with a sentinel.
+using Statistics = std::array<std::uint64_t, 16>;
+static_assert(sizeof(Statistics) == 128);
+constexpr std::uint64_t sentinel = 0x5a5a5a5a5a5a5a5aull;
+
+// What an AMD caller reads: the 64-bit value at +8 on success, zero otherwise.
+std::uint64_t caller_reads()
+{
+    Statistics statistics;
+    statistics.fill(sentinel);
+    return XMemGetWorkingSetStatistics(amd_selector, statistics.data()) ? statistics[1] : 0;
+}
+
 bool working_set_checks()
 {
-    std::array<std::uint64_t, 4> statistics;
-    statistics.fill(0x5a5a5a5a5a5a5a5aull);
-    SetLastError(ERROR_SUCCESS);
+    // The AMD selector succeeds and writes only the qword at +8.
+    Statistics statistics;
+    statistics.fill(sentinel);
     const BOOL ok = XMemGetWorkingSetStatistics(amd_selector, statistics.data());
-    const DWORD error = GetLastError();
-    // The AMD callers use the 64-bit value at +8 on success and zero otherwise.
-    const std::uint64_t used = ok ? statistics[1] : 0;
-    const bool untouched = std::all_of(statistics.begin(), statistics.end(),
-                                       [](std::uint64_t v) { return v == 0x5a5a5a5a5a5a5a5aull; });
-    std::printf("working_set_result=%d last_error=%lu caller_value=%llu\n", ok, error,
-                static_cast<unsigned long long>(used));
-    return !ok && error == ERROR_NOT_SUPPORTED && used == 0 && untouched;
+    statistics[1] = sentinel;
+    const auto untouched = [&] {
+        return std::all_of(statistics.begin(), statistics.end(), [](std::uint64_t v) { return v == sentinel; });
+    };
+    const bool rest_untouched = untouched();
+
+    // Another selector stays unsupported and leaves the output untouched.
+    SetLastError(ERROR_SUCCESS);
+    const BOOL other = XMemGetWorkingSetStatistics(amd_selector + 1, statistics.data());
+    const DWORD other_error = GetLastError();
+    SetLastError(ERROR_SUCCESS);
+    const BOOL null_output = XMemGetWorkingSetStatistics(amd_selector, nullptr);
+    const DWORD null_error = GetLastError();
+    std::printf("amd_selector=%d rest_untouched=%d other_selector=%d error=%lu null_output=%d error=%lu\n", ok,
+                rest_untouched, other, other_error, null_output, null_error);
+    return ok && rest_untouched && !other && other_error == ERROR_NOT_SUPPORTED && untouched() && !null_output &&
+           null_error == ERROR_INVALID_PARAMETER;
+}
+
+// Synthetic per-adapter readings for xmem_gpu_usage::total, the aggregation behind the value at +8.
+bool aggregation_checks()
+{
+    using xmem_gpu_usage::Domain;
+    using Domains = std::vector<Domain>;
+    constexpr std::uint64_t mib = 1ull << 20;
+    const std::wstring gpu_a = LR"(PCI\VEN_10DE&DEV_28E0\4&1&0&0008)";
+    const std::wstring gpu_b = LR"(PCI\VEN_10DE&DEV_28E0\4&2&0&0010)";
+    const std::wstring igpu = LR"(PCI\VEN_8086&DEV_A7A0\3&1&0&0010)";
+    const std::wstring basic = LR"(ROOT\BasicRender\0000)";
+    const auto domain = [](std::uint64_t bytes, std::vector<std::wstring> devices = {}) {
+        return Domain{true, bytes, std::move(devices)};
+    };
+    const auto failed = [] { return Domain{}; };
+
+    // Regression reference (Windows build 26200, RTX 4060 Laptop, driver 32.0.16.1656): two LUIDs for
+    // 10de:28e0, both flags 0, both moving 7,294,976 -> 74,403,840 bytes on one 64 MiB heap; the
+    // Intel and Basic Render Driver entries stay at zero. Vendor and device IDs matched and the
+    // readings were equal, but neither shows they are one device, so without an identity the
+    // call must fail rather than report 2x.
+    const auto laptop = [&](std::uint64_t bytes, bool identified) {
+        const auto key = [&](const std::wstring& device) {
+            return identified ? std::vector<std::wstring>{device} : std::vector<std::wstring>{};
+        };
+        return Domains{domain(bytes, key(gpu_a)), domain(bytes, key(gpu_a)), domain(0, key(igpu)),
+                       domain(0, key(basic))};
+    };
+    const auto before = xmem_gpu_usage::total(laptop(7294976, false), true);
+    const auto after = xmem_gpu_usage::total(laptop(74403840, false), true);
+    const auto alias_before = xmem_gpu_usage::total(laptop(7294976, true), true);
+    const auto alias_after = xmem_gpu_usage::total(laptop(74403840, true), true);
+
+    struct Case {
+        const char* name;
+        Domains domains;
+        bool complete;
+        std::optional<std::uint64_t> expected;
+    };
+    const Case cases[] = {
+        // GPU-less runner: Basic Render Driver with flags 0 and as a software adapter, one device.
+        {"basic_render_alias", {domain(64 * mib, {basic}), domain(64 * mib, {basic})}, true, 64 * mib},
+        // Two adapters of the same model at different PCI locations are both counted, even with equal readings.
+        {"same_model_distinct", {domain(64 * mib, {gpu_a}), domain(64 * mib, {gpu_b}), domain(0, {igpu})}, true,
+         128 * mib},
+        {"genuine_zero", {domain(0, {gpu_a}), domain(0), domain(0, {basic})}, true, 0},
+        {"one_unidentified_active", {domain(0, {gpu_a}), domain(32 * mib)}, true, 32 * mib},
+        {"all_queries_failed", {failed(), failed(), failed()}, true, std::nullopt},
+        {"one_query_failed", {domain(64 * mib, {gpu_a}), failed()}, true, std::nullopt},
+        {"incomplete_enumeration", {domain(64 * mib, {gpu_a})}, false, std::nullopt},
+        {"no_adapters", {}, true, std::nullopt},
+        {"alias_disagrees", {domain(64 * mib, {basic}), domain(32 * mib, {basic})}, true, std::nullopt},
+        {"unidentified_with_active", {domain(64 * mib, {gpu_a}), domain(64 * mib)}, true, std::nullopt},
+        {"linked_partial_overlap", {domain(64 * mib, {gpu_a, gpu_b}), domain(64 * mib, {gpu_a})}, true, std::nullopt},
+        {"overflow", {domain(UINT64_MAX, {gpu_a}), domain(1, {gpu_b})}, true, std::nullopt},
+    };
+    bool passed = !before && !after && alias_before == 7294976ull && alias_after == 74403840ull &&
+                  *alias_after - *alias_before == 64 * mib;
+    std::printf("laptop_reference unidentified=%s identified_delta=%lld\n", before || after ? "published" : "declined",
+                alias_before && alias_after ? static_cast<long long>(*alias_after - *alias_before) : -1ll);
+    for (const auto& c : cases) {
+        const auto result = xmem_gpu_usage::total(c.domains, c.complete);
+        const bool ok = result == c.expected;
+        passed &= ok;
+        if (result) {
+            std::printf("%s total=%llu %s\n", c.name, static_cast<unsigned long long>(*result), ok ? "ok" : "MISMATCH");
+        } else {
+            std::printf("%s declined %s\n", c.name, ok ? "ok" : "MISMATCH");
+        }
+    }
+    return passed;
+}
+
+// Lists the DXGI adapters with the identity the shim aggregates by, for GPU reports.
+void describe_adapters()
+{
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return;
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (FAILED(adapter->GetDesc1(&desc))) continue;
+        std::wstring devices;
+        for (const auto& device : adapter_identity::physical_devices(desc.AdapterLuid)) {
+            devices += (devices.empty() ? L"" : L";") + device;
+        }
+        std::printf("adapter %u %04x:%04x flags=%u luid=%08lx:%08lx device=%ls\n", i, desc.VendorId, desc.DeviceId,
+                    desc.Flags, desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart,
+                    devices.empty() ? L"(unknown)" : devices.c_str());
+    }
+}
+
+Microsoft::WRL::ComPtr<ID3D12Device> create_device(bool warp)
+{
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    if (warp) {
+        factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+    } else {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> candidate;
+        for (UINT i = 0; !adapter && factory->EnumAdapters1(i, &candidate) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(candidate->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) adapter = candidate;
+        }
+    }
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    if (adapter) D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    return device;
+}
+
+// Measures as the AMD callers do: reads the value before creating an object, after creating it
+// and after releasing it. Creation must add at least the allocation size and release must remove
+// as much. The slack allows for allocations the driver makes on its own between two reads.
+template <typename Create>
+bool bracket(const char* what, std::uint64_t size, Create create)
+{
+    constexpr std::int64_t slack = 4 << 20;
+    const std::uint64_t before = caller_reads();
+    auto object = create();
+    if (!object) {
+        std::printf("%s: creation failed\n", what);
+        return false;
+    }
+    const std::uint64_t created = caller_reads();
+    object.Reset();
+    const std::uint64_t released = caller_reads();
+    const auto n = static_cast<std::int64_t>(size);
+    const auto added = static_cast<std::int64_t>(created - before);
+    const auto removed = static_cast<std::int64_t>(created - released);
+    const bool ok = added >= n && added <= n + slack && removed >= n && removed <= n + slack;
+    std::printf("%s size=%lld added=%lld removed=%lld %s\n", what, static_cast<long long>(n),
+                static_cast<long long>(added), static_cast<long long>(removed), ok ? "ok" : "MISMATCH");
+    return ok;
+}
+
+// Returns 0 on pass, 1 on failure, 77 (skip) without the adapter or a D3D12 device.
+int working_set_gpu_checks(bool warp)
+{
+    describe_adapters();
+    const auto device = create_device(warp);
+    if (!device) {
+        std::puts(warp ? "No D3D12 device on WARP" : "No D3D12-capable hardware adapter visible");
+        return 77;
+    }
+    constexpr std::uint64_t mib = 1ull << 20;
+
+    bool passed = true;
+    const struct {
+        D3D12_HEAP_TYPE type;
+        const char* name;
+    } heaps[] = {{D3D12_HEAP_TYPE_DEFAULT, "heap_default"},
+                 {D3D12_HEAP_TYPE_UPLOAD, "heap_upload"},
+                 {D3D12_HEAP_TYPE_READBACK, "heap_readback"}};
+    for (const auto& heap : heaps) {
+        D3D12_HEAP_DESC desc{};
+        desc.SizeInBytes = 64 * mib;
+        desc.Properties.Type = heap.type;
+        desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        passed &= bracket(heap.name, desc.SizeInBytes, [&] {
+            Microsoft::WRL::ComPtr<ID3D12Heap> object;
+            device->CreateHeap(&desc, IID_PPV_ARGS(&object));
+            return object;
+        });
+    }
+
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 32 * mib;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const std::uint64_t size = device->GetResourceAllocationInfo(0, 1, &buffer).SizeInBytes;
+    passed &= bracket("committed_buffer", size, [&] {
+        Microsoft::WRL::ComPtr<ID3D12Resource> object;
+        device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COMMON,
+                                        nullptr, IID_PPV_ARGS(&object));
+        return object;
+    });
+    return passed ? 0 : 1;
 }
 }
 
@@ -173,6 +393,12 @@ int main(int argc, char** argv)
         passed = query_checks();
     } else if (scenario == "working_set"sv) {
         passed = working_set_checks();
+    } else if (scenario == "working_set_aggregation"sv) {
+        passed = aggregation_checks();
+    } else if (scenario == "working_set_warp"sv || scenario == "working_set_hardware"sv) {
+        const int result = working_set_gpu_checks(scenario == "working_set_warp"sv);
+        if (result == 77) return result;
+        passed = result == 0;
     } else {
         return 2;
     }
