@@ -1,0 +1,10 @@
+EXPORTS
+    sqrt_m80
+    sqrt_to_m64
+    sqrt_to_m32
+    sqrt_twice
+    sqrt_f64
+    sqrt_f32
+    sqrt_add
+    sqrt_sum_squares
+    sqrt_depth8

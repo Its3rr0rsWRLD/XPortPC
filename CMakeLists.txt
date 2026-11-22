@@ -1507,6 +1507,25 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME cpu_aot_x87_compare COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_compare.py"
         check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_compare>"
         "$<TARGET_FILE:cpu_x87_compare_lifted>" ${x87_compare_control_files})
+    cpu_asm_fixture(cpu_x87_sqrt x87_sqrt)
+    # The lifted DLL and six mutated controls that the check requires to mismatch.
+    set(x87_sqrt_control_files "")
+    foreach(variant IN ITEMS lifted pc64 double nosticky negzero negabs snan)
+        set(x87_sqrt_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_x87_sqrt_${variant}.cpp")
+        add_custom_command(OUTPUT "${x87_sqrt_fixture}"
+            COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_sqrt.py"
+                emit "$<TARGET_FILE:cpu_x87_sqrt>" "${x87_sqrt_fixture}" ${variant}
+            DEPENDS cpu_x87_sqrt tests/cpu/x87_sqrt.py tests/cpu/x87_moves.py tests/cpu/x87_sub.py
+                tests/cpu/x87_div.py tests/cpu/x87_mul.py tests/cpu/x87_add.py tools/ffx_version_query.py
+                tools/x87_lower.py tools/x87_soft.h tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+        add_library(cpu_x87_sqrt_${variant} SHARED "${x87_sqrt_fixture}")
+        if(NOT variant STREQUAL "lifted")
+            list(APPEND x87_sqrt_control_files "$<TARGET_FILE:cpu_x87_sqrt_${variant}>")
+        endif()
+    endforeach()
+    add_test(NAME cpu_aot_x87_sqrt COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/x87_sqrt.py"
+        check "$<TARGET_FILE:cpu_x87_harness>" "$<TARGET_FILE:cpu_x87_sqrt>"
+        "$<TARGET_FILE:cpu_x87_sqrt_lifted>" ${x87_sqrt_control_files})
     cpu_asm_fixture(cpu_create create_context)
     set(create_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_create_lifted.cpp")
     add_custom_command(OUTPUT "${create_fixture}"

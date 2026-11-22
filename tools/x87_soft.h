@@ -322,3 +322,29 @@ static inline int x87_compare(X87Value a, X87Value b) {
     const bool less = ua.e != ub.e ? ua.e < ub.e : ua.sig < ub.sig;
     return less != x87_sign(a) ? 0 : 2;
 }
+
+// FSQRT: the exact square root rounded to the arithmetic format (53 significand bits, to nearest-even).
+// sqrt(-0) is -0 and sqrt(+inf) is +inf; a NaN is quieted; any other negative operand, and an unsupported
+// encoding, gives the indefinite. The root of sig * 2^(e - 63) is isqrt(sig * 2^t) * 2^((e - 63 - t) / 2)
+// with t = 63 or 64 chosen to make the exponent even, which puts the 64-bit root in [2^63, 2^64); a
+// nonzero remainder becomes the sticky bit. The result never leaves the extended normal range.
+static inline X87Value x87_sqrt(X87Value a) {
+    if (x87_unsupported(a)) return x87_indefinite;
+    if (x87_is_nan(a)) return x87_quiet(a);
+    if (x87_is_zero(a)) return a;
+    if (x87_sign(a)) return x87_indefinite;
+    if (x87_is_inf(a)) return a;
+    const X87Unpacked x = x87_unpack(a);
+    const int t = (x.e & 1) ? 64 : 63;
+    const uint64_t r_hi = t == 64 ? x.sig : x.sig >> 1, r_lo = t == 64 ? 0 : x.sig << 63;  // R = sig * 2^t
+    uint64_t q = 0, sq_hi = 0, sq_lo = 0;
+    for (uint64_t bit = x87_integer_bit; bit != 0; bit >>= 1) {
+        const uint64_t c = q | bit;
+        uint64_t hi;
+        const uint64_t lo = _umul128(c, c, &hi);
+        if (hi < r_hi || (hi == r_hi && lo <= r_lo)) { q = c; sq_hi = hi; sq_lo = lo; }
+    }
+    const uint64_t sticky = sq_hi != r_hi || sq_lo != r_lo;  // sqrt sticky
+    const X87Rounded r = x87_round(false, (x.e - 63 - t) / 2 + 63, q, sticky, x87_arith, x87_rc);  // sqrt round
+    return {r.sig, static_cast<uint16_t>(r.biased)};
+}
