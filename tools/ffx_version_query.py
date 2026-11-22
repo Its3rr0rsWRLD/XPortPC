@@ -27,6 +27,15 @@ STRING_OPS = {
     C.CMPSB_M8_M8: ("cmps", 1), C.CMPSW_M16_M16: ("cmps", 2), C.CMPSD_M32_M32: ("cmps", 4), C.CMPSQ_M64_M64: ("cmps", 8),
 }
 
+# Memory-ordering fences and PAUSE, and the cache hints with one memory operand, by the MSVC intrinsic
+# that emits the same instruction.
+FENCES = {M.LFENCE: "_mm_lfence();", M.MFENCE: "_mm_mfence();", M.SFENCE: "_mm_sfence();", M.PAUSE: "_mm_pause();"}
+CACHE_HINTS = {
+    M.PREFETCHT0: "prefetch_t0", M.PREFETCHT1: "prefetch_t1", M.PREFETCHT2: "prefetch_t2",
+    M.PREFETCHNTA: "prefetch_nta", M.PREFETCH: "prefetch_amd", M.PREFETCHW: "_m_prefetchw",
+    M.CLFLUSH: "_mm_clflush", M.CLFLUSHOPT: "_mm_clflushopt", M.CLWB: "_mm_clwb",
+}
+
 INTEGER_HEADER = """#include <array>
 #include <cmath>
 #include <cstdint>
@@ -36,6 +45,7 @@ INTEGER_HEADER = """#include <array>
 #include <emmintrin.h>
 #include <pmmintrin.h>
 #include <smmintrin.h>
+#include <immintrin.h>
 using std::memcpy;
 using std::memset;
 using word = uint64_t;
@@ -44,6 +54,11 @@ static_assert(sizeof(void*) == sizeof(word));
 template<class T> T load(word address) {
     T v; memcpy(&v, reinterpret_cast<const void*>(address), sizeof v); return v;
 }
+static inline void prefetch_t0(const char* p) { _mm_prefetch(p, _MM_HINT_T0); }
+static inline void prefetch_t1(const char* p) { _mm_prefetch(p, _MM_HINT_T1); }
+static inline void prefetch_t2(const char* p) { _mm_prefetch(p, _MM_HINT_T2); }
+static inline void prefetch_nta(const char* p) { _mm_prefetch(p, _MM_HINT_NTA); }
+static inline void prefetch_amd(const char* p) { _m_prefetch(const_cast<char*>(p)); }
 // Every guest read, once per memory operand: the compiler must perform it even when its value is unused,
 // because the original faults on an inaccessible address either way. A scalar is one access at its width;
 // a vector operand is read byte by byte, which faults on the same addresses.
@@ -594,6 +609,12 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             stmt = "direction = false;"
         elif op == M.STD:
             stmt = "direction = true;"
+        elif op in FENCES:
+            # The intrinsics also keep the compiler from moving loads and stores across them.
+            stmt = FENCES[op]
+        elif op in CACHE_HINTS:
+            # Prefetches never fault; the flushes fault like a one-byte load of the same address.
+            stmt = f"{CACHE_HINTS[op]}(reinterpret_cast<const char*>({address()}));"
         elif (op in (M.JE, M.JNE, M.JAE, M.JA, M.JB, M.JBE, M.JMP) or
               (x87_depth is None and op in (M.JL, M.JGE, M.JLE, M.JG, M.JS, M.JNS, M.JO, M.JNO))):
             target = i.near_branch_target
