@@ -3484,10 +3484,7 @@ def check_ceiling_draws(directory, compiler, renderer, backend):
         raise AssertionError("Replacing ceiling with floor escaped detection")
 
 
-def check_render(directory, compiler, renderer, backend):
-    check_movk_draw(directory, compiler, renderer, backend)
-    check_half_draw(directory, compiler, renderer, backend)
-    check_narrow_draw(directory, compiler, renderer, backend)
+def check_channel_draws(directory, compiler, renderer, backend):
     for swap in (False, True):
         source = directory / "fixture.hlsl"
         shader = directory / "fixture.cso"
@@ -3501,6 +3498,11 @@ def check_render(directory, compiler, renderer, backend):
             wrong = subprocess.run([*draw, "rgba"], capture_output=True, text=True)
             if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
                 raise AssertionError("The renderer failed to detect the changed channel order")
+
+
+def check_arithmetic_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     program = arithmetic()
     source.write_text(translate(program), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -3514,6 +3516,11 @@ def check_render(directory, compiler, renderer, backend):
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Swapped subtraction operands escaped detection")
 
+
+
+def check_scalar_constant_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     program = with_scalar_constant_reads()
     source.write_text(translate(program), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -3532,6 +3539,11 @@ def check_render(directory, compiler, renderer, backend):
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Reading the neighboring constant word escaped detection")
 
+
+
+def check_curve_shaping_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     for program_fn, case_fn in ((curve, curve_case), (shaping, shaping_case)):
         source.write_text(translate(program_fn()), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -3546,6 +3558,11 @@ def check_render(directory, compiler, renderer, backend):
         if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
             raise AssertionError("Stale reference accepted after changing the bound constants")
 
+
+
+def check_truncate_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     program = truncate_values()
     source.write_text(translate(program), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -3560,6 +3577,11 @@ def check_render(directory, compiler, renderer, backend):
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Rounding toward negative infinity escaped detection")
 
+
+
+def check_abs_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     program = absolute_value()
     case = absolute_case(directory)
     draw = [renderer, backend, "--check-pixel-case", shader, case]
@@ -3573,7 +3595,11 @@ def check_render(directory, compiler, renderer, backend):
     wrong = subprocess.run(draw, capture_output=True, text=True)
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("The renderer failed to detect the missing absolute value")
-    check_ceiling_draws(directory, compiler, renderer, backend)
+
+
+def check_select_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     source.write_text(translate(select()), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
     for constants in ((.5, .75, .375, .25), (.125, .5, 1.0, 0.0)):
@@ -3586,6 +3612,11 @@ def check_render(directory, compiler, renderer, backend):
     wrong = subprocess.run(draw, capture_output=True, text=True)
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Stale reference accepted after moving the comparison threshold")
+
+
+def check_signed_export_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     # Binary32 values on either side of a half-ULP midpoint, in both signs.
     values = (1 + 3 / 4096, 1 + 1 / 4096, -1 - 3 / 4096, -1 - 1 / 4096)
     constants = bytearray(256)
@@ -3596,11 +3627,11 @@ def check_render(directory, compiler, renderer, backend):
     case = directory / "signed-export.case"
     case.write_bytes(constants + struct.pack("<4f", *map(half_rtz, values)) * 64)
     subprocess.run([renderer, backend, "--check-pixel-case", shader, case], check=True)
-    check_class_draw(directory, compiler, renderer, backend)
-    check_predicate_draws(directory, compiler, renderer, backend)
-    check_sdwa_predicate_draws(directory, compiler, renderer, backend)
-    check_literal_fma_draw(directory, compiler, renderer, backend)
-    check_e64_draws(directory, compiler, renderer, backend)
+
+
+def check_dual_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     capture = directory / "blend.rgba"
     draw = [renderer, backend, "--dual-pixel", shader, capture]
     for case in DUAL_CASES:
@@ -3615,17 +3646,11 @@ def check_render(directory, compiler, renderer, backend):
     wrong = subprocess.run(draw, capture_output=True, text=True)
     if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
         raise AssertionError("Swapped blend weights escaped detection")
-    check_cube_draw(directory, compiler, renderer, backend)
-    check_sdwa_draw(directory, compiler, renderer, backend)
-    check_sdwa_arith_draws(directory, compiler, renderer, backend)
-    check_int_draws(directory, compiler, renderer, backend)
-    check_f16_draws(directory, compiler, renderer, backend)
-    check_f16_cmp_draws(directory, compiler, renderer, backend)
-    check_arith_draws(directory, compiler, renderer, backend)
-    check_load_draws(directory, compiler, renderer, backend)
-    check_image_draws(directory, compiler, renderer, backend)
-    check_fract_draw(directory, compiler, renderer, backend)
 
+
+def check_scalar64_draws(directory, compiler, renderer, backend):
+    source = directory / "fixture.hlsl"
+    shader = directory / "fixture.cso"
     program = scalar64()
     source.write_text(translate(program), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -3649,21 +3674,85 @@ def check_render(directory, compiler, renderer, backend):
         wrong = subprocess.run(draw, capture_output=True, text=True)
         if wrong.returncode != 1 or "pixel_mismatch" not in wrong.stderr:
             raise AssertionError(f"Mutation of {label} escaped detection")
-    check_mad_draw(directory, compiler, renderer, backend)
+
+
+# Draw families in the order check_render always ran them. Each takes (directory, compiler, renderer, backend),
+# compiles what it needs and depends on nothing another family leaves behind, so a process can run any subset.
+# `pixel_aot_check.py --list-families` prints these names; CMake makes one CTest test per name. A family
+# returns a nonzero exit code (the renderer's 77 for "no adapter") or raises on failure.
+DRAW_FAMILIES = {
+    "movk": check_movk_draw,
+    "half": check_half_draw,
+    "narrow": check_narrow_draw,
+    "channel": check_channel_draws,
+    "arithmetic": check_arithmetic_draws,
+    "scalar_constant": check_scalar_constant_draws,
+    "curve_shaping": check_curve_shaping_draws,
+    "truncate": check_truncate_draws,
+    "abs": check_abs_draws,
+    "ceiling": check_ceiling_draws,
+    "select": check_select_draws,
+    "signed_export": check_signed_export_draws,
+    "class": check_class_draw,
+    "predicate": check_predicate_draws,
+    "sdwa_predicate": check_sdwa_predicate_draws,
+    "literal_fma": check_literal_fma_draw,
+    "e64": check_e64_draws,
+    "dual": check_dual_draws,
+    "cube": check_cube_draw,
+    "sdwa": check_sdwa_draw,
+    "sdwa_arith": check_sdwa_arith_draws,
+    "int": check_int_draws,
+    "f16": check_f16_draws,
+    "f16_cmp": check_f16_cmp_draws,
+    "arith": check_arith_draws,
+    "load": check_load_draws,
+    "image": check_image_draws,
+    "fract": check_fract_draw,
+    "scalar64": check_scalar64_draws,
+    "mad": check_mad_draw,
+}
+
+
+def check_render(directory, compiler, renderer, backend, families=None):
+    for name in families or DRAW_FAMILIES:
+        try:
+            code = DRAW_FAMILIES[name](directory, compiler, renderer, backend)
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 77:  # the renderer found no adapter: skip, like the channel-order draw
+                raise
+            return 77
+        if code:
+            return code
     return 0
 
 
 def main():
     mode, *args = sys.argv[1:]
+    if mode == "--list-families":
+        print("\n".join(DRAW_FAMILIES))
+        return 0
+    families = []
+    while "--family" in args:  # draw mode: only these families (repeatable); none means all and the controls
+        at = args.index("--family")
+        families.append(args[at + 1])
+        del args[at:at + 2]
+    unknown = [name for name in families if name not in DRAW_FAMILIES]
+    if unknown or (families and mode != "draw"):
+        raise ValueError(f"Unknown or misplaced --family {unknown}; known families: {', '.join(DRAW_FAMILIES)}")
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
-        check_controls(directory)
-        if mode == "binary":
+        if mode == "controls":
+            check_controls(directory)
+        elif mode == "binary":
+            check_controls(directory)
             check_binary(directory, *args)
         elif mode == "draw":
-            return check_render(directory, *args)
+            if not families:
+                check_controls(directory)
+            return check_render(directory, *args, families or None)
         else:
-            raise ValueError("Expected binary or draw mode")
+            raise ValueError("Expected binary, controls or draw mode")
 
 
 if __name__ == "__main__":

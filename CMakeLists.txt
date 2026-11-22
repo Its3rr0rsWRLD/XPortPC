@@ -911,16 +911,32 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/pso_readiness_check.py")
     add_test(NAME dxcontainer_part_offsets COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/dxcontainer_part_offsets_check.py")
+    # One pixel_aot test per draw family and adapter. The family list comes from the script itself at
+    # configure time (and a change to the script re-runs configure), so it cannot drift from the code.
+    execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" --list-families
+        OUTPUT_VARIABLE PIXEL_AOT_FAMILIES RESULT_VARIABLE pixel_aot_list_status OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT pixel_aot_list_status EQUAL 0 OR PIXEL_AOT_FAMILIES STREQUAL "")
+        message(FATAL_ERROR "tests/pixel_aot_check.py --list-families failed (status ${pixel_aot_list_status})")
+    endif()
+    string(REPLACE "\r" "" PIXEL_AOT_FAMILIES "${PIXEL_AOT_FAMILIES}")
+    string(REPLACE "\n" ";" PIXEL_AOT_FAMILIES "${PIXEL_AOT_FAMILIES}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py")
+    add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
+    set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600
+        ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/pixel_aot_controls.txt")
     foreach(adapter IN ITEMS hardware warp)
         add_test(NAME cpu_native_frame_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/cpu/native_frame_check.py" "$<TARGET_FILE:cpu_frame_guest>"
             "$<TARGET_FILE:cpu_tls_sink>" "$<TARGET_FILE:cpu_frame_host>" "$<TARGET_FILE:pe_map>"
             "${DXC_EXECUTABLE}" "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(cpu_native_frame_${adapter} PROPERTIES TIMEOUT 95)
-        add_test(NAME pixel_aot_${adapter} COMMAND "${INTAKE_PYTHON}" -B
-            "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" draw "${DXC_EXECUTABLE}"
-            "$<TARGET_FILE:offscreen_check>" ${adapter})
-        set_tests_properties(pixel_aot_${adapter} PROPERTIES TIMEOUT 900)
+        foreach(family IN LISTS PIXEL_AOT_FAMILIES)
+            add_test(NAME pixel_aot_${family}_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+                "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" draw "${DXC_EXECUTABLE}"
+                "$<TARGET_FILE:offscreen_check>" ${adapter} --family ${family})
+            set_tests_properties(pixel_aot_${family}_${adapter} PROPERTIES TIMEOUT 600)
+        endforeach()
         add_test(NAME pixel_memory_${adapter} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/pixel_memory_check.py" "${DXC_EXECUTABLE}"
             "$<TARGET_FILE:offscreen_check>" ${adapter})
@@ -930,11 +946,16 @@ if(EXISTS "${INTAKE_PYTHON}")
             "$<TARGET_FILE:offscreen_check>" ${adapter})
         set_tests_properties(bc7_draw_${adapter} PROPERTIES TIMEOUT 60)
     endforeach()
-    set_tests_properties(cpu_native_frame_hardware pixel_aot_hardware pixel_memory_hardware bc7_draw_hardware PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(cpu_native_frame_hardware pixel_memory_hardware bc7_draw_hardware PROPERTIES SKIP_RETURN_CODE 77)
     foreach(adapter IN ITEMS hardware warp)
-        # The gfx programs this test translated, for tools/form_coverage.py.
-        set_tests_properties(pixel_aot_${adapter} PROPERTIES
-            ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/pixel_aot_${adapter}.txt")
+        foreach(family IN LISTS PIXEL_AOT_FAMILIES)
+            if(adapter STREQUAL "hardware")
+                set_tests_properties(pixel_aot_${family}_hardware PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
+            # The gfx programs this test translated, for tools/form_coverage.py (one record per test).
+            set_tests_properties(pixel_aot_${family}_${adapter} PROPERTIES
+                ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/pixel_aot_${family}_${adapter}.txt")
+        endforeach()
     endforeach()
     add_test(NAME compressed_scene_metadata COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/scene_records_check.py" "${CMAKE_CURRENT_BINARY_DIR}/DualUav.cso"

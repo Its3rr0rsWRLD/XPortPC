@@ -11,12 +11,12 @@ Xbox2Windows targets x64 Windows for its C++, HLSL, MASM, D3D12, WARP, and GPU t
 | LLVM 15 `gfx1013` translation checks | Yes | No (via CI / separate LLVM) | `tests/pixel_aot_check.py binary` and `tests/ffx_dispatch_aot_check.py` verify assembling, disassembling, and lowering only. |
 | `cmake --preset dev` build (MSVC `cl` + Ninja) | No | Yes | `CMakePresets.json` selects `cl`. |
 | MASM fixtures (`tests/cpu/*.asm`) and `cpu_*` tests | No | Yes | Assembled and built by the Windows toolchain. |
-| DXC compilation and rendering (`pixel_aot_warp`, `pixel_aot_hardware`) | No | Yes | Requires Windows SDK / DXC (`dxc.exe`, `dxil.dll`) and D3D12. |
+| DXC compilation and rendering (the `pixel_aot_<family>_warp` and `pixel_aot_<family>_hardware` tests) | No | Yes | Requires Windows SDK / DXC (`dxc.exe`, `dxil.dll`) and D3D12. |
 | D3D12, WARP, and DXR tests (`*_warp`, `*_hardware`) | No | Yes | Covers software WARP and physical GPU checks. |
 | System32 PE export inventory (`tools/pe_inventory.py`) | No | Yes | Uses `ctypes.windll` on Windows. |
 | Standalone GPU check packaging (`tools/package-gpu-check.ps1`) | No | Yes | Builds and smoke-tests the Windows x64 ZIP package. |
 
-`tests/pixel_aot_check.py binary` and `tests/ffx_dispatch_aot_check.py` do not invoke DXC or render pixels; desktop HLSL compilation and readback (`pixel_aot_warp`, `pixel_aot_hardware`) remain Windows-only.
+`tests/pixel_aot_check.py binary` and `tests/ffx_dispatch_aot_check.py` do not invoke DXC or render pixels; desktop HLSL compilation and readback (the `pixel_aot_<family>_warp` and `pixel_aot_<family>_hardware` tests) remain Windows-only.
 
 ## Quick start on macOS
 

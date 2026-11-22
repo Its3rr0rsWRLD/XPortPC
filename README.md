@@ -55,6 +55,8 @@ Work is split into small batches of instruction forms. Each batch adds the lower
 ctest --preset dev --no-tests=error -R '^pixel_' -V
 ```
 
+The shader-draw checks are one CTest test per draw family and adapter, `pixel_aot_<family>_hardware` and `pixel_aot_<family>_warp`, plus `pixel_aot_controls`. `python tests/pixel_aot_check.py --list-families` prints the families; a new draw function is registered in `DRAW_FAMILIES` in `tests/pixel_aot_check.py` and CMake picks it up when it next configures.
+
 Do not add game files, dumps, distribution links or credentials to the repository, issues or pull requests.
 
 ## Hardware reports
