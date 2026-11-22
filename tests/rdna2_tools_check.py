@@ -302,6 +302,39 @@ class TestRdna2Disasm(unittest.TestCase):
             ("004020dc00007c04", "scratch_load_ubyte", "scratch_load_ubyte v4, off, m0"),
             ("104070dc01087d00", "scratch_store_dword", "scratch_store_dword v1, v8, off offset:16"),
             ("e04f74dc00080200", "scratch_store_dwordx2", "scratch_store_dwordx2 off, v[8:9], s2 offset:-32"),
+            ("000050d800000000", "ds_nop", "ds_nop"),
+            ("0000d8d802000018", "ds_read_b32", "ds_read_b32 v24, v2"),
+            ("4000d8d802000018", "ds_read_b32", "ds_read_b32 v24, v2 offset:64"),
+            ("0400e8d802000018", "ds_read_u8", "ds_read_u8 v24, v2 offset:4"),
+            ("1000d8d902000018", "ds_read_b64", "ds_read_b64 v[24:25], v2 offset:16"),
+            ("0000fcdb02000018", "ds_read_b128", "ds_read_b128 v[24:27], v2"),
+            ("0408dcd802000018", "ds_read2_b32", "ds_read2_b32 v[24:25], v2 offset0:4 offset1:8"),
+            ("0102e0d902000018", "ds_read2st64_b64", "ds_read2st64_b64 v[24:27], v2 offset0:1 offset1:2"),
+            ("000034d802080000", "ds_write_b32", "ds_write_b32 v2, v8"),
+            ("800034d802080000", "ds_write_b32", "ds_write_b32 v2, v8 offset:128"),
+            ("040838d802081000", "ds_write2_b32", "ds_write2_b32 v2, v8, v16 offset0:4 offset1:8"),
+            ("20007cdb02080000", "ds_write_b128", "ds_write_b128 v2, v[8:11] offset:32"),
+            ("080000d802080000", "ds_add_u32", "ds_add_u32 v2, v8 offset:8"),
+            ("080082d802080018", "ds_add_rtn_u32", "ds_add_rtn_u32 v24, v2, v8 offset:8 gds"),
+            ("100030d802081000", "ds_mskor_b32", "ds_mskor_b32 v2, v8, v16 offset:16"),
+            ("0102b8d802081018", "ds_wrxchg2_rtn_b32", "ds_wrxchg2_rtn_b32 v[24:25], v2, v8, v16 offset0:1 offset1:2"),
+            ("0000d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2"),
+            ("1b80d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(QUAD_PERM,3,2,1,0)"),
+            ("1f40d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(SWAP,16)"),
+            ("1f1cd4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(REVERSE,8)"),
+            ("5c00d4d802000018", "ds_swizzle_b32", "ds_swizzle_b32 v24, v2 offset:swizzle(BROADCAST,4,2)"),
+            ("0103d4d802000018", "ds_swizzle_b32", 'ds_swizzle_b32 v24, v2 offset:swizzle(BITMASK_PERM,"1100p")'),
+            ("0c00fad800000018", "ds_append", "ds_append v24 offset:12 gds"),
+            ("0000f4d800000018", "ds_consume", "ds_consume v24"),
+            ("0400fed802000018", "ds_ordered_count", "ds_ordered_count v24, v2 offset:4 gds"),
+            ("000062d800000000", "ds_gws_sema_release_all", "ds_gws_sema_release_all gds"),
+            ("080076d802000000", "ds_gws_barrier", "ds_gws_barrier v2 offset:8 gds"),
+            ("0400c8da02080018", "ds_permute_b32", "ds_permute_b32 v24, v2, v8 offset:4"),
+            ("0000ccda02080018", "ds_bpermute_b32", "ds_bpermute_b32 v24, v2, v8"),
+            ("1000c0da00080000", "ds_write_addtid_b32", "ds_write_addtid_b32 v8 offset:16"),
+            ("1000c4da00000018", "ds_read_addtid_b32", "ds_read_addtid_b32 v24 offset:16"),
+            ("200054da02000000", "ds_add_src2_f32", "ds_add_src2_f32 v2 offset:32"),
+            ("0000f8d902080018", "ds_condxchg32_rtn_b64", "ds_condxchg32_rtn_b64 v[24:25], v2, v[8:9]"),
         ]
         for hex_str, expected_op, expected_asm in vectors:
             raw = bytes.fromhex(hex_str)
@@ -911,6 +944,110 @@ class TestRdna2Disasm(unittest.TestCase):
             "scratch_load_dword off, s2 offset:16 lds",
         )
 
+    def test_ds_opcode_table_synthetic_forms(self):
+        """All 154 GFX1013 DS opcodes must decode cleanly and invalid variants keep 8-byte alignment."""
+        from disasm_rdna2 import DS_OPS
+
+        self.assertEqual(len(DS_OPS), 154)
+
+        def fmt_v(reg: int, width: int) -> str:
+            return f"v{reg}" if width == 1 else f"v[{reg}:{reg + width - 1}]"
+
+        for op, (expected_name, vdst_w, has_addr, data0_w, data1_w, offset_mode, gds_mode) in DS_OPS.items():
+            with self.subTest(op=op, name=expected_name):
+                gds = 1 if gds_mode == "gds_only" else 0
+                w0 = 0xd8000000 | (op << 18) | (gds << 17)
+                w1 = (24 << 24) | (16 << 16) | (8 << 8) | 2
+                insns = disasm_rdna2(struct.pack("<2I", w0, w1))
+                self.assertEqual(len(insns), 1)
+                self.assertEqual(insns[0]["opcode"], expected_name)
+                self.assertEqual(insns[0]["length"], 8)
+
+                ops = []
+                if vdst_w:
+                    ops.append(fmt_v(24, vdst_w))
+                if has_addr:
+                    ops.append("v2")
+                if data0_w:
+                    ops.append(fmt_v(8, data0_w))
+                if data1_w:
+                    ops.append(fmt_v(16, data1_w))
+                expected_asm = expected_name
+                if ops:
+                    expected_asm += f" {', '.join(ops)}"
+                if gds:
+                    expected_asm += " gds"
+                self.assertEqual(insns[0]["assembly"], expected_asm)
+                self.assertTrue(is_opcode_recognized(expected_name))
+                self.assertEqual(classify_isa_category(expected_name), "LDS (Local Data Share)")
+
+        # Truncated DS header reports ds_truncated instead of crashing.
+        trunc = disasm_rdna2(struct.pack("<I", 0xd8000000 | (0x36 << 18)))
+        self.assertEqual(len(trunc), 1)
+        self.assertEqual(trunc[0]["opcode"], "ds_truncated")
+        self.assertIn("<truncated>", trunc[0]["assembly"])
+
+        # Unknown DS opcode, gds_only with gds=0, no_gds with gds=1, and ds_nop with non-zero offset
+        # must all consume 8 bytes so following instructions stay aligned.
+        invalid_w0s = [
+            0xd8000000 | (0x16 << 18),
+            0xd8000000 | (0x3f << 18),
+            0xd8000000 | (0xb2 << 18) | (1 << 17),
+            0xd8000000 | (0x14 << 18) | 4,
+        ]
+        for bad_w0 in invalid_w0s:
+            stream = struct.pack("<3I", bad_w0, 0, 0xbf810000)
+            decoded = disasm_rdna2(stream)
+            self.assertEqual([r["length"] for r in decoded], [8, 4])
+            self.assertEqual(decoded[1]["opcode"], "s_endpgm")
+
+    def test_ds_distinguishes_offsets_swizzle_and_gds(self):
+        """DS single offsets, dual offset0/offset1 pairs, swizzle patterns, and gds must stay distinct."""
+        w1_read = (24 << 24) | 2
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", 0xd8000000 | (0x36 << 18) | 8721, w1_read))[0]["assembly"],
+            "ds_read_b32 v24, v2 offset:8721",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", 0xd8000000 | (0x36 << 18) | (1 << 17) | 64, w1_read))[0]["assembly"],
+            "ds_read_b32 v24, v2 offset:64 gds",
+        )
+
+        # Dual offsets emit non-zero offset0 / offset1 independently.
+        dual_base = 0xd8000000 | (0x37 << 18)
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | 17, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset0:17",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | (34 << 8), w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset1:34",
+        )
+        self.assertEqual(
+            disasm_rdna2(struct.pack("<2I", dual_base | (34 << 8) | 17, w1_read))[0]["assembly"],
+            "ds_read2_b32 v[24:25], v2 offset0:17 offset1:34",
+        )
+
+        # Swizzle modes: omitted zero, QUAD_PERM, SWAP, REVERSE, BROADCAST, BITMASK_PERM, decimal fallback.
+        swz_base = 0xd8000000 | (0x35 << 18)
+        for imm, suffix in (
+            (0x0000, ""),
+            (0x80e4, " offset:swizzle(QUAD_PERM,0,1,2,3)"),
+            (0x041f, " offset:swizzle(SWAP,1)"),
+            (0x1c1f, " offset:swizzle(REVERSE,8)"),
+            (0x0058, " offset:swizzle(BROADCAST,8,2)"),
+            (0x1234, ' offset:swizzle(BITMASK_PERM,"10i01")'),
+            (0xc0e4, " offset:49380"),
+        ):
+            self.assertEqual(
+                disasm_rdna2(struct.pack("<2I", swz_base | imm, w1_read))[0]["assembly"],
+                f"ds_swizzle_b32 v24, v2{suffix}",
+            )
+
     def test_cli_hex_entry_point(self):
         script = Path(__file__).resolve().parents[1] / "tools" / "disasm_rdna2.py"
         res = subprocess.run(
@@ -1031,6 +1168,35 @@ class TestRdna2Disasm(unittest.TestCase):
             "v_add_f32_e64 v3, v1, v2",
             "v_cndmask_b32_e64 v14, 0, 1.0, vcc_lo",
             "v_add_co_u32 v1, vcc_lo, v2, v3",
+            "ds_nop",
+            "ds_read_b32 v24, v2",
+            "ds_read_b32 v24, v2 offset:64",
+            "ds_read_b64 v[24:25], v2 offset:16",
+            "ds_read_b128 v[24:27], v2",
+            "ds_read2_b32 v[24:25], v2 offset0:4 offset1:8",
+            "ds_read2st64_b64 v[24:27], v2 offset0:1 offset1:2",
+            "ds_write_b32 v2, v8 offset:128",
+            "ds_write2_b32 v2, v8, v16 offset0:4 offset1:8",
+            "ds_add_rtn_u32 v24, v2, v8 offset:8 gds",
+            "ds_mskor_b32 v2, v8, v16 offset:16",
+            "ds_wrxchg2_rtn_b32 v[24:25], v2, v8, v16 offset0:1 offset1:2",
+            "ds_swizzle_b32 v24, v2",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(QUAD_PERM,3,2,1,0)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(SWAP,16)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(REVERSE,8)",
+            "ds_swizzle_b32 v24, v2 offset:swizzle(BROADCAST,4,2)",
+            'ds_swizzle_b32 v24, v2 offset:swizzle(BITMASK_PERM,"1100p")',
+            "ds_append v24 offset:12 gds",
+            "ds_consume v24",
+            "ds_ordered_count v24, v2 offset:4 gds",
+            "ds_gws_sema_release_all gds",
+            "ds_gws_barrier v2 offset:8 gds",
+            "ds_permute_b32 v24, v2, v8 offset:4",
+            "ds_bpermute_b32 v24, v2, v8",
+            "ds_write_addtid_b32 v8 offset:16",
+            "ds_read_addtid_b32 v24 offset:16",
+            "ds_add_src2_f32 v2 offset:32",
+            "ds_condxchg32_rtn_b64 v[24:25], v2, v[8:9]",
             "s_endpgm",
         ]
 
@@ -1085,7 +1251,7 @@ class TestRdna2Disasm(unittest.TestCase):
                 rdna2_op, llvm_op,
                 f"Instruction {i}: disasm_rdna2 opcode '{rdna2_op}' does not match LLVM opcode '{llvm_op}'"
             )
-            if orig_op.startswith(("v_", "exp", "image_", "buffer_", "tbuffer_", "flat_", "global_", "scratch_")):
+            if orig_op.startswith(("v_", "exp", "image_", "buffer_", "tbuffer_", "flat_", "global_", "scratch_", "ds_")):
                 self.assertEqual(
                     " ".join(rdna2_rec["assembly"].lower().split()),
                     " ".join(llvm_line.lower().split()),
