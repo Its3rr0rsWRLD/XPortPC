@@ -6,12 +6,12 @@
 <meta name="color-scheme" content="light dark">
 <title>XPortPC status</title>
 <link rel="icon" href="data:,">
-<meta name="description" content="What works and what does not yet in XPortPC, which runs Xbox Series X|S programs on Windows PCs.">
+<meta name="description" content="How many instructions XPortPC handles so far, across the Xbox Series X|S graphics chip and the x64 CPU.">
 <style>
 :root {
   color-scheme: light;
   --paper: #f7f7f5; --surface: #ffffff; --ink: #1c1e22; --ink-2: #565b64; --rule: #dcdfe3; --rule-2: #c3c7cd;
-  --accent: #2f4a8a; --accent-soft: #e4e9f3; --meter: #e3e5e8;
+  --accent: #2f4a8a; --meter: #e3e5e8;
   --serif: "Iowan Old Style", "Sitka Text", Charter, "Bitstream Charter", Cambria, Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --code: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
@@ -21,7 +21,7 @@
   :root {
     color-scheme: dark;
     --paper: #1d1f23; --surface: #25282d; --ink: #e9e7e2; --ink-2: #a5a9b0; --rule: #34383f; --rule-2: #4a4f57;
-    --accent: #a9b9ea; --accent-soft: #2d3548; --meter: #34383f;
+    --accent: #a9b9ea; --meter: #34383f;
   }
 }
 @media (prefers-reduced-motion: reduce) { :root { --open: 0ms; } }
@@ -29,98 +29,37 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--paper); color: var(--ink); font: 1.0625rem/1.6 var(--sans);
-  font-variant-numeric: lining-nums; }
-.stages, .unlock span, .measures dt, .row .c, dl.run dd { font-variant-numeric: tabular-nums lining-nums; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 1.0625rem/1.6 var(--sans); font-variant-numeric: lining-nums; }
 a { color: var(--accent); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
 a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
 p { margin: 0; }
-h1, h2, h3 { margin: 0; font-family: var(--serif); font-weight: 400; color: var(--ink); }
+h1, h2, h3 { margin: 0; font-weight: 400; }
 code, .code { font-family: var(--code); font-size: 0.875em; }
-.quiet { color: var(--ink-2); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.num { font-variant-numeric: tabular-nums lining-nums; }
 
-.page { max-width: 70rem; margin: 0 auto; padding: 0 1.25rem 5rem; }
-@media (min-width: 48rem) { .page { padding: 0 2.5rem 6rem; } }
+.page { max-width: 60rem; margin: 0 auto; padding: 0 1.25rem 3rem; }
+@media (min-width: 48rem) { .page { padding: 0 2.5rem 4rem; } }
 
-/* Masthead */
-.mast { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 2rem; padding: 1.5rem 0 0; }
-.mast .name { font-family: var(--serif); font-size: 1.375rem; letter-spacing: 0.005em; }
-.mast .what { color: var(--ink-2); font-size: 0.9375rem; }
+.mast { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: 1.5rem 0 0; }
+.mast .name { font-family: var(--serif); font-size: 1.375rem; }
+.mast a { font-size: 0.9375rem; }
 
-/* Notice */
-#notice { margin: 2rem 0 0; padding: 0.875rem 1.125rem; background: var(--surface); border-left: 3px solid var(--accent); max-width: 42rem; }
+/* The figure */
+.figure { padding: 4.5rem 0 3.5rem; }
+.figure h1 { font-size: 1rem; font-weight: 600; }
+.figure .big { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.25rem 2rem; margin-top: 0.5rem; }
+.figure .ratio { font-family: var(--serif); font-size: clamp(3.25rem, 13vw, 6.5rem); line-height: 1; letter-spacing: -0.02em; }
+.figure .ratio span { color: var(--ink-2); font-size: 0.5em; letter-spacing: 0; }
+.figure .pct { font-family: var(--serif); font-size: clamp(2rem, 7vw, 3.5rem); line-height: 1; }
+.bar { height: 6px; border-radius: 3px; background: var(--meter); overflow: hidden; margin-top: 1.75rem; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.split { display: flex; gap: 1.5rem; margin-top: 0.75rem; font-size: 0.9375rem; color: var(--ink-2); }
+.split b { color: var(--ink); font-weight: 600; }
+.figure .missing { margin-top: 0.75rem; color: var(--ink-2); }
 
-/* Hero */
-.hero { padding: 4.5rem 0 4rem; max-width: 52rem; }
-.hero h1 { font-size: clamp(2.125rem, 6.2vw, 3.875rem); line-height: 1.08; letter-spacing: -0.012em; text-wrap: balance; }
-.hero h1 .n { white-space: nowrap; }
-.hero .lede { margin-top: 1.75rem; max-width: 38rem; font-size: 1.125rem; line-height: 1.65; }
-.hero .when { margin-top: 1.25rem; color: var(--ink-2); font-size: 0.9375rem; max-width: 38rem; }
-
-/* Sections: title column + content column on wide screens */
-.sec { padding: 3.25rem 0; border-top: 1px solid var(--rule); display: grid; gap: 1.25rem 3rem; }
-.sec > header h2 { font-size: 1.625rem; line-height: 1.2; }
-.sec > header p { margin-top: 0.625rem; color: var(--ink-2); font-size: 0.9375rem; max-width: 34rem; }
-@media (min-width: 64rem) {
-  .sec { grid-template-columns: 16rem minmax(0, 1fr); }
-  .sec > header p { max-width: 16rem; }
-}
-.body { min-width: 0; }
-.empty { color: var(--ink-2); }
-
-/* State marks: shape carries the meaning, colour only reinforces it */
-.mark { flex: none; width: 1.125rem; height: 1.125rem; display: inline-block; vertical-align: -0.2em; }
-.mark circle, .mark path { vector-effect: non-scaling-stroke; }
-
-/* Road */
-.road { list-style: none; margin: 0; padding: 0; }
-.road li { display: grid; grid-template-columns: 1.125rem minmax(0, 1fr); gap: 0.125rem 0.875rem; padding: 0.875rem 0; border-bottom: 1px solid var(--rule); }
-.road li:first-child { padding-top: 0; }
-.road .mark { margin-top: 0.25rem; }
-.road .t { font-weight: 600; }
-.road .s { display: block; color: var(--ink-2); font-weight: 400; font-size: 0.9375rem; }
-.road .note { grid-column: 2; color: var(--ink-2); font-size: 0.9375rem; max-width: 40rem; }
-@media (min-width: 48rem) {
-  .road li { grid-template-columns: 1.125rem 15rem minmax(0, 1fr); }
-  .road .note { grid-column: 3; }
-}
-
-/* Stage table */
-table.stages { width: 100%; border-collapse: collapse; }
-.stages th, .stages td { padding: 0.625rem 0 0.625rem 1rem; text-align: right; border-bottom: 1px solid var(--rule); vertical-align: baseline; font-weight: 400; }
-.stages th:first-child { padding-left: 0; text-align: left; }
-.stages thead th { color: var(--ink-2); font-size: 0.875rem; line-height: 1.35; vertical-align: bottom; border-bottom-color: var(--rule-2); }
-.stages tbody th { font-weight: 600; }
-.stages tbody th small { display: block; font-weight: 400; color: var(--ink-2); font-size: 0.8125rem; }
-.stages td.last { font-weight: 600; }
-@media (max-width: 40rem) {
-  .stages thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .stages, .stages tbody, .stages tr, .stages th, .stages td { display: block; }
-  .stages tr { padding: 0.75rem 0; border-bottom: 1px solid var(--rule); }
-  .stages th, .stages td { border: 0; padding: 0.0625rem 0; text-align: left; display: flex; justify-content: space-between; gap: 1rem; }
-  .stages tbody th { display: block; margin-bottom: 0.25rem; }
-  .stages td::before { content: attr(data-l); color: var(--ink-2); font-weight: 400; }
-}
-
-/* Unlock list */
-.unlock { list-style: none; margin: 0; padding: 0; }
-.unlock li { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: 0.625rem 0; border-bottom: 1px solid var(--rule); }
-.unlock li:first-child { padding-top: 0; }
-.unlock code { overflow-wrap: anywhere; }
-.unlock span { color: var(--ink-2); white-space: nowrap; font-size: 0.9375rem; }
-
-/* Other measures */
-.measures { margin: 0; display: grid; gap: 1.75rem; }
-@media (min-width: 52rem) { .measures { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2.5rem; } }
-.measures dt { font-family: var(--serif); font-size: 2.125rem; line-height: 1.1; }
-.measures dt small { font-family: var(--sans); font-size: 0.9375rem; color: var(--ink-2); margin-left: 0.375rem; }
-.measures dd { margin: 0.5rem 0 0; font-size: 0.9375rem; max-width: 22rem; }
-.measures dd b { display: block; font-weight: 600; }
-.measures dd span { color: var(--ink-2); }
-
-/* Instruction forms */
+/* Filter */
 .tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; margin-bottom: 1.5rem; }
 .filter { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 999px; padding: 0.1875rem; margin: 0; }
 .filter legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -131,9 +70,11 @@ table.stages { width: 100%; border-collapse: collapse; }
 .filter input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 .key { display: flex; gap: 1.25rem; font-size: 0.875rem; color: var(--ink-2); }
 .key span { display: inline-flex; align-items: center; gap: 0.4375rem; }
+.mark { flex: none; width: 1.125rem; height: 1.125rem; display: inline-block; }
 
+/* Groups */
 .family + .family { margin-top: 2.25rem; }
-.family h3 { font-size: 1.1875rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--rule-2); }
+.family h2 { font-family: var(--serif); font-size: 1.1875rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--rule-2); }
 .groups { list-style: none; margin: 0; padding: 0; }
 .groups > li { border-bottom: 1px solid var(--rule); }
 .row { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; align-items: baseline;
@@ -145,42 +86,34 @@ div.row { cursor: default; }
 .row[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .row .g { font-weight: 600; }
 .row .d { color: var(--ink-2); font-size: 0.9375rem; }
-.row .c { text-align: right; white-space: nowrap; font-size: 0.9375rem; }
+.row .c { text-align: right; white-space: nowrap; font-size: 0.9375rem; font-variant-numeric: tabular-nums lining-nums; }
 .row .c b { font-weight: 600; }
 .row .meter { grid-column: 2 / -1; height: 3px; background: var(--meter); margin-top: 0.375rem; border-radius: 2px; overflow: hidden; }
 .row .meter i { display: block; height: 100%; background: var(--accent); }
-@media (max-width: 36rem) {
-  .row { grid-template-columns: 1rem minmax(0, 1fr) auto; }
-  .row .d { grid-column: 2 / -1; grid-row: 2; }
-  .row .meter { grid-row: 3; }
-}
 
 .panel { display: grid; grid-template-rows: 0fr; opacity: 0; visibility: hidden;
   transition: grid-template-rows var(--open) cubic-bezier(0.2, 0.7, 0.2, 1), opacity var(--open) ease-out, visibility 0s linear var(--open); }
 .panel > div { min-height: 0; overflow: hidden; }
 .open > .panel { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition-delay: 0s; }
-.forms { list-style: none; margin: 0; padding: 0.25rem 0.25rem 1.25rem 2rem; columns: 15rem auto; column-gap: 2rem; }
+.forms { list-style: none; margin: 0; padding: 0.25rem 0.25rem 1.25rem 2rem; columns: 13rem auto; column-gap: 2rem; }
 .forms li { display: flex; align-items: center; gap: 0.5rem; padding: 0.1875rem 0; break-inside: avoid; font-size: 0.9375rem; }
 .forms li.no code { color: var(--ink-2); }
 .forms code { overflow-wrap: anywhere; }
 .none { padding: 0.25rem 0.25rem 1.25rem 2rem; color: var(--ink-2); font-size: 0.9375rem; }
-.legacy { margin-top: 1rem; font-size: 0.9375rem; color: var(--ink-2); }
 
-/* Test run */
-dl.run { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.5rem 2rem; max-width: 36rem; }
-dl.run dt { color: var(--ink-2); }
-dl.run dd { margin: 0; }
-
-footer { border-top: 1px solid var(--rule); padding-top: 2rem; color: var(--ink-2); font-size: 0.9375rem; max-width: 40rem; }
-footer p + p { margin-top: 0.5rem; }
-footer strong { color: var(--ink); font-weight: 600; }
+.stages { margin-top: 3.5rem; }
+.stages h2 { font-family: var(--serif); font-size: 1.1875rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--rule-2); }
+.stages table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+.stages th, .stages td { padding: 0.7rem 0.5rem 0.7rem 0; text-align: right; border-bottom: 1px solid var(--rule); }
+.stages th:first-child, .stages td:first-child { text-align: left; }
+.stages thead th { font-weight: 400; font-size: 0.8125rem; color: var(--ink-2); }
+.stages td.off { color: var(--ink-2); }
+footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 0.875rem;
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.25rem 2rem; }
 </style>
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
-  <symbol id="m-done" viewBox="0 0 18 18"><circle cx="9" cy="9" r="8" fill="var(--accent)"/><path d="M5.2 9.3l2.5 2.4 5-5.2" fill="none" stroke="var(--paper)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="m-part" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.25" fill="none" stroke="var(--accent)" stroke-width="1.5"/><path d="M9 1.75a7.25 7.25 0 0 1 0 14.5z" fill="var(--accent)"/></symbol>
-  <symbol id="m-todo" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.25" fill="none" stroke="var(--ink-2)" stroke-width="1.5"/></symbol>
   <symbol id="m-yes" viewBox="0 0 18 18"><path d="M3.5 9.5l3.6 3.4 7.4-7.8" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="m-no" viewBox="0 0 18 18"><path d="M5 9h8" fill="none" stroke="var(--ink-2)" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="chev" viewBox="0 0 12 12"><path d="M4 2.5L7.5 6 4 9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -188,83 +121,45 @@ footer strong { color: var(--ink); font-weight: 600; }
 <div class="page">
 <header class="mast">
   <p class="name">XPortPC</p>
-  <p class="what">Runs Xbox Series X|S programs on Windows PCs. <a href="https://github.com/Its3rr0rsWRLD/XPortPC">Source on GitHub</a></p>
+  <a href="https://github.com/Its3rr0rsWRLD/XPortPC">GitHub</a>
 </header>
 
-<p id="notice" role="status" hidden></p>
-
 <main>
-<div class="hero">
-  <h1 id="headline">Loading the latest numbers.</h1>
-  <p class="lede" id="lede" hidden></p>
-  <p class="when" id="when" hidden></p>
-</div>
-
-<section class="sec" aria-labelledby="h-road">
-  <header><h2 id="h-road">Before a game can run</h2><p>Every part below has to work before a title runs. This lists results, not work in progress.</p></header>
-  <div class="body"><ol class="road" id="road"><li class="empty" style="display:block">Not available.</li></ol></div>
-</section>
-
-<section class="sec" aria-labelledby="h-stages">
-  <header><h2 id="h-stages">Shaders, stage by stage</h2><p>Each stage of the real shaders counted above. Only supported stages can convert anything today, so the others show 0.</p></header>
-  <div class="body">
-    <table class="stages" id="stages" hidden>
-      <thead><tr><th scope="col">Stage</th><th scope="col">Shaders</th><th scope="col">Every instruction tested</th><th scope="col">And no branches</th><th scope="col">Convertible today</th></tr></thead>
-      <tbody id="stages-body"></tbody>
-    </table>
-    <p class="empty" id="stages-empty">Not available.</p>
+<section class="figure" aria-labelledby="h-done">
+  <h1 id="h-done">Instructions done</h1>
+  <div id="figure" hidden>
+    <div class="big"><p class="ratio num" id="ratio"></p><p class="pct num" id="pct"></p></div>
+    <div class="bar" aria-hidden="true"><i id="bar"></i></div>
+    <p class="split num"><span>Done <b id="n-done"></b></span><span>Missing <b id="n-missing"></b></span></p>
   </div>
+  <p class="missing" id="no-figure">Loading.</p>
 </section>
 
-<section class="sec" aria-labelledby="h-unlock">
-  <header><h2 id="h-unlock">What would unlock more</h2><p>Each instruction form here is the only untested one in this many pixel shaders. A test for it would unlock them, up to the branch limit.</p></header>
-  <div class="body"><ol class="unlock" id="unlock"><li class="empty">Not available.</li></ol></div>
-</section>
-
-<section class="sec" aria-labelledby="h-measures">
-  <header><h2 id="h-measures">Other measures</h2><p>Each counts something different. None of them says how close a game is to running.</p></header>
-  <div class="body">
-    <dl class="measures">
-      <div><dt id="f1">&ndash;</dt><dd><b>Instruction forms tested</b><span>Of every form in the graphics chip&rsquo;s reference list, counted once each.</span></dd></div>
-      <div><dt id="f2">&ndash;</dt><dd><b>Instructions with a tested form</b><span>Counted per instruction across all real shaders. Common instructions repeat thousands of times, so this reads high.</span></dd></div>
-      <div><dt id="f3">&ndash;</dt><dd><b>CPU instruction forms tested</b><span>Of the x64 forms in the Zen 2 reference list.</span></dd></div>
-    </dl>
+<section aria-label="Every instruction, by group" id="list" hidden>
+  <div class="tools">
+    <fieldset class="filter" id="filter">
+      <legend>Show</legend>
+      <label><input type="radio" name="show" value="all" checked><span>All</span></label>
+      <label><input type="radio" name="show" value="yes"><span>Done</span></label>
+      <label><input type="radio" name="show" value="no"><span>Missing</span></label>
+    </fieldset>
+    <p class="key" aria-hidden="true"><span><svg class="mark"><use href="#m-yes"/></svg>Done</span><span><svg class="mark"><use href="#m-no"/></svg>Missing</span></p>
   </div>
+  <div id="families"></div>
 </section>
 
-<section class="sec" aria-labelledby="h-forms">
-  <header><h2 id="h-forms">Instruction forms</h2><p id="forms-intro">The graphics chip&rsquo;s instructions, grouped by encoding. A form is tested when a passing test converts a program that uses it. Open a group to see each form.</p></header>
-  <div class="body">
-    <div class="tools" id="tools" hidden>
-      <fieldset class="filter" id="filter">
-        <legend>Show forms</legend>
-        <label><input type="radio" name="show" value="all" checked><span>All</span></label>
-        <label><input type="radio" name="show" value="yes"><span>Tested</span></label>
-        <label><input type="radio" name="show" value="no"><span>Not tested yet</span></label>
-      </fieldset>
-      <p class="key" aria-hidden="true"><span><svg class="mark"><use href="#m-yes"/></svg>Tested</span><span><svg class="mark"><use href="#m-no"/></svg>Not tested yet</span></p>
-    </div>
-    <div id="families"><p class="empty">Not available.</p></div>
-    <p class="legacy" id="legacy" hidden>This status file has group totals only. The per-form list appears after the next update.</p>
-  </div>
-</section>
-
-<section class="sec" aria-labelledby="h-run">
-  <header><h2 id="h-run">Test run</h2><p>Where these numbers come from.</p></header>
-  <div class="body">
-    <dl class="run">
-      <dt>Results</dt><dd id="t-pass">Not available</dd>
-      <dt>Graphics adapters</dt><dd id="t-adapters">Not available</dd>
-      <dt>Run at</dt><dd id="t-time">Not available</dd>
-      <dt>Commit</dt><dd id="t-commit">Not available</dd>
-    </dl>
-  </div>
+<section class="stages" aria-labelledby="h-stages" id="stages" hidden>
+  <h2 id="h-stages">Shaders, stage by stage</h2>
+  <table>
+    <thead><tr><th scope="col">Stage</th><th scope="col">Shaders</th><th scope="col">All instructions done</th><th scope="col">Convertible today, at most</th></tr></thead>
+    <tbody id="stage-rows"></tbody>
+  </table>
 </section>
 </main>
 
 <footer>
-  <p><strong>Never includes games.</strong> The tests build their own fixtures; no console, SDK or game files are needed or shipped.</p>
-  <p>MIT licensed, based on <a href="https://github.com/R0Y00/Xbox2Windows">Xbox2Windows</a>.</p>
+  <p id="updated"></p>
+  <p>Never includes games &middot; MIT &middot; based on <a href="https://github.com/R0Y00/Xbox2Windows">Xbox2Windows</a></p>
 </footer>
 </div>
 <script>
@@ -272,28 +167,13 @@ footer strong { color: var(--ink); font-weight: 600; }
   "use strict";
   var REPO = "https://github.com/Its3rr0rsWRLD/XPortPC";
   var STALE_DAYS = 14;
-  var STATE = { done: "Done", partial: "Partial", not_started: "Not started" };
-  var MARK = { done: "m-done", partial: "m-part", not_started: "m-todo" };
-  var STAGE_NAME = { pixel: "Pixel", vertex: "Vertex", compute: "Compute", other: "Other" };
-  var ROAD = [
-    { name: "CPU code", match: ["CPU patch layer"] },
-    { name: "System libraries", match: ["System libraries"] },
-    { name: "Console Direct3D 12", match: ["Console Direct3D 12"] },
-    { name: "Shaders", match: ["Shader converter"] },
-    { name: "Memory", match: ["GPU memory"] },
-    { name: "Launcher", match: ["Native launcher"] },
-    { name: "Running a title", match: ["Running a title"] }
-  ];
-  // Encoding groups by what they do, in plain words. Unknown groups land in "Other".
+  // GPU encoding groups by what they do. Unknown groups land in "Other".
   var FAMILIES = [
-    ["Vector math", [["VOP1", "One operand"], ["VOP2", "Two operands"], ["VOP3", "Three operands, or the long form of the others"],
-      ["VOP3P", "Two 16-bit values at once"], ["VOPC", "Comparisons"], ["SDWA", "On bytes or halves of a register"],
-      ["DPP16", "Sharing data between neighbouring lanes"], ["DPP8", "Sharing data between any 8 lanes"]]],
-    ["Scalar and control", [["SOP1", "One operand"], ["SOP2", "Two operands"], ["SOPK", "With a 16-bit constant"],
-      ["SOPC", "Comparisons"], ["SOPP", "Branches, waits and program end"]]],
-    ["Memory", [["SMEM", "Scalar loads"], ["MUBUF", "Buffer loads and stores"], ["MTBUF", "Typed buffer loads and stores"],
-      ["FLAT", "Global, scratch and flat memory"], ["DS", "On-chip shared memory"], ["MIMG", "Textures and images"]]],
-    ["Pixel input and output", [["VINTRP", "Interpolating pixel inputs"], ["EXP", "Writing results out"]]]
+    ["Vector math", [["VOP1", "One operand"], ["VOP2", "Two operands"], ["VOP3", "Three operands"], ["VOP3P", "Packed math"],
+      ["VOPC", "Comparisons"], ["SDWA", "Sub-register math"], ["DPP16", "Lane sharing"], ["DPP8", "8-lane sharing"]]],
+    ["Scalar", [["SOP1", "One operand"], ["SOP2", "Two operands"], ["SOPK", "With constant"], ["SOPC", "Comparisons"], ["SOPP", "Program control"]]],
+    ["Memory", [["SMEM", "Scalar loads"], ["MUBUF", "Buffers"], ["MTBUF", "Typed buffers"], ["FLAT", "Global memory"], ["DS", "Shared memory"], ["MIMG", "Textures"]]],
+    ["Pixel input and output", [["VINTRP", "Interpolation"], ["EXP", "Output"]]]
   ];
   var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   var $ = function (id) { return document.getElementById(id); };
@@ -310,164 +190,84 @@ footer strong { color: var(--ink); font-weight: 600; }
     return tpl.content.firstChild;
   }
   function isNum() { return Array.prototype.every.call(arguments, function (v) { return typeof v === "number" && isFinite(v); }); }
-  function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + "%" : "n/a"; }
+  function pct(a, b) { return (100 * a / b).toFixed(1) + "%"; }
   function day(iso) {
     var d = new Date(iso);
     return isNaN(d) ? String(iso) : d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear();
   }
-  function stamp(iso) {
-    var d = new Date(iso);
-    return isNaN(d) ? String(iso) : day(iso) + ", " + d.toISOString().slice(11, 16) + " UTC";
-  }
-  function notice(msg) { var n = $("notice"); n.textContent = msg; n.hidden = false; }
 
-  function hero(s) {
-    var sup = Array.isArray(s.stages_supported) ? s.stages_supported : [];
-    var px = s.corpus && s.corpus.stages && s.corpus.stages.pixel;
-    var h = $("headline"), lede = $("lede");
-    if (!px || !isNum(px.shaders, px.all_covered, px.translatable_bound)) {
-      h.textContent = "Per-shader numbers are not in this status file yet.";
-      lede.textContent = "The measures further down still apply.";
-    } else if (sup.indexOf("pixel") < 0) {
-      h.textContent = "No real pixel shader can be converted yet.";
-      lede.textContent = "The converter does not support the pixel stage yet.";
-    } else {
-      var n = px.translatable_bound;
-      h.textContent = "";
-      h.appendChild(document.createTextNode("Up to "));
-      h.appendChild(el("span", "n", nf.format(n) + " of " + nf.format(px.shaders)));
-      h.appendChild(document.createTextNode(" real pixel shaders could be converted today."));
-      var total = isNum(s.corpus.shaders) ? "The " + nf.format(s.corpus.shaders) + " real shaders come from open-source projects, compiled for the Series X|S graphics chip (gfx1013). " : "";
-      lede.textContent = total + "These " + nf.format(n) + " (" + pct(n, px.shaders) + " of pixel shaders) have a passing test for every instruction they use and no branches or exec-mask changes. It is an upper bound, not a promise: resource bindings and the rest of the pipeline still have to work.";
+  function figure(s) {
+    var g = s.gfx1013 || {}, x = s.x64 || {};
+    if (!isNum(g.forms_covered, g.forms_total, x.covered, x.total) || g.forms_total + x.total <= 0) {
+      $("no-figure").textContent = "Not available in this status file.";
+      return;
     }
-    lede.hidden = false;
+    var done = g.forms_covered + x.covered, total = g.forms_total + x.total;
+    var r = $("ratio"); r.textContent = nf.format(done); r.appendChild(el("span", "", " / " + nf.format(total)));
+    r.setAttribute("aria-label", nf.format(done) + " of " + nf.format(total));
+    $("pct").textContent = pct(done, total);
+    $("bar").style.width = (100 * done / total) + "%";
+    $("n-done").textContent = nf.format(done);
+    $("n-missing").textContent = nf.format(total - done);
+    $("figure").hidden = false; $("no-figure").hidden = true;
   }
 
-  function when(s) {
-    var t = s.tests || {}, c = s.commit || {}, at = t.run_at || c.time, w = $("when"), bits = [];
-    var title = Array.isArray(s.parts) && s.parts.filter(function (p) { return p.name.indexOf("Running a title") === 0; })[0];
-    if (title && title.state !== "done") bits.push("No game runs yet.");
-    if (at) bits.push("Numbers from the test run on " + day(at) + (isNum(t.passed) ? ", " + nf.format(t.passed) + " tests passing." : "."));
-    if (!bits.length) return;
-    w.textContent = bits.join(" "); w.hidden = false;
-  }
-
-  function road(s) {
-    if (!Array.isArray(s.parts) || !s.parts.length) return;
-    var ol = $("road"), any = false;
-    ROAD.forEach(function (r) {
-      var ps = s.parts.filter(function (p) { return r.match.some(function (m) { return p.name.indexOf(m) === 0; }); });
-      if (!ps.length) return;
-      var st = ps.every(function (p) { return p.state === "done"; }) ? "done"
-        : ps.every(function (p) { return p.state === "not_started"; }) ? "not_started" : "partial";
-      var note = ps.length === 1 ? ps[0].note : ps.map(function (p) {
-        return p.name.replace(/^Shader converter: /, "").replace(/^./, function (ch) { return ch.toUpperCase(); }) + ": " + (STATE[p.state] || "").toLowerCase() + ". " + p.note;
-      }).join(" ");
-      if (!any) { ol.textContent = ""; any = true; }
-      var li = el("li");
-      li.appendChild(mark(MARK[st]));
-      var t = el("p", "t", r.name); t.appendChild(el("span", "s", STATE[st])); li.appendChild(t);
-      li.appendChild(el("p", "note", note.replace(/ in the figures above\./, " in the sections on this page.")));
-      ol.appendChild(li);
-    });
-  }
-
-  function stages(s) {
-    var sup = Array.isArray(s.stages_supported) ? s.stages_supported : [];
-    if (!s.corpus || !s.corpus.stages) return;
-    var body = $("stages-body"), rows = 0;
-    ["pixel", "vertex", "compute", "other"].forEach(function (k) {
-      var st = s.corpus.stages[k];
-      if (!st || !isNum(st.shaders, st.all_covered, st.translatable_bound)) return;
-      var ok = sup.indexOf(k) >= 0, tr = el("tr"), th = el("th", "", STAGE_NAME[k]);
-      th.setAttribute("scope", "row");
-      if (!ok) th.appendChild(el("small", "", "Not supported yet"));
-      tr.appendChild(th);
-      [["Shaders", st.shaders], ["Every instruction tested", st.all_covered], ["And no branches", st.translatable_bound]].forEach(function (c) {
-        var td = el("td", "", nf.format(c[1])); td.setAttribute("data-l", c[0]); tr.appendChild(td);
-      });
-      var last = el("td", "last", ok ? "up to " + nf.format(st.translatable_bound) : "0");
-      last.setAttribute("data-l", "Convertible today"); tr.appendChild(last);
-      body.appendChild(tr); rows++;
-    });
-    if (rows) { $("stages").hidden = false; $("stages-empty").hidden = true; }
-  }
-
-  function unlock(s) {
-    var list = s.corpus && Array.isArray(s.corpus.blocking_forms) ? s.corpus.blocking_forms.filter(function (b) { return b && typeof b.form === "string" && isNum(b.shaders); }) : [];
-    if (!list.length) return;
-    var ol = $("unlock"); ol.textContent = "";
-    list.forEach(function (b) {
-      var li = el("li"); li.appendChild(el("code", "", b.form));
-      li.appendChild(el("span", "", nf.format(b.shaders) + (b.shaders === 1 ? " shader" : " shaders")));
-      ol.appendChild(li);
-    });
-  }
-
-  function measures(s) {
-    var g = s.gfx1013 || {};
-    function set(id, big, small) { var d = $(id); d.textContent = big; if (small) d.appendChild(el("small", "", small)); }
-    if (isNum(g.forms_covered, g.forms_total) && g.forms_total > 0)
-      set("f1", nf.format(g.forms_covered), "of " + nf.format(g.forms_total) + ", " + pct(g.forms_covered, g.forms_total));
-    var up = s.corpus && isNum(s.corpus.uses_percent) ? s.corpus.uses_percent : g.uses_percent;
-    if (isNum(up)) set("f2", up.toFixed(1) + "%");
-    if (s.x64 && isNum(s.x64.covered, s.x64.total) && s.x64.total > 0)
-      set("f3", nf.format(s.x64.covered), "of " + nf.format(s.x64.total) + ", " + pct(s.x64.covered, s.x64.total));
-  }
-
-  function forms(s) {
-    var g = s.gfx1013 || {};
-    var groups = Array.isArray(g.groups) ? g.groups.filter(function (x) { return x && typeof x.name === "string" && isNum(x.covered, x.total) && x.total > 0; }) : [];
-    if (!groups.length) return;
-    var list = Array.isArray(g.forms) ? g.forms.filter(function (f) { return f && typeof f.name === "string" && typeof f.group === "string"; }) : null;
+  function list(s) {
+    var g = s.gfx1013 || {}, x = s.x64 || {};
+    var groups = Array.isArray(g.groups) ? g.groups.filter(function (v) { return v && typeof v.name === "string" && isNum(v.covered, v.total) && v.total > 0; }) : [];
     var byGroup = {};
-    if (list) list.forEach(function (f) { (byGroup[f.group] = byGroup[f.group] || []).push(f); });
-    var have = {}; groups.forEach(function (x) { have[x.name] = x; });
-    var fams = FAMILIES.map(function (f) {
-      return [f[0], f[1].filter(function (m) { return have[m[0]]; }).map(function (m) { var x = have[m[0]]; delete have[m[0]]; return [x, m[1]]; })];
+    if (Array.isArray(g.forms)) g.forms.forEach(function (f) {
+      if (f && typeof f.name === "string" && typeof f.group === "string") (byGroup[f.group] = byGroup[f.group] || []).push(f);
     });
-    var rest = Object.keys(have).sort().map(function (k) { return [have[k], ""]; });
+    var have = {}; groups.forEach(function (v) { have[v.name] = v; });
+    var fams = FAMILIES.map(function (f) {
+      return [f[0], f[1].filter(function (m) { return have[m[0]]; }).map(function (m) { var v = have[m[0]]; delete have[m[0]]; return [v, m[1], byGroup[v.name]]; })];
+    });
+    var rest = Object.keys(have).sort().map(function (k) { return [have[k], "", byGroup[k]]; });
     if (rest.length) fams.push(["Other", rest]);
+    if (isNum(x.covered, x.total) && x.total > 0) {
+      var xf = Array.isArray(x.forms) ? x.forms.filter(function (f) { return f && typeof f.name === "string"; }) : null;
+      fams.push(["CPU", [[{ name: "x64", covered: x.covered, total: x.total }, "Zen 2 instructions", xf]]]);
+    }
+    if (!fams.some(function (f) { return f[1].length; })) return;
 
-    var host = $("families"); host.textContent = "";
-    var show = "all", panels = [];
+    var host = $("families"), show = "all", panels = [];
     function fill(p) {
-      var ul = p.ul, items = p.items.filter(function (f) { return show === "all" || (show === "yes") === !!f.covered; });
-      ul.textContent = "";
-      p.none.hidden = items.length > 0; ul.hidden = items.length === 0;
+      var items = p.items.filter(function (f) { return show === "all" || (show === "yes") === !!f.covered; });
+      p.ul.textContent = "";
+      p.none.hidden = items.length > 0; p.ul.hidden = items.length === 0;
       var frag = document.createDocumentFragment();
       items.forEach(function (f) {
         var li = el("li", f.covered ? "yes" : "no");
         li.appendChild(mark(f.covered ? "m-yes" : "m-no"));
         li.appendChild(el("code", "", f.name));
-        li.appendChild(el("span", "sr", f.covered ? ", tested" : ", not tested yet"));
+        li.appendChild(el("span", "sr", f.covered ? ", done" : ", missing"));
         frag.appendChild(li);
       });
-      ul.appendChild(frag);
+      p.ul.appendChild(frag);
       p.filled = show;
     }
     fams.forEach(function (fam, fi) {
       if (!fam[1].length) return;
       var wrap = el("div", "family");
-      var h3 = el("h3", "", fam[0]); h3.id = "fam-" + fi; wrap.appendChild(h3);
-      var ul = el("ul", "groups"); ul.setAttribute("aria-labelledby", h3.id);
-      fam[1].forEach(function (pair) {
-        var x = pair[0], items = byGroup[x.name], li = el("li");
-        var expandable = !!(items && items.length);
+      var h = el("h2", "", fam[0]); h.id = "fam-" + fi; wrap.appendChild(h);
+      var ul = el("ul", "groups"); ul.setAttribute("aria-labelledby", h.id);
+      fam[1].forEach(function (t) {
+        var v = t[0], items = t[2], li = el("li"), expandable = !!(items && items.length);
         var row = el(expandable ? "button" : "div", "row");
         if (expandable) { row.type = "button"; row.appendChild(mark("chev")); } else row.appendChild(el("span"));
-        row.appendChild(el("span", "g", x.name));
-        row.appendChild(el("span", "d", pair[1]));
-        var c = el("span", "c"); c.appendChild(el("b", "", nf.format(x.covered))); c.appendChild(document.createTextNode(" of " + nf.format(x.total)));
-        c.appendChild(el("span", "sr", " tested")); row.appendChild(c);
+        row.appendChild(el("span", "g", v.name));
+        row.appendChild(el("span", "d", t[1]));
+        var c = el("span", "c"); c.appendChild(el("b", "", nf.format(v.covered))); c.appendChild(document.createTextNode(" / " + nf.format(v.total)));
+        c.appendChild(el("span", "sr", " done")); row.appendChild(c);
         var m = el("span", "meter"); m.setAttribute("aria-hidden", "true");
-        var mi = el("i"); mi.style.width = (100 * x.covered / x.total) + "%"; m.appendChild(mi); row.appendChild(m);
+        var mi = el("i"); mi.style.width = (100 * v.covered / v.total) + "%"; m.appendChild(mi); row.appendChild(m);
         li.appendChild(row);
         if (expandable) {
-          var id = "g-" + x.name.replace(/[^A-Za-z0-9]/g, "");
+          var id = "g-" + v.name.replace(/[^A-Za-z0-9]/g, "");
           row.id = id + "-b"; row.setAttribute("aria-expanded", "false"); row.setAttribute("aria-controls", id);
           var panel = el("div", "panel"); panel.id = id; panel.setAttribute("role", "region"); panel.setAttribute("aria-labelledby", row.id);
-          var inner = el("div"), fl = el("ul", "forms"), none = el("p", "none", "No forms in this group match the filter.");
+          var inner = el("div"), fl = el("ul", "forms"), none = el("p", "none", "None in this group.");
           none.hidden = true; inner.appendChild(fl); inner.appendChild(none); panel.appendChild(inner); li.appendChild(panel);
           var p = { ul: fl, none: none, items: items, filled: null, li: li };
           panels.push(p);
@@ -482,46 +282,49 @@ footer strong { color: var(--ink); font-weight: 600; }
       });
       wrap.appendChild(ul); host.appendChild(wrap);
     });
-    if (panels.length) {
-      $("tools").hidden = false;
-      $("filter").addEventListener("change", function (e) {
-        show = e.target.value;
-        panels.forEach(function (p) { if (p.li.classList.contains("open")) fill(p); });
-      });
-    } else {
-      $("legacy").hidden = false;
-      $("forms-intro").textContent = "The graphics chip’s instructions, grouped by encoding. A form is tested when a passing test converts a program that uses it.";
-    }
+    if (panels.length) $("filter").addEventListener("change", function (e) {
+      show = e.target.value;
+      panels.forEach(function (p) { if (p.li.classList.contains("open")) fill(p); });
+    });
+    else $("filter").parentNode.hidden = true;
+    $("list").hidden = false;
   }
 
-  function tests(s) {
-    var t = s.tests || {}, c = s.commit || {};
-    if (isNum(t.passed, t.total) && t.total > 0)
-      $("t-pass").textContent = nf.format(t.passed) + " of " + nf.format(t.total) + " passed" +
-        (t.failed ? ", " + nf.format(t.failed) + " failed" : "") + (t.skipped ? ", " + nf.format(t.skipped) + " skipped" : "");
-    if (Array.isArray(t.adapters) && t.adapters.length) $("t-adapters").textContent = t.adapters.join(" and ");
-    var at = t.run_at || c.time;
-    if (at) {
-      var tm = el("time", "", stamp(at)); tm.setAttribute("datetime", at);
-      var dd = $("t-time"); dd.textContent = ""; dd.appendChild(tm);
-      if ((Date.now() - new Date(at).getTime()) / 864e5 > STALE_DAYS)
-        notice("These numbers are from " + day(at) + ", more than " + STALE_DAYS + " days ago, and may be behind the repository.");
-    }
+  function stages(s) {
+    var c = s.corpus, st = c && c.stages, sup = Array.isArray(s.stages_supported) ? s.stages_supported : [];
+    if (!st || typeof st !== "object") return;
+    var names = [["pixel", "Pixel"], ["vertex", "Vertex"], ["compute", "Compute"], ["other", "Other"]];
+    var body = $("stage-rows"), any = false;
+    names.forEach(function (n) {
+      var v = st[n[0]];
+      if (!v || !isNum(v.shaders, v.all_covered, v.translatable_bound) || v.shaders <= 0) return;
+      var on = sup.indexOf(n[0]) >= 0, tr = el("tr");
+      var th = el("th", null, n[1]); th.scope = "row"; tr.appendChild(th);
+      tr.appendChild(el("td", "num", v.shaders.toLocaleString("en-US")));
+      tr.appendChild(el("td", "num", v.all_covered.toLocaleString("en-US")));
+      tr.appendChild(on ? el("td", "num", v.translatable_bound.toLocaleString("en-US") + " (" + pct(v.translatable_bound, v.shaders) + ")")
+                        : el("td", "off", "Not supported yet"));
+      body.appendChild(tr); any = true;
+    });
+    if (any) $("stages").hidden = false;
+  }
+
+  function updated(s) {
+    var t = s.tests || {}, c = s.commit || {}, at = t.run_at || c.time, u = $("updated");
+    if (!at) return;
+    u.appendChild(document.createTextNode("Updated "));
+    var tm = el("time", "", day(at)); tm.setAttribute("datetime", at); u.appendChild(tm);
+    if ((Date.now() - new Date(at).getTime()) / 864e5 > STALE_DAYS) u.appendChild(document.createTextNode(" (over " + STALE_DAYS + " days ago)"));
     if (c.short && /^[0-9a-f]{7,40}$/.test(c.full || "")) {
-      var a = el("a", "code", c.short); a.href = REPO + "/commit/" + c.full;
-      var cc = $("t-commit"); cc.textContent = ""; cc.appendChild(a);
+      u.appendChild(document.createTextNode(" · "));
+      var a = el("a", "code", c.short); a.href = REPO + "/commit/" + c.full; u.appendChild(a);
     }
   }
-
-  function render(s) { s = s || {}; [hero, when, road, stages, unlock, measures, forms, tests].forEach(function (f) { f(s); }); }
 
   fetch("status.json", { cache: "no-store" })
     .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then(render)
-    .catch(function () {
-      $("headline").textContent = "The status numbers could not be loaded.";
-      var l = $("lede"); l.textContent = "Nothing below is filled in. The repository on GitHub has the current state."; l.hidden = false;
-    });
+    .then(function (s) { s = s || {}; figure(s); list(s); stages(s); updated(s); })
+    .catch(function () { $("no-figure").textContent = "The status data could not be loaded."; });
 })();
 </script>
 </body>

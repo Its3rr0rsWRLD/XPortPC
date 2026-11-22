@@ -14,7 +14,10 @@ half-updated. Python standard library only.
 
 Schema 3 adds gfx1013.forms: one {name, group, covered} entry per form of docs/coverage/gfx1013.tsv,
 covered exactly as tools/form_coverage.py counts it (a record from these runs whose test passed).
-The per-group totals must match the coverage file, so the list and the counts never disagree.
+Schema 4 adds x64.forms: one {name, covered} entry per form of docs/coverage/x64_zen2.tsv, covered
+when a tests/cpu/*.asm fixture whose mapped test (form_coverage.CPU_FIXTURES) passed uses it.
+The per-group (gfx) and overall (x64) totals must match the coverage file, so the lists and the counts
+never disagree.
 """
 
 import argparse
@@ -30,6 +33,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import form_coverage  # noqa: E402
 
 CORPUS = Path("docs/coverage/corpus-gfx1013.tsv")
+CORPUS_SHADERS = Path("docs/coverage/corpus-shaders.tsv")  # per shader: stage, name, branches (0/1), forms
 PARTS = Path("docs/status-parts.json")
 STATES = ("done", "partial", "not_started")
 ADAPTERS = ["NVIDIA GeForce RTX 4070 Ti", "WARP"]
@@ -129,6 +133,38 @@ def read_git(root):
     return {"short": out[0], "full": out[1], "time": out[2]}
 
 
+def read_run(junit):
+    """form_coverage's per-test status merged over the JUnit files (later files override earlier ones),
+    and the window spanning all of them, since records may come from any of the runs."""
+    results, start, end = {}, None, None
+    for path in junit_paths(junit):
+        more, (lo, hi) = form_coverage.read_results(path)
+        results.update(more)
+        start, end = (lo, hi) if start is None else (min(start, lo), max(end, hi))
+    return results, (start, end)
+
+
+def read_x64_forms(junit, root=ROOT):
+    """[{name, covered}] for every x64 reference form, covered exactly as tools/form_coverage.py counts
+    it: the mnemonics of a tests/cpu/*.asm fixture whose mapped test passed."""
+    path = root / "docs" / "coverage" / "x64_zen2.tsv"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        results, _ = read_run(junit)
+        sources = {asm.stem: asm.read_text(encoding="utf-8") for asm in sorted((root / "tests" / "cpu").glob("*.asm"))}
+    except (OSError, ValueError, TypeError, ET.ParseError) as error:
+        raise InputError(f"cannot read x64 coverage inputs: {error}")
+    reference = [tuple(line.split("\t")) for line in lines if line and not line.startswith("#")]
+    if not reference or any(len(form) != 2 for form in reference):
+        raise InputError(f"{path} is not a two-column form list")
+    covered = set()
+    for stem, text in sources.items():
+        test = form_coverage.CPU_FIXTURES.get(stem)
+        if test and form_coverage.fixture_status(results, [test]) == "pass":
+            covered |= form_coverage.x64_forms(form_coverage.masm_mnemonics(text), set(reference))
+    return [{"name": name, "covered": (group, name) in covered} for group, name in reference]
+
+
 def read_forms(junit, records, root=ROOT):
     """[{name, group, covered}] for every gfx1013 reference form, in reference-file order."""
     records = Path(records)
@@ -137,12 +173,8 @@ def read_forms(junit, records, root=ROOT):
     path = root / "docs" / "coverage" / "gfx1013.tsv"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-        results, start, end = {}, None, None
-        for path in junit_paths(junit):  # later files override earlier ones; records may come from any run
-            more, (lo, hi) = form_coverage.read_results(path)
-            results.update(more)
-            start, end = (lo, hi) if start is None else (min(start, lo), max(end, hi))
-        accepted = form_coverage.read_records(records, (start, end))
+        results, window = read_run(junit)
+        accepted = form_coverage.read_records(records, window)
     except (OSError, ValueError, TypeError, ET.ParseError) as error:
         raise InputError(f"cannot read form coverage inputs: {error}")
     reference = [tuple(line.split("\t")) for line in lines if line and not line.startswith("#")]
@@ -168,6 +200,33 @@ def check_forms(forms, groups):
                          + " (were both written by the same test run?)")
 
 
+def recount_corpus(root, covered):
+    """Stage counts and blocking forms from the per-shader corpus file and the forms covered by this run, so they
+    never lag behind the coverage. Returns None when the file is absent (the TSV header values then stand).
+    A form written with a leading '!' is a mnemonic outside the reference list, which no test can cover."""
+    path = root / CORPUS_SHADERS
+    if not path.exists():
+        return None
+    stages = {s: {"shaders": 0, "all_covered": 0, "translatable_bound": 0} for s in STAGES}
+    blocking = {}
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[0] not in stages or parts[2] not in ("0", "1"):
+            raise InputError(f"{path}:{number}: expected stage, name, 0 or 1, forms")
+        missing = [f for f in parts[3].split() if f.startswith("!") or f not in covered]
+        row = stages[parts[0]]
+        row["shaders"] += 1
+        if not missing:
+            row["all_covered"] += 1
+            row["translatable_bound"] += parts[2] == "0"
+        elif parts[0] == "pixel" and len(missing) == 1 and not missing[0].startswith("!"):
+            blocking[missing[0]] = blocking.get(missing[0], 0) + 1
+    top = sorted(blocking.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    return stages, [{"form": f, "shaders": n} for f, n in top]
+
+
 def build(junit, coverage, root=ROOT, records=form_coverage.RECORDS):
     cov = read_json(coverage)
     try:
@@ -185,9 +244,15 @@ def build(junit, coverage, root=ROOT, records=form_coverage.RECORDS):
     forms["forms_percent"] = round(100 * forms["forms_covered"] / forms["forms_total"], 1)
     forms["forms"] = read_forms(junit, records, root)
     check_forms(forms["forms"], groups)
+    cpu["forms"] = read_x64_forms(junit, root)
+    if [sum(f["covered"] for f in cpu["forms"]), len(cpu["forms"])] != [cpu["covered"], cpu["total"]]:
+        raise InputError("x64 fixtures disagree with the coverage file (were both written by the same test run?)")
     legacy, corpus = read_corpus(root)  # legacy fields stay in gfx1013 so a schema-1 page still works
+    recount = recount_corpus(root, {f["name"] for f in forms["forms"] if f["covered"]})
+    if recount:
+        corpus["stages"], corpus["blocking_forms"] = recount
     return {
-        "schema": 3,
+        "schema": 4,
         "commit": read_git(root),
         "tests": tests,
         "gfx1013": {**forms, **legacy},

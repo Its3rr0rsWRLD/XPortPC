@@ -15,8 +15,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 import status_json  # noqa: E402
 
 JUNIT = """<?xml version="1.0"?>
-<testsuite name="x" tests="4" timestamp="2026-11-20T10:00:00" time="5">
+<testsuite name="x" tests="5" timestamp="2026-11-20T10:00:00" time="5">
 <testcase name="a" status="run"/>
+<testcase name="cpu_leaf_aot_branches" status="run"/>
 <testcase name="b" status="run"/>
 <testcase name="c" status="run"><failure message="no"/></testcase>
 <testcase name="d" status="notrun"><skipped/></testcase>
@@ -39,6 +40,14 @@ GFX1013 = ("# 10 forms. Fixture.\n"
 # Test a passed (2 SOP1 forms, and v_add_f32 through its _e32 spelling); c failed, so v_sub_f32 is not
 # covered; "old" is a record from another run (outside the JUnit window), so v_mul_f32 is not covered.
 RECORDS = {"a": "s_mov_b32 s_not_b32 s_endpgm", "b": "v_add_f32_e32 s_mov_b32", "c": "v_sub_f32", "old": "v_mul_f32"}
+X64 = "# 20 forms. Fixture.\n" + "".join(f"Integer\t{m}\n" for m in (
+    "add", "sub", "mov", "jmp", "je", "cmove", "xlatb", "nop", "push", "pop",
+    "and", "or", "xor", "not", "neg", "inc", "dec", "imul", "shl", "shr"))
+# branch.asm maps to cpu_leaf_aot_branches, which passed: add, mov, je (MASM jz), cmove (cmovz), push.
+# xlatb.asm maps to cpu_aot_xlatb, absent from the run; register_probe.asm is a harness (None); an
+# unlisted .asm is unclassified. None of those cover anything.
+ASM = {"branch": "f proc\n  add eax, 1\n  mov ecx, eax\n  jz done\n  cmovz eax, ecx\n  push rbx\ndone:\n  ret\nf endp\nend\n",
+       "xlatb": "xlatb\n", "register_probe": "nop\n", "unlisted": "neg eax\n"}
 PARTS = {"parts": [{"name": "A", "state": "done", "note": "n"}, {"name": "B", "state": "not_started", "note": "m"}]}
 
 
@@ -46,6 +55,10 @@ def make_repo(base):
     (base / "docs" / "coverage").mkdir(parents=True)
     (base / "docs" / "coverage" / "corpus-gfx1013.tsv").write_text(CORPUS, encoding="utf-8")
     (base / "docs" / "coverage" / "gfx1013.tsv").write_text(GFX1013, encoding="utf-8")
+    (base / "docs" / "coverage" / "x64_zen2.tsv").write_text(X64, encoding="utf-8")
+    (base / "tests" / "cpu").mkdir(parents=True)
+    for stem, text in ASM.items():
+        (base / "tests" / "cpu" / f"{stem}.asm").write_text(text, encoding="utf-8")
     (base / "docs" / "status-parts.json").write_text(json.dumps(PARTS), encoding="utf-8")
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "PATH": __import__("os").environ["PATH"]}
@@ -80,9 +93,9 @@ class StatusJson(unittest.TestCase):
     def test_fields(self):
         data = self.build()
         self.assertEqual(list(data), ["schema", "commit", "tests", "gfx1013", "corpus", "stages_supported", "x64", "parts"])
-        self.assertEqual(data["schema"], 3)
+        self.assertEqual(data["schema"], 4)
         self.assertEqual({k: data["tests"][k] for k in ("passed", "failed", "skipped", "total")},
-                         {"passed": 2, "failed": 1, "skipped": 1, "total": 4})
+                         {"passed": 3, "failed": 1, "skipped": 1, "total": 5})
         self.assertEqual(data["tests"]["run_at"], "2026-11-20T10:00:00")
         g = data["gfx1013"]
         self.assertEqual((g["forms_covered"], g["forms_total"], g["uses_covered"], g["uses_total"],
@@ -96,7 +109,11 @@ class StatusJson(unittest.TestCase):
         self.assertEqual(len(corpus["blocking_forms"]), 5)
         self.assertEqual(data["stages_supported"], ["pixel"])
         self.assertEqual(g["groups"][0], {"name": "SOP1", "covered": 2, "total": 4})
-        self.assertEqual(data["x64"], {"covered": 5, "total": 20})
+        self.assertEqual({k: data["x64"][k] for k in ("covered", "total")}, {"covered": 5, "total": 20})
+        x64 = data["x64"]["forms"]
+        self.assertEqual(len(x64), 20)
+        self.assertEqual(x64[0], {"name": "add", "covered": True})
+        self.assertEqual(sorted(f["name"] for f in x64 if f["covered"]), ["add", "cmove", "je", "mov", "push"])
         self.assertEqual(len(data["commit"]["full"]), 40)
         self.assertTrue(data["commit"]["full"].startswith(data["commit"]["short"]))
         self.assertEqual([p["state"] for p in data["parts"]], ["done", "not_started"])
@@ -118,7 +135,7 @@ class StatusJson(unittest.TestCase):
         self.assertEqual(code, 0)
         text = out.read_text(encoding="utf-8")
         self.assertEqual(text.count("\n"), 1)
-        self.assertEqual(json.loads(text)["schema"], 3)
+        self.assertEqual(json.loads(text)["schema"], 4)
 
     def test_rerun_junit_overrides_by_name(self):
         # c failed in the main run and passes in a serial rerun 10 minutes later; its record is from the rerun.
@@ -133,7 +150,7 @@ class StatusJson(unittest.TestCase):
         (self.dir / "c.json").write_text(json.dumps(cov), encoding="utf-8")
         data = status_json.build([self.dir / "j.xml", self.dir / "r.xml"], self.dir / "c.json", self.repo, self.records)
         self.assertEqual({k: data["tests"][k] for k in ("passed", "failed", "skipped", "total", "run_at")},
-                         {"passed": 3, "failed": 0, "skipped": 1, "total": 4, "run_at": "2026-11-20T10:00:00"})
+                         {"passed": 4, "failed": 0, "skipped": 1, "total": 5, "run_at": "2026-11-20T10:00:00"})
         self.assertIn("v_sub_f32", [f["name"] for f in data["gfx1013"]["forms"] if f["covered"]])
         # Order matters: the main run given last overrides the rerun, so c is failed again and the
         # rerun's record no longer counts, which now disagrees with the coverage file.
@@ -149,7 +166,39 @@ class StatusJson(unittest.TestCase):
         finally:
             status_json.ROOT = old
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["tests"]["passed"], 3)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["tests"]["passed"], 4)
+
+    def test_x64_disagreeing_with_coverage_is_rejected(self):
+        cov = json.loads(json.dumps(COVERAGE))
+        cov["x64_zen2"]["covered"] = 6
+        (self.dir / "c.json").write_text(json.dumps(cov), encoding="utf-8")
+        with self.assertRaises(status_json.InputError):
+            self.build()
+        # The same run without the passing CPU test covers no x64 form, which also disagrees.
+        (self.dir / "j.xml").write_text(JUNIT.replace('<testcase name="cpu_leaf_aot_branches" status="run"/>\n', ""), encoding="utf-8")
+        (self.dir / "c.json").write_text(json.dumps(COVERAGE), encoding="utf-8")
+        with self.assertRaises(status_json.InputError):
+            self.build()
+
+    def test_corpus_shaders_recount_stages_from_this_run(self):
+        # Covered here: s_mov_b32, s_not_b32, v_add_f32. A '!' form is outside the reference list.
+        (self.repo / "docs" / "coverage" / "corpus-shaders.tsv").write_text(
+            "# stage\tname\tbranches\tforms\n"
+            "pixel\ta.frag\t0\ts_mov_b32 v_add_f32\n"
+            "pixel\tb.frag\t1\ts_mov_b32\n"
+            "pixel\tc.frag\t0\ts_mov_b32 v_mul_f32\n"
+            "pixel\td.frag\t0\ts_mov_b32 !odd_op\n"
+            "vertex\te.vert\t0\ts_not_b32\n", encoding="utf-8")
+        corpus = self.build()["corpus"]
+        self.assertEqual(corpus["stages"]["pixel"], {"shaders": 4, "all_covered": 2, "translatable_bound": 1})
+        self.assertEqual(corpus["stages"]["vertex"], {"shaders": 1, "all_covered": 1, "translatable_bound": 1})
+        self.assertEqual(corpus["stages"]["compute"], {"shaders": 0, "all_covered": 0, "translatable_bound": 0})
+        self.assertEqual(corpus["blocking_forms"], [{"form": "v_mul_f32", "shaders": 1}])
+
+    def test_malformed_corpus_shaders_is_rejected(self):
+        (self.repo / "docs" / "coverage" / "corpus-shaders.tsv").write_text("pixel\ta.frag\t2\ts_mov_b32\n", encoding="utf-8")
+        with self.assertRaises(status_json.InputError):
+            self.build()
 
     def test_missing_or_empty_records_exit_2(self):
         out = self.dir / "status.json"
