@@ -137,6 +137,12 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
 
 - **Buffers (V#):** already handled. The converted shader decodes base and range from the V# words and loads through
   `TitleLookup` (`src/title_va_lookup.hlsli`) from the title GPU address. No desktop descriptor per buffer is needed.
+- **As built in R4:** the translator resolves every descriptor load to (descriptor table, byte offset) at
+  translation time, since the converter already tracks descriptor loads by key, and the shim resolves that to the
+  slot of the title heap the table points into at draw time. This is a CPU-side TextureLookup: no T# search on the
+  GPU and no SM 6.6 heap indexing, and it is exact for descriptors written through the API. The plan below (T# words
+  in title memory, a GPU search) is kept for titles that write or copy descriptor words themselves, which R4 does not
+  handle (their reads are misses).
 - **Textures and storage images (T#):** a desktop SRV/UAV is needed. The shim creates it when the title creates the
   view through the API and records `(title address of the image, format, dims) -> heap index` in a sorted table, the
   same shape as `TitleRange`. A new `TextureLookup` helper finds the index from the T# words; the shader then uses
@@ -273,6 +279,18 @@ first-unimplemented-call line. Furthest rung today: none.
 R2 program: `tests/runtime/r2_clear.cpp` over the graphics shim skeleton in `d3d12_xs.dll` (work item 2; tests and
 wrapped interfaces in [experiments.md](../experiments.md#graphics-shim-skeleton-runtime-rung-r2)). It runs directly,
 not under `x2w_launch`, until `pe_map` maps implicit TLS.
+
+R4 program: `tests/runtime/r4_scene.cpp`, over title descriptor heaps (`src/d3d12_xs_descriptors.h`) and draw-time
+descriptor resolution (design choices and tests in
+[experiments.md](../experiments.md#title-descriptor-heaps-textures-constants-and-depth-runtime-rung-r4)). Its exit
+criteria pass on WARP and hardware except "textures created from tiled bytes": the console's texture upload path is
+not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
+
+R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
+`src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
+[experiments.md](../experiments.md#pipeline-time-translation-runtime-rung-r3)). Its shaders come in a console
+bytecode container that our own tests define (`X2WShaderContainer`, `src/d3d12_xs_api.h`): the container real titles
+use is not public and is learned from owner logs, then parsed by the same single function.
 
 ## 7. Game report
 
