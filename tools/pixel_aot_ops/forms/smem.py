@@ -5,17 +5,20 @@ from ..dispatch import form
 from ..registers import registers, sgpr_name, sgpr_pair
 
 
-@form(r"s_load_dwordx8 s\[(\d+):(\d+)\], s\[(\d+):(\d+)\], (null|0x[0-9a-f]+)", when=lambda st, m: (0 if m[5] == "null" else int(m[5], 16)) in st.bindings)
+@form(r"s_load_dwordx8 s\[(\d+):(\d+)\], s\[(\d+):(\d+)\], (null|0x[0-9a-f]+)",
+      when=lambda st, m: (0 if m[5] == "null" else int(m[5], 16)) in st.bindings.keys() | st.storage_images.keys())
 def texture_descriptor(st, i, m):
     # Any other offset is a descriptor-table read for the scalar-load branch below, which refuses it unless
-    # every word belongs to a tracked descriptor.
+    # every word belongs to a tracked descriptor. A storage image (forms/image_writes.py) is tracked as
+    # ("image<slot>", j), a name no sampling form looks up.
     dst = registers(*m.groups()[:2], 8)
     addr = registers(*m.groups()[2:4], 2)
     offset = 0 if m[5] == "null" else int(m[5], 16)
     if any(f"s{n}" in st.pending for n in (*addr, *dst)) or [st.scalar.get(f"s{n}") for n in addr] != ["texture_ptr", 0]:
         raise ValueError("Texture address differs from binding contract")
     for j, n in enumerate(dst):
-        st.scalar[f"s{n}"] = (st.bindings[offset], j)
+        name = st.bindings[offset] if offset in st.bindings else f"image{st.storage_images[offset][0]}"
+        st.scalar[f"s{n}"] = (name, j)
         st.pending.add(f"s{n}")
 
 

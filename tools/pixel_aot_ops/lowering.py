@@ -23,6 +23,8 @@ class Lowering:
         self.uses_memory = False  # emit the title-memory helpers
         self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
         self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order
+        self.storage_images = {}  # descriptor-table byte offset of a storage-image T# -> (slot, format); forms/image_writes.py
+        self.declarations = {}  # name -> HLSL declarations and helpers a form needs before the preamble, in insertion order
         self.pending = set()  # SGPRs an outstanding scalar load writes (cleared by lgkmcnt(0))
         self.scc = None  # SCC as an HLSL bool expression, or None when it is not tracked
         self.helpers = set()  # names of SALU_HELPERS (hlsl.py) the program uses
@@ -111,7 +113,7 @@ def masked_writes(st, i, ex, before):
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
-          buffer_descriptors=None, integer_export=False):
+          buffer_descriptors=None, integer_export=False, storage_images=None):
     """Track descriptor provenance, interpolation and packed exports through register writes."""
     if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
             or len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
@@ -152,6 +154,16 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if empty:
         st.lines.append("    return;")
         st.layout, st.signature, st.exported = (), ("void", None), True
+    # storage_images maps the byte offset of a 32-byte image T# in the descriptor table to (slot, format): the harness
+    # binds that image's levels at u(8 * slot), space2 (forms/image_writes.py checks the format where it is written).
+    slots = [entry[0] if isinstance(entry, tuple) and len(entry) == 2 else None for entry in (storage_images or {}).values()]
+    for (offset, entry), slot in zip((storage_images or {}).items(), slots):
+        if (slot not in range(4) or not isinstance(offset, int) or offset < 32 or offset % 32 or slots.count(slot) != 1
+                or any(start < offset + 32 and offset < start + 32 for start in bindings)
+                or any(start < offset + 32 and offset < start + 16 for start in vsharp_words)
+                or constant_descriptor is not None and constant_descriptor < offset + 32 and offset < constant_descriptor + 16):
+            raise ValueError("Invalid storage image offset or slot, or it overlaps another descriptor")
+        st.storage_images[offset] = entry
     blocks, labels = split_blocks(instructions)
     latch_of = find_loops(blocks, labels)
     for i, line in program(st, blocks, labels, latch_of):
@@ -178,6 +190,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         declarations = TITLE_RW_DECLARATIONS if st.writes_memory else TITLE_DECLARATIONS
         st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), declarations, MEMORY_HELPERS,
                              *st.memory_helpers.values()]
+    if st.declarations:
+        pos = st.lines.index(PREAMBLE)
+        st.lines[pos:pos] = list(st.declarations.values())
     if st.flat_attrs or st.quad_position:
         pos = st.lines.index(PREAMBLE)
         # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.

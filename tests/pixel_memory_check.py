@@ -53,6 +53,21 @@ def expect(slots, magic=EXPECTED_MAGIC):
     return GOOD + struct.pack("<2I", magic, len(slots)) + b"".join(struct.pack("<I", len(b)) + b for b in slots)
 
 
+IMAGE_MAGIC = 0x49573258
+
+
+def image_entry(slot, channels, width, height, levels, initial, expected):
+    return struct.pack("<5I", slot, channels, width, height, levels) + initial + expected
+
+
+def images(*entries, magic=IMAGE_MAGIC, count=None):
+    """Storage images after a memory section (the 'X2WI' part, used by the image_writes draws)."""
+    return struct.pack("<3I", magic, len(entries) if count is None else count, 0) + b"".join(entries)
+
+
+# A 4x2 R32_UINT image with three levels (4x2, 2x1, 1x1: 11 words) and a 2x3 R32G32B32A32_UINT one.
+IMAGE0 = contents(29, 11 * 4)
+IMAGE1 = contents(31, 6 * 16)
 GOOD = section([(BASE0, BASE0 + SIZE0, 0), (BASE1, BASE1 + SIZE1, 1)], SLOTS)
 HIT_FIRST = BASE0 + 0x44
 LAST_WORD = BASE1 + SIZE1 - 4
@@ -117,7 +132,43 @@ def main(compiler, renderer, backend):
         if result.returncode != 1 or "memory_mismatch slot=1 offset=0x4" not in result.stderr:
             raise AssertionError(f"A changed expected byte escaped detection (exit {result.returncode})")
 
+        # Storage images (the 'X2WI' part): the probe writes none, so their initial texels match and a changed word
+        # is reported as an image mismatch; the section may follow expected memory or the slots directly.
+        stored = images(image_entry(0, 1, 4, 2, 3, IMAGE0, IMAGE0), image_entry(2, 4, 2, 3, 1, IMAGE1, IMAGE1))
+        # Without ranges every lookup misses.
+        for memory, expected in ((GOOD + stored, EXPECTED), (expect(SLOTS) + stored, EXPECTED),
+                                 (section([], []) + stored, [-1.0] * 4)):
+            same = run(draw, case, case_bytes(ADDRESSES, expected, memory))
+            if same.returncode != 0:
+                sys.stderr.write(same.stderr)
+                raise AssertionError("Unchanged storage images did not match their expected texels")
+        moved = IMAGE1[:52] + bytes([IMAGE1[52] ^ 1]) + IMAGE1[53:]  # word 13: texel (1, 1), channel 1
+        result = run(draw, case, case_bytes(ADDRESSES, EXPECTED, GOOD + images(
+            image_entry(0, 1, 4, 2, 3, IMAGE0, IMAGE0), image_entry(2, 4, 2, 3, 1, IMAGE1, moved))))
+        if result.returncode != 1 or "image_mismatch slot=2 level=0 x=1 y=1 channel=1" not in result.stderr:
+            raise AssertionError(f"A changed expected texel escaped detection (exit {result.returncode})")
+        last = IMAGE0[:40] + bytes([IMAGE0[40] ^ 1]) + IMAGE0[41:]  # word 10: level 2
+        result = run(draw, case, case_bytes(ADDRESSES, EXPECTED, GOOD + images(image_entry(0, 1, 4, 2, 3, IMAGE0, last))))
+        if result.returncode != 1 or "image_mismatch slot=0 level=2 x=0 y=0" not in result.stderr:
+            raise AssertionError(f"A changed texel of the last level escaped detection (exit {result.returncode})")
+
+        one = image_entry(0, 1, 4, 2, 3, IMAGE0, IMAGE0)
         bad = {
+            "image magic": GOOD + images(one, magic=0x12345678),
+            "image count zero": GOOD + images(),
+            "image count five": GOOD + images(*(image_entry(n, 1, 1, 1, 1, b"\0" * 4, b"\0" * 4) for n in range(5))),
+            "image count larger than images": GOOD + images(one, count=2),
+            "image reserved": GOOD + struct.pack("<3I", IMAGE_MAGIC, 1, 1) + one,
+            "image slot": GOOD + images(image_entry(4, 1, 4, 2, 3, IMAGE0, IMAGE0)),
+            "image slots not ascending": GOOD + images(one, one),
+            "image channels": GOOD + images(image_entry(0, 2, 4, 2, 3, IMAGE0, IMAGE0)),
+            "image width": GOOD + images(image_entry(0, 1, 0, 2, 3, IMAGE0, IMAGE0)),
+            "image height": GOOD + images(image_entry(0, 1, 4, 1025, 3, IMAGE0, IMAGE0)),
+            "image levels": GOOD + images(image_entry(0, 1, 4, 2, 4, IMAGE0 + b"\0" * 4, IMAGE0 + b"\0" * 4)),
+            "image no levels": GOOD + images(image_entry(0, 1, 4, 2, 0, b"", b"")),
+            "image truncated": (GOOD + images(one))[:-1],
+            "image trailing byte": GOOD + images(one) + b"\0",
+            "image before expected memory": GOOD + images(one) + expect(SLOTS)[len(GOOD):],
             "expected magic": expect(SLOTS, magic=0x12345678),
             "expected slot count": GOOD + struct.pack("<2I", EXPECTED_MAGIC, 1) + struct.pack("<I", SIZE0) + SLOTS[0],
             "expected slot size": expect([SLOTS[0], SLOTS[1][:-4]]),

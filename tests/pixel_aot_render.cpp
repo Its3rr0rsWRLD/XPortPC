@@ -45,11 +45,20 @@ struct TitleRangeRecord {
     UINT slot, reserved;
 };
 static_assert(sizeof(TitleRangeRecord) == 24);
+// A storage image of a case (the 'X2WI' part of the memory section, see parse_memory_section): an R32_UINT (one channel)
+// or R32G32B32A32_UINT (four) texture with its levels, bound as one UAV per level at u(8 * slot + level), space2, and
+// compared word for word after the single draw.
+struct StorageImage {
+    UINT slot, channels, width, height, levels;
+    std::vector<BYTE> initial, expected;  // every level in order, rows packed, 4 * channels bytes per texel
+};
 struct TitleMemory {
     std::vector<TitleRangeRecord> ranges;
     std::vector<std::vector<BYTE>> slots;
     // When not empty: each slot's contents after the draw, compared byte for byte (a case that checks shader writes).
     std::vector<std::vector<BYTE>> expected;
+    // Storage images written by the shader (a case that checks image writes), in ascending slot order.
+    std::vector<StorageImage> images;
 };
 
 struct PixelInput {
@@ -129,6 +138,47 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         if (!input.memory.slots[i].empty())
             writable[i] = make_buffer(device, input.memory.slots[i].size(), D3D12_HEAP_TYPE_DEFAULT,
                                       D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
+    // Storage images: each gets a default-heap texture with all its levels and one UAV per level in the image table
+    // (root parameter 6: u0..u31 in space2, eight per slot, null views elsewhere), and is compared after the single draw.
+    const auto& images = input.memory.images;
+    if (!images.empty() && draws.size() != 1) throw std::runtime_error("A storage image check needs exactly one draw");
+    struct ImageResources {
+        ComPtr<ID3D12Resource> texture, staging, back;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts;
+        std::vector<UINT> rows;
+        std::vector<UINT64> rowBytes;
+        UINT64 bytes = 0;
+    };
+    const auto imageFormat = [](UINT channels) {
+        return channels == 1 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R32G32B32A32_UINT;
+    };
+    std::vector<ImageResources> imageResources(images.size());
+    for (size_t n = 0; n < images.size(); ++n) {
+        const auto& image = images[n];
+        auto& res = imageResources[n];
+        auto imageDesc = texture_desc(image.width, image.height, imageFormat(image.channels),
+                                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        imageDesc.MipLevels = static_cast<UINT16>(image.levels);
+        res.texture = resource(device, imageDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+        res.layouts.resize(image.levels);
+        res.rows.resize(image.levels);
+        res.rowBytes.resize(image.levels);
+        device->GetCopyableFootprints(&imageDesc, 0, image.levels, 0, res.layouts.data(), res.rows.data(),
+                                      res.rowBytes.data(), &res.bytes);
+        std::vector<BYTE> staged(res.bytes);
+        size_t at = 0;
+        for (UINT level = 0; level < image.levels; ++level) {
+            for (UINT y = 0; y < res.rows[level]; ++y) {
+                if (image.initial.size() - at < res.rowBytes[level]) throw std::runtime_error("Invalid storage image size");
+                std::memcpy(staged.data() + res.layouts[level].Offset + size_t(y) * res.layouts[level].Footprint.RowPitch,
+                            image.initial.data() + at, res.rowBytes[level]);
+                at += res.rowBytes[level];
+            }
+        }
+        if (at != image.initial.size() || at != image.expected.size()) throw std::runtime_error("Invalid storage image size");
+        res.staging = upload(device, staged);
+        res.back = make_buffer(device, res.bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
     }
     std::ifstream file(path, std::ios::binary);
     std::vector<char> ps{std::istreambuf_iterator<char>(file), {}};
@@ -213,7 +263,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvs)), "Pixel depth heap");
     }
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.NumDescriptors = 2 + 8 + 8;
+    heapDesc.NumDescriptors = 2 + 8 + 8 + 32;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&srvs)), "Pixel texture heap");
     const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
@@ -248,6 +298,22 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += size_t(2 + 8 + i) * increment;
         device->CreateUnorderedAccessView(writable[i].Get(), nullptr, &rw, handle);
+    }
+    for (UINT d = 0; d < 32; ++d) {
+        const UINT slot = d / 8, level = d % 8;
+        const auto found = std::find_if(images.begin(), images.end(),
+                                        [&](const StorageImage& image) { return image.slot == slot; });
+        D3D12_UNORDERED_ACCESS_VIEW_DESC view2d{};
+        view2d.Format = found == images.end() ? DXGI_FORMAT_R32_UINT : imageFormat(found->channels);
+        view2d.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        ID3D12Resource* viewed = nullptr;
+        if (found != images.end() && level < found->levels) {
+            viewed = imageResources[size_t(found - images.begin())].texture.Get();
+            view2d.Texture2D.MipSlice = level;
+        }
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(2 + 8 + 8 + d) * increment;
+        device->CreateUnorderedAccessView(viewed, nullptr, &view2d, handle);
     }
 
     bool textureUploaded = false;
@@ -310,6 +376,19 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                 list->CopyBufferRegion(writable[i].Get(), 0, slotBuffers[i].Get(), 0, input.memory.slots[i].size());
                 transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
+            for (size_t n = 0; n < images.size(); ++n) {
+                const auto& res = imageResources[n];
+                src.pResource = res.staging.Get();
+                src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.pResource = res.texture.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                for (UINT level = 0; level < images[n].levels; ++level) {
+                    src.PlacedFootprint = res.layouts[level];
+                    dst.SubresourceIndex = level;
+                    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                }
+                transition(list, res.texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
             textureUploaded = true;
         }
         ID3D12DescriptorHeap* heaps[]{srvs.Get()};
@@ -325,6 +404,9 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto writeTable = srvs->GetGPUDescriptorHandleForHeapStart();
         writeTable.ptr += UINT64(2 + 8) * increment;
         list->SetGraphicsRootDescriptorTable(5, writeTable);
+        auto imageTable = srvs->GetGPUDescriptorHandleForHeapStart();
+        imageTable.ptr += UINT64(2 + 8 + 8) * increment;
+        list->SetGraphicsRootDescriptorTable(6, imageTable);
         // WARP and hardware can use either the rounded SRV extent or the
         // unrounded base extent for implicit LOD. Their geometric mean is
         // within half a mip of both, since rounding discards less than one texel.
@@ -382,6 +464,20 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             transition(list, writable[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             list->CopyBufferRegion(memoryBack[i].Get(), 0, writable[i].Get(), 0, bytes);
         }
+        for (size_t n = 0; n < images.size(); ++n) {
+            const auto& res = imageResources[n];
+            transition(list, res.texture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+            from.pResource = res.texture.Get();
+            from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            to.pResource = res.back.Get();
+            to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            for (UINT level = 0; level < images[n].levels; ++level) {
+                from.SubresourceIndex = level;
+                to.PlacedFootprint = res.layouts[level];
+                list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+            }
+        }
         cmd.submit_and_wait(device);
         for (size_t i = 0; i < memoryBack.size(); ++i) {
             if (!memoryBack[i]) continue;
@@ -394,6 +490,29 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                     std::fprintf(stderr, "memory_mismatch slot=%zu offset=0x%zx expected=%08x actual=%08x\n",
                                  i, 4 * w, static_cast<unsigned>(wanted), static_cast<unsigned>(got[w]));
                     throw std::runtime_error("Title memory after the draw differs from CPU reference");
+                }
+            }
+        }
+        for (size_t n = 0; n < images.size(); ++n) {
+            const auto& image = images[n];
+            const auto& res = imageResources[n];
+            const auto got = read(res.back.Get(), static_cast<size_t>(res.bytes / 4));
+            size_t at = 0;
+            for (UINT level = 0; level < image.levels; ++level) {
+                const UINT rowWords = static_cast<UINT>(res.rowBytes[level] / 4);
+                for (UINT y = 0; y < res.rows[level]; ++y) {
+                    const size_t first = static_cast<size_t>(
+                        (res.layouts[level].Offset + UINT64(y) * res.layouts[level].Footprint.RowPitch) / 4);
+                    for (UINT w = 0; w < rowWords; ++w, at += 4) {
+                        Word wanted;
+                        std::memcpy(&wanted, image.expected.data() + at, sizeof(wanted));
+                        if (got[first + w] != wanted) {
+                            std::fprintf(stderr, "image_mismatch slot=%u level=%u x=%u y=%u channel=%u expected=%08x actual=%08x\n",
+                                         image.slot, level, w / image.channels, y, w % image.channels,
+                                         static_cast<unsigned>(wanted), static_cast<unsigned>(got[first + w]));
+                            throw std::runtime_error("Storage image after the draw differs from CPU reference");
+                        }
+                    }
                 }
             }
         }
@@ -573,9 +692,14 @@ TitleMemory parse_memory_section(const char* data, size_t size)
         memory.slots.emplace_back(data + at, data + at + bytes);
         at += bytes;
     }
+    const auto next = [&](UINT magic) {
+        UINT value = 0;
+        if (size - at >= 4) std::memcpy(&value, data + at, 4);
+        return size - at >= 4 && value == magic;
+    };
     // Optional expected contents after the draw: magic 'X2WE', a slot count equal to the one above, then each slot
     // as a byte size equal to its initial size and its bytes.
-    if (at != size) {
+    if (at != size && !next(0x49573258u)) {
         if (word("expected magic") != 0x45573258u) throw BadCase("Memory section has trailing bytes");
         if (word("expected slot count") != slotCount || !slotCount)
             throw BadCase("Expected memory names a different slot count");
@@ -586,7 +710,43 @@ TitleMemory parse_memory_section(const char* data, size_t size)
             memory.expected.emplace_back(data + at, data + at + bytes);
             at += bytes;
         }
-        if (at != size) throw BadCase("Expected memory has trailing bytes");
+        if (at != size && !next(0x49573258u)) throw BadCase("Expected memory has trailing bytes");
+    }
+    // Optional storage images, last: magic 'X2WI', an image count (1 to 4) and a zero word, then each image as its slot
+    // (0 to 3, ascending), channel count (1: R32_UINT, 4: R32G32B32A32_UINT), width and height (1 to 1024) and level
+    // count (1 to 8, at most a full chain), then its initial texels and its expected texels after the draw, each as
+    // every level in order with rows packed.
+    if (at != size) {
+        if (word("image magic") != 0x49573258u) throw BadCase("Memory section has trailing bytes");
+        const UINT imageCount = word("image count");
+        if (!imageCount || imageCount > 4) throw BadCase("Image section needs 1 to 4 images");
+        if (word("image reserved") != 0) throw BadCase("Image section reserved word is not zero");
+        for (UINT n = 0; n < imageCount; ++n) {
+            StorageImage image{};
+            image.slot = word("image slot");
+            image.channels = word("image channels");
+            image.width = word("image width");
+            image.height = word("image height");
+            image.levels = word("image levels");
+            if (image.slot > 3 || (n && image.slot <= memory.images.back().slot))
+                throw BadCase("Image slots are out of range or not ascending");
+            if (image.channels != 1 && image.channels != 4) throw BadCase("Image channel count is not 1 or 4");
+            if (!image.width || !image.height || image.width > 1024 || image.height > 1024)
+                throw BadCase("Image extent is not 1 to 1024");
+            if (!image.levels || image.levels > 8 || !((std::max)(image.width, image.height) >> (image.levels - 1)))
+                throw BadCase("Image level count is not 1 to 8 or exceeds the full chain");
+            UINT64 bytes = 0;
+            for (UINT level = 0; level < image.levels; ++level) {
+                const auto extent = Extent{image.width, image.height}.mip(level);
+                bytes += UINT64(extent.width) * extent.height * 4 * image.channels;
+            }
+            if (size - at < 2 * bytes) throw BadCase("Image section is truncated in an image");
+            image.initial.assign(data + at, data + at + bytes);
+            image.expected.assign(data + at + bytes, data + at + 2 * bytes);
+            at += static_cast<size_t>(2 * bytes);
+            memory.images.push_back(std::move(image));
+        }
+        if (at != size) throw BadCase("Image section has trailing bytes");
     }
     for (size_t i = 0; i < memory.ranges.size(); ++i) {
         const auto& range = memory.ranges[i];
