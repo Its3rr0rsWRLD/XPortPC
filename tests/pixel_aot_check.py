@@ -4,17 +4,17 @@ The checks live in tests/pixel_aot_draws/, one module per draw family (docs/desi
 them: `controls`, `binary <llvm-mc> <llvm-objcopy> <libLLVM>`, `draw <dxc> <renderer> <adapter> [--family NAME]...`
 and `--list-families`.
 """
+from collections.abc import Mapping
 from pathlib import Path
 import os
 import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from pixel_aot import disassemble, native_program  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pixel_aot_draws import FAMILIES, MODULES  # noqa: E402
+import pixel_aot_draws  # noqa: E402
 # Other checks import these from here: bc7_draw_check, cpu/native_frame_check, pso_readiness_check, form_coverage_check.
 from pixel_aot_draws.common import (ACCEPTED, assembly, compile_shader, lod_zero_sample, lower, must_reject,  # noqa: E402,F401
                                     translate, with_constants, write_case, write_record)
@@ -27,12 +27,27 @@ from pixel_aot_draws.dual import dual_program, translate_dual  # noqa: E402,F401
 # compiles what it needs and depends on nothing another family leaves behind, so a process can run any subset.
 # `pixel_aot_check.py --list-families` prints these names; CMake makes one CTest test per name. A family
 # returns a nonzero exit code (the renderer's 77 for "no adapter") or raises on failure.
-DRAW_FAMILIES = {name: module.draw for name, module in FAMILIES.items()}
+class _Families(Mapping):
+    """name -> draw function; a family's module is imported when its draw is first looked up."""
+    def __iter__(self):
+        return iter(pixel_aot_draws.FAMILY_MODULES)
+
+    def __len__(self):
+        return len(pixel_aot_draws.FAMILY_MODULES)
+
+    def __contains__(self, name):
+        return name in pixel_aot_draws.FAMILY_MODULES
+
+    def __getitem__(self, name):
+        return pixel_aot_draws.family(name).draw
+
+
+DRAW_FAMILIES = _Families()
 
 
 def check_controls(directory):
     """Every module's controls: translation checks that need neither DXC nor a GPU."""
-    for module in MODULES:
+    for module in pixel_aot_draws.modules():
         if hasattr(module, "controls"):
             module.controls(directory)
     check_adapter_skip(directory)
@@ -54,6 +69,8 @@ def check_adapter_skip(directory):
             result.check_returncode()
         return result
 
+    from unittest.mock import patch  # imported here: it costs 40 ms and only this control uses it
+
     for name in DRAW_FAMILIES:
         work = directory / f"no-adapter-{name}"
         work.mkdir()
@@ -63,7 +80,8 @@ def check_adapter_skip(directory):
 
 
 def check_binary(directory, assembler, objcopy, library):
-    fixtures = [fixture for module in MODULES if hasattr(module, "binary_fixtures")
+    modules = pixel_aot_draws.modules()
+    fixtures = [fixture for module in modules if hasattr(module, "binary_fixtures")
                 for fixture in module.binary_fixtures()]
     selector = assembly(False)  # the program the container selection is checked with, once
     for entry in fixtures:
@@ -85,7 +103,7 @@ def check_binary(directory, assembler, objcopy, library):
             check_container_selector(directory, native, library)
             selector = None
     # Checks of a family that need the assembler beyond a round trip (exports: patched EN bits).
-    for module in MODULES:
+    for module in modules:
         if hasattr(module, "binary_checks"):
             module.binary_checks(directory, assembler, objcopy, library)
 

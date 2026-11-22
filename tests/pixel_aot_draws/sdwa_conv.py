@@ -13,6 +13,7 @@ Sources: an integer source is the selected field, zero- or sign-extended; a bina
 neg and abs on bit 15; a binary32 source takes DWORD only (neg and abs on the sign bit). A 16-bit result goes to a
 BYTE or WORD field (DWORD is refused). Inputs avoid NaN payloads and denormals, whose handling is not what is measured.
 """
+import functools
 import math
 import struct
 import subprocess
@@ -229,12 +230,14 @@ def row_program(row):
     return with_constants(body)
 
 
-ROW_PLANS = [row_plan(row) for row in ROWS]
+@functools.cache
+def row_plans():
+    return [row_plan(row) for row in ROWS]
 
 
 def draw(directory, compiler, renderer, backend):
     case = directory / "sdwa_conv.case"
-    for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, ROW_PLANS)):
+    for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, row_plans())):
         source, shader = directory / f"sdwa_conv{index}.hlsl", directory / f"sdwa_conv{index}.cso"
         source.write_text(translate(row_program(row)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -260,7 +263,7 @@ def draw(directory, compiler, renderer, backend):
 def controls(directory):
     # Every operation has rows, and every non-vacuous wrong reference differs from the right result on a chosen input.
     assert {row[0] for row in ROWS} == set(OPS), set(OPS) - {row[0] for row in ROWS}
-    for row, (inputs, wrongs, missing) in zip(ROWS, ROW_PLANS):
+    for row, (inputs, wrongs, missing) in zip(ROWS, row_plans()):
         assert not missing and inputs, (row, missing)
         body = translate(row_program(row)).split("float4 main", 1)[1]
         # Integer and binary16 results stay uint words: the float variables are the four byte read-backs and a

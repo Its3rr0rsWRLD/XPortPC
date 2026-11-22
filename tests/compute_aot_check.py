@@ -21,7 +21,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "tools"))
@@ -1633,6 +1632,8 @@ def check_adapter_skip(directory):
             result.check_returncode()
         return result
 
+    from unittest.mock import patch  # here, not at the top: it costs 40 ms of every import
+
     for name in FAMILIES:
         work = directory / f"no-adapter-{name}"
         work.mkdir()
@@ -1677,6 +1678,8 @@ def check_binary(directory, assembler, objcopy, library):
     payload = envelope(padded, directory_end=(40 + len(padded), 288 + len(padded)), compute_width=64)
     container = directory / "integrate.dxbc"
     container.write_bytes(_read_named_container(payload, 1 + len(b"fixture") + 1))
+    from unittest.mock import patch
+
     with patch("pixel_aot.disassemble", lambda code, llvm: disassemble(code, llvm, features=b"+wavefrontsize64")):
         instructions, numthreads = compute_aot.container_program(container, library)
     assert numthreads == (64, 1, 1)

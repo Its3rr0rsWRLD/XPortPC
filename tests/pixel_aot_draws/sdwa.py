@@ -1,4 +1,5 @@
 """Draw family `sdwa`: pixel_aot_check.py draw --family sdwa."""
+import functools
 import math
 import struct
 import subprocess
@@ -369,7 +370,10 @@ def complete_rows(rows):
     return chosen
 
 
-WORD_ROWS = complete_rows(INT_ROWS + F16_ROWS)
+@functools.cache
+def word_rows():
+    """The rows with their chosen words; the search takes seconds, so it runs on first use."""
+    return complete_rows(INT_ROWS + F16_ROWS)
 
 
 def row_program(row):
@@ -391,7 +395,7 @@ def row_program(row):
 
 def check_sdwa_word_draws(directory, compiler, renderer, backend):
     case = directory / "sdwa_word.case"
-    for index, row in enumerate(WORD_ROWS):
+    for index, row in enumerate(word_rows()):
         source = directory / f"sdwa_word{index}.hlsl"
         shader = directory / f"sdwa_word{index}.cso"
         source.write_text(translate(row_program(row)), encoding="ascii")
@@ -448,8 +452,8 @@ def check_sdwa_pack_draw(directory, compiler, renderer, backend):
 def controls(directory):
     # Every row has a wrong reference for each destination field, unused mode and modifier, and every
     # operation has one for each source selector and extension its rows can show.
-    assert not op_gaps(WORD_ROWS), op_gaps(WORD_ROWS)
-    for row in WORD_ROWS:
+    assert not op_gaps(word_rows()), op_gaps(word_rows())
+    for row in word_rows():
         assert row[5] and row_complete(row) and row_expected(row), row
         body = translate(row_program(row)).split("float4 main", 1)[1]
         # Integer and binary16 values stay uint words: the only float variables are the four byte read-backs, and
@@ -512,7 +516,7 @@ def binary_fixtures():
     """(program, translator) pairs that `pixel_aot_check.py binary` assembles, disassembles and lowers."""
     return [
         *((with_constants(body), translate) for body in (SDWA_PRESERVE_BODY, SDWA_PAD_BODY)),
-        *((row_program(row), translate) for row in WORD_ROWS),
+        *((row_program(row), translate) for row in word_rows()),
         (pack_program(), translate),
     ]
 

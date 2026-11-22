@@ -7,6 +7,7 @@ model. For every row, a small set of inputs is chosen (greedily, from fixed spec
 sequence) so that each non-vacuous wrong reference differs from the right result on at least one of them; the draw
 runs the right result on every chosen input and each wrong reference once, where it differs, and the wrong one must
 fail. `controls` asserts that coverage without a GPU."""
+import functools
 import struct
 import subprocess
 
@@ -145,12 +146,14 @@ def cmp_plan(channels):
     return inputs, wrongs, missing
 
 
-CMP_PLANS = [cmp_plan(channels) for channels in CMP_PROGRAMS]
+@functools.cache
+def cmp_plans():
+    return [cmp_plan(channels) for channels in CMP_PROGRAMS]
 
 
 def check_cmp_draws(directory, compiler, renderer, backend):
     case = directory / "sdwa_int_cmp.case"
-    for index, (channels, (inputs, wrongs, _)) in enumerate(zip(CMP_PROGRAMS, CMP_PLANS)):
+    for index, (channels, (inputs, wrongs, _)) in enumerate(zip(CMP_PROGRAMS, cmp_plans())):
         source, shader = directory / f"sdwa_int_cmp{index}.hlsl", directory / f"sdwa_int_cmp{index}.cso"
         source.write_text(translate(cmp_program(channels)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -296,12 +299,14 @@ def row_program(row):
     return with_constants(body)
 
 
-ROW_PLANS = [row_plan(row) for row in ROWS]
+@functools.cache
+def row_plans():
+    return [row_plan(row) for row in ROWS]
 
 
 def check_word_draws(directory, compiler, renderer, backend):
     case = directory / "sdwa_int_word.case"
-    for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, ROW_PLANS)):
+    for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, row_plans())):
         source, shader = directory / f"sdwa_int_word{index}.hlsl", directory / f"sdwa_int_word{index}.cso"
         source.write_text(translate(row_program(row)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
@@ -331,9 +336,9 @@ def draw(directory, compiler, renderer, backend):
 
 def controls(directory):
     # Every non-vacuous wrong reference differs from the right result on a chosen input.
-    for channels, (inputs, wrongs, missing) in zip(CMP_PROGRAMS, CMP_PLANS):
+    for channels, (inputs, wrongs, missing) in zip(CMP_PROGRAMS, cmp_plans()):
         assert not missing and inputs, (channels, missing)
-    for row, (inputs, wrongs, missing) in zip(ROWS, ROW_PLANS):
+    for row, (inputs, wrongs, missing) in zip(ROWS, row_plans()):
         assert not missing and inputs, (row, missing)
         body = translate(row_program(row)).split("float4 main", 1)[1]
         # Integer results stay uint words; the float variables are the four byte read-backs and a float result.
