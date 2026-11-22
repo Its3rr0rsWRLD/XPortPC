@@ -144,24 +144,24 @@ def read_run(junit):
     return results, (start, end)
 
 
-def read_x64_forms(junit, root=ROOT):
+def read_x64_forms(junit, root=ROOT, records=None):
     """[{name, covered}] for every x64 reference form, covered exactly as tools/form_coverage.py counts
-    it: the mnemonics of a tests/cpu/*.asm fixture whose mapped test passed."""
+    it: the forms of a tests/cpu/*.asm fixture (its source, or its translation record) whose test passed."""
     path = root / "docs" / "coverage" / "x64_zen2.tsv"
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-        results, _ = read_run(junit)
-        sources = {asm.stem: asm.read_text(encoding="utf-8") for asm in sorted((root / "tests" / "cpu").glob("*.asm"))}
+        results, window = read_run(junit)
+        accepted = form_coverage.read_records(records, window) if records and Path(records).is_dir() else {}
+        cpu, _ = form_coverage.x64_fixtures(results, root, accepted)
     except (OSError, ValueError, TypeError, ET.ParseError) as error:
         raise InputError(f"cannot read x64 coverage inputs: {error}")
     reference = [tuple(line.split("\t")) for line in lines if line and not line.startswith("#")]
     if not reference or any(len(form) != 2 for form in reference):
         raise InputError(f"{path} is not a two-column form list")
     covered = set()
-    for stem, text in sources.items():
-        test = form_coverage.CPU_FIXTURES.get(stem)
-        if test and form_coverage.fixture_status(results, [test]) == "pass":
-            covered |= form_coverage.x64_forms(form_coverage.masm_mnemonics(text), set(reference))
+    for forms, status in cpu.values():
+        if status == "pass":
+            covered |= form_coverage.x64_forms(forms, set(reference))
     return [{"name": name, "covered": (group, name) in covered} for group, name in reference]
 
 
@@ -244,7 +244,7 @@ def build(junit, coverage, root=ROOT, records=form_coverage.RECORDS):
     forms["forms_percent"] = round(100 * forms["forms_covered"] / forms["forms_total"], 1)
     forms["forms"] = read_forms(junit, records, root)
     check_forms(forms["forms"], groups)
-    cpu["forms"] = read_x64_forms(junit, root)
+    cpu["forms"] = read_x64_forms(junit, root, records)
     if [sum(f["covered"] for f in cpu["forms"]), len(cpu["forms"])] != [cpu["covered"], cpu["total"]]:
         raise InputError("x64 fixtures disagree with the coverage file (were both written by the same test run?)")
     legacy, corpus = read_corpus(root)  # legacy fields stay in gfx1013 so a schema-1 page still works

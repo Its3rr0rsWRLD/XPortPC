@@ -205,6 +205,15 @@ def summarize(reference, fixtures, select):
 def measure(results, root=ROOT, records=None):
     """results: {test: status}. root: the repository whose tests/cpu is scanned (the check passes a
     temporary one). records: {test: accepted gfx mnemonics} from read_records."""
+    records = records or {}
+    cpu, cpu_tests = x64_fixtures(results, root, records)
+    shaders = {test: (forms, fixture_status(results, [test]))
+               for test, forms in records.items() if test not in cpu_tests}
+    return _measure(results, cpu, shaders)
+
+
+def x64_fixtures(results, root=ROOT, records=None):
+    """({asm file name: (x64 mnemonics, status)}, CPU test names) for every tests/cpu/*.asm fixture."""
     cpu = {}
     records = records or {}
     cpu_tests = set(CPU_FIXTURES.values()) - {None}
@@ -226,8 +235,10 @@ def measure(results, root=ROOT, records=None):
         else:
             forms = masm_mnemonics(source)
         cpu[asm.name] = (forms, status)
-    shaders = {test: (forms, fixture_status(results, [test]))
-               for test, forms in records.items() if test not in cpu_tests}
+    return cpu, cpu_tests
+
+
+def _measure(results, cpu, shaders):
     x64 = load_reference("x64_zen2.tsv")
     fixtures = {name: status for name, (_, status) in {**cpu, **shaders}.items()}
     return {
