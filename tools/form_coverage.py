@@ -76,6 +76,7 @@ CPU_FIXTURES = {
     "call_entries": "cpu_aot_call_entries",
     "bare_calls": "cpu_aot_bound_callees",
     "string_ops": "cpu_aot_string_ops",
+    "bit_ops": "cpu_aot_bit_ops",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

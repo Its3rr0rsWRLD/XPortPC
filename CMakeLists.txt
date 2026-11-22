@@ -830,6 +830,17 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_library(cpu_sign_ext_adc_lifted SHARED "${sign_ext_adc_fixture}")
     add_test(NAME cpu_aot_sign_ext_adc COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/sign_ext_adc.py"
         check "$<TARGET_FILE:cpu_sign_ext_adc>" "$<TARGET_FILE:cpu_sign_ext_adc_lifted>")
+    cpu_asm_fixture(cpu_bit_ops bit_ops)
+    set(bit_ops_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_bit_ops_lifted.cpp")
+    add_custom_command(OUTPUT "${bit_ops_fixture}"
+        COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/bit_ops.py"
+            emit "$<TARGET_FILE:cpu_bit_ops>" "${bit_ops_fixture}"
+        DEPENDS cpu_bit_ops tests/cpu/bit_ops.py tools/ffx_version_query.py
+            tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+    add_library(cpu_bit_ops_lifted SHARED "${bit_ops_fixture}")
+    add_test(NAME cpu_aot_bit_ops COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/bit_ops.py"
+        check "$<TARGET_FILE:cpu_bit_ops>" "$<TARGET_FILE:cpu_bit_ops_lifted>")
+    set_tests_properties(cpu_aot_bit_ops PROPERTIES SKIP_RETURN_CODE 77)
     cpu_translation(cpu_callback cpu_chained_aot call_context CALLBACK_OFFSET 8)
     cpu_asm_fixture(cpu_xlatb xlatb)
     # The lifted DLL and three mutated controls that the check requires to mismatch.

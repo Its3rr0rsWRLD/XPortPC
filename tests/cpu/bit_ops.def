@@ -1,0 +1,20 @@
+EXPORTS
+    bsf32
+    bsf64
+    bsr32
+    bsr64
+    bswap32
+    bswap64
+    popcnt32
+    popcnt64
+    lzcnt32
+    lzcnt64
+    bt32
+    bt64
+    bts32
+    bts64
+    btr32
+    btr64
+    btc32
+    btc64
+    btc64_imm

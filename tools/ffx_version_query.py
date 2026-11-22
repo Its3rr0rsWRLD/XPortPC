@@ -334,6 +334,39 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                     stmt = (f"{{ const {width} a = {operand(0)}, b = {operand(1)}; const unsigned c = {count_expr}; "
                             f"{width} v = a; if (c != 0u) {{ v = static_cast<{width}>((a >> c) | (b << ({bits}u - c))); "
                             f"carry = ((a >> (c - 1u)) & 1u) != 0; zero = v == 0; }} {write('v')} }}")
+        elif op in (M.BSF, M.BSR, M.POPCNT, M.LZCNT) and RegisterExt.size(i.op0_register) in (4, 8):
+            size = RegisterExt.size(i.op0_register)
+            width, bits = UINT[size], 8 * size
+            if op == M.BSF:
+                stmt = (f"{{ const {width} a = {operand(1)}; zero = a == 0; if (a != 0) {{ "
+                        f"{width} v = 0; while (((a >> v) & 1) == 0) ++v; {write('v')} }} }}")
+            elif op == M.BSR:
+                stmt = (f"{{ const {width} a = {operand(1)}; zero = a == 0; if (a != 0) {{ "
+                        f"{width} v = {bits - 1}; while (((a >> v) & 1) == 0) --v; {write('v')} }} }}")
+            elif op == M.POPCNT:
+                stmt = (f"{{ {width} a = {operand(1)}, v = 0; while (a != 0) {{ a &= a - 1; ++v; }} "
+                        f"carry = false; zero = v == 0; {write('v')} }}")
+            else:  # M.LZCNT
+                stmt = (f"{{ const {width} a = {operand(1)}; {width} v = 0; "
+                        f"if (a == 0) {{ v = {bits}; }} else {{ while (((a >> ({bits - 1} - v)) & 1) == 0) ++v; }} "
+                        f"carry = a == 0; zero = v == 0; {write('v')} }}")
+        elif op == M.BSWAP and RegisterExt.size(i.op0_register) in (4, 8):
+            size = RegisterExt.size(i.op0_register)
+            width = UINT[size]
+            stmt = (f"{{ const {width} a = {operand(0)}; {width} v = 0; "
+                    f"for (unsigned b = 0; b < {size}u; ++b) {{ v = (v << 8) | ((a >> (b * 8u)) & 0xffu); }} "
+                    f"{write('v')} }}")
+        elif op in (M.BT, M.BTS, M.BTR, M.BTC) and i.op0_kind == K.REGISTER and RegisterExt.size(i.op0_register) in (4, 8):
+            size = RegisterExt.size(i.op0_register)
+            width, bits = UINT[size], 8 * size
+            bit_expr = f"static_cast<unsigned>({operand(1)}) & {bits - 1}u"
+            if op == M.BT:
+                stmt = f"{{ const {width} a = {operand(0)}; carry = ((a >> ({bit_expr})) & 1u) != 0; }}"
+            else:
+                mut = {M.BTS: "a | m", M.BTR: "a & static_cast<" + width + ">(~m)", M.BTC: "a ^ m"}[op]
+                stmt = (f"{{ const {width} a = {operand(0)}; const unsigned b = {bit_expr}; "
+                        f"const {width} m = static_cast<{width}>(1) << b; carry = (a & m) != 0; "
+                        f"const {width} v = static_cast<{width}>({mut}); {write('v')} }}")
         elif op in (M.VMOVQ, M.VMOVSD, M.VMOVHPD) and has_wide:
             lanes = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
             if i.op1_kind == K.MEMORY and op != M.VMOVHPD:
