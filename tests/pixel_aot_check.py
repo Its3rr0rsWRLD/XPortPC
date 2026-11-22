@@ -2525,11 +2525,180 @@ def check_scheduling_hints():
     must_reject(translate, plain[:-1] + ["s_setprio 0", plain[-1]])
 
 
+# MIMG loads, level queries and gathers on the 8x8 R8G8B8A8 fixture texture, whose texel (x, y) is (RAMP[x], RAMP[y], 128, 255)
+# and which has one mip level. Every coordinate comes from the case constants (or an inline constant) so the draw does not
+# depend on the pixel. Outputs are exported directly, as unorm floats, or through v_cvt_f32_ubyte0 for the integer words of
+# image_get_resinfo. The texture is square, so width and height are not told apart by the draws; there is one level, so
+# a level above 0 is out of range. The wrong references are the plausible lowering bugs: swapped x and y, the first N
+# channels instead of the dmask channels, clamped or wrapped coordinates, an ignored mip index, an unzeroed
+# out-of-range level, a changed footprint order and the wrong gather component.
+IMG = "dim:SQ_RSRC_IMG_2D"
+SRC = "s[28:35]"
+f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
+unorm_export = lambda byte_value: half_rtz(f32(byte_value / 255.0))
+float_bits = lambda x: struct.unpack("<I", struct.pack("<f", x))[0]
+
+
+def texel(x, y):
+    """The fixture texel as bytes; any coordinate outside the 8x8 base level reads zero."""
+    return (RAMP[x], RAMP[y], 128, 255) if x < 8 and y < 8 else (0, 0, 0, 0)
+
+
+def pick(values, dmask):
+    return [value for c, value in enumerate(values) if dmask >> c & 1]
+
+
+def image_load_body(*loads):
+    """loads: (op, destination, dmask, source sgprs, modifiers). Coordinates move to v18 and up, one group per load."""
+    body = []
+    first = 18
+    for op, dst, dmask, sources, modifiers in loads:
+        regs = []
+        for source in sources:
+            body.append(move(first + len(regs), source))
+            regs.append(first + len(regs))
+        address = f"v{regs[0]}" if len(regs) == 1 else f"v[{regs[0]}:{regs[-1]}]"
+        body.append(f"image_{op} {dst}, {address}, {SRC} dmask:{dmask:#x} {IMG}{modifiers}")
+        first += len(regs)
+    return [*body, "s_waitcnt vmcnt(0)"]
+
+
+def image_gather_body(op, dmask):
+    return ["v_mov_b32_e32 v18, s44", "v_mov_b32_e32 v19, s45",
+            f"image_{op} v[12:15], v[18:19], {SRC}, s[40:43] dmask:{dmask:#x} {IMG}", "s_waitcnt vmcnt(0)"]
+
+
+def info_body(*queries):
+    """queries: (destination base, dmask, level sgpr). Outputs are v12..v15 from the listed result registers."""
+    body = []
+    for n, (base, dmask, level) in enumerate(queries):
+        body.append(move(30 + n, level))
+        count = bin(dmask).count("1")
+        dst = f"v{base}" if count == 1 else f"v[{base}:{base + count - 1}]"
+        body.append(f"image_get_resinfo {dst}, v{30 + n}, {SRC} dmask:{dmask:#x} {IMG}")
+    return [*body, "s_waitcnt vmcnt(0)"]
+
+
+def exported(*values):
+    return [unorm_export(v) for v in values]
+
+
+# (name, body, constant words, reference floats, wrong reference floats)
+GATHER_WORDS = (float_bits(3.25 / 8), float_bits(5.75 / 8), 0, 0)
+# At (3.25, 5.75) texels the footprint is columns 2 and 3 and rows 5 and 6. The order is lower left, lower right,
+# upper right, upper left, so red is [37, 64, 64, 37] and green is [219, 219, 153, 153].
+GL, GR, GT, GB = RAMP[2], RAMP[3], RAMP[5], RAMP[6]
+IMAGE_PROGRAMS = (
+    ("load", image_load_body(("load", "v[12:15]", 0xf, ("s44", "s45"), " unorm")), (2, 5, 0, 0),
+     exported(*texel(2, 5)), [exported(*texel(5, 2))]),
+    ("pack", image_load_body(("load", "v[12:13]", 0x5, ("s44", "s45"), " unorm glc"),
+                             ("load", "v[14:15]", 0xa, ("s46", "s47"), " dlc")), (6, 1, 3, 4),
+     exported(*pick(texel(6, 1), 0x5), *pick(texel(3, 4), 0xa)),
+     [exported(*texel(6, 1)[:2], *texel(3, 4)[:2]), exported(*pick(texel(6, 1), 0x5), *texel(3, 4)[:2]),
+      exported(*texel(6, 1)[:2], *pick(texel(3, 4), 0xa))]),
+    ("single", image_load_body(("load", "v12", 0x2, ("s44", "s45"), ""), ("load", "v13", 0x8, ("s46", "s47"), ""),
+                               ("load", "v14", 0x4, ("s44", "s45"), " unorm slc"), ("load", "v15", 0x1, ("s46", "s47"), " unorm")),
+     (1, 6, 7, 0),
+     exported(texel(1, 6)[1], texel(7, 0)[3], texel(1, 6)[2], texel(7, 0)[0]),
+     [exported(texel(1, 6)[0], texel(7, 0)[1], texel(1, 6)[2], texel(7, 0)[0])]),
+    ("edge", image_load_body(("load", "v[12:13]", 0x3, ("s44", "s45"), " unorm"), ("load", "v[14:15]", 0x3, ("s46", "s47"), " unorm")),
+     (7, 7, 8, 2),
+     exported(*texel(7, 7)[:2], 0, 0),
+     [exported(*texel(7, 7)[:2], *texel(7, 2)[:2]), exported(*texel(7, 7)[:2], *texel(0, 2)[:2])]),
+    ("range", image_load_body(("load", "v[12:13]", 0x3, ("s44", "s45"), " unorm"), ("load", "v[14:15]", 0x3, ("s46", "s47"), " unorm")),
+     (M32, 1, 3, 8),
+     exported(0, 0, 0, 0),
+     [exported(*texel(0, 1)[:2], *texel(3, 7)[:2]), exported(*texel(7, 1)[:2], *texel(3, 0)[:2])]),
+    ("mip", image_load_body(("load_mip", "v[12:13]", 0x3, ("s44", "s45", "s46"), " unorm"),
+                            ("load_mip", "v[14:15]", 0x3, ("s44", "s45", "s47"), " unorm")), (2, 5, 0, 1),
+     exported(*texel(2, 5)[:2], 0, 0),
+     [exported(*texel(2, 5)[:2], *texel(2, 5)[:2])]),
+    ("info0", [*info_body((20, 0xb, "s44"), (23, 0x9, "s45")),
+               ubyte(0, 12, "v20", "e32"), ubyte(0, 13, "v21", "e32"), ubyte(0, 14, "v22", "e32"), ubyte(0, 15, "v23", "e64")],
+     (0, 1, 0, 0), [8.0, 8.0, 1.0, 0.0], [[8.0, 8.0, 1.0, 4.0], [8.0, 8.0, 0.0, 0.0], [8.0, 8.0, 4.0, 0.0]]),
+    ("info1", [*info_body((20, 0xa, "s45"), (22, 0x8, "s44"), (23, 0x1, "s44")),
+               ubyte(0, 12, "v20", "e32"), ubyte(0, 13, "v21", "e64"), ubyte(0, 14, "v22", "e32"), ubyte(0, 15, "v23", "e32")],
+     (0, 1, 0, 0), [0.0, 1.0, 1.0, 8.0], [[4.0, 1.0, 1.0, 8.0], [0.0, 0.0, 1.0, 8.0], [0.0, 1.0, 4.0, 8.0]]),
+    ("gather_r", image_gather_body("gather4_lz", 0x1), GATHER_WORDS,
+     exported(GL, GR, GR, GL), [exported(GR, GL, GL, GR), exported(GT, GT, GB, GB), exported(RAMP[2], RAMP[2], RAMP[3], RAMP[3])]),
+    ("gather_g", image_gather_body("gather4_lz", 0x2), GATHER_WORDS,
+     exported(GB, GB, GT, GT), [exported(GT, GT, GB, GB), exported(GL, GR, GR, GL), exported(GB, GT, GT, GB)]),
+    ("gather_a", image_gather_body("gather4_lz", 0x8), GATHER_WORDS,
+     exported(255, 255, 255, 255), [exported(128, 128, 128, 128)]),
+    ("gather_b", image_gather_body("gather4_lz", 0x4), GATHER_WORDS,
+     exported(128, 128, 128, 128), [exported(255, 255, 255, 255)]),
+)
+
+
+def check_image_draws(directory, compiler, renderer, backend):
+    case = directory / "image.case"
+    for name, body, words, reference, bugs in IMAGE_PROGRAMS:
+        source = directory / f"image_{name}.hlsl"
+        shader = directory / f"image_{name}.cso"
+        source.write_text(translate(with_constants(body)), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        constants = bytearray(256)
+        struct.pack_into("<4I", constants, 12, *words)
+        for x in reference:
+            assert half_rtz(x) == x, x
+        case.write_bytes(constants + struct.pack("<4f", *reference) * 64)
+        subprocess.run(draw, check=True)
+        for wrong in bugs:
+            assert wrong != reference and all(half_rtz(x) == x for x in wrong), (name, wrong)
+            case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
+            result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                raise AssertionError(f"A wrong image result escaped detection in {name}: {wrong}")
+
+
+def check_image_controls():
+    load = ["image_load v[12:15], v[18:19], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D unorm"]
+    gather = "image_gather4_lz v[12:15], v[18:19], s[28:35], s[40:43] dmask:0x1 dim:SQ_RSRC_IMG_2D"
+    ready = [move(18, "s44"), move(19, "s45")]
+    # Direct3D loads, level queries and gathers; the helpers make out-of-range reads zero explicitly.
+    source = translate(with_constants([*ready, *load, "s_waitcnt vmcnt(0)"]))
+    assert "image_load2d(tex, " in source and "t.Load(int3(int(x), int(y), int(mip)))" in source, source
+    assert "if (x >= w || y >= h) return float4(0.0f" in source and "if (mip >= levels)" in source, source
+    source = translate(with_constants([*info_body((20, 0xb, "s44")), ubyte(0, 12, "v20", "e32")]))
+    assert "image_resinfo2d(tex, " in source and "uint4(w, h, 0u, levels)" in source, source
+    source = translate(with_constants([*ready, "image_gather4_lz v[12:15], v[18:19], s[28:35], s[40:43] dmask:0x4 dim:SQ_RSRC_IMG_2D",
+                                       "s_waitcnt vmcnt(0)"]))
+    assert "tex.GatherBlue(samp, float2(" in source, source
+    # The implicit-level gather is refused: its level comes from derivatives, which Gather* does not reproduce.
+    must_reject(translate, with_constants([*ready, gather.replace("gather4_lz", "gather4"), "s_waitcnt vmcnt(0)"]))
+    # Two dmask bits on a gather, a zero dmask, and unsupported modifiers or dimensions are refused.
+    for line in (gather.replace("0x1", "0x3"), gather.replace("0x1", "0x0"), gather.replace("0x1", "0x5"),
+                 load[0].replace("0xf", "0x0"), load[0] + " a16", load[0] + " d16", load[0] + " tfe", load[0] + " lwe",
+                 load[0].replace("IMG_2D", "IMG_2D_ARRAY"), load[0].replace("IMG_2D", "IMG_3D"), load[0] + " r128",
+                 gather + " unorm", gather + " a16", gather.replace("IMG_2D", "IMG_2D_ARRAY"),
+                 "image_get_resinfo v[12:14], v18, s[28:35] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm",
+                 "image_get_resinfo v12, v18, s[28:35] dmask:0x4 dim:SQ_RSRC_IMG_2D",
+                 "image_load v[12:14], v[18:19], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                 "image_load v[12:15], v[18:20], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                 "image_load_mip v[12:15], v[18:19], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                 "image_load v[12:15], v[18:19], s[28:35], s[40:43] dmask:0xf dim:SQ_RSRC_IMG_2D unorm",
+                 gather.replace("s[40:43]", "s[44:47]"), "image_gather4 v[12:15], v[18:19], s[28:35] dmask:0x1 dim:SQ_RSRC_IMG_2D"):
+        must_reject(translate, with_constants([*ready, line, "s_waitcnt vmcnt(0)"]))
+    # The image descriptor must be a loaded T#, and the coordinates must be set.
+    must_reject(translate, with_constants([*ready, load[0].replace("s[28:35]", "s[36:43]"), "s_waitcnt vmcnt(0)"]))
+    must_reject(translate, with_constants([*ready, load[0].replace("v[18:19]", "v[24:25]"), "s_waitcnt vmcnt(0)"]))
+    # A load result read before s_waitcnt vmcnt(0), an integer word and a destination that overlaps an outstanding load.
+    must_reject(translate, with_constants([*ready, *load]))
+    must_reject(translate, with_constants([*ready, *load, ubyte(0, 12, "v12", "e32")]))
+    must_reject(translate, with_constants([*info_body((20, 0xb, "s44"))[:-1], ubyte(0, 12, "v20", "e32")]))
+    must_reject(translate, with_constants([*ready, *load, load[0].replace("v[12:15]", "v[14:17]")]))
+    must_reject(translate, with_constants([*ready, gather, ubyte(0, 13, "v13", "e32")]))
+    # A gather coordinate read from a register under an outstanding sample is refused as well.
+    must_reject(translate, with_constants([*ready, *load, gather.replace("v[18:19]", "v[12:13]")]))
+
+
 def check_controls(directory):
     check_scheduling_hints()
     check_constant_descriptor_bounds()
     check_scalar_constant_reads()
     check_load_controls()
+    check_image_controls()
     # Whole-dword SDWA comparisons lower exactly as the e32 forms; byte and word selections are refused.
     for first in range(0, 16, 4):
         assert translate(predicate_group(first, sdwa=True)) == translate(predicate_group(first)), first
@@ -2949,6 +3118,7 @@ def check_binary(directory, assembler, objcopy, library):
     fixtures.extend((with_constants(body), translate) for _, body, *_ in F16_PROGRAMS)
     fixtures.extend((with_constants(body), translate) for body, *_ in ARITH_PROGRAMS)
     fixtures.extend((with_constants(body), translate_loads) for body, *_ in LOAD_PROGRAMS)
+    fixtures.extend((with_constants(body), translate) for _, body, *_ in IMAGE_PROGRAMS)
     fixtures.append((scheduling_hints(), translate))
     for index, (instructions, lower_fixture) in enumerate(fixtures):
         source = directory / "fixture.s"
@@ -3133,6 +3303,7 @@ def check_render(directory, compiler, renderer, backend):
     check_f16_draws(directory, compiler, renderer, backend)
     check_arith_draws(directory, compiler, renderer, backend)
     check_load_draws(directory, compiler, renderer, backend)
+    check_image_draws(directory, compiler, renderer, backend)
     check_fract_draw(directory, compiler, renderer, backend)
 
     program = scalar64()
