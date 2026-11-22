@@ -71,7 +71,9 @@ def check():
                 ([], "blocked", "disassembly_failed", "empty instruction stream"),
                 (ValueError("Unknown instruction at byte 0"), "blocked", "disassembly_failed",
                  "Unknown instruction at byte 0"),
-                (["s_endpgm"], "blocked", "pixel_lowering_rejected", None),
+                # A lone s_endpgm now lowers to an empty main (exports card), so use a recognized trap that
+                # the pixel lowering refuses.
+                (["s_trap 2", "s_endpgm"], "blocked", "pixel_lowering_rejected", None),
                 (["unknown_instruction"], "blocked", "unsupported_opcodes", "unknown_instruction")):
             patch_args = {"side_effect": instructions} if isinstance(instructions, Exception) else {"return_value": instructions}
             with patch("pixel_aot.disassemble", **patch_args) as scan:
