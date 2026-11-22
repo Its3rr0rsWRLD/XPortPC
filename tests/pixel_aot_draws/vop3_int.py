@@ -303,9 +303,40 @@ assert all(row[5] for row in ROWS)
 # ---- the draw ------------------------------------------------------------------------------------------------------
 
 
-def check_vop3_int_draws(directory, compiler, renderer, backend):
+def draw_cost(row):
+    """Renderer launches one row costs: the plain check per constant set, one per wrong-reference channel that differs, and
+    the row's own shader (each launch is a process with the debug layer, so launches are what a family's time is made of)."""
+    _, _, reads, reference, sets, bugs = row
+    cost = 1
+    for constants_words in sets:
+        expected = read(reads, reference(*constants_words))
+        cost += 1 + sum(value != expected[channel] for buggy in bugs.values()
+                        for channel, value in enumerate(read(reads, buggy(*constants_words))))
+    return cost
+
+
+def split_rows(parts):
+    """The rows in `parts` consecutive runs of about equal launch cost (a 64-bit pair's rows stay adjacent)."""
+    total = sum(draw_cost(row) for row in ROWS)
+    runs, current, spent = [[] for _ in range(parts)], 0, 0
+    for row in ROWS:
+        runs[current].append(row)
+        spent += draw_cost(row)
+        if current < parts - 1 and spent >= total * (current + 1) / parts:
+            current += 1
+    return runs
+
+
+# One CTest test per family and the whole table is ~3100 launches, over the 600 s limit on hardware with the debug layer:
+# vop3_int, vop3_int_b, vop3_int_c and vop3_int_d (modules of the same name) each run one run of ROWS, ~770 launches.
+PARTS = 4
+RUNS = split_rows(PARTS)
+assert [row for run in RUNS for row in run] == ROWS and all(RUNS)
+
+
+def check_vop3_int_draws(directory, compiler, renderer, backend, rows=None):
     case = directory / "vop3_int.case"
-    for index, (name, body, reads, reference, sets, bugs) in enumerate(ROWS):
+    for index, (name, body, reads, reference, sets, bugs) in enumerate(RUNS[0] if rows is None else rows):
         source = directory / f"vop3_int{index}.hlsl"
         shader = directory / f"vop3_int{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
@@ -393,4 +424,5 @@ def binary_fixtures():
     return [(with_constants(body), translate) for _, body, *_ in ROWS]
 
 
-draw = check_vop3_int_draws
+def draw(directory, compiler, renderer, backend):
+    return check_vop3_int_draws(directory, compiler, renderer, backend, RUNS[0])
