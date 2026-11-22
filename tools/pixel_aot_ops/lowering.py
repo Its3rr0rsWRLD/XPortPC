@@ -69,6 +69,8 @@ class Lowering:
         # attr0 interpolated in its z or w component (forms/vintrp.py): TEXCOORD0 is declared float4.
         self.attribute_input = False
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
+        self.texcoord4 = False  # lower(texcoord_components=4): TEXCOORD0 is declared float4
+        self.compressed_mrt0 = False  # the done export is the compressed mrt0 export alone (forms/exp.py)
         self.exports = ()  # exports before the done export on this path: (output name, width, mask, HLSL local)
         self.exported = False  # the done export has been emitted
         self.layout = None  # the outputs the done export returns, the same on every path (forms/exp.py)
@@ -200,7 +202,8 @@ def described_state(b):
 
 
 def lower(instructions, texture_sgpr=None, interp_sgpr=None, sampler=None, constant_descriptor=None, *,
-          second_texture_offset=None, buffer_descriptors=None, integer_export=False, storage_images=None, bindings=None):
+          second_texture_offset=None, buffer_descriptors=None, integer_export=False, storage_images=None, bindings=None,
+          texcoord_components=2):
     """Track descriptor provenance, interpolation and packed exports through register writes.
 
     The fixed contract: texture_sgpr holds the descriptor-table pointer (high word 0), with the T# at offset 0 and
@@ -211,10 +214,15 @@ def lower(instructions, texture_sgpr=None, interp_sgpr=None, sampler=None, const
     from R0Y00/Xbox2Windows#484 by Royoo).
 
     bindings: a bindings.PixelBindings instead of all of those (docs/design/pixel-bindings.md): descriptor sets,
-    push constants, any number of textures, samplers and constant buffers at any offset, samplers loaded from memory."""
+    push constants, any number of textures, samplers and constant buffers at any offset, samplers loaded from memory.
+
+    texcoord_components: 2 or 4, the width of the TEXCOORD0 input main declares (upstream's argument, 2 by default;
+    tests/mesh_textured_check.py pairs a float4 PARAM0 with it), whatever the program reads of it."""
+    if texcoord_components not in (2, 4):
+        raise ValueError("Expected two or four TEXCOORD components")
     if bindings is not None:
         if (texture_sgpr, interp_sgpr, sampler, constant_descriptor, second_texture_offset, buffer_descriptors,
-                storage_images) != (None,) * 7:
+                storage_images) != (None,) * 7 or texcoord_components != 2:
             raise ValueError("A binding description replaces the fixed-contract arguments")
         st = described_state(bindings)
         st.integer_export = integer_export
@@ -258,6 +266,7 @@ def lower(instructions, texture_sgpr=None, interp_sgpr=None, sampler=None, const
                   vsharp_words)
     st.preamble = preamble
     st.integer_export = integer_export
+    st.texcoord4 = texcoord_components == 4
     # storage_images maps the byte offset of a 32-byte image T# in the descriptor table to (slot, format): the harness
     # binds that image's levels at u(8 * slot), space2 (forms/image_writes.py checks the format where it is written).
     slots = [entry[0] if isinstance(entry, tuple) and len(entry) == 2 else None for entry in (storage_images or {}).values()]
@@ -358,7 +367,7 @@ def finish(st, instructions, samples=None):
             st.lines[:] = [text.replace(f"GetAttributeAtVertex(attr{n}, ", f"GetAttributeAtVertex(attr{n}_v, ")
                            for text in st.lines]
         st.lines[pos + 1:pos + 1] = prologue
-    if st.attribute_input and 0 not in st.flat_attrs:
+    if (st.attribute_input or st.texcoord4) and 0 not in st.flat_attrs:
         pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
         st.lines[pos] = st.lines[pos].replace("main(float2 uv : TEXCOORD0", "main(float4 uv : TEXCOORD0", 1)
     if st.signature:
@@ -367,6 +376,13 @@ def finish(st, instructions, samples=None):
         st.lines[pos] = st.lines[pos].replace("float4 main(", f"{returns} main(", 1).replace(") : SV_Target0 {", ") {", 1)
         if declaration:
             st.lines.insert(pos, declaration)
+    if samples == 0 and st.compressed_mrt0 and not attributes and not st.quad_position:
+        # The fixed contract without a sampler (lower(sampler=None)) whose compressed mrt0 export reads no input:
+        # main takes no TEXCOORD0, as upstream R0Y00/Xbox2Windows#544 lowers it, so the program links with a mesh
+        # or vertex stage that outputs SV_Position alone (tests/mesh_cbv_order_check.py).
+        pos = st.lines.index(next(line for line in st.lines if re.search(r"main\(float[24] uv : TEXCOORD0\)", line)))
+        if not any(re.search(r"\buv\b", line) for line in st.lines[pos + 1:]):
+            st.lines[pos] = re.sub(r"main\(float[24] uv : TEXCOORD0\)", "main()", st.lines[pos], count=1)
     text = "\n".join([*st.lines, "}",""])
     if integer_export:
         if "return uint4(" not in text:
