@@ -315,6 +315,10 @@ def case_bytes(constants, reference):
     struct.pack_into("<4I", case, 12, *(word(c) for c in constants))
     for p in pixels(constants):
         case.extend(struct.pack("<4f", *reference(p)))
+    # The case trailer's viewport (flags bit 1, tests/pixel_aot_render.cpp): the full 8x8 target, so the draw is one pixel
+    # per texel as Pixel models it. Without it the renderer draws 64x64 (8x8 pixels per texel): u then varies inside a
+    # texel (cf2_sample's T < u differs from the texel-center reference) and no 2x2 quad spans two texels.
+    case.extend(struct.pack("<B4I", 2, 0, 0, 8, 8))
     return bytes(case)
 
 
