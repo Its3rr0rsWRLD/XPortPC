@@ -194,13 +194,14 @@ def check_shader_records():
         os.utime(record, (now - 3600, now - 3600))
         assert fc.read_records(record.parent, (now - 60, now + 60)) == {}
     # The same holds in the real controls. The scheduling-hint fixtures translate programs with s_nop
-    # and the hints, so those forms are recorded; s_branch reaches only must_reject and stays out.
+    # and the hints, so those forms are recorded. Since CF-1 the control-flow controls accept s_branch;
+    # s_code_end still reaches only must_reject and stays out.
     assert ("SOPP", "s_branch") in gfx
     pixel.ACCEPTED.clear()
     with tempfile.TemporaryDirectory() as tmp:
         pixel.check_controls(Path(tmp))
     assert {"s_nop", "s_clause", "s_setprio", "s_sleep", "image_sample"} <= pixel.ACCEPTED
-    assert "s_branch" not in pixel.ACCEPTED and "s_code_end" not in pixel.ACCEPTED
+    assert "s_branch" in pixel.ACCEPTED and "s_code_end" not in pixel.ACCEPTED
     # Every newly lowered 64-bit SOP1/SOP2 and 32-bit BFE form is counted in both gfx1013 and rdna2,
     # while rejected neighbors (exec save/restore, #257 ops, 64-bit BFE/cselect) stay out of covered.
     scalar64_forms = {
@@ -214,7 +215,7 @@ def check_shader_records():
         "s_and_saveexec_b64", "s_or_saveexec_b64", "s_andn2_saveexec_b64",
         "s_cselect_b64", "s_bfe_u64", "s_bfe_i64", "s_nand_b64", "s_nor_b64", "s_xnor_b64",
         "s_cmp_eq_u64", "s_bitcmp1_b64", "s_bfm_b32",
-        "s_add_u32", "s_and_b32", "s_not_b32", "s_cmp_eq_i32", "s_cselect_b32",
+        "s_and_b32", "s_not_b32", "s_cmp_eq_i32", "s_cselect_b32",  # s_add_u32 is lowered now
     }
     assert not (pixel.ACCEPTED & rejected_forms), pixel.ACCEPTED & rejected_forms
     for name in ("gfx1013.tsv", "rdna2.tsv"):
@@ -240,6 +241,15 @@ def check_parsing():
         assert results == {"a": "pass", "b": "fail", "c": "skip", "d": "fail", "e": "fail", "f": "skip"}, results
         start = datetime(2026, 11, 21, 21, 5, 21).timestamp()  # CTest writes local time
         assert window == (start - 1, start + 34), window
+        rerun = Path(tmp) / "rerun.xml"
+        rerun.write_text('<testsuite time="5" timestamp="2026-11-21T21:07:00">'
+                         '<testcase name="b" status="run"/><testcase name="d" status="fail"/></testsuite>',
+                         encoding="utf-8")
+        merged, wider = fc.merge_reruns(results, window, [rerun])
+        assert merged == dict(results, b="pass"), merged
+        again = datetime(2026, 11, 21, 21, 7, 0).timestamp()
+        assert wider == (start - 1, again + 7), wider
+        assert fc.merge_reruns(results, window, []) == (results, window)
     asm = ("emit MACRO dst\nLOCAL skip\n    lock cmpxchg [rdx], eax\n    rep movsb\nskip:\nENDM\n"
            "x PROC FRAME\n    .endprolog\nIFDEF A\n    jae short l\nELSE\n    jnz short l\nENDIF\n"
            "l:  mov DWORD PTR [rdx], eax ; c\ng:: ud2\n    emit rax\nvalue DQ 0\n    dd 1\n    ret\nx ENDP\nEND\n")

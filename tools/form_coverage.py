@@ -137,6 +137,18 @@ def read_results(junit):
     return results, (start - 1, start + float(suite.get("time")) + 2)
 
 
+def merge_reruns(results, window, reruns):
+    """Apply `ctest --rerun-failed` results on top of the main run: a test's last state wins, and the
+    record window grows to cover the reruns, since a rerun test writes its records again."""
+    results = dict(results)
+    start, end = window
+    for junit in reruns:
+        again, (s, e) = read_results(junit)
+        results.update(again)
+        start, end = min(start, s), max(end, e)
+    return results, (start, end)
+
+
 def read_records(directory, window):
     """{test: first words of the accepted program lines} from records written within window."""
     start, end = window
@@ -216,8 +228,10 @@ def main(argv):
     parser.add_argument("--records", type=Path, default=RECORDS,
                         help="directory of shader translation records (default: %(default)s)")
     parser.add_argument("--json", type=Path, help="also write the full result, per group, as JSON")
+    parser.add_argument("--rerun", type=Path, action="append", default=[],
+                        help="JUnit of a `ctest --rerun-failed` after the main run; repeatable, later wins")
     args = parser.parse_args(argv)
-    results, window = read_results(args.junit)
+    results, window = merge_reruns(*read_results(args.junit), args.rerun)
     m = measure(results, records=read_records(args.records, window))
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

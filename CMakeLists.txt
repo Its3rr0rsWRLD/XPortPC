@@ -371,6 +371,8 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME status_json COMMAND "${INTAKE_PYTHON}" -B -I
         "${CMAKE_SOURCE_DIR}/tests/status_json_check.py")
     set_tests_properties(status_json PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME form_coverage COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/form_coverage_check.py")
 
     enable_language(ASM_MASM)
     function(cpu_asm_fixture image source)
