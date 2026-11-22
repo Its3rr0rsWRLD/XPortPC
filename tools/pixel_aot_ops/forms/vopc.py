@@ -29,7 +29,19 @@ def class_f32(st, i, m):
         bits = word_of(classes, st.scalar, st.vector, st.pending, st.sample_pending)
     else:
         raise ValueError("Unsupported class mask")
-    operand = fp_operand(value, st.scalar, st.vector, st.pending, st.sample_pending)
+    # The class test is exact on every encoding, a subnormal included: abs and neg act on the sign bit of the word, never
+    # through a float negate or abs, which a device may flush (a negated subnormal then reads as zero).
+    modified = re.fullmatch(r"(-?)(?:abs\(([^()|]+)\)|\|([^()|]+)\|)", value) or re.fullmatch(r"(-)()([vs]\d+)", value)
+    if modified:
+        neg, inner = modified.group(1), modified.group(2) or modified.group(3)
+        word = f"asuint({fp_operand(inner, st.scalar, st.vector, st.pending, st.sample_pending)})"
+        if modified.group(2) or "|" in value:
+            word = f"({word} & 0x7fffffffu)"
+        if neg:
+            word = f"({word} ^ 0x80000000u)"
+        operand = f"asfloat({word})"
+    else:
+        operand = fp_operand(value, st.scalar, st.vector, st.pending, st.sample_pending)
     for j, reg in enumerate(regs):
         st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.lines.append(f"    bool cmp{i} = (class32({operand}) & {bits}) != 0u;")

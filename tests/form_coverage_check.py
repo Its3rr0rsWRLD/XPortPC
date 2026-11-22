@@ -231,12 +231,22 @@ def check_shader_records():
     }
     rejected_forms = {
         "s_and_saveexec_b64", "s_or_saveexec_b64", "s_andn2_saveexec_b64",
-        # Removed as lowered (salu_rest lowering; its draws are pending): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
+        # Removed as lowered (draw family salu_rest): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
         # s_bitcmp1_b64 and s_not_b32, as were s_add_u32, s_and_b32, s_bfm_b32 and s_cselect_b32 before them.
         # What is left reads or writes EXEC or is lane-mask or control flow (CF-2/CF-3): s_wqm_b32, s_quadmask_*,
         # the saveexec/wrexec family, s_getpc/s_setpc/s_swappc_b64, s_rfe_b64, s_movrel*.
         "s_wqm_b32", "s_quadmask_b32", "s_quadmask_b64", "s_and_saveexec_b32", "s_getpc_b64", "s_setpc_b64",
         "s_swappc_b64", "s_rfe_b64", "s_movrels_b32", "s_movreld_b32",
+    }
+    # The forms lowered by the salu_rest draws are counted in both gfx1013 and rdna2.
+    salu_rest_forms = {
+        ("SOP1", "s_not_b32"), ("SOP1", "s_brev_b32"), ("SOP1", "s_bcnt1_i32_b32"), ("SOP1", "s_flbit_i32"),
+        ("SOP1", "s_ff1_i32_b64"), ("SOP1", "s_bitset1_b64"), ("SOP1", "s_bitreplicate_b64_b32"),
+        ("SOP1", "s_cmov_b32"), ("SOP1", "s_abs_i32"), ("SOP1", "s_sext_i32_i8"),
+        ("SOP2", "s_addc_u32"), ("SOP2", "s_min_i32"), ("SOP2", "s_mul_hi_i32"), ("SOP2", "s_bfe_i64"),
+        ("SOP2", "s_cselect_b64"), ("SOP2", "s_nand_b64"), ("SOP2", "s_pack_hh_b32_b16"), ("SOP2", "s_absdiff_i32"),
+        ("SOPC", "s_cmp_eq_u64"), ("SOPC", "s_bitcmp1_b64"), ("SOPC", "s_bitcmp0_b32"),
+        ("SOPK", "s_cmpk_lt_u32"), ("SOPK", "s_cmpk_ge_i32"), ("SOPK", "s_cmovk_i32"),
     }
     assert not (pixel.ACCEPTED & rejected_forms), pixel.ACCEPTED & rejected_forms
     # The int_compare draws accept the signed scalar comparisons (lowered before any test used them).
@@ -244,6 +254,7 @@ def check_shader_records():
     for name in ("gfx1013.tsv", "rdna2.tsv"):
         covered = fc.gfx_forms(pixel.ACCEPTED, fc.load_reference(name))
         assert scalar64_forms <= covered, (name, scalar64_forms - covered)
+        assert salu_rest_forms <= covered, (name, salu_rest_forms - covered)
 
 
 def check_parsing():

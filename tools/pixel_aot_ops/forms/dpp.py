@@ -230,6 +230,11 @@ def dpp(st, i, m):
 def _typed(word, source, neg, absolute):
     """The first source word given its type, then abs and neg (on the encoding's sign bit for binary16)."""
     if source == "bits":
+        # Only the frexp forms take modifiers on a bit source: abs clears and neg flips the sign bit of the word.
+        if absolute:
+            word = f"({word} & 0x7fffffffu)"
+        if neg:
+            word = f"({word} ^ 0x80000000u)"
         return word
     if source == "f16":
         bits = f"({word} & 0xffffu)"
