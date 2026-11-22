@@ -649,6 +649,43 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 else:
                     stmt = (f"{{ const {width} acc = static_cast<{width}>(rax), d = {operand(0)}, s = {operand(1)}; "
                             f"zero = acc == d; carry = acc < d; if (zero) {{ {write('s')} }} else {{ rax = d; }} }}")
+        elif op in (M.BZHI, M.MULX, M.PDEP, M.PEXT, M.RORX, M.SARX, M.SHLX, M.SHRX) and RegisterExt.size(i.op0_register) in (4, 8):
+            size = RegisterExt.size(i.op0_register)
+            width, bits = UINT[size], 8 * size
+            if op == M.BZHI:
+                stmt = (f"{{ const {width} a = {operand(1)}; const unsigned n = static_cast<unsigned>({operand(2)} & 0xffu); "
+                        f"const {width} v = n >= {bits}u ? a : static_cast<{width}>(a & ((static_cast<{width}>(1) << n) - 1)); "
+                        f"carry = n >= {bits}u; zero = v == 0; {write('v')} }}")
+            elif op == M.RORX:
+                count = i.immediate(2) & (bits - 1)
+                expr = "a" if count == 0 else f"static_cast<{width}>((a >> {count}) | (a << {bits - count}))"
+                stmt = f"{{ const {width} a = {operand(1)}, v = {expr}; {write('v')} }}"
+            elif op in (M.SHLX, M.SHRX, M.SARX):
+                lhs = f"static_cast<int{bits}_t>(a)" if op == M.SARX else "a"
+                shift = "<<" if op == M.SHLX else ">>"
+                stmt = (f"{{ const {width} a = {operand(1)}; const unsigned c = static_cast<unsigned>({operand(2)}) & {bits - 1}u; "
+                        f"const {width} v = static_cast<{width}>({lhs} {shift} c); {write('v')} }}")
+            elif op == M.PDEP:
+                stmt = (f"{{ const {width} src = {operand(1)}, mask = {operand(2)}; {width} v = 0; unsigned k = 0; "
+                        f"for (unsigned b = 0; b < {bits}u; ++b) {{ if ((mask >> b) & 1u) {{ "
+                        f"if ((src >> k) & 1u) v |= static_cast<{width}>(1) << b; ++k; }} }} {write('v')} }}")
+            elif op == M.PEXT:
+                stmt = (f"{{ const {width} src = {operand(1)}, mask = {operand(2)}; {width} v = 0; unsigned k = 0; "
+                        f"for (unsigned b = 0; b < {bits}u; ++b) {{ if ((mask >> b) & 1u) {{ "
+                        f"if ((src >> b) & 1u) v |= static_cast<{width}>(1) << k; ++k; }} }} {write('v')} }}")
+            else:  # M.MULX
+                lo_dst = reg(i.op1_register)
+                if size == 4:
+                    stmt = (f"{{ const uint64_t p = static_cast<uint64_t>(static_cast<uint32_t>(rdx)) * static_cast<uint32_t>({operand(2)}); "
+                            f"const uint32_t lo = static_cast<uint32_t>(p), hi = static_cast<uint32_t>(p >> 32); "
+                            f"{lo_dst} = lo; {write('hi')} }}")
+                else:
+                    stmt = (f"{{ const uint64_t a = rdx, b = {operand(2)}; "
+                            f"const uint64_t a0 = static_cast<uint32_t>(a), a1 = a >> 32, b0 = static_cast<uint32_t>(b), b1 = b >> 32; "
+                            f"const uint64_t p0 = a0 * b0, p1 = a0 * b1, p2 = a1 * b0, p3 = a1 * b1; "
+                            f"const uint64_t mid = (p0 >> 32) + static_cast<uint32_t>(p1) + static_cast<uint32_t>(p2); "
+                            f"const uint64_t lo = (p0 & 0xffffffffull) | (mid << 32), hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32); "
+                            f"{lo_dst} = lo; {write('hi')} }}")
         elif op in (M.VMOVQ, M.VMOVSD, M.VMOVHPD) and has_wide:
             lanes = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
             if i.op1_kind == K.MEMORY and op != M.VMOVHPD:

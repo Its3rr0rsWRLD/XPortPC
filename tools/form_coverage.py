@@ -90,6 +90,7 @@ CPU_FIXTURES = {
     "crypto_aes_pclmul": "cpu_aot_crypto_aes_pclmul",
     "crypto_sha": "cpu_aot_crypto_sha",
     "avx_packed_fp": "cpu_aot_avx_packed_fp",
+    "bmi2": "cpu_aot_bmi2",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map

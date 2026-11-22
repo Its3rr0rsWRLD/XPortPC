@@ -1,0 +1,18 @@
+EXPORTS
+    bzhi32
+    bzhi64
+    rorx32
+    rorx64
+    shlx32
+    shlx64
+    shrx32
+    shrx64
+    sarx32
+    sarx64
+    pdep32
+    pdep64
+    pext32
+    pext64
+    mulx32
+    mulx64
+    mulx64_same
