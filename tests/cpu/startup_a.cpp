@@ -20,7 +20,11 @@ extern "C" __declspec(dllexport) void a_log(char event) {
 extern "C" __declspec(dllexport) unsigned a_snapshot(char* out) {
     LONG length = g_length;
     if (length > static_cast<LONG>(sizeof(g_log))) length = sizeof(g_log);
-    for (LONG i = 0; i < length; ++i) out[i] = g_log[i];
+    // An explicit copy: at /O2 MSVC turns a byte loop into a memcpy call, which a CRT-free DLL cannot link.
+    if (length > 0) {
+        __movsb(reinterpret_cast<unsigned char*>(out), reinterpret_cast<const unsigned char*>(g_log),
+                static_cast<size_t>(length));
+    }
     return static_cast<unsigned>(length);
 }
 

@@ -1,0 +1,17 @@
+EXPORTS
+    m32_to_m32
+    m32_to_m64
+    m32_to_m80
+    m64_to_m32
+    m64_to_m64
+    m64_to_m80
+    m80_to_m32
+    m80_to_m64
+    m80_to_m80
+    add_m80
+    add_to_m64
+    add_to_m32
+    add_m64
+    add_m64_to_m80
+    add_m32
+    add_three

@@ -7,13 +7,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from cpu_switch_aot import translate
 from direct_check import GUARDS, MASK, SENTINELS, input_pairs, observe, register_probe
 
-NAMES = ("square_tail", "inc_square", "pick_tail")
+NAMES = ("square_tail", "inc_square", "pick_tail", "branch_next")
 # Whether the export's entry is above the lowest instruction it reaches.
-ABOVE = {"square_tail": False, "inc_square": True, "pick_tail": True}
+ABOVE = {"square_tail": False, "inc_square": True, "pick_tail": True, "branch_next": False}
 
 
 def reference(name, x, y):
     """Return value and the two trace words; an untouched word keeps the probe's fill."""
+    if name == "branch_next":
+        value = (x + y) & MASK
+        return value, (value, MASK)
     if name == "pick_tail" and x >= y:
         value = (x - y) & MASK
         return value, (MASK, value)
@@ -37,6 +40,13 @@ def check_layout(original_path):
             raise AssertionError(f"{name}: translation starts with {first!r}")
         print(f"control {name}: entry {function.entry:#x}, lowest instruction {lowest:#x}, "
               f"{'starts with a jump to the entry' if starts_with_jump else 'starts at the entry'}")
+    # branch_next must really branch to its own fallthrough, and that target must be labelled.
+    branch = next(ins for ins in functions[NAMES.index("branch_next")].instructions.values() if ins.is_jcc_short_or_near)
+    if branch.near_branch_target != branch.next_ip:
+        raise AssertionError(f"branch_next: the branch at {branch.ip:#x} targets {branch.near_branch_target:#x}")
+    if f"loc_{branch.next_ip:x}:" not in bodies[NAMES.index("branch_next")]:
+        raise AssertionError("branch_next: the branch target has no label")
+    print(f"control branch_next: the branch at {branch.ip:#x} targets its fallthrough, which is labelled")
 
 
 def check(probe_path, original_path, lifted_path):

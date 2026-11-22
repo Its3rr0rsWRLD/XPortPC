@@ -1,5 +1,6 @@
 """Differential checks and rejection controls for 8- and 16-bit register writes and return widths,
-plus 64-bit IMUL, CL shifts and MOVSX (qword_ops) and the flags of INC, TEST and CMP (flag_results)."""
+plus 64-bit IMUL, CL shifts and MOVSX (qword_ops), the flags of INC, TEST and CMP (flag_results) and
+three-operand IMUL into destinations not defined before it (imul3_fresh)."""
 
 import ctypes
 from pathlib import Path
@@ -17,7 +18,7 @@ from direct_check import GUARDS, MASK, SENTINELS, input_pairs, observe, register
 # Consecutive low bytes of RAX defined at every reachable RET of each export that the test calls.
 WIDTHS = {"byte_merge": 8, "word_ops": 8, "byte_shift": 8, "byte_unary": 8, "al_less": 1,
           "mixed_width": 1, "ax_copy": 2, "zx_byte": 8, "set_less": 1, "set_zx": 8, "store_only": 0,
-          "store_ret0": 0, "qword_ops": 8, "flag_results": 8}
+          "store_ret0": 0, "qword_ops": 8, "flag_results": 8, "imul3_fresh": 8}
 
 FOCUSED_INPUTS = {"qword_ops": [(32, 0x8000000000000080)], "flag_results": [(255, 255)]}
 
@@ -75,6 +76,10 @@ def reference(name, x, y, rax):
         # TEST always clears the carry flag.
         trace = [int(incremented == 0), 0, int(signed(x, 64) <= signed(y, 64))]
         rax = difference >> 63
+    elif name == "imul3_fresh":
+        # The low bits of a product do not depend on signedness; MOVZX clears R9 above the word.
+        rax = x * 0x1010101 & 0xffffffff
+        trace[0], trace[1] = y * -5 & MASK, x * 0x7fff & 0xffff
     return rax, (GUARDS[0], *trace, GUARDS[1])
 
 
@@ -168,7 +173,8 @@ def check_rejections(original_path):
             path.write_bytes(damaged)
             run_control(name, f"{ins} -> {replacement}", path, reason)
     exports = (("join_wide", "undefined register rax"), ("cmov_word", "unsupported partial register write"),
-               ("address_return", "return value may hold a guest address"))
+               ("address_return", "return value may hold a guest address"),
+               ("imul2_undefined", "undefined register rax"))
     for name, reason in exports:
         run_control(name, "source export", original_path, reason)
     print(f"{len(controls) + len(exports)} rejection controls passed")

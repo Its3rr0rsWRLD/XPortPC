@@ -1,15 +1,18 @@
 """Compare complete Windows processes, including a translated inverted branch."""
+from functools import partial
 from pathlib import Path
 import struct
-import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from typing import NamedTuple
 
 import pefile
+from exe_process import launch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from cpu_exe_aot import translate
+from cpu_exe_aot import translate as translate_exe
+
+translate = partial(translate_exe, entry_export="native_entry")
 
 
 class Observation(NamedTuple):
@@ -18,9 +21,14 @@ class Observation(NamedTuple):
     exit_code: int
 
 
+def observation(row):
+    if not row["process_signaled"] or not all(row[name]["eof"] for name in ("stdout", "stderr")):
+        raise AssertionError(f"expected process signal and both EOFs: {row}")
+    return Observation(row["stderr"]["bytes"], row["stdout"]["bytes"], row["code"])
+
+
 def run(executable, selector):
-    child = subprocess.run([executable], input=selector, capture_output=True, timeout=15)
-    return Observation(child.stderr, child.stdout, child.returncode)
+    return observation(launch([executable], selector))
 
 
 def check(label, actual, expected):

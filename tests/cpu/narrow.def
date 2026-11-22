@@ -17,3 +17,5 @@ EXPORTS
     join_wide
     cmov_word
     address_return
+    imul3_fresh
+    imul2_undefined

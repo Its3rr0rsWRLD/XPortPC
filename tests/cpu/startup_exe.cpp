@@ -5,6 +5,7 @@
 // A failure ends the process with 0xE0000001 (TlsAlloc), 0xE0000002 (CreateThread), 0xE0000003 (wait timed out),
 // 0xE0000004 (wait failed) or 0xE0000005 (unexpected wait result).
 #include <windows.h>
+#include <intrin.h>
 
 #pragma runtime_checks("", off)
 
@@ -52,7 +53,9 @@ void write_line(HANDLE out, const char* prefix, const char* text, unsigned lengt
     char line[96];
     unsigned n = 0;
     for (; prefix[n]; ++n) line[n] = prefix[n];
-    for (unsigned i = 0; i < length; ++i) line[n++] = text[i];
+    // An explicit copy: at /O2 MSVC turns a byte loop into a memcpy call, which a CRT-free EXE cannot link.
+    __movsb(reinterpret_cast<unsigned char*>(line + n), reinterpret_cast<const unsigned char*>(text), length);
+    n += length;
     line[n++] = '\n';
     DWORD written = 0;
     WriteFile(out, line, n, &written, nullptr);

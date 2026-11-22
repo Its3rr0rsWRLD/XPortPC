@@ -205,4 +205,24 @@ address_return PROC FRAME
     lea rax, byte_merge
     ret
 address_return ENDP
+
+; Three-operand IMUL writes its destination without reading it: R10, R9 and RAX are not defined
+; before the multiplies. The 16-bit form merges into R9W, and MOVZX reads only that word.
+imul3_fresh PROC FRAME
+    .endprolog
+    imul r10, rdx, -5
+    mov QWORD PTR [r8], r10
+    imul r9w, cx, 7FFFh
+    movzx r9d, r9w
+    mov QWORD PTR [r8+8], r9
+    imul eax, ecx, 1010101h
+    ret
+imul3_fresh ENDP
+
+; Rejected: two-operand IMUL reads its destination, and EAX is not defined at entry.
+imul2_undefined PROC FRAME
+    .endprolog
+    imul eax, ecx
+    ret
+imul2_undefined ENDP
 END

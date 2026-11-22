@@ -1,0 +1,5 @@
+EXPORTS
+    xlat_basic
+    xlat_rexw
+    xlat_addr32
+    xlat_twice

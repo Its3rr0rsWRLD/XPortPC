@@ -154,6 +154,12 @@ class BlockChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture(0, 1)
 
+    def test_rectangular_fixture_raster(self):
+        # The reference decodes the 5-by-7 block grid as one 20-by-28 image
+        # with texture2ddecoder 1.0.6 and converts its BGRA output to RGBA.
+        _, _, pixels = fixture(columns=5, rows=7)
+        self.assertEqual(hashlib.sha256(pixels).hexdigest(), RECTANGULAR_PIXELS_SHA256)
+
     @unittest.skipUnless(texture2ddecoder, "Optional comparison: pip install texture2ddecoder")
     def test_independent_decoder(self):
         rows = fixture()[1] + b"".join(random_block(mode, case) for mode in range(8) for case in range(2048))
@@ -170,6 +176,7 @@ class BlockChecks(unittest.TestCase):
 
 ROWS_SHA256 = "184fc0970dc8e1b91f79639d820bd0eb7df2659427bb8b17ce66f61fd7e969ba"
 PIXELS_SHA256 = "79fe13df3cf1a31914c7a08d0e02d78840347d5e2dcbaa51b35c44afc7210383"
+RECTANGULAR_PIXELS_SHA256 = "3aac1b30ad79ea78d6dc76b4ad137122441129ea98d797126c45c017e49b1e19"
 
 
 if __name__ == "__main__":

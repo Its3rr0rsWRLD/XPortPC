@@ -86,7 +86,7 @@ def report(manifest, pipelines, root, llvm=None):
         if root_status == "missing":
             blockers.append({"reason": "missing_root_signature"})
         for stage, assessment in sorted(stages.items()):
-            if assessment["status"] in ("unsupported_opcodes", "pixel_lowering_rejected"):
+            if assessment["status"] in ("disassembly_failed", "unsupported_opcodes", "pixel_lowering_rejected"):
                 blockers.append({"reason": assessment["status"], "stage": stage, "detail": assessment["detail"]})
         if blockers:
             status = "blocked"

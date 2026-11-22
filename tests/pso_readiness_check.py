@@ -65,17 +65,25 @@ def check():
         assert untested["shaders"]["pixel"]["archive_records"] == 2
         # Temporary paths can contain a directory alias on Windows CI.
         unnormalized_root = root / ".." / root.name
-        for instructions, status, blocker in (
-                (assembly(False), "needs_pso_validation", None),
-                (with_rounding(assembly(False)), "needs_pso_validation", None),
-                (["s_endpgm"], "blocked", "pixel_lowering_rejected"),
-                (["unknown_instruction"], "blocked", "unsupported_opcodes")):
-            with patch("pixel_aot.disassemble", return_value=instructions) as scan:
+        for instructions, status, blocker, detail in (
+                (assembly(False), "needs_pso_validation", None, None),
+                (with_rounding(assembly(False)), "needs_pso_validation", None, None),
+                ([], "blocked", "disassembly_failed", "empty instruction stream"),
+                (ValueError("Unknown instruction at byte 0"), "blocked", "disassembly_failed",
+                 "Unknown instruction at byte 0"),
+                (["s_endpgm"], "blocked", "pixel_lowering_rejected", None),
+                (["unknown_instruction"], "blocked", "unsupported_opcodes", "unknown_instruction")):
+            patch_args = {"side_effect": instructions} if isinstance(instructions, Exception) else {"return_value": instructions}
+            with patch("pixel_aot.disassemble", **patch_args) as scan:
                 rows = report(manifest, pipelines, unnormalized_root, "test-llvm")["pipelines"]
                 assert rows[0]["first_blocker"] == {"reason": "missing_root_signature"}
+                assert rows[2]["status"] == "needs_evidence" and rows[2]["first_blocker"] is None
                 assert rows[-1]["status"] == status, rows[-1]
                 if blocker:
                     assert rows[-1]["first_blocker"]["reason"] == blocker
+                    assert rows[-1]["first_blocker"]["stage"] == "pixel"
+                    if detail is not None:
+                        assert rows[-1]["first_blocker"]["detail"] == detail
                 else:
                     assert rows[-1]["first_blocker"] is None
                 scan.assert_called_once_with(code, "test-llvm")

@@ -25,4 +25,15 @@ pick_tail PROC
     mov [r8+8], rax
     ret
 pick_tail ENDP
+
+; A conditional branch whose target is its own fallthrough. Either way RAX = RCX + RDX, stored to
+; the first trace word.
+branch_next PROC
+    cmp rcx, rdx
+    jb short branch_next_join
+branch_next_join:
+    lea rax, [rcx+rdx]
+    mov [r8], rax
+    ret
+branch_next ENDP
 END

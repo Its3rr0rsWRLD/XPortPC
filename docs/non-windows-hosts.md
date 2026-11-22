@@ -26,11 +26,11 @@ Install Python 3.12 and LLVM 15 with Homebrew (both are needed as explicit paths
 brew install python@3.12 llvm@15
 ```
 
-From the repository root, create the virtual environment under `out/pe-env`, install `requirements-dev.txt`, and run all eight pure-Python checks:
+From the repository root, create a virtual environment under `out/pe-env`, install `pefile` at the version pinned in `requirements-dev.txt`, and run the eight pure-Python checks.
 
 ```bash
 "$(brew --prefix python@3.12)/bin/python3.12" -m venv out/pe-env
-./out/pe-env/bin/python -m pip install -r requirements-dev.txt
+./out/pe-env/bin/python -m pip install -c requirements-dev.txt pefile
 for t in \
   tests/script_state_check.py \
   tests/bcpack_check.py \

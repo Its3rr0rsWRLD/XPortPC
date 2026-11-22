@@ -6,7 +6,7 @@ import pefile
 from iced_x86 import MemorySizeExt, Mnemonic as M, OpKind as K, Register as R, RegisterExt
 
 from cpu_call_aot import lift_body, resolve_import
-from cpu_leaf_aot import bounded_code
+from cpu_leaf_aot import bounded_code, export_rva
 from ffx_version_query import INTEGER_HEADER, lower, region
 
 
@@ -17,7 +17,7 @@ def require_local_pointer(previous, register, call, jump_targets):
         raise ValueError(f"expected aligned local trace pointer before call at {call.ip:#x}")
 
 
-def translate(image, io_provider, mix_provider):
+def translate(image, io_provider, mix_provider, *, entry_export=None):
     with pefile.PE(str(image), fast_load=True) as pe:
         if (pe.FILE_HEADER.Machine != 0x8664 or pe.OPTIONAL_HEADER.Magic != 0x20b
                 or not pe.FILE_HEADER.Characteristics & 2
@@ -26,7 +26,8 @@ def translate(image, io_provider, mix_provider):
         directories = pe.OPTIONAL_HEADER.DATA_DIRECTORY
         if len(directories) > 9 and directories[9].VirtualAddress:
             raise ValueError("TLS startup is outside this entry profile")
-        entry = pe.OPTIONAL_HEADER.AddressOfEntryPoint
+        entry = (export_rva(pe, entry_export) if entry_export
+                 else pe.OPTIONAL_HEADER.AddressOfEntryPoint)
         body = region(pe, entry, entry + len(bounded_code(pe, entry)))
         if len(body) < 3:
             raise ValueError("incomplete entry stack frame")
@@ -100,7 +101,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("image", "io_provider", "mix_provider", "output"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--entry-export", help="translate this return-based export instead of the PE startup")
     args = parser.parse_args()
     if args.output.suffix.lower() != ".cpp":
         parser.error("choose a .cpp output")
-    args.output.write_text(translate(args.image, args.io_provider, args.mix_provider), encoding="ascii")
+    source = translate(args.image, args.io_provider, args.mix_provider, entry_export=args.entry_export)
+    args.output.write_text(source, encoding="ascii")
