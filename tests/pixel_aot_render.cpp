@@ -408,6 +408,38 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
     draw_verified(device, path, levels, 0, 0, nullptr);
 }
 
+// The mip-chain fixture of --check-pixel-case-mips (mirrored by mip_texel in tests/pixel_aot_draws/image.py): an 8x8
+// R8G8B8A8 texture with all four levels. Texel (x, y) of level k is (ramp[(x + 2k) % 8], ramp[(y + 5k) % 8], blue[k], 255),
+// where level 0 is read in 2x2 blocks (x and y halved first), so that a level-0 read at the 4x4 draw's pixel centers,
+// which fall on level-0 texel edges, has one value. The draw is 4x4 pixels over the 8x8 base, so the implicit level is
+// exactly 1, and the case holds the 256-byte constant buffer and 16 reference colors, one per pixel in row order.
+void check_translated_pixel_mips(ID3D12Device* device, const char* path, const char* reference)
+{
+    constexpr std::array<UINT, 4> blue{128, 64, 219, 37};
+    std::vector<PixelInput> levels;
+    for (UINT level = 0; level < 4; ++level) {
+        const UINT size = 8u >> level;
+        PixelInput input{size, size, 1, DXGI_FORMAT_R8G8B8A8_UNORM};
+        for (UINT y = 0; y < size; ++y) {
+            for (UINT x = 0; x < size; ++x) {
+                const UINT u = level ? x : x / 2, v = level ? y : y / 2;
+                input.rows.insert(input.rows.end(), {BYTE(ramp[(u + 2 * level) % 8]), BYTE(ramp[(v + 5 * level) % 8]),
+                                                     BYTE(blue[level]), 255});
+            }
+        }
+        levels.push_back(std::move(input));
+    }
+    std::ifstream file(reference, std::ios::binary);
+    const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
+    constexpr size_t fixed = 64 * sizeof(Word) + 16 * sizeof(Color);
+    if (file.bad() || bytes.size() != fixed)
+        throw BadCase("Expected a 256-byte constant buffer and 16 float4 reference colors");
+    std::memcpy(levels[0].constants.data(), bytes.data(), levels[0].constants.size() * sizeof(Word));
+    levels[1].expected.resize(16);
+    std::memcpy(levels[1].expected.data(), bytes.data() + levels[0].constants.size() * sizeof(Word), 16 * sizeof(Color));
+    draw_verified(device, path, levels, {8, 8}, 0, {{1, 1}}, nullptr);
+}
+
 void check_dual_pixel(ID3D12Device* device, const char* shader, const char* capture, bool swap)
 {
     PixelInput input{8, 8, 8, DXGI_FORMAT_R8G8B8A8_UNORM};

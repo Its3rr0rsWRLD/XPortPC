@@ -95,3 +95,56 @@ def load_query_gather(st, i, m):
         for d, c in zip(dests, [0, 1, 2, 3] if gather else channels):
             st.vector[d] = results[c]
     st.sample_dest.update(dests)
+
+
+@form(r"image_sample_(lz|b) (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\]), s\[(\d+):(\d+)\], "
+      r"s\[(\d+):(\d+)\] dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D((?: (?:glc|slc|dlc))*)")
+def sample_level(st, i, m):
+    # image_sample_lz samples at level 0 (SampleLevel with 0); image_sample_b adds the binary32 bias in its first
+    # address VGPR to the implicit level (SampleBias). The address is a range or a non-sequential (NSA) list: lz
+    # takes x, y; b takes bias, x, y. The descriptor provenance rules are those of image_sample. Cache modifiers do
+    # not change the value; unorm, a16, d16, tfe, lwe, r128 and other dimensions do not match this grammar.
+    # The implicit level of image_sample_b comes from derivatives, so, as for image_sample, its coordinates must be
+    # the interpolated texture coordinate; lz has no derivatives and, like image_gather4_lz, reads any coordinate.
+    op, dst_token, addr_token, f0, f1, s0, s1, dmask_digit, modifiers = m.groups()
+    flags = modifiers.split()
+    if len(set(flags)) != len(flags):
+        raise ValueError("Repeated image modifier")
+    dmask = int(dmask_digit, 16)
+    if st.mask != "entry" or not dmask:
+        raise ValueError("Invalid image operation")
+    channels = [c for c in range(4) if dmask >> c & 1]
+    dests = vgprs(dst_token, len(channels))
+    width = 2 if op == "lz" else 3
+    if addr_token.startswith("["):
+        addrs = addr_token[1:-1].split(", ")
+        if len(addrs) != width:
+            raise ValueError("Image address width mismatch")
+    else:
+        addrs = vgprs(addr_token, width)
+    image = [f"s{n}" for n in registers(f0, f1, 8)]
+    state = [f"s{n}" for n in registers(s0, s1, 4)]
+    descriptor = [st.scalar.get(r) for r in image]
+    texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
+    if (texture is None or int(f0) % 4 or int(s0) % 4 or int(f1) > 105 or int(s1) > 105
+            or any(r in st.pending for r in (*image, *state)) or [st.scalar.get(r) for r in state] != list(st.sampler)):
+        raise ValueError("Unsupported image or sampler binding")
+    if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
+        raise ValueError("Write overlaps an outstanding sample")
+    if op == "lz":
+        coords = []
+        for r in addrs:
+            value = st.vector.get(r)
+            coords.append(value if value in ("uv.x", "uv.y") else fp_operand(r, st.scalar, st.vector, st.pending, st.sample_pending))
+        call = f"{texture}.SampleLevel(samp, float2({coords[0]}, {coords[1]}), 0.0f)"
+    else:
+        uv = [st.vector.get(r) for r in addrs[1:]]
+        if any(v not in ("uv.x", "uv.y") for v in uv):
+            raise ValueError("Unsupported texture coordinate")
+        bias = fp_operand(addrs[0], st.scalar, st.vector, st.pending, st.sample_pending)
+        call = f"{texture}.SampleBias(samp, float2({', '.join(uv)}), {bias})"
+    st.lines.append(f"    float4 sample{i} = {call};")
+    st.sample_pending = True
+    for d, c in zip(dests, channels):
+        st.vector[d] = f"sample{i}.{'xyzw'[c]}"
+    st.sample_dest.update(dests)

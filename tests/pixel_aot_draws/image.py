@@ -109,6 +109,138 @@ IMAGE_PROGRAMS = (
 )
 
 
+# image_sample_lz and image_sample_b on the mip-chain fixture of the renderer's --check-pixel-case-mips: an 8x8 texture
+# with all four levels, each with its own blue byte, drawn at 4x4 pixels so that the implicit level is exactly 1 (where the
+# program's own image_sample reads). Level 0 is read in 2x2 blocks, so a level-0 read at those pixel centers, which lie on
+# level-0 texel edges, has one value. References are per pixel. The wrong references are the plausible lowering bugs: an
+# implicit-level sample for lz, an ignored, negated or partly dropped bias, swapped constant coordinates, the first N
+# channels instead of the dmask channels, and a level-0 lz read taken from level 1.
+MIP_BLUE = (128, 64, 219, 37)
+
+
+def mip_texel(level, x, y):
+    """Texel (x, y) of a level of the mip-chain fixture, as bytes (tests/pixel_aot_render.cpp builds the same)."""
+    size = 8 >> level
+    assert 0 <= x < size and 0 <= y < size
+    if level == 0:
+        x, y = x // 2, y // 2
+    return (RAMP[(x + 2 * level) % 8], RAMP[(y + 5 * level) % 8], MIP_BLUE[level], 255)
+
+
+def mip_at(level, u, v):
+    """The point-sampled texel of a level at normalized (u, v) in [0, 1), clamp addressing; exact for the coordinates
+    used here, which lie on no texel edge of a level other than 0 (where 2x2 blocks make edges inside a block moot)."""
+    size = 8 >> level
+    return mip_texel(level, min(int(u * size), size - 1), min(int(v * size), size - 1))
+
+
+PIXEL_UV = [((2 * x + 1) / 8, (2 * y + 1) / 8) for y in range(4) for x in range(4)]  # the 4x4 draw's pixel centers
+
+
+def per_pixel(*channels):
+    """channels: functions of (u, v) giving one exported byte each; the four exported floats for every pixel."""
+    return [exported(*(c(u, v) for c in channels)) for u, v in PIXEL_UV]
+
+
+def at(level, channel):
+    return lambda u, v: mip_at(level, u, v)[channel]
+
+
+def fixed(level, x, y, channel):
+    return lambda u, v: mip_at(level, x, y)[channel]
+
+
+MIP_COORD = (5.5 / 8, 2.5 / 8)  # level-0 block (2, 1); swapped, block (1, 2)
+MIP_PROGRAMS = (
+    # The texture coordinate read at level 0: an implicit-level sample would read level 1.
+    ("lz", ["image_sample_lz v[12:15], v[8:9], s[28:35], s[40:43] dmask:0xf dim:SQ_RSRC_IMG_2D", "s_waitcnt vmcnt(0)"],
+     (0, 0, 0, 0),
+     per_pixel(at(0, 0), at(0, 1), at(0, 2), at(0, 3)),
+     [per_pixel(at(1, 0), at(1, 1), at(1, 2), at(1, 3))]),
+    # A constant coordinate through an NSA address with two dmask channels, then the texture coordinate as an NSA list
+    # with dmask 0x9 and cache modifiers.
+    ("lz_nsa", ["v_mov_b32_e32 v18, s44", "v_mov_b32_e32 v19, s45",
+                "image_sample_lz v[12:13], [v18, v19], s[28:35], s[40:43] dmask:0x6 dim:SQ_RSRC_IMG_2D",
+                "image_sample_lz v[14:15], [v8, v9], s[28:35], s[40:43] dmask:0x9 dim:SQ_RSRC_IMG_2D glc dlc",
+                "s_waitcnt vmcnt(0)"],
+     (float_bits(MIP_COORD[0]), float_bits(MIP_COORD[1]), 0, 0),
+     per_pixel(fixed(0, *MIP_COORD, 1), fixed(0, *MIP_COORD, 2), at(0, 0), at(0, 3)),
+     [per_pixel(fixed(0, *MIP_COORD[::-1], 1), fixed(0, *MIP_COORD[::-1], 2), at(0, 0), at(0, 3)),
+      per_pixel(fixed(0, *MIP_COORD, 0), fixed(0, *MIP_COORD, 1), at(0, 0), at(0, 1)),
+      per_pixel(fixed(0, *MIP_COORD, 1), fixed(0, *MIP_COORD, 2), at(1, 0), at(1, 3))]),
+    # Bias +1 (level 2) and -1 (level 0) through NSA lists, and +10 (past the last level, so level 3) through a range
+    # whose first VGPR is the bias and whose next two are the texture coordinate.
+    ("bias", ["v_mov_b32_e32 v20, s44", "v_mov_b32_e32 v21, s45", "v_mov_b32_e32 v7, s46",
+              "image_sample_b v12, [v20, v8, v9], s[28:35], s[40:43] dmask:0x1 dim:SQ_RSRC_IMG_2D",
+              "image_sample_b v13, [v21, v8, v9], s[28:35], s[40:43] dmask:0x2 dim:SQ_RSRC_IMG_2D",
+              "image_sample_b v[14:15], v[7:9], s[28:35], s[40:43] dmask:0x5 dim:SQ_RSRC_IMG_2D",
+              "s_waitcnt vmcnt(0)"],
+     (float_bits(1.0), float_bits(-1.0), float_bits(10.0), 0),
+     per_pixel(at(2, 0), at(0, 1), at(3, 0), at(3, 2)),
+     [per_pixel(at(1, 0), at(1, 1), at(1, 0), at(1, 2)),
+      per_pixel(at(0, 0), at(2, 1), at(0, 0), at(0, 2)),
+      per_pixel(at(2, 0), at(0, 1), at(3, 0), at(3, 1)),
+      per_pixel(at(1, 0), at(0, 1), at(3, 0), at(3, 2))]),
+)
+
+
+def check_mip_draws(directory, compiler, renderer, backend):
+    case = directory / "image_mips.case"
+    for name, body, words, reference, bugs in MIP_PROGRAMS:
+        source = directory / f"image_{name}.hlsl"
+        shader = directory / f"image_{name}.cso"
+        source.write_text(translate(with_constants(body)), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+        draw = [renderer, backend, "--check-pixel-case-mips", shader, case]
+        constants = bytearray(256)
+        struct.pack_into("<4I", constants, 12, *words)
+        case.write_bytes(constants + b"".join(struct.pack("<4f", *pixel) for pixel in reference))
+        subprocess.run(draw, check=True)
+        for wrong in bugs:
+            assert wrong != reference, (name, wrong)
+            case.write_bytes(constants + b"".join(struct.pack("<4f", *pixel) for pixel in wrong))
+            result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                raise AssertionError(f"A wrong mip-level image result escaped detection in {name}: {wrong}")
+
+
+def check_mip_controls():
+    lz = "image_sample_lz v[12:15], v[8:9], s[28:35], s[40:43] dmask:0xf dim:SQ_RSRC_IMG_2D"
+    bias = "image_sample_b v[12:15], [v20, v8, v9], s[28:35], s[40:43] dmask:0xf dim:SQ_RSRC_IMG_2D"
+    ready = ["v_mov_b32_e32 v20, s44", "v_mov_b32_e32 v18, s44", "v_mov_b32_e32 v19, s45"]
+    # The level-0 and biased samples lower to SampleLevel(..., 0) and SampleBias with the first address as the bias.
+    source = translate(with_constants([lz, "s_waitcnt vmcnt(0)"]))
+    assert "tex.SampleLevel(samp, float2(uv.x, uv.y), 0.0f)" in source, source
+    source = translate(with_constants([*ready, bias, "s_waitcnt vmcnt(0)"]))
+    assert "tex.SampleBias(samp, float2(uv.x, uv.y), asfloat(movw" in source, source
+    for _, body, *_ in MIP_PROGRAMS:
+        translate(with_constants(body))
+    # Refused neighbours: the other sample variants (implicit level from derivatives with a computed coordinate,
+    # comparisons, explicit level, offsets, clamps, gradients), unnormalized and 16-bit or partial-result forms,
+    # other dimensions, a zero dmask, address and destination widths that disagree with the form, and an unloaded
+    # T# or sampler.
+    for line in (lz.replace("sample_lz", "sample_l"), lz.replace("sample_lz", "sample_c_lz"),
+                 lz.replace("sample_lz", "sample_lz_o"), bias.replace("sample_b", "sample_b_cl"),
+                 bias.replace("sample_b", "sample_c_b"), bias.replace("sample_b", "sample_b_o"),
+                 lz.replace("sample_lz", "sample_d"), lz + " unorm", lz + " a16", lz + " d16", lz + " tfe", lz + " lwe",
+                 lz + " r128", bias + " tfe", lz + " glc glc", lz.replace("IMG_2D", "IMG_2D_ARRAY"),
+                 lz.replace("IMG_2D", "IMG_CUBE"), bias.replace("IMG_2D", "IMG_CUBE"), lz.replace("0xf", "0x0"),
+                 lz.replace("v[12:15]", "v[12:14]"), lz.replace("v[8:9]", "v[8:10]"), lz.replace("v[8:9]", "[v8, v9, v20]"),
+                 bias.replace("[v20, v8, v9]", "[v8, v9]"), bias.replace("[v20, v8, v9]", "v[8:9]"),
+                 bias.replace("[v20, v8, v9]", "[v20, v18, v19]"), bias.replace("[v20, v8, v9]", "[v20, v9, v24]"),
+                 lz.replace("s[28:35]", "s[36:43]"), lz.replace("s[40:43]", "s[44:47]"),
+                 lz.replace("v[8:9]", "[v24, v25]"), "image_sample_lz v[12:15], v[8:9], s[28:35] dmask:0xf dim:SQ_RSRC_IMG_2D"):
+        must_reject(translate, with_constants([*ready, line, "s_waitcnt vmcnt(0)"]))
+    # A result read before s_waitcnt vmcnt(0), a coordinate or bias read from a register under an outstanding sample,
+    # and a destination that overlaps an outstanding sample.
+    must_reject(translate, with_constants([lz, "v_mov_b32_e32 v18, v12", "s_waitcnt vmcnt(0)"]))
+    must_reject(translate, with_constants([lz, lz.replace("v[8:9]", "[v12, v13]").replace("v[12:15]", "v[16:19]"),
+                                           "s_waitcnt vmcnt(0)"]))
+    must_reject(translate, with_constants([lz, bias.replace("v20", "v12").replace("v[12:15]", "v[16:19]"),
+                                           "s_waitcnt vmcnt(0)"]))
+    must_reject(translate, with_constants([lz, lz.replace("v[12:15]", "v[14:17]"), "s_waitcnt vmcnt(0)"]))
+
+
 def check_image_draws(directory, compiler, renderer, backend):
     case = directory / "image.case"
     for name, body, words, reference, bugs in IMAGE_PROGRAMS:
@@ -174,13 +306,17 @@ def check_image_controls():
 
 def controls(directory):
     check_image_controls()
+    check_mip_controls()
 
 
 def binary_fixtures():
     """(program, translator) pairs that `pixel_aot_check.py binary` assembles, disassembles and lowers."""
     return [
         *((with_constants(body), translate) for _, body, *_ in IMAGE_PROGRAMS),
+        *((with_constants(body), translate) for _, body, *_ in MIP_PROGRAMS),
     ]
 
 
-draw = check_image_draws
+def draw(directory, compiler, renderer, backend):
+    check_image_draws(directory, compiler, renderer, backend)
+    check_mip_draws(directory, compiler, renderer, backend)

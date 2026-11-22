@@ -44,17 +44,19 @@ def cube(st, i, m):
     st.lines.append(f"    precise float alu{i} = {expression};")
 
 
-@form(r"v_(fmaak|fmamk)_f32 (v\d+), ([^,]+), ([^,]+), ([^,]+)")
+@form(r"v_(fmaak|fmamk|madak|madmk)_f32 (v\d+), ([^,]+), ([^,]+), ([^,]+)")
 def literal_fma(st, i, m):
+    # *ak: S0 * S1 + K; *mk: S0 * K + S1, with K a 32-bit literal. v_fma*k is fused; v_mad*k is the legacy unfused,
+    # denormal-flushing multiply-add of v_mad_f32 (mad32), so it takes the same lowering as v_mad_f32 and v_mac_f32.
     op, dst, *tokens = m.groups()
-    literal = tokens[2] if op == "fmaak" else tokens[1]
+    literal = tokens[2] if op.endswith("ak") else tokens[1]
     if st.mask != "entry" or not re.fullmatch(r"0x[0-9a-f]{1,8}", literal):
         raise ValueError("Invalid literal multiply-add")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
     st.vector[dst] = f"alu{i}"
-    st.lines.append(f"    precise float alu{i} = {ALU['fma'][1].format(*values)};")
+    st.lines.append(f"    precise float alu{i} = {ALU[op[:3]][1].format(*values)};")
 
 
 @form(r"v_mov_b32(?:_e32|_e64)? (v\d+), (-?\d+(?:\.\d+)?|0x[0-9a-f]{1,8}|[vs]\d+)")
