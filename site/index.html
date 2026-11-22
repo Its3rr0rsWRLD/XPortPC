@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>XPortPC status</title>
+<meta name="description" content="What works and what does not yet in XPortPC, which runs Xbox Series X|S programs on Windows PCs.">
+<style>
+:root {
+  --paper: #eff2ef; --ink: #121b17; --muted: #53625b; --rule: #c6cfc9;
+  --accent: #1d3bd0; --accent-ink: #ffffff; --cell-off: #d5dcd7; --warn: #8a4b00;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #0e1411; --ink: #e5ece8; --muted: #91a299; --rule: #2a3530;
+    --accent: #93a6ff; --accent-ink: #0e1411; --cell-off: #1d2722; --warn: #e0b36a; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 1rem/1.55 var(--sans);
+  font-variant-numeric: tabular-nums; }
+.wrap { max-width: 62rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+a { color: var(--accent); text-underline-offset: 0.18em; }
+a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+h1, h2 { font-family: var(--serif); font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.25rem, 7vw, 3.5rem); line-height: 1.05; }
+h2 { font-size: 1.5rem; line-height: 1.2; }
+.lede { max-width: 38rem; margin: 1rem 0 0; font-size: 1.125rem; line-height: 1.6; }
+.repo { display: inline-block; margin-top: 0.75rem; }
+section { margin-top: 4rem; }
+section > p.sub { max-width: 40rem; margin: 0.5rem 0 0; color: var(--muted); }
+#notice { display: none; margin-top: 2rem; padding: 0.75rem 1rem; border-left: 4px solid var(--warn); color: var(--ink); max-width: 40rem; }
+#notice.on { display: block; }
+
+/* Hero: one cell per instruction form. */
+.hero { display: grid; gap: 2rem; margin-top: 3.5rem; }
+.big { font-family: var(--serif); font-size: clamp(4.5rem, 20vw, 9rem); line-height: 0.9; font-weight: 600;
+  letter-spacing: -0.03em; margin: 0; }
+.big small { font-size: 0.28em; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 0.25em; }
+.label { margin: 0.75rem 0 0; max-width: 34rem; }
+.field { display: grid; grid-template-columns: repeat(auto-fill, minmax(7px, 1fr)); gap: 2px; margin: 0; }
+.field i { aspect-ratio: 1; background: var(--cell-off); }
+.field i.on { background: var(--accent); }
+.share { font-family: var(--serif); font-size: clamp(2.5rem, 10vw, 4rem); line-height: 1; font-weight: 600; margin: 0; }
+.share-label { margin: 0.5rem 0 0; max-width: 34rem; }
+.fine { color: var(--muted); font-size: 0.9375rem; }
+@media (min-width: 52rem) { .hero { grid-template-columns: 1fr 1fr; align-items: start; gap: 3rem; } .field { grid-column: 1 / -1; } }
+
+/* Parts */
+.parts { list-style: none; margin: 1.5rem 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.parts li { display: grid; grid-template-columns: 1.5rem 1fr; column-gap: 0.75rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+.mark { width: 1rem; height: 1rem; margin-top: 0.3rem; border: 2px solid var(--accent); border-radius: 2px; }
+.mark.done { background: var(--accent); }
+.mark.partial { background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+.parts .name { font-weight: 600; }
+.parts .state { font-weight: 400; color: var(--muted); margin-left: 0.5rem; }
+.parts li.empty { display: block; }
+.parts .note { grid-column: 2; margin: 0.15rem 0 0; color: var(--muted); max-width: 40rem; }
+
+/* Groups */
+.groups { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 0.5rem 3rem; }
+@media (min-width: 52rem) { .groups { grid-template-columns: 1fr 1fr; } }
+.groups li { display: grid; grid-template-columns: 5.5rem 1fr auto; align-items: center; gap: 0.75rem; }
+.bar { height: 0.75rem; background: var(--cell-off); position: relative; }
+.bar b { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+.n { text-align: right; min-width: 6.5rem; color: var(--muted); font-size: 0.9375rem; }
+.cpu { margin-top: 2rem; display: grid; grid-template-columns: 5.5rem 1fr auto; gap: 0.75rem; align-items: center; max-width: 30rem; }
+
+/* Tests */
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1.5rem; margin: 1.5rem 0 0; }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; }
+
+footer { margin-top: 5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); color: var(--muted); max-width: 40rem; }
+footer p { margin: 0 0 0.5rem; }
+footer strong { color: var(--ink); }
+.empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>XPortPC</h1>
+  <p class="lede">Runs Xbox Series X|S programs on Windows PCs: native x64 loading, console library shims, and an RDNA shader converter to DirectX 12.</p>
+  <a class="repo" href="https://github.com/Its3rr0rsWRLD/XPortPC">Source on GitHub</a>
+</header>
+
+<p id="notice" role="status"></p>
+
+<div class="hero">
+  <div>
+    <p class="big" id="forms"><span id="forms-n">&ndash;</span><small id="forms-of"></small></p>
+    <p class="label">GPU instruction forms covered, out of all gfx1013 forms in the reference list.</p>
+  </div>
+  <div>
+    <p class="share" id="share">&ndash;</p>
+    <p class="share-label">of instruction uses covered, counted in <span id="corpus">the corpus of</span> open-source shaders compiled for gfx1013.</p>
+    <p class="fine">Common instructions are used far more often than rare ones, so the second number is much higher than the first. Neither measures how close a game is to running.</p>
+  </div>
+  <div class="field" id="field" role="img" aria-label="One cell per instruction form. Filled cells are covered."></div>
+</div>
+
+<section aria-labelledby="h-parts">
+  <h2 id="h-parts">Parts of the converter</h2>
+  <p class="sub">Done, partial or not started. This lists results, not current work.</p>
+  <ul class="parts" id="parts"><li class="empty">Part status is not available.</li></ul>
+</section>
+
+<section aria-labelledby="h-groups">
+  <h2 id="h-groups">Coverage by instruction group</h2>
+  <p class="sub">Forms covered by a passing test, per encoding group.</p>
+  <ul class="groups" id="groups"></ul>
+  <div class="cpu" id="cpu" hidden>
+    <span>x64 CPU</span><span class="bar" aria-hidden="true"><b id="cpu-bar"></b></span><span class="n" id="cpu-n"></span>
+  </div>
+  <p class="fine" id="groups-empty">Coverage data is not available.</p>
+</section>
+
+<section aria-labelledby="h-tests">
+  <h2 id="h-tests">Tests</h2>
+  <dl class="facts">
+    <dt>Passing</dt><dd id="t-pass">Not available</dd>
+    <dt>Adapters</dt><dd id="t-adapters">Not available</dd>
+    <dt>Last update</dt><dd id="t-time">Not available</dd>
+    <dt>Commit</dt><dd id="t-commit">Not available</dd>
+  </dl>
+</section>
+
+<footer>
+  <p><strong>Never includes games.</strong> The tests build their own fixtures; no console, SDK or game files are needed or shipped.</p>
+  <p>MIT licensed, based on <a href="https://github.com/R0Y00/Xbox2Windows">Xbox2Windows</a>.</p>
+</footer>
+</div>
+<script>
+(function () {
+  "use strict";
+  var REPO = "https://github.com/Its3rr0rsWRLD/XPortPC";
+  var STALE_DAYS = 14;
+  var STATE = { done: "Done", partial: "Partial", not_started: "Not started" };
+  var $ = function (id) { return document.getElementById(id); };
+  var nf = new Intl.NumberFormat("en-US");
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  function stamp(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return String(iso);
+    return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+  function isNum() { return Array.prototype.every.call(arguments, function (v) { return typeof v === "number" && isFinite(v); }); }
+
+  function render(s) {
+    var g = s.gfx1013 || {}, t = s.tests || {}, c = s.commit || {};
+    if (isNum(g.forms_covered, g.forms_total)) {
+      $("forms-n").textContent = nf.format(g.forms_covered);
+      $("forms-of").textContent = "of " + nf.format(g.forms_total);
+    }
+    if (isNum(g.uses_percent)) $("share").textContent = g.uses_percent.toFixed(1) + "%";
+    if (isNum(g.corpus_shaders)) $("corpus").textContent = nf.format(g.corpus_shaders);
+
+    var groups = Array.isArray(g.groups) ? g.groups.filter(function (x) { return isNum(x.covered, x.total) && x.total > 0; }) : [];
+    if (groups.length) {
+      var field = $("field");
+      groups.forEach(function (x) {
+        for (var i = 0; i < x.total; i++) field.appendChild(el("i", i < x.covered ? "on" : ""));
+      });
+      var list = $("groups");
+      groups.slice().sort(function (a, b) { return b.total - a.total; }).forEach(function (x) {
+        var li = el("li");
+        li.appendChild(el("span", "", x.name));
+        var bar = el("span", "bar"); bar.setAttribute("aria-hidden", "true");
+        var fill = el("b"); fill.style.width = (100 * x.covered / x.total) + "%"; bar.appendChild(fill);
+        li.appendChild(bar);
+        li.appendChild(el("span", "n", x.covered + " of " + nf.format(x.total)));
+        list.appendChild(li);
+      });
+      $("groups-empty").hidden = true;
+    } else { $("field").hidden = true; }
+    if (s.x64 && isNum(s.x64.covered, s.x64.total) && s.x64.total > 0) {
+      $("cpu").hidden = false;
+      $("cpu-bar").style.width = (100 * s.x64.covered / s.x64.total) + "%";
+      $("cpu-n").textContent = s.x64.covered + " of " + nf.format(s.x64.total);
+      $("groups-empty").hidden = true;
+    }
+
+    if (Array.isArray(s.parts) && s.parts.length) {
+      var ul = $("parts"); ul.textContent = "";
+      s.parts.forEach(function (p) {
+        var li = el("li");
+        var m = el("span", "mark " + (STATE[p.state] ? p.state : "")); m.setAttribute("aria-hidden", "true");
+        li.appendChild(m);
+        var head = el("span", "name", p.name);
+        head.appendChild(el("span", "state", STATE[p.state] || ""));
+        li.appendChild(head);
+        li.appendChild(el("p", "note", p.note));
+        ul.appendChild(li);
+      });
+    }
+
+    if (isNum(t.passed, t.total)) {
+      $("t-pass").textContent = nf.format(t.passed) + " of " + nf.format(t.total) +
+        (t.failed ? ", " + t.failed + " failed" : "") + (t.skipped ? ", " + t.skipped + " skipped" : "");
+    }
+    if (Array.isArray(t.adapters) && t.adapters.length) $("t-adapters").textContent = t.adapters.join(" and ");
+    var when = t.run_at || c.time;
+    if (when) {
+      var tm = el("time", "", stamp(when)); tm.setAttribute("datetime", when);
+      var d = $("t-time"); d.textContent = ""; d.appendChild(tm);
+      var age = (Date.now() - new Date(when).getTime()) / 864e5;
+      if (age > STALE_DAYS) {
+        var n = $("notice");
+        n.textContent = "These numbers were last updated " + stamp(when) + ", over " + STALE_DAYS + " days ago. They may be behind the repository.";
+        n.className = "on";
+      }
+    }
+    if (c.short && /^[0-9a-f]{7,40}$/.test(c.full || "")) {
+      var a = el("a", "", c.short); a.href = REPO + "/commit/" + c.full;
+      var dd = $("t-commit"); dd.textContent = ""; dd.appendChild(a);
+    }
+  }
+
+  function fail(msg) {
+    var n = $("notice"); n.textContent = msg; n.className = "on";
+  }
+  fetch("status.json", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(render)
+    .catch(function () { fail("Status data could not be loaded, so no numbers are shown. See the repository for the current state."); });
+})();
+</script>
+</body>
+</html>

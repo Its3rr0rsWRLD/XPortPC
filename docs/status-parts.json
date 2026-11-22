@@ -1,0 +1,13 @@
+{
+  "parts": [
+    {"name": "Shader converter: instruction forms", "state": "partial", "note": "Counts and shares are in the figures above."},
+    {"name": "Shader converter: control flow", "state": "not_started", "note": "Branches, loops and exec masks."},
+    {"name": "Shader converter: other stages", "state": "not_started", "note": "Vertex, compute and other stages."},
+    {"name": "GPU memory loads", "state": "partial", "note": "Buffer, global and image loads are done; stores and LDS are not started."},
+    {"name": "Console Direct3D 12 layer (d3d12_xs)", "state": "not_started", "note": "Not started."},
+    {"name": "System libraries", "state": "partial", "note": "Desktop xmem.dll (graphics and heap memory) only."},
+    {"name": "Native launcher", "state": "done", "note": "Maps a program and resolves imports through shims, Windows or logged stubs; tested with source-built programs."},
+    {"name": "CPU patch layer", "state": "not_started", "note": "No CPU code is patched yet."},
+    {"name": "Running a title", "state": "not_started", "note": "No title runs yet."}
+  ]
+}

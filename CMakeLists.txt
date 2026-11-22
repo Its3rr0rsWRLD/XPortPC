@@ -368,6 +368,9 @@ if(EXISTS "${INTAKE_PYTHON}")
         "${CMAKE_SOURCE_DIR}/tests/docs_links_check.py")
     # Outside a Git checkout, such as a source archive, the tracked-path check cannot run.
     set_tests_properties(docs_links PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME status_json COMMAND "${INTAKE_PYTHON}" -B -I
+        "${CMAKE_SOURCE_DIR}/tests/status_json_check.py")
+    set_tests_properties(status_json PROPERTIES SKIP_RETURN_CODE 77)
 
     enable_language(ASM_MASM)
     function(cpu_asm_fixture image source)

@@ -10,6 +10,8 @@ The center of the project is the shader converter. It translates gfx1013 (RDNA) 
 
 [![Instruction-form coverage of source-built fixtures, not a measure of port completion](docs/coverage/dashboard.svg)](tools/coverage_svg.py)
 
+Live status: <https://xportpc.3rr0r.cc>
+
 ## What works today
 
 | Part | State |
