@@ -518,7 +518,7 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
             clist->Dispatch(particles / group_size, 1, 1);
             good = ok(clist->Close(), "compute Close");
             // Not before the previous frame's draws have read the vertices (gpu.fence reaches f after frame f - 1).
-            good = good && ok(cqueue->Wait(gpu.fence.Get(), f), "compute queue Wait");
+            if (f) good = good && ok(cqueue->Wait(gpu.fence.Get(), f), "compute queue Wait");
             ID3D12CommandList* clists[] = {clist.Get()};
             if (good) cqueue->ExecuteCommandLists(1, clists);
             good = good && ok(cqueue->Signal(cfence.Get(), f + 1), "compute queue Signal");
@@ -776,8 +776,26 @@ int refused_check()
 
 }  // namespace
 
+// A crash prints its code and the module-relative address (stdout is unbuffered, so the lines before it survive).
+LONG WINAPI report_crash(EXCEPTION_POINTERS* info)
+{
+    HMODULE module = nullptr;
+    const void* at = info->ExceptionRecord->ExceptionAddress;
+    wchar_t name[MAX_PATH] = L"?";
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(at), &module))
+        GetModuleFileNameW(module, name, MAX_PATH);
+    std::fprintf(stderr, "r5: exception 0x%08lx at %ls+0x%llx\n",
+                 static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode), name,
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(at) -
+                                                 reinterpret_cast<std::uintptr_t>(module)));
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int main(int argc, char** argv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    SetUnhandledExceptionFilter(report_crash);
     if (argc != 3) return 2;
     const std::string_view adapter = argv[1];
     const std::string_view mode = argv[2];
