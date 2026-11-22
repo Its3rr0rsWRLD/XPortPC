@@ -93,7 +93,7 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -114,6 +114,14 @@ foreach(adapter IN ITEMS warp hardware)
 endforeach()
 add_test(NAME runtime_r2_unknown_entries_warp COMMAND r2_clear warp unknown_entries)
 set_tests_properties(runtime_r2_unknown_entries_warp PROPERTIES TIMEOUT 60)
+
+# Runtime ladder R3: a triangle from llvm-mc-assembled gfx1013 programs (tests/runtime/r3_*.s, r3_programs.h), which
+# the shim translates at pipeline creation (src/d3d12_xs_pipeline.h) by running tools/pso_translate.py (Python + DXC)
+# and caches per adapter test under the build tree. The cold test empties the cache; warm and the control run after it.
+add_executable(r3_triangle tests/runtime/r3_triangle.cpp)
+target_include_directories(r3_triangle PRIVATE src)
+target_compile_features(r3_triangle PRIVATE cxx_std_17)
+target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
@@ -2649,6 +2657,25 @@ if(EXISTS "${INTAKE_PYTHON}")
     file(GLOB pixel_aot_family_modules CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_draws/*.py")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py"
         ${pixel_aot_family_modules})
+    # Runtime ladder R3 (tests/runtime/r3_triangle.cpp): the translator runs out of process from the shim.
+    add_test(NAME runtime_r3_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r3_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r3_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_${adapter}")
+        add_test(NAME runtime_r3_triangle_cold_${adapter} COMMAND r3_triangle ${adapter} cold)
+        add_test(NAME runtime_r3_triangle_warm_${adapter} COMMAND r3_triangle ${adapter} warm)
+        add_test(NAME runtime_r3_wrong_reference_${adapter} COMMAND r3_triangle ${adapter} wrong_reference)
+        set_tests_properties(runtime_r3_triangle_cold_${adapter} PROPERTIES FIXTURES_SETUP r3_cache_${adapter})
+        set_tests_properties(runtime_r3_triangle_warm_${adapter} runtime_r3_wrong_reference_${adapter} PROPERTIES
+            FIXTURES_REQUIRED r3_cache_${adapter})
+        set_tests_properties(runtime_r3_triangle_cold_${adapter} runtime_r3_triangle_warm_${adapter}
+            runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+            ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
+    set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600

@@ -6,12 +6,14 @@
 // beyond the interface. Methods forward to the desktop object and log their first use.
 #include "d3d12_xs_wrap.h"
 #include "d3d12_xs_api.h"
+#include "d3d12_xs_pipeline.h"
 
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cstring>
 #include <cstdio>
 #include <new>
 #include <type_traits>
@@ -141,6 +143,7 @@ HRESULT hand_out(W* wrapper, IUnknown* real, REFIID riid, void** out, const void
 class Device;
 std::atomic<Device*> g_attached_device;
 HRESULT device_query(Device* device, REFIID riid, void** out, const void* caller);
+pipeline::TitleViews* device_views(Device* device);
 
 // ID3D12DeviceChild::GetDevice (slot 7): the wrapped device.
 #define X2W_DEVICE_CHILD_METHODS                                                                     \
@@ -226,11 +229,48 @@ public:
 
 class List final : public Wrapper<List, ID3D12GraphicsCommandList, Kind::list>, DeviceRef {
 public:
-    List(ID3D12GraphicsCommandList* real, Device* device) : Wrapper(real), DeviceRef(device) { install(); }
+    List(ID3D12GraphicsCommandList* real, Device* device) : Wrapper(real), DeviceRef(device), args_(new (std::nothrow) pipeline::RootArgs())
+    {
+        if (args_) args_->clear();
+        install();
+    }
+    ~List() { delete args_; }
     static bool implements(REFIID riid)
     {
         return is_d3d12_child_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandList)) ||
                IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList));
+    }
+
+    // Graphics state the converter's bindings depend on (d3d12_xs_pipeline.h), recorded as the title sets it.
+    void reset_state(ID3D12PipelineState* state)
+    {
+        has_root_ = false;
+        set_pipeline(state);
+        title_heap_ = nullptr;
+        ours_bound_ = false;
+        if (args_) args_->clear();
+    }
+    void set_pipeline(ID3D12PipelineState* state) { translated_ = pipeline::pso_info(state, &pso_); }
+    void record_address(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address)
+    {
+        if (args_ && index < pipeline::max_title_params) args_->address[index] = address;
+    }
+    void record_constants(UINT index, UINT count, const void* data, UINT offset)
+    {
+        if (!args_ || index >= pipeline::max_title_params || offset >= 64 || count > 64 - offset) return;
+        std::memcpy(&args_->constants[index][offset], data, count * 4);
+    }
+    // Before a draw: the converter parameters of a translated pipeline. False skips the draw (logged).
+    bool bind_draw()
+    {
+        if (!translated_) return true;
+        if (!has_root_ || !args_) {
+            log_refused("d3d12_xs!ID3D12GraphicsCommandList::Draw",
+                        "draw skipped: a translated pipeline drawn without a root signature created through the shim",
+                        true);
+            return false;
+        }
+        return pipeline::bind_for_draw(device_views(device_), real_, root_, pso_, *args_, title_heap_, &ours_bound_);
     }
 
     X2W_D3D12_OBJECT_METHODS
@@ -248,23 +288,25 @@ public:
     HRESULT STDMETHODCALLTYPE Reset(ID3D12CommandAllocator* allocator, ID3D12PipelineState* state) override
     {
         X2W_USE();
+        reset_state(state);
         return real_->Reset(unwrap(allocator), state);
     }
     void STDMETHODCALLTYPE ClearState(ID3D12PipelineState* state) override
     {
         X2W_USE();
+        reset_state(state);
         real_->ClearState(state);
     }
     void STDMETHODCALLTYPE DrawInstanced(UINT vertices, UINT instances, UINT first_vertex, UINT first_instance) override
     {
         X2W_USE();
-        real_->DrawInstanced(vertices, instances, first_vertex, first_instance);
+        if (bind_draw()) real_->DrawInstanced(vertices, instances, first_vertex, first_instance);
     }
     void STDMETHODCALLTYPE DrawIndexedInstanced(UINT indices, UINT instances, UINT first_index, INT base_vertex,
                                                 UINT first_instance) override
     {
         X2W_USE();
-        real_->DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance);
+        if (bind_draw()) real_->DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance);
     }
     void STDMETHODCALLTYPE Dispatch(UINT x, UINT y, UINT z) override
     {
@@ -329,6 +371,7 @@ public:
     void STDMETHODCALLTYPE SetPipelineState(ID3D12PipelineState* state) override
     {
         X2W_USE();
+        set_pipeline(state);
         real_->SetPipelineState(state);
     }
     void STDMETHODCALLTYPE ResourceBarrier(UINT count, const D3D12_RESOURCE_BARRIER* barriers) override
@@ -344,6 +387,11 @@ public:
     void STDMETHODCALLTYPE SetDescriptorHeaps(UINT count, ID3D12DescriptorHeap* const* heaps) override
     {
         X2W_USE();
+        title_heap_ = nullptr;
+        ours_bound_ = false;
+        for (UINT i = 0; heaps && i < count; ++i) {
+            if (heaps[i] && heaps[i]->GetDesc().Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) title_heap_ = heaps[i];
+        }
         real_->SetDescriptorHeaps(count, heaps);
     }
     void STDMETHODCALLTYPE SetComputeRootSignature(ID3D12RootSignature* root) override
@@ -354,6 +402,8 @@ public:
     void STDMETHODCALLTYPE SetGraphicsRootSignature(ID3D12RootSignature* root) override
     {
         X2W_USE();
+        has_root_ = pipeline::root_info(root, &root_);
+        if (args_) args_->clear();
         real_->SetGraphicsRootSignature(root);
     }
     void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE base) override
@@ -374,6 +424,7 @@ public:
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstant(UINT index, UINT data, UINT offset) override
     {
         X2W_USE();
+        record_constants(index, 1, &data, offset);
         real_->SetGraphicsRoot32BitConstant(index, data, offset);
     }
     void STDMETHODCALLTYPE SetComputeRoot32BitConstants(UINT index, UINT count, const void* data, UINT offset) override
@@ -384,48 +435,68 @@ public:
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstants(UINT index, UINT count, const void* data, UINT offset) override
     {
         X2W_USE();
+        if (data) record_constants(index, count, data, offset);
         real_->SetGraphicsRoot32BitConstants(index, count, data, offset);
     }
-    // Root GPU addresses are desktop addresses here. Title GPU address translation
-    // (X2WTitleGpuTranslate) belongs to the memory work, not this skeleton.
+    // Root GPU addresses: a title GPU address becomes its desktop alias (X2WTitleGpuTranslate); any other address
+    // is passed through. A graphics address is also recorded as the title passed it, for the push words of a
+    // translated pipeline.
     void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetComputeRootConstantBufferView(index, address);
+        real_->SetComputeRootConstantBufferView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootConstantBufferView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetGraphicsRootConstantBufferView(index, address);
+        record_address(index, address);
+        real_->SetGraphicsRootConstantBufferView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetComputeRootShaderResourceView(index, address);
+        real_->SetComputeRootShaderResourceView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootShaderResourceView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetGraphicsRootShaderResourceView(index, address);
+        record_address(index, address);
+        real_->SetGraphicsRootShaderResourceView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetComputeRootUnorderedAccessView(index, address);
+        real_->SetComputeRootUnorderedAccessView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootUnorderedAccessView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
-        real_->SetGraphicsRootUnorderedAccessView(index, address);
+        record_address(index, address);
+        real_->SetGraphicsRootUnorderedAccessView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW* view) override
     {
         X2W_USE();
+        if (view) {
+            D3D12_INDEX_BUFFER_VIEW desktop = *view;
+            desktop.BufferLocation = pipeline::translate_address(view->BufferLocation, view->SizeInBytes);
+            real_->IASetIndexBuffer(&desktop);
+            return;
+        }
         real_->IASetIndexBuffer(view);
     }
     void STDMETHODCALLTYPE IASetVertexBuffers(UINT start, UINT count, const D3D12_VERTEX_BUFFER_VIEW* views) override
     {
         X2W_USE();
+        if (views && count <= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) {
+            D3D12_VERTEX_BUFFER_VIEW desktop[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+            for (UINT i = 0; i < count; ++i) {
+                desktop[i] = views[i];
+                desktop[i].BufferLocation = pipeline::translate_address(views[i].BufferLocation, views[i].SizeInBytes);
+            }
+            real_->IASetVertexBuffers(start, count, desktop);
+            return;
+        }
         real_->IASetVertexBuffers(start, count, views);
     }
     void STDMETHODCALLTYPE SOSetTargets(UINT start, UINT count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW* views) override
@@ -512,6 +583,15 @@ public:
         X2W_USE();
         real_->ExecuteIndirect(signature, max_commands, args, args_offset, count, count_offset);
     }
+
+private:
+    pipeline::RootArgs* args_;
+    pipeline::RootInfo root_{};
+    pipeline::PsoInfo pso_{};
+    bool has_root_ = false;
+    bool translated_ = false;
+    bool ours_bound_ = false;
+    ID3D12DescriptorHeap* title_heap_ = nullptr;
 };
 
 class Queue final : public Wrapper<Queue, ID3D12CommandQueue, Kind::queue>, DeviceRef {
@@ -605,9 +685,10 @@ public:
 
 class Device final : public Wrapper<Device, ID3D12Device, Kind::device> {
 public:
-    explicit Device(ID3D12Device* real) : Wrapper(real) { install(); }
+    explicit Device(ID3D12Device* real) : Wrapper(real), views_(pipeline::create_title_views(real)) { install(); }
     ~Device()
     {
+        pipeline::destroy_title_views(views_);
         if (attached_ && detach_) {
             detach_();
             g_attached_device.store(nullptr);
@@ -692,18 +773,18 @@ public:
         if (FAILED(hr)) return hr;
         return hand_out(new (std::nothrow) Allocator(allocator, this), allocator, riid, out, X2W_RETURN_ADDRESS());
     }
-    // Pipeline translation (R3) goes here; until then the desktop description is forwarded as is.
+    // Console shaders are translated here (d3d12_xs_pipeline.h); desktop bytecode is forwarded.
     HRESULT STDMETHODCALLTYPE CreateGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
                                                           void** out) override
     {
         X2W_USE();
-        return real_->CreateGraphicsPipelineState(desc, riid, out);
+        return pipeline::create_graphics_pipeline(real_, desc, riid, out);
     }
     HRESULT STDMETHODCALLTYPE CreateComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                                          void** out) override
     {
         X2W_USE();
-        return real_->CreateComputePipelineState(desc, riid, out);
+        return pipeline::create_compute_pipeline(real_, desc, riid, out);
     }
     HRESULT STDMETHODCALLTYPE CreateCommandList(UINT node_mask, D3D12_COMMAND_LIST_TYPE type,
                                                 ID3D12CommandAllocator* allocator, ID3D12PipelineState* state,
@@ -737,7 +818,7 @@ public:
                                                   void** out) override
     {
         X2W_USE();
-        return real_->CreateRootSignature(node_mask, blob, size, riid, out);
+        return pipeline::create_root_signature(real_, node_mask, blob, size, riid, out);
     }
     void STDMETHODCALLTYPE CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc,
                                                     D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
@@ -934,9 +1015,12 @@ public:
     }
 #endif
 
+    pipeline::TitleViews* views() const { return views_; }
+
 private:
     bool attached_ = false;
     void (*detach_)() = nullptr;
+    pipeline::TitleViews* views_;
 };
 
 DeviceRef::DeviceRef(Device* device) : device_(device) { device_->AddRef(); }
@@ -946,6 +1030,8 @@ HRESULT device_query(Device* device, REFIID riid, void** out, const void* caller
 {
     return device->query(riid, out, caller);
 }
+
+pipeline::TitleViews* device_views(Device* device) { return device->views(); }
 
 class SwapChain final : public Wrapper<SwapChain, IDXGISwapChain3, Kind::swap_chain> {
 public:

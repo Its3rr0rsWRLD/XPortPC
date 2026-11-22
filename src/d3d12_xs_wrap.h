@@ -49,6 +49,9 @@ void log_unknown_iid(Kind kind, REFIID riid, const void* caller);
 void log_note(const char* symbol, const char* detail, const GUID* iid);
 std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, std::uintptr_t a1,
                                 std::uintptr_t a2, std::uintptr_t a3);
+// A refused pipeline (draw=false) or draw (draw=true): counted, and reported as X2W_GFX_EVENT_REFUSED.
+void log_refused(const char* symbol, const char* detail, bool draw);
+void count_shader(bool cached);
 void count_object(int delta);
 void count_device();
 void count_present();
