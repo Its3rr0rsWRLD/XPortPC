@@ -4,10 +4,11 @@ import re
 
 from ..dispatch import form
 from ..registers import (LANE_MASK, f16_encoding, fp_operand, lane_mask, tracked_word, vector_u32, word_of)
+from .valu_bits import BITS_UNARY
 from .valu_f16 import F16_ALU
 from .valu_int import INT_VOP2, int_binary
 from .valu_f32 import ALU
-from .vopc import COMPARE
+from .vopc import COMPARE, INT16_COMPARE, INT_COMPARE
 
 # SDWA selections: (bit offset, width). A source selection is zero-extended, or sign-extended with sext();
 # a destination selection writes the low bits of the result into that field. Following the equivalences in
@@ -16,7 +17,7 @@ SDWA_SEL = {"BYTE_0": (0, 8), "BYTE_1": (8, 8), "BYTE_2": (16, 8), "BYTE_3": (24
             "WORD_0": (0, 16), "WORD_1": (16, 16), "DWORD": (0, 32)}
 # Exact arithmetic with SDWA forms on gfx1013 (docs/coverage/gfx1013.tsv).
 SDWA_ALU = ("add", "sub", "subrev", "mul", "mul_legacy", "max", "min", "floor", "ceil", "fract", "trunc",
-            "log", "exp", "rcp", "sqrt", "rsq")
+            "rndne", "log", "exp", "rcp", "sqrt", "rsq")
 
 
 def sdwa_source(word, sel, sext):
@@ -292,3 +293,96 @@ def class_sdwa(st, i, m):
     mask = int_source(st, classes, sel1)
     set_condition(st, i, dst)
     st.lines.append(f"    bool cmp{i} = ({test} & {mask}) != 0u;")
+
+
+# Integer comparisons, min/max, bit scans and conversions between binary32 and 32-bit integers, with selected sources.
+# Their e32 forms are lowered in vopc, valu_int and valu_bits; the selections work as above:
+# - an integer source is the selected field, zero-extended or, written sext(), sign-extended, before the operation;
+#   a constant source takes DWORD only and must be an integer;
+# - v_cmp_{i16,u16} compare the low 16 bits of the extended source (i16 sign-extends them again), as the e32 forms do;
+# - the integer-to-float conversions take the extended field as the integer and round it as the e32 form does; their
+#   result is a binary32 value, placed like an SDWA arithmetic result, and clamp is refused;
+# - the float-to-integer conversions take a whole-dword binary32 source with neg and abs, like SDWA arithmetic, and
+#   place the integer result as a word. clamp is refused (what it does to an integer result is not established).
+# The comparisons write VCC or an SGPR lane mask, like the other SDWA comparisons. v_cmp_f and v_cmp_t exist only
+# for the 32-bit kinds, and no SDWA comparison writes EXEC here.
+def int_compare_source(st, token, sel, wide):
+    word = int_source(st, token, sel)
+    return word if wide else f"({word} & 0xffffu)"
+
+
+@form(rf"v_cmp_({'|'.join(INT_COMPARE)})_(i32|u32)_sdwa {LANE_MASK}, ([^,\s]+), ([^,\s]+){SRC0}{SRC1}")
+def compare_int_sdwa(st, i, m):
+    op, kind, dst, first, second, sel0, sel1 = m.groups()
+    words = [int_compare_source(st, t, sel, True) for t, sel in ((first, sel0), (second, sel1))]
+    if kind == "i32":
+        words = [f"asint({w})" for w in words]
+    set_condition(st, i, dst)
+    relation = {"f": "false", "t": "true"}.get(op) or f"{words[0]} {INT_COMPARE[op]} {words[1]}"
+    st.lines.append(f"    bool cmp{i} = {relation};")
+
+
+@form(rf"v_cmp_({'|'.join(INT16_COMPARE)})_(i16|u16)_sdwa {LANE_MASK}, ([^,\s]+), ([^,\s]+){SRC0}{SRC1}")
+def compare_int16_sdwa(st, i, m):
+    op, kind, dst, first, second, sel0, sel1 = m.groups()
+    words = [int_compare_source(st, t, sel, False) for t, sel in ((first, sel0), (second, sel1))]
+    if kind == "i16":
+        words = [f"((int({w}) ^ 0x8000) - 0x8000)" for w in words]
+    set_condition(st, i, dst)
+    st.lines.append(f"    bool cmp{i} = {words[0]} {INT16_COMPARE[op]} {words[1]};")
+
+
+@form(rf"v_(max|min)_(i32|u32)_sdwa (v\d+), ([^,\s]+), ([^,\s]+){DST_FIELDS}{SRC0}{SRC1}")
+def min_max_sdwa(st, i, m):
+    op, kind, dst, first, second, dst_sel, unused, sel0, sel1 = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid integer operation")
+    words = [int_source(st, t, sel) for t, sel in ((first, sel0), (second, sel1))]
+    if kind == "i32":
+        words = [f"asint({w})" for w in words]
+    expression = f"{op}({words[0]}, {words[1]})"
+    place_word(st, i, dst, f"asuint({expression})" if kind == "i32" else expression, dst_sel, unused)
+
+
+@form(rf"v_({'|'.join(op[2:] for op in BITS_UNARY)})_sdwa (v\d+), ([^,\s]+){DST_FIELDS}{SRC0}")
+def bit_scan_sdwa(st, i, m):
+    op, dst, src, dst_sel, unused, sel = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid integer operation")
+    word = int_source(st, src, sel)
+    st.lines.append(f"    uint scan{i} = {word};")
+    if op != "ffbl_b32":
+        st.helpers.add("v_ffbh_u32")
+    place_word(st, i, dst, BITS_UNARY[f"v_{op}"].format(f"scan{i}"), dst_sel, unused)
+
+
+@form(rf"v_cvt_f32_(i32|u32)_sdwa (v\d+), ([^,\s]+){DST_FIELDS}{SRC0}")
+def int_to_float_sdwa(st, i, m):
+    kind, dst, src, dst_sel, unused, sel = m.groups()
+    if st.ex != "true" or dst in st.sample_dest:
+        raise ValueError("Invalid conversion")
+    st.lines.append(f"    uint cvtw{i} = {int_source(st, src, sel)};")
+    # As the e32 conversion: the high and low halves are converted exactly and the one binary32 add rounds.
+    high = f"asint(cvtw{i}) >> 16" if kind == "i32" else f"cvtw{i} >> 16u"
+    expression = f"float({high}) * 65536.0f + float(cvtw{i} & 0xffffu)"
+    place_float(st, i, dst, expression, dst_sel, unused)
+
+
+@form(rf"v_cvt_(i32|u32)_f32_sdwa (v\d+), ([^,\s]+){DST_FIELDS} src0_sel:DWORD")
+def float_to_int_sdwa(st, i, m):
+    # The e32 lowering of valu_int.convert_to_int on the whole-dword source, whose result is placed as a word.
+    kind, dst, src, dst_sel, unused = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid conversion")
+    value = fp_operand(src, st.scalar, st.vector, st.pending, st.sample_pending)
+    st.lines.append(f"    uint cvtb{i} = asuint({value});")
+    if kind == "i32":
+        st.lines.append(f"    uint cvtm{i} = cvtb{i} & 0x7fffffffu;")
+        st.lines.append(f"    float cvti{i} = asfloat(min(cvtm{i}, 0x4effffffu) | (cvtb{i} & 0x80000000u));")
+        expression = (f"cvtm{i} > 0x7f800000u ? 0u : cvtm{i} >= 0x4f000000u ? 0x7fffffffu + (cvtb{i} >> 31u)"
+                      f" : asuint(int(cvti{i}))")
+    else:
+        st.lines.append(f"    float cvti{i} = asfloat(cvtb{i} < 0x4f800000u ? cvtb{i} : 0u);")
+        expression = f"cvtb{i} > 0x7f800000u ? 0u : cvtb{i} >= 0x4f800000u ? 0xffffffffu : uint(cvti{i})"
+    st.lines.append(f"    uint valu{i} = {expression};")
+    place_word(st, i, dst, f"valu{i}", dst_sel, unused)
