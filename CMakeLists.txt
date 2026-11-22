@@ -1023,6 +1023,16 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_library(cpu_sse2_sat_mul_lifted SHARED "${sse2_sat_mul_fixture}")
     add_test(NAME cpu_aot_sse2_sat_mul COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/sse2_sat_mul.py"
         check "$<TARGET_FILE:cpu_sse2_sat_mul>" "$<TARGET_FILE:cpu_sse2_sat_mul_lifted>")
+    cpu_asm_fixture(cpu_sse_packed_fp sse_packed_fp)
+    set(sse_packed_fp_fixture "${CMAKE_CURRENT_BINARY_DIR}/cpu_sse_packed_fp_lifted.cpp")
+    add_custom_command(OUTPUT "${sse_packed_fp_fixture}"
+        COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/sse_packed_fp.py"
+            emit "$<TARGET_FILE:cpu_sse_packed_fp>" "${sse_packed_fp_fixture}"
+        DEPENDS cpu_sse_packed_fp tests/cpu/sse_packed_fp.py tools/ffx_version_query.py
+            tools/cpu_ranges.py tools/cpu_leaf_aot.py VERBATIM)
+    add_library(cpu_sse_packed_fp_lifted SHARED "${sse_packed_fp_fixture}")
+    add_test(NAME cpu_aot_sse_packed_fp COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/cpu/sse_packed_fp.py"
+        check "$<TARGET_FILE:cpu_sse_packed_fp>" "$<TARGET_FILE:cpu_sse_packed_fp_lifted>")
     cpu_translation(cpu_callback cpu_chained_aot call_context CALLBACK_OFFSET 8)
     cpu_asm_fixture(cpu_xlatb xlatb)
     # The lifted DLL and three mutated controls that the check requires to mismatch.

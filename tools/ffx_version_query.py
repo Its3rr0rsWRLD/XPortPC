@@ -297,6 +297,15 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         M.PMINUB, M.PMAXUB, M.PMINSW, M.PMAXSW, M.PAVGB, M.PAVGW, M.PSADBW,
     }
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic == M.MOVDQU or i.mnemonic in sse2_sat_mul_ops for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    sse_packed_fp_ops = {
+        M.MOVUPS, M.MOVUPD,
+        M.ADDPS, M.SUBPS, M.MULPS, M.DIVPS, M.SQRTPS, M.MINPS, M.MAXPS,
+        M.ANDPS, M.ANDNPS, M.ORPS, M.XORPS, M.SHUFPS, M.UNPCKLPS, M.UNPCKHPS, M.MOVMSKPS,
+        M.ADDPD, M.SUBPD, M.MULPD, M.DIVPD, M.SQRTPD, M.MINPD, M.MAXPD,
+        M.ANDPD, M.ANDNPD, M.ORPD, M.XORPD, M.SHUFPD, M.UNPCKLPD, M.UNPCKHPD, M.MOVMSKPD,
+    }
+    has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in sse_packed_fp_ops for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -1326,6 +1335,76 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                 stmt = (f"{{ {src_init} for (size_t q=0; q<16; q+=8) {{ uint64_t s = 0; "
                         f"for (size_t k=0; k<8; ++k) {{ const int d = int({dst}[q+k]) - int(rhs[q+k]); "
                         f"s += static_cast<uint64_t>(d < 0 ? -d : d); }} memcpy({dst}.data()+q, &s, 8); }} }}")
+        elif op in (M.MOVUPS, M.MOVUPD) and i.encoding == EncodingKind.LEGACY and has_wide:
+            if i.op0_kind == K.REGISTER and i.op0_register in wide_xmm and i.op1_kind == K.MEMORY:
+                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), reinterpret_cast<const void*>({address()}), 16);"
+            elif i.op0_kind == K.MEMORY and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
+                stmt = f"memcpy(reinterpret_cast<void*>({address()}), {wide_xmm[i.op1_register]}.data(), 16);"
+            elif (i.op0_kind == K.REGISTER and i.op0_register in wide_xmm
+                  and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm):
+                stmt = f"memcpy({wide_xmm[i.op0_register]}.data(), {wide_xmm[i.op1_register]}.data(), 16);"
+            else:
+                raise ValueError(f"unsupported {op} form at {i.ip:#x}: {i}")
+        elif (op in (M.MOVMSKPS, M.MOVMSKPD) and i.encoding == EncodingKind.LEGACY and has_wide
+              and i.op0_kind == K.REGISTER and RegisterExt.size(i.op0_register) in (4, 8)
+              and i.op1_kind == K.REGISTER and i.op1_register in wide_xmm):
+            src = wide_xmm[i.op1_register]
+            lane_size = 4 if op == M.MOVMSKPS else 8
+            lanes = 16 // lane_size
+            stmt = (f"{{ uint32_t m = 0; for (size_t k=0; k<{lanes}; ++k) {{ "
+                    f"if ({src}[(k + 1) * {lane_size} - 1] & 0x80u) m |= (1u << k); }} {write('m')} }}")
+        elif (op in sse_packed_fp_ops and op not in (M.MOVUPS, M.MOVUPD, M.MOVMSKPS, M.MOVMSKPD)
+              and i.encoding == EncodingKind.LEGACY and i.op0_kind == K.REGISTER and i.op0_register in wide_xmm and has_wide):
+            dst = wide_xmm[i.op0_register]
+            if i.op1_kind == K.REGISTER and i.op1_register in wide_xmm:
+                src_init = f"std::array<uint8_t,16> rhs; memcpy(rhs.data(), {wide_xmm[i.op1_register]}.data(), 16);"
+            elif i.op1_kind == K.MEMORY:
+                src_init = f"std::array<uint8_t,16> rhs; memcpy(rhs.data(), reinterpret_cast<const void*>({address()}), 16);"
+            else:
+                raise ValueError(f"unsupported SSE packed FP source at {i.ip:#x}: {i}")
+            if op in (M.ANDPS, M.ANDPD, M.ANDNPS, M.ANDNPD, M.ORPS, M.ORPD, M.XORPS, M.XORPD):
+                expr = {M.ANDPS: "a & b", M.ANDPD: "a & b", M.ANDNPS: "(~a) & b", M.ANDNPD: "(~a) & b",
+                        M.ORPS: "a | b", M.ORPD: "a | b", M.XORPS: "a ^ b", M.XORPD: "a ^ b"}[op]
+                stmt = (f"{{ {src_init} for (size_t n=0; n<16; ++n) {{ "
+                        f"const uint8_t a = {dst}[n], b = rhs[n]; {dst}[n] = static_cast<uint8_t>({expr}); }} }}")
+            elif op in (M.SQRTPS, M.SQRTPD):
+                ftype, lane_size = ("float", 4) if op == M.SQRTPS else ("double", 8)
+                stmt = (f"{{ {src_init} for (size_t n=0; n<16; n+={lane_size}) {{ "
+                        f"{ftype} b; memcpy(&b, rhs.data()+n, {lane_size}); "
+                        f"const {ftype} v = std::sqrt(b); memcpy({dst}.data()+n, &v, {lane_size}); }} }}")
+            elif op in (M.ADDPS, M.SUBPS, M.MULPS, M.DIVPS, M.MINPS, M.MAXPS,
+                        M.ADDPD, M.SUBPD, M.MULPD, M.DIVPD, M.MINPD, M.MAXPD):
+                is_ps = op in (M.ADDPS, M.SUBPS, M.MULPS, M.DIVPS, M.MINPS, M.MAXPS)
+                ftype, lane_size = ("float", 4) if is_ps else ("double", 8)
+                expr = {
+                    M.ADDPS: "a + b", M.ADDPD: "a + b", M.SUBPS: "a - b", M.SUBPD: "a - b",
+                    M.MULPS: "a * b", M.MULPD: "a * b", M.DIVPS: "a / b", M.DIVPD: "a / b",
+                    M.MINPS: "(a < b) ? a : b", M.MINPD: "(a < b) ? a : b",
+                    M.MAXPS: "(a > b) ? a : b", M.MAXPD: "(a > b) ? a : b",
+                }[op]
+                stmt = (f"{{ {src_init} for (size_t n=0; n<16; n+={lane_size}) {{ "
+                        f"{ftype} a, b; memcpy(&a, {dst}.data()+n, {lane_size}); memcpy(&b, rhs.data()+n, {lane_size}); "
+                        f"const {ftype} v = {expr}; memcpy({dst}.data()+n, &v, {lane_size}); }} }}")
+            elif op == M.SHUFPS:
+                imm = i.immediate(2)
+                stmt = (f"{{ std::array<uint8_t,16> lhs; memcpy(lhs.data(), {dst}.data(), 16); {src_init} "
+                        f"memcpy({dst}.data()+0, lhs.data()+{4 * (imm & 3)}, 4); "
+                        f"memcpy({dst}.data()+4, lhs.data()+{4 * ((imm >> 2) & 3)}, 4); "
+                        f"memcpy({dst}.data()+8, rhs.data()+{4 * ((imm >> 4) & 3)}, 4); "
+                        f"memcpy({dst}.data()+12, rhs.data()+{4 * ((imm >> 6) & 3)}, 4); }}")
+            elif op == M.SHUFPD:
+                imm = i.immediate(2)
+                stmt = (f"{{ std::array<uint8_t,16> lhs; memcpy(lhs.data(), {dst}.data(), 16); {src_init} "
+                        f"memcpy({dst}.data()+0, lhs.data()+{8 * (imm & 1)}, 8); "
+                        f"memcpy({dst}.data()+8, rhs.data()+{8 * ((imm >> 1) & 1)}, 8); }}")
+            else:  # UNPCKLPS, UNPCKHPS, UNPCKLPD, UNPCKHPD
+                lane_size = 4 if op in (M.UNPCKLPS, M.UNPCKHPS) else 8
+                base = 0 if op in (M.UNPCKLPS, M.UNPCKLPD) else 8
+                pairs = 8 // lane_size
+                stmt = (f"{{ std::array<uint8_t,16> lhs; memcpy(lhs.data(), {dst}.data(), 16); {src_init} "
+                        f"for (size_t k=0; k<{pairs}; ++k) {{ "
+                        f"memcpy({dst}.data()+2*k*{lane_size}, lhs.data()+{base}+k*{lane_size}, {lane_size}); "
+                        f"memcpy({dst}.data()+(2*k+1)*{lane_size}, rhs.data()+{base}+k*{lane_size}, {lane_size}); }} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:
