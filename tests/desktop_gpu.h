@@ -1,4 +1,5 @@
 #pragma once
+#include <stdexcept>
 #include <d3d12.h>
 #include <wrl/client.h>
 
@@ -14,6 +15,8 @@ void check_ffx_recurrent(ID3D12Device* device);
 void check_dual_uav(ID3D12Device* device);
 void check_texture_mips(ID3D12Device* device);
 void check_dual_pixel(ID3D12Device*, const char*, const char*, bool);
+// A malformed case file: the checker exits 2, like other bad arguments.
+struct BadCase : std::runtime_error { using std::runtime_error::runtime_error; };
 void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference = nullptr);
 void check_bc7_pixel(ID3D12Device* device, const char* shader, const char* input,
                      const char* capture, const char* mip1 = nullptr);

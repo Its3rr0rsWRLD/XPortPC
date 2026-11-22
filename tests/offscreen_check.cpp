@@ -474,6 +474,9 @@ int main(int argc, char** argv)
             draw(device.Get(), argv[2], argc == 5 ? argv + 3 : nullptr);
         }
         return report_debug_errors(messages.Get()) ? 1 : 0;
+    } catch (const BadCase& e) {
+        std::fprintf(stderr, "Invalid case file: %s\n", e.what());
+        return 2;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s\n", e.what());
         report_debug_errors(messages.Get());
