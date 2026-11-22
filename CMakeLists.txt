@@ -592,6 +592,90 @@ if(EXISTS "${INTAKE_PYTHON}")
         "$<TARGET_FILE:cpu_avx2_regs_original>"
         "$<TARGET_FILE:cpu_avx2_regs_original_lifted>"
         "$<TARGET_FILE:cpu_avx2_regs_altered_lifted>")
+    set(cpu_avx_int_exports
+        "op_pabsb,op_pabsw,op_pabsd,"
+        "op_packsswb,op_packssdw,op_packusdw,"
+        "op_paddb,op_paddq,op_paddsb,op_paddusb,op_paddusw,"
+        "op_psubb,op_psubd,op_psubq,op_psubsb,op_psubsw,op_psubusb,op_psubusw,"
+        "op_palignr_0,op_palignr_5,op_palignr_16,op_palignr_23,op_palignr_32,"
+        "op_pblendvb,op_pblendw,op_pblendw_all,op_pblendw_none,"
+        "op_pcmpeqb,op_pcmpeqw,op_pcmpeqd,op_pcmpeqq,op_pcmpgtb,op_pcmpgtw,op_pcmpgtd,op_pcmpgtq,"
+        "op_pmaxsb,op_pmaxsd,op_pmaxub,op_pmaxuw,op_pmaxud,"
+        "op_pminsb,op_pminsd,op_pminub,op_pminuw,op_pminud,"
+        "op_phaddw,op_phaddd,op_phaddsw,op_phsubw,op_phsubd,op_phsubsw,op_phminposuw,"
+        "op_pmaddwd,op_pmuldq,op_pmuludq,op_pmulhrsw,op_pmulhuw,op_pmulld,"
+        "op_psadbw,op_mpsadbw_0,op_mpsadbw_3,op_mpsadbw_7_ignored,"
+        "op_pshufhw,op_pshuflw,"
+        "op_psignb,op_psignw,op_psignd,"
+        "op_pmovsxbw,op_pmovsxbd,op_pmovsxbq,op_pmovsxwd,op_pmovsxwq,op_pmovsxdq,"
+        "op_pmovzxbw,op_pmovzxbd,op_pmovzxbq,op_pmovzxwd,op_pmovzxwq,op_pmovzxdq,"
+        "op_punpckldq,op_punpckhdq,op_punpcklqdq,op_punpckhqdq,"
+        "op_pslld_xmm,op_psllq_xmm,op_psrld_xmm,op_psrlq_xmm,"
+        "op_pslld_imm,op_pslld_imm_ovf,op_psllq_imm,op_psllq_imm_ovf,"
+        "op_psrld_imm,op_psrld_imm_ovf,op_psrlq_imm,op_psrlq_imm_ovf,"
+        "op_pmovmskb,"
+        "op_pextrb_reg,op_pextrb_mem,op_pextrw_reg,op_pextrw_mem,"
+        "op_pextrd_reg,op_pextrd_mem,op_pextrq_reg,op_pextrq_mem,"
+        "op_pinsrb_reg,op_pinsrb_mem,op_pinsrw_reg,op_pinsrw_mem,"
+        "op_pinsrd_reg,op_pinsrd_mem,op_pinsrq_reg,op_pinsrq_mem,"
+        "op_zeroupper,op_zeroall,op_pipeline,op_movdqu_copy128,op_mov_store32,op_movdqu_regcopy,op_movdqu_store128")
+    string(CONCAT cpu_avx_int_exports ${cpu_avx_int_exports})
+    foreach(variant IN ITEMS original altered)
+        cpu_asm_fixture(cpu_avx_int_regs_${variant} avx_int_regs)
+        cpu_translation(cpu_avx_int_regs_${variant} cpu_avx_int_aot "${cpu_avx_int_exports}")
+    endforeach()
+    target_compile_definitions(cpu_avx_int_regs_altered PRIVATE ALTER_IMM)
+    add_test(NAME cpu_aot_avx_int_regs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/avx_int_regs_check.py"
+        "$<TARGET_FILE:cpu_avx_int_regs_original>"
+        "$<TARGET_FILE:cpu_avx_int_regs_original_lifted>"
+        "$<TARGET_FILE:cpu_avx_int_regs_altered_lifted>")
+    set(cpu_avx_move_exports
+        "op_andpd_xmm,op_andpd_ymm,op_andps_xmm,op_andps_ymm,op_andnpd_xmm,op_andnpd_ymm,"
+        "op_andnps_xmm,op_andnps_ymm,op_orpd_xmm,op_orpd_ymm,op_orps_xmm,op_orps_ymm,"
+        "op_xorpd_xmm,op_xorpd_ymm,op_xorps_xmm,op_xorps_ymm,"
+        "op_blendpd_xmm,op_blendpd_ymm,op_blendpd_ymm_all,op_blendpd_ymm_none,"
+        "op_blendps_xmm,op_blendps_ymm,op_blendps_ymm_all,op_blendps_ymm_none,"
+        "op_blendvpd_xmm,op_blendvpd_ymm,op_blendvps_xmm,op_blendvps_ymm,"
+        "op_broadcastf128,op_broadcastsd_mem0,op_broadcastsd_mem1,op_broadcastsd_mem2,"
+        "op_broadcastsd_mem3,op_broadcastsd_reg,op_broadcastss_xmm_mem0,op_broadcastss_xmm_mem1,"
+        "op_broadcastss_xmm_mem2,op_broadcastss_xmm_mem3,op_broadcastss_ymm_mem4,op_broadcastss_ymm_mem5,"
+        "op_broadcastss_ymm_mem6,op_broadcastss_ymm_mem7,op_broadcastss_xmm_reg,op_broadcastss_ymm_reg,"
+        "op_extractf128_lo,op_extractf128_hi,op_insertf128_lo,op_insertf128_hi,"
+        "op_extractps_lane0,op_extractps_lane1,op_extractps_lane2,op_extractps_lane3,"
+        "op_insertps_s0d1_z0,op_insertps_s3d2_zmask,op_insertps_zero_all,"
+        "op_perm2f128_mix,op_perm2f128_swap,op_perm2f128_zero_lo,op_perm2f128_zero_hi,"
+        "op_perm2f128_zero_both,op_perm2f128_ignored,op_permilpd_imm_xmm,op_permilpd_imm_ymm,"
+        "op_permilpd_imm_ymm_lo,op_permilpd_imm_ymm_hi,op_permilpd_var_xmm,op_permilpd_var_ymm,"
+        "op_permilps_imm_xmm,op_permilps_imm_ymm,op_permilps_imm_ymm_lo,op_permilps_imm_ymm_hi,"
+        "op_permilps_var_xmm,op_permilps_var_ymm,"
+        "op_shufpd_xmm,op_shufpd_ymm,op_shufpd_ymm_lo,op_shufpd_ymm_hi,"
+        "op_shufps_xmm,op_shufps_ymm,op_shufps_ymm_lo,op_shufps_ymm_hi,"
+        "op_unpcklpd_xmm,op_unpcklpd_ymm,op_unpckhpd_xmm,op_unpckhpd_ymm,"
+        "op_unpcklps_xmm,op_unpcklps_ymm,op_unpckhps_xmm,op_unpckhps_ymm,"
+        "op_movapd_xmm,op_movapd_ymm,op_movapd_store128,"
+        "op_movupd_xmm,op_movupd_ymm,op_movupd_store128,"
+        "op_lddqu_xmm,op_lddqu_ymm,op_movntdq_xmm,op_movntdq_ymm,op_movntdqa_xmm,op_movntdqa_ymm,"
+        "op_movntpd_xmm,op_movntpd_ymm,op_movntps_xmm,op_movntps_ymm,"
+        "op_movddup_xmm,op_movddup_ymm,op_movshdup_xmm,op_movshdup_ymm,op_movsldup_xmm,op_movsldup_ymm,"
+        "op_movhlps,op_movlhps,op_movhpd_load,op_movhpd_store,op_movhps_load,op_movhps_store,"
+        "op_movlpd_load,op_movlpd_store,op_movlps_load,op_movlps_store,"
+        "op_movsd_load,op_movsd_store,op_movsd_reg,op_movss_load,op_movss_store,op_movss_reg,"
+        "op_movmskpd_xmm,op_movmskpd_ymm,op_movmskps_xmm,op_movmskps_ymm,"
+        "op_maskmovps_load_xmm,op_maskmovps_load_ymm,op_maskmovpd_load_xmm,op_maskmovpd_load_ymm,"
+        "op_maskmovps_store_xmm,op_maskmovps_store_ymm,op_maskmovpd_store_xmm,op_maskmovpd_store_ymm,"
+        "op_zeroupper,op_pipeline,op_mov_load32")
+    string(CONCAT cpu_avx_move_exports ${cpu_avx_move_exports})
+    foreach(variant IN ITEMS original altered)
+        cpu_asm_fixture(cpu_avx_move_regs_${variant} avx_move_regs)
+        cpu_translation(cpu_avx_move_regs_${variant} cpu_avx_move_aot "${cpu_avx_move_exports}")
+    endforeach()
+    target_compile_definitions(cpu_avx_move_regs_altered PRIVATE ALTER_IMM)
+    add_test(NAME cpu_aot_avx_move_regs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/cpu/avx_move_regs_check.py"
+        "$<TARGET_FILE:cpu_avx_move_regs_original>"
+        "$<TARGET_FILE:cpu_avx_move_regs_original_lifted>"
+        "$<TARGET_FILE:cpu_avx_move_regs_altered_lifted>")
     cpu_asm_fixture(cpu_chained chained)
     cpu_translation(cpu_chained cpu_chained_aot choose_value)
     cpu_asm_fixture(cpu_chained_jne chained)

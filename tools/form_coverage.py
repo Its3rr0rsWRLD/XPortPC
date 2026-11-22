@@ -70,6 +70,8 @@ CPU_FIXTURES = {
     "xchg": "cpu_aot_xchg",
     "address_size": "cpu_aot_address_size",
     "avx2_regs": "cpu_aot_avx2_regs",
+    "avx_int_regs": "cpu_aot_avx_int_regs",
+    "avx_move_regs": "cpu_aot_avx_move_regs",
     "call_pair": "cpu_aot_call_pair",
     "movbe": "cpu_aot_movbe",
     "bmi1": "cpu_aot_bmi1",

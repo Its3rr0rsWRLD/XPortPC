@@ -1011,6 +1011,98 @@ An `ALTER_IMM` variant changes the immediates or memory displacements of `op_per
 
 Not covered by this experiment: memory operands on the 17 register-only AVX2 forms, control flow or calls mixed with AVX2 state, nonvolatile `XMM6`..`XMM15` save/restore prologues, and title CPU code execution.
 
+## AVX packed-integer leaf recompilation
+
+[The AVX packed-integer leaf translator](../tools/cpu_avx_int_aot.py) lifts bounded straight-line Windows x64 leaf functions covering 90 AVX packed-integer and state forms in `docs/coverage/x64_zen2.tsv` group `AVX` (excluding the 28 packed-integer forms carved out to `cpu_vex_aot.py (PR #325)` so each form has a single translator):
+
+- state management: `vzeroall`, `vzeroupper`
+- packed absolute value: `vpabsb`, `vpabsw`, `vpabsd`
+- saturated packs: `vpacksswb`, `vpackssdw`, `vpackusdw`
+- packed add and subtract (wrapping and signed/unsigned saturating): `vpaddb`/`q`, `vpaddsb`/`usb`/`usw`, `vpsubb`/`d`/`q`, `vpsubsb`/`sw`/`usb`/`usw`
+- align and blend: `vpalignr`, `vpblendvb`, `vpblendw`
+- packed compares and min/max: `vpcmpeqb`/`w`/`d`/`q`, `vpcmpgtb`/`w`/`d`/`q`, `vpmaxsb`/`sd`/`ub`/`uw`/`ud`, `vpminsb`/`sd`/`ub`/`uw`/`ud`
+- horizontal operations: `vphaddw`/`d`/`sw`, `vphsubw`/`d`/`sw`, `vphminposuw`
+- multiply and multiply-add: `vpmaddwd`, `vpmuldq`, `vpmuludq`, `vpmulhrsw`, `vpmulhuw`, `vpmulld`
+- sums of absolute differences: `vpsadbw`, `vmpsadbw`
+- shuffles and packed sign: `vpshufhw`, `vpshuflw`, `vpsignb`, `vpsignw`, `vpsignd`
+- sign-extend and zero-extend moves: `vpmovsxbw`/`bd`/`bq`/`wd`/`wq`/`dq`, `vpmovzxbw`/`bd`/`bq`/`wd`/`wq`/`dq`
+- unpack/interleave: `vpunpckldq`/`hdq`/`lqdq`/`hqdq`
+- packed shifts: `vpslld`/`q`, `vpsrld`/`q` (both `imm8` and `xmm` count encodings)
+- movemask, extract and insert: `vpmovmskb`, `vpextrb`/`w`/`d`/`q` (register and memory forms), `vpinsrb`/`w`/`d`/`q` (register and memory forms)
+
+Each export uses the leaf ABI `void fn(word rcx, word rdx, word r8)` where `rcx`, `rdx` and `r8` carry flat host pointers to caller-owned buffers. `vmovdqu` (128/256-bit flat load, store and register copy), flat 32/64-bit `mov` load/store for volatile scratch GPRs (`rax`, `r9`, `r10`, `r11`) and terminal `ret` serve as transport/ABI glue.
+
+### State model, ISA semantics and explicit rejections
+
+YMM registers `ymm0`..`ymm5` use a portable C++ value struct (`struct Vec256 { std::uint64_t q[4]; }`) so the generated C++ compiles under default x64 flags without `/arch:AVX` and avoids signed overflow or shift-width undefined behavior. Every VEX.128 write zeroes bits `128..255` of the destination YMM register. `vzeroupper` zeroes bits `128..255` of all defined YMM registers; `vzeroall` zeroes all 256 bits of all six modeled registers `ymm0`..`ymm5`.
+
+Key ISA rules enforced by the translator:
+
+- **VEX.128 only**: AVX1 has no 256-bit packed-integer encodings (`VEX.L=1` packed-integer instructions belong to AVX2). Every `VEX.L=1` encoding of the 88 packed-integer forms is rejected explicitly (`vzeroall` is the sole `L=1` form in scope).
+- **Shift counts**: `vpslld`/`q` and `vpsrld`/`q` support both `imm8` and `xmm` count encodings. Per the Intel SDM, the `xmm` count operand reads bits `63:0` as an unsigned 64-bit count (ignoring bits `127:64`), and counts `>=` lane width zero the lane without wrapping.
+- **Saturation, rounding, compares and blends**: signed/unsigned saturating add, subtract, horizontal add/sub and pack clamp at exact 8-bit/16-bit bounds; `vpmulhrsw` rounds and scales per `(((a * b) >> 14) + 1) >> 1`; `vpblendvb` selects solely on bit 7 of each mask byte; `vpcmpeq*`/`vpcmpgt*` produce all-ones or all-zero lanes; `vpsign*` negates, zeroes or preserves per the sign of the second operand; `vphminposuw` breaks ties toward the lowest word index.
+- **GPR bridge and memory operands**: `vpmovmskb` and `vpextr*` register forms zero-extend results into volatile scratch GPRs (`rax`, `r9`, `r10`, `r11`). Flat `[base + disp]` memory operands rooted in `rcx`, `rdx` or `r8` are accepted only on `vpextrb`/`w`/`d`/`q`, `vpinsrb`/`w`/`d`/`q` and transport `vmovdqu`/`mov`.
+
+The translator explicitly rejects:
+
+- `VEX.L=1` (256-bit) packed-integer encodings;
+- memory operands on all register-only AVX packed-integer instructions;
+- the 28 packed-integer forms carved out to `cpu_vex_aot.py (PR #325)` (`vpackuswb`, `vpaddd`, `vpaddw`, `vpaddsw`, `vpsubw`, `vpand`, `vpandn`, `vpor`, `vpxor`, `vpavgb`, `vpavgw`, `vpmaxsw`, `vpminsw`, `vpmaddubsw`, `vpmulhw`, `vpmullw`, `vpshufb`, `vpshufd`, `vpunpcklbw`, `vpunpckhbw`, `vpunpcklwd`, `vpunpckhwd`, `vpsllw`, `vpsraw`, `vpsrad`, `vpsrlw`, `vpslldq`, `vpsrldq`);
+- undefined vector or scratch GPR reads, nonvolatile vector registers (`xmm6`..`xmm15` / `ymm6`..`ymm15`), nonvolatile GPRs (`rbx`, `rbp`, `rsi`, `rdi`, `rsp`, `r12`..`r15`), and scalar reads/writes of pointer-argument GPRs (`rcx`, `rdx`, `r8`);
+- EVEX encodings, instruction prefixes, branches, out-of-scope instructions (AVX2-only ops, AVX floating-point ops, legacy SSE/MMX, GPR ALU), non-flat/non-argument memory operands, register-to-register `mov`, missing terminal `ret`, and unreachable instructions after `ret`.
+
+```powershell
+cmake --build --preset dev --target cpu_avx_int_regs_original cpu_avx_int_regs_original_lifted cpu_avx_int_regs_altered_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_avx_int_regs$' -V
+```
+
+### Measured results and open scope
+
+The [MASM fixture](../tests/cpu/avx_int_regs.asm) builds 119 exports covering all 90 surviving AVX packed-integer forms across their valid encodings: both `xmm`-count and `imm8` shifts (including in-range, overflow `>=` lane width, and upper-64-bit nonzero `xmm` counts), register and flat-memory forms of `vpextrb`/`w`/`d`/`q` and `vpinsrb`/`w`/`d`/`q`, `vpalignr` across offsets `0`/`5`/`16`/`23`/`32`, `vmpsadbw` ignored immediate bits, saturation edges, full `vpsign*` sign matrices, `vpmulhrsw` rounding boundaries, `vphminposuw` tie-breaking, `vpmovsx*`/`vpmovzx*` sign/zero-extension extremes, `vpblendvb` bit-7 mask checks, `vzeroupper`, a 192-byte `vzeroall` check across `ymm0`..`ymm5`, and a chained `op_pipeline` export. [The Windows test](../tests/cpu/avx_int_regs_check.py) checks 1,568 differential cases across all 119 exports with 16-byte pre/post guards against both the native MASM DLL and an independent Python reference model.
+
+An `ALTER_IMM` variant changes the immediates of `op_palignr_5`, `op_pblendw`, `op_mpsadbw_0`, `op_pshufhw` and `op_pextrb_reg`, and must match the altered reference while diverging from the unmodified reference on 12, 11, 8, 10 and 10 cases respectively. An output-mutation negative control flips one bit of `op_pipeline` and confirms the comparator fails. Alternate-encoding lift checks cover 6 r64/W1 GPR bridge forms (`vpmovmskb`, `vpextrb`/`w` and `vpinsrb`/`w` `r64` variants that MASM does not emit by default). Rejection controls cover 110 unit cases (25 `VEX.L=1` packed-integer encodings, 25 register-domain memory operands, 32 carved-out encodings covering all 28 carved-out forms, 10 out-of-scope instructions and 18 EVEX/ABI/GPR/addressing/state violations) and 11 end-to-end PE-patched DLL cases. In `tools/form_coverage.py`, `avx_int_regs.asm` covers all 90 surviving AVX packed-integer forms (plus transport `vmovdqu`, 91 AVX forms total), advancing x64 Zen 2 `AVX` group coverage alone from 7/256 to 96/256 (+89 net new forms; total x64 Zen 2 from 55/948 to 144/948).
+
+Not covered by this experiment: the 28 packed-integer forms carved out to `cpu_vex_aot.py (PR #325)`, memory operands on register-only AVX packed-integer forms, 256-bit AVX2 packed-integer forms (`VEX.L=1`), AVX floating-point/move/test/string-compare forms, control flow or calls mixed with AVX state, nonvolatile register save/restore prologues, and title CPU code execution.
+
+## AVX bit-move, shuffle, blend and logical leaf recompilation
+
+[The AVX bit-move leaf translator](../tools/cpu_avx_move_aot.py) lifts bounded straight-line Windows x64 leaf functions covering 50 bit-transfer, shuffle, blend, broadcast, lane, permute, unpack, logical and masked load/store forms in `docs/coverage/x64_zen2.tsv` group `AVX` (excluding the 5 move forms `vmovdqa`, `vmovups`, `vmovaps`, `vmovq` and `vmovd` carved out to `cpu_vex_aot.py (PR #325)`; `vmovdqu` remains here as transport glue):
+
+- Logical bitwise ops: `vandpd`, `vandps`, `vandnpd`, `vandnps`, `vorpd`, `vorps`, `vxorpd`, `vxorps` (XMM and YMM widths)
+- Blends: `vblendpd`, `vblendps` (`imm8`), `vblendvpd`, `vblendvps` (sign-bit mask) across XMM and YMM widths
+- Broadcasts: `vbroadcastf128` (`m128`), `vbroadcastsd` (`m64` and `xmm`), `vbroadcastss` (`m32` and `xmm`, XMM and YMM destinations)
+- Lane ops: `vextractf128`, `vinsertf128`, `vextractps` (`r32`/`r64`), `vinsertps`
+- Permutes: `vperm2f128`, `vpermilpd` (`imm8` and variable register-control), `vpermilps` (`imm8` and variable register-control)
+- Shuffles and unpacks: `vshufpd`, `vshufps`, `vunpcklpd`, `vunpckhpd`, `vunpcklps`, `vunpckhps` (XMM and YMM widths)
+- Vector and scalar moves: `vmovapd`, `vmovupd` (128/256-bit load, store and register copy), `vlddqu`, `vmovntdq`, `vmovntdqa`, `vmovntpd`, `vmovntps`, `vmovddup`, `vmovshdup`, `vmovsldup`, `vmovhlps`, `vmovlhps`, `vmovhpd`, `vmovhps`, `vmovlpd`, `vmovlps`, `vmovsd`, `vmovss`, `vmovmskpd`, `vmovmskps`
+- Masked loads and stores: `vmaskmovpd`, `vmaskmovps` (all 8 VEX encodings across XMM/YMM load and store forms)
+
+Each lifted export takes `(word rcx, word rdx, word r8)` pointing to caller-owned flat buffers and returns `void`. For transport and ABI glue the translator accepts `vmovdqu` (128/256-bit flat load, store and register copy), flat argument-rooted 32/64-bit `mov` between volatile scratch GPRs (`rax`/`eax`, `r9`/`r9d`, `r10`/`r10d`, `r11`/`r11d`) and `[base + disp]`, `vzeroupper`, and terminal `ret`.
+
+### State model, bit-transparent semantics and explicit rejections
+
+YMM registers `ymm0`..`ymm5` use a portable `struct Vec256 { std::uint64_t q[4]; }` value model, so the generated C++ compiles with default x64 MSVC flags without `/arch:AVX`. All 50 instructions transfer or combine raw bits with no FP arithmetic, no NaN canonicalization and no MXCSR involvement; `vcmp*`, `vtest*`, `vcomis*` and `vucomis*` are out of scope. Every VEX write to an XMM destination zeroes bits `128..255` of the corresponding YMM register; `vmovss` (`m32`) and `vmovsd` (`m64`) zero-extend into their destination XMM register; `vmovmskpd`, `vmovmskps` and `vextractps` zero-extend to 64 bits; variable `vpermilpd` inspects bit 1 of each 64-bit control lane; `vinsertps` applies `ZMask` after inserting `CountS` into `CountD`; and non-temporal moves (`vmovnt*`) lower as plain loads/stores. `vmaskmovps` and `vmaskmovpd` check the MSB of each mask lane inside an `if` guard so masked-off lanes never dereference memory, zero masked-off load lanes and preserve the mask register.
+
+Memory operands are allowed as flat `[base + disp]` rooted in `rcx`, `rdx` or `r8` only where the form requires memory (loads, stores, broadcasts, half/scalar memory moves, non-temporal moves, masked loads/stores and transport `vmovdqu`/`mov` glue). The translator explicitly rejects:
+
+- memory operands on all 28 register-domain AVX forms that have memory encodings (`vand*`, `vor*`, `vxor*`, `vblend*`, `vextractf128`, `vinsertf128`, `vextractps`, `vinsertps`, `vperm2f128`, `vpermil*`, `vshuf*`, `vunpck*`, `vmovddup`, `vmovshdup`, `vmovsldup`);
+- the carved-out move forms owned by `cpu_vex_aot.py (PR #325)` (`vmovdqa`, `vmovups`, `vmovaps`, `vmovq`, `vmovd`);
+- out-of-scope ops (`vcmp*`, `vtest*`, `vcomis*`, `vucomis*`, FP/integer arithmetic, AVX2-only ops, legacy SSE, branches);
+- EVEX encodings, instruction prefixes, nonvolatile vector (`xmm6`..`xmm15` / `ymm6`..`ymm15`) or GPR (`rbx`, `rbp`, `rsi`, `rdi`, `r12`..`r15`) registers, clobbering argument GPRs, reg-to-reg `mov`, reads of undefined vector or scratch GPR registers, RIP-relative/indexed/32-bit/`rsp`/non-argument memory operands, missing terminal `ret` and unreachable instructions after `ret`.
+
+```powershell
+cmake --build --preset dev --target cpu_avx_move_regs_original cpu_avx_move_regs_original_lifted cpu_avx_move_regs_altered_lifted
+ctest --preset dev --no-tests=error -R '^cpu_aot_avx_move_regs$' -V
+```
+
+### Measured results and open scope
+
+The [MASM fixture](../tests/cpu/avx_move_regs.asm) builds 142 exports covering all 50 surviving AVX forms across XMM and YMM widths, memory and register encoding variants, all 4 `vbroadcastsd` (`m64`) and all 8 `vbroadcastss` (`m32`) lane offsets, ignored immediate bits, `vperm2f128` lane-zeroing bits, `vinsertps` `CountS`/`CountD`/`ZMask` interactions (including zeroing `CountD`), `vpermilpd` bit-1 vs bit-0 variable control, IEEE-754 special bit patterns (`+0`, `-0`, subnormals, infinities, sNaN and qNaN), 32-byte aligned buffers for aligned and non-temporal moves, unaligned `+1`/`+3`/`+7` byte offsets for `vmovupd`/`vlddqu`/scalar/broadcast/half-XMM paths, GPR zero-extension checks (`vmovmskpd`, `vmovmskps`, `vextractps`), `vzeroupper`, a chained `op_pipeline` function, full/partial/zero/non-MSB-noise masks, and Windows `VirtualAlloc` + `PAGE_NOACCESS` guard-page fault-suppression checks for all 8 `vmaskmovps`/`vmaskmovpd` exports. [The Windows test](../tests/cpu/avx_move_regs_check.py) checks 2,314 differential cases (1,754 standard across 130 exports + 192 unaligned across 16 exports + 192 variable-blend across 4 exports + 176 `vmaskmov` across 8 exports) and 16 guard-page fault-suppression cases with 32-byte pre/post guards against both the native MASM DLL and an independent Python reference model.
+
+An `ALTER_IMM` variant changes immediates or memory displacements on 10 exports (`op_blendpd_ymm`, `op_blendps_ymm`, `op_broadcastf128`, `op_insertps_s3d2_zmask`, `op_perm2f128_mix`, `op_permilpd_imm_ymm`, `op_permilps_imm_ymm`, `op_shufpd_ymm`, `op_shufps_ymm`, `op_maskmovps_load_ymm`), matching the altered reference while diverging from the original on 13, 13, 11, 10, 11, 11, 11, 11, 11 and 10 cases respectively. An output-mutation negative control flips one bit of `op_pipeline` and confirms the comparator fails. Unit and end-to-end controls cover 7 alternate-encoding lift checks (`0F 11` reg-reg `vmovsd`/`vmovss`, `W1` 64-bit `vmovmskpd`/`vmovmskps`/`vextractps`), 78 unit rejection controls (30 register-domain memory encodings across all 28 register-only forms, 13 carved-out move encodings, 13 out-of-scope ops, 22 EVEX/ABI/state/addressing violations) and 11 PE-patched DLL rejection controls. In `tools/form_coverage.py`, `avx_move_regs.asm` accounts for all 50 surviving AVX forms (plus `vmovdqu` and `vzeroupper` ABI glue, 52 AVX forms total), advancing x64 Zen 2 `AVX` group coverage alone from 7/256 to 57/256 (+50 net new forms; total x64 Zen 2 from 55/948 to 105/948). Together, `avx_int_regs.asm` and `avx_move_regs.asm` advance x64 Zen 2 `AVX` group coverage from 7/256 to 146/256 (+139 net new forms; total x64 Zen 2 from 55/948 to 194/948).
+
+Not covered by this experiment: the 5 move forms carved out to `cpu_vex_aot.py (PR #325)`, memory operands on the 28 register-only AVX forms, FP arithmetic/compare/convert/test instructions, control flow or calls mixed with AVX state, nonvolatile `XMM6`..`XMM15` save/restore prologues, and title CPU code execution.
+
 ## Offline pixel shader recompilation
 
 `tools/pixel_aot.py` extracts one named pixel program from a local archive, decodes gfx1013 instructions with LLVM and emits HLSL. DXC compiles the result to desktop DXIL before the draw. The lowerer tracks register writes across whole-quad interpolation of attribute 0, a scalar texture-descriptor load, a 2D RGBA sample, packed round-toward-zero binary16 conversions and one compressed color export. Unknown instructions, mismatched bindings and reads before the required wait cause translation to fail. [LLVM disassembler API](https://llvm.org/docs/doxygen/group__LLVMCDisassembler.html) · [Leonida public format reference](https://github.com/ItsNotRexed/Leonida/blob/56f023a10a726da20702d4e121656ceda2391d93/tools/fssm_unpack.py)
