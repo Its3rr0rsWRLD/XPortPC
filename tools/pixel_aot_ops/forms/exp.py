@@ -172,6 +172,8 @@ def export(st, i, m):
         if pairs == [None, None]:
             raise ValueError("A compressed export must enable whole binary16 pairs (RG, BA or RGBA): none is enabled")
         channels = [half for word in pairs for half in (_pair_halves(st, word) if word else ["0.0f", "0.0f"])]
+        if done and target == "mrt0" and not st.exports:
+            st.compressed_mrt0 = True  # lowering.finish: an unsampled one that reads no input declares none
     else:
         if not mask:
             raise ValueError("An uncompressed export must enable at least one component")
