@@ -10,7 +10,7 @@ Every draw renders the 8x8 pixel case (texel (x, y) = (RAMP[x], RAMP[y], 128, 25
 conditions come from the sample and differ between pixels, also inside a quad. The results are small integers
 (exact in binary16) and each program has a per-pixel Python reference and wrong references (a mask operation with
 its operands or sense swapped, a v_cmpx that does not narrow, a saveexec that saves the new EXEC, a masked write
-that is not masked) that must each be reported as a pixel_mismatch. Branches on EXEC are CF-2c and stay refused."""
+that is not masked) that must each be reported as a pixel_mismatch. Branches on EXEC are CF-2c (family cf2_skip)."""
 import math
 import struct
 import subprocess
@@ -545,10 +545,10 @@ def check_cf2_exec_controls():
     rejected("Unsupported pack operand", [line for line in IF_ELSE if line != "s_mov_b64 exec, s[60:61]"])
     rejected("Unsupported pack operand", [line for line in CMPX_REGION if line != "s_mov_b64 exec, s[62:63]"])
     rejected("Unsupported pack operand", ["v_cmpx_lt_f32_e32 s44, v12"])
-    # Every s_cbranch_exec* stays refused, also with a label to jump to.
+    # s_cbranch_exec* are lowered since CF-2c (family cf2_skip); a skip over the else form, which restores a mask
+    # saved outside the skipped region, is refused.
     for branch in ("s_cbranch_execz", "s_cbranch_execnz"):
-        rejected("Unsupported instruction", IF_ELSE[:5] + [f"{branch} BB0_2"] + IF_ELSE[5:9] + ["BB0_2:"] + IF_ELSE[9:])
-        rejected("Unsupported instruction", [f"{branch} BB0_1", "v_mov_b32_e32 v12, 1.0", "BB0_1:"])
+        rejected("EXEC re-enabled inside a skipped region", IF_ELSE[:5] + [f"{branch} BB0_2"] + IF_ELSE[5:9] + ["BB0_2:"] + IF_ELSE[9:])
     # Loads and interpolation while the lane may be inactive stay refused.
     rejected("Invalid buffer load", ["s_mov_b64 s[62:63], exec", "v_cmpx_lt_f32_e32 s44, v12",
                                      "buffer_load_dword v20, v12, s[28:31], 0 offen", "s_mov_b64 exec, s[62:63]"])

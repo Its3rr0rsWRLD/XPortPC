@@ -42,7 +42,9 @@ def sample(st, i, m):
         raise ValueError("Write overlaps an outstanding sample")
     descriptor = [st.scalar.get(f"s{n}") for n in image]
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
-    if (st.ex != "true" or any(f"s{n}" in st.pending for n in (*image, *state))
+    # CF-2c: a sample while the lane may be inactive (a predicated skip region or a narrowed EXEC) runs in uniform HLSL
+    # flow, so all four lanes of the quad take part in the derivatives; lower() masks its destination writes.
+    if (any(f"s{n}" in st.pending for n in (*image, *state))
             or texture is None
             or [st.scalar.get(f"s{n}") for n in state] != list(st.sampler)):
         raise ValueError("Unsupported image or sampler binding")
@@ -158,7 +160,7 @@ def sample_level(st, i, m):
         raise ValueError("Repeated image modifier")
     d16 = "d16" in flags
     dmask = int(dmask_digit, 16)
-    if st.ex != "true" or not dmask:
+    if not dmask:  # CF-2c: also while the lane may be inactive, as image_sample
         raise ValueError("Invalid image operation")
     channels = [c for c in range(4) if dmask >> c & 1]
     if d16 and len(channels) % 2:

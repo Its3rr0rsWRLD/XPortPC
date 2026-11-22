@@ -107,6 +107,7 @@ def write_compare(st, i, dst, relation):
     for j, reg in enumerate(regs):
         st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.lines.append(f"    bool cmp{i} = {relation if st.ex == 'true' else f'{st.ex} && ({relation})'};")
+    st.compares[f"cmp{i}"] = (relation, len(st.lines), st.ex)
 
 
 def compare_exec(st, i, relation):

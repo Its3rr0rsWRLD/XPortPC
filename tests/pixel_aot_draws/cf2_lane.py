@@ -168,7 +168,8 @@ def check_cf2_lane_controls():
         if accepted:
             assert "bool ex" not in translate(twin)
         else:
-            must_reject_for("Unsupported image or sampler binding", translate, twin)
+            # Since CF-2c the sample is masked (family cf2_skip); the export still needs EXEC restored.
+            must_reject_for("Unsupported pack operand", translate, twin)
     split = with_constants(["v_cmp_lt_f32_e64 s[60:61], v12, v13", "s_cmp_eq_u32 s44, s45", "s_cbranch_scc1 BB0_1",
                             "s_and_b64 exec, exec, s[60:61]", "BB0_1:"])
     must_reject_for("Execution or load state differs at a join", translate, split)

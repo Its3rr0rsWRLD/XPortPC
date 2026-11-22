@@ -295,6 +295,8 @@ def check_shader_records():
     assert not (pixel.ACCEPTED & rejected_forms), pixel.ACCEPTED & rejected_forms
     # The int_compare draws accept the signed scalar comparisons (lowered before any test used them).
     assert {"s_cmp_eq_i32", "s_cmp_lt_i32", "s_cmp_lg_i32"} <= pixel.ACCEPTED
+    # The skip and uniform VCC branches (draw family cf2_skip, CF-2c).
+    assert {"s_cbranch_execz", "s_cbranch_execnz", "s_cbranch_vccz", "s_cbranch_vccnz"} <= pixel.ACCEPTED
     for name in ("gfx1013.tsv", "rdna2.tsv"):
         covered = fc.gfx_forms(pixel.ACCEPTED, fc.load_reference(name))
         assert scalar64_forms <= covered, (name, scalar64_forms - covered)

@@ -2,7 +2,8 @@
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
 import re
 
-from .control_flow import find_loops, program, split_blocks, word_expr
+from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, POISON_MESSAGE, find_loops, poisoned_operands, program,
+                           split_blocks, word_expr)
 from .dispatch import dispatch
 from .hlsl import (MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS,
                    UNSAMPLED_PREAMBLE)
@@ -65,6 +66,13 @@ class Lowering:
         # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).
         self.stage = "pixel"
         self.descriptor_high = 0
+        # CF-2c: each VOPC compare's relation without the EXEC mask, the line count when it was written and the lane bit
+        # it ran under, by the name of its bool (cmp<i>); s_cbranch_vccz/vccnz on a uniform compare branches on it
+        # (control_flow.uniform_vcc).
+        self.compares = {}
+        # CF-2c: HLSL names a VGPR took unmasked because it had no value before (masked_writes); a lane that was
+        # inactive holds something else on the console, so they are never wave-uniform.
+        self.lane_values = set()
 
     @property
     def sample_pending(self):
@@ -113,15 +121,26 @@ def masked_writes(st, i, ex, before):
     before takes the new one (a refinement of an undefined register). Both values must be 32-bit words."""
     for reg, value in list(st.vector.items()):
         old = before.get(reg)
+        if old is None and value is not None:
+            st.lane_values.add(word_expr(value) or str(value))
         if old is None or value == old:
             continue
         new_word, old_word = word_expr(value), word_expr(old)
         if new_word is None or old_word is None:
             raise ValueError("Masked write of a register that does not hold a 32-bit word")
         # exw: both sides are raw words that the float readers accept (registers.RAW_WORD_PREFIXES); exv: an integer result.
+        # mem_ex: the destination of an outstanding sample (CF-2c), which, like a memory word, waits for vmcnt(0).
         name = f"{'exw' if tracked_word(value) and tracked_word(old) else 'exv'}{i}_{reg[1:]}"
+        if reg in st.sample_dest:
+            name = f"mem_ex{i}_{reg[1:]}"
         st.lines.append(f"    uint {name} = {ex} ? {new_word} : {old_word};")
         st.vector[reg] = ("uint", name)
+
+
+def poison_message(st, regs):
+    """The refusal of an instruction that reads registers poisoned at a reconvergence point (control_flow.POISON)."""
+    kind = JOIN_POISON_MESSAGE if all(st.scalar.get(r) == JOIN_POISON for r in regs) else POISON_MESSAGE
+    return f"{kind}: {', '.join(regs)}"
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
@@ -195,12 +214,21 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             raise ValueError("Unexpected instruction after color export")
         if st.exports and not line.startswith("exp "):
             raise ValueError("Only exports may follow an export that is not done")
-        if st.ex == "true":
-            dispatch(st, i, line)
-        else:
-            ex, before = st.ex, dict(st.vector)
-            dispatch(st, i, line)
-            masked_writes(st, i, ex, before)
+        # CF-2c: an instruction that names a scalar register poisoned by a skipped region must overwrite it, not read it.
+        poisoned = poisoned_operands(st.scalar, line)
+        try:
+            if st.ex == "true":
+                dispatch(st, i, line)
+            else:
+                ex, before = st.ex, dict(st.vector)
+                dispatch(st, i, line)
+                masked_writes(st, i, ex, before)
+        except ValueError as error:
+            if poisoned:
+                raise ValueError(poison_message(st, poisoned)) from error
+            raise
+        if poisoned and set(poisoned) & set(poisoned_operands(st.scalar, line)):
+            raise ValueError(poison_message(st, poisoned))
     if not st.ended or st.samples != (0 if empty else len(bindings)):
         raise ValueError("Unexpected sample count or missing color export")
     if st.helpers:
