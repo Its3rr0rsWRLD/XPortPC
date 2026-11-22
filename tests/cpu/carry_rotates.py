@@ -44,8 +44,9 @@ EXPORTS = tuple(name for name, *_ in ROTATES) + tuple(name for name, _ in FLAG_O
 CONTROLS = {
     # The count masks to five bits (six for 64-bit) before it rotates.
     "nomask": (re.compile(r" & (31|63)u\)"), " & 255u)"),
-    # Feeding the bit rotated out back in instead of CF turns RCL and RCR into ROL and ROR.
-    "nocarry": (re.compile(r"\(c\)"), "(out)"),
+    # Feeding the bit rotated out back in instead of CF turns RCL and RCR into ROL and ROR. Only the uintN_t(c)
+    # casts of the rotate loops: the shared prelude's fma_x86 also has a "(c)".
+    "nocarry": (re.compile(r"(int(?:8|16|32|64)_t)\(c\)"), r"\1(out)"),
     # STC sets CF.
     "stc": (re.compile(r"carry = true;"), "carry = false;"),
 }
