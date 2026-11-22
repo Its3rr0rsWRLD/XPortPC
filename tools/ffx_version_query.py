@@ -284,6 +284,12 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
     sse41_ops = (M.MOVDQU, M.PMINSB, M.PMAXSB, M.PMINUW, M.PMAXUW, M.PMINSD, M.PMAXSD,
                  M.PMINUD, M.PMAXUD, M.PMULLD, M.PMULDQ, M.PCMPEQQ, M.PACKUSDW, M.PBLENDW, M.PBLENDVB)
     has_wide = has_wide or any(i.mnemonic == M.VMOVUPS or i.mnemonic in sse41_ops for i in body)
+    wide_xmm = {R.XMM0: "wide0", R.XMM1: "wide1", R.XMM2: "wide2"}
+    pmov_ext = {
+        getattr(M, f"PMOV{k.upper()}{p.upper()}"): (k == "sx", {"b": 1, "w": 2, "d": 4}[p[0]], {"w": 2, "d": 4, "q": 8}[p[1]])
+        for k in ("sx", "zx") for p in ("bw", "bd", "bq", "wd", "wq", "dq")
+    }
+    has_wide = has_wide or any(i.mnemonic in (M.VMOVUPS, M.MOVDQU) or i.mnemonic in pmov_ext for i in body)
     if has_wide:
         if has_xmm_math:
             raise ValueError("mixed vector arithmetic and wide descriptor copies are unsupported")
@@ -1231,6 +1237,19 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             else:  # M.PBLENDVB (implicit XMM0 mask)
                 stmt = (f"{{ const auto in1 = {dst}, m = wide0; {s2_init} for (size_t n = 0; n < 16; ++n) {{ "
                         f"{dst}[n] = (m[n] & 0x80u) ? in2[n] : in1[n]; }} }}")
+        elif has_wide and i.encoding == EncodingKind.LEGACY and i.op0_register in wide_xmm and op in pmov_ext:
+            signed, src_sz, dst_sz = pmov_ext[op]
+            lanes = 16 // dst_sz
+            src_t = f"int{8 * src_sz}_t" if signed else UINT[src_sz]
+            dst_t = f"int{8 * dst_sz}_t" if signed else UINT[dst_sz]
+            dst = wide_xmm[i.op0_register]
+            if i.op1_kind == K.MEMORY:
+                src_init = f"const auto in1 = load<std::array<uint8_t,{lanes * src_sz}>>({address()});"
+            else:
+                src_init = f"const auto in1 = {wide_xmm[i.op1_register]};"
+            stmt = (f"{{ {src_init} for (size_t k = 0; k < {lanes}; ++k) {{ "
+                    f"const {dst_t} v = static_cast<{dst_t}>(load<{src_t}>(reinterpret_cast<word>(in1.data() + k * {src_sz}))); "
+                    f"memcpy({dst}.data() + k * {dst_sz}, &v, {dst_sz}); }} }}")
         elif op == M.VMOVUPS and i.op1_kind == K.MEMORY:
             stmt = f"{wide[i.op0_register]} = load<std::array<uint8_t,32>>({address()});"
         elif op == M.VMOVUPS and i.op0_kind == K.MEMORY:

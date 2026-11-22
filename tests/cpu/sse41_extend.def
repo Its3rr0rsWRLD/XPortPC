@@ -1,0 +1,14 @@
+EXPORTS
+    pmovsxbw_op
+    pmovsxbd_op
+    pmovsxbq_op
+    pmovsxwd_op
+    pmovsxwq_op
+    pmovsxdq_op
+    pmovzxbw_op
+    pmovzxbd_op
+    pmovzxbq_op
+    pmovzxwd_op
+    pmovzxwq_op
+    pmovzxdq_op
+    pmovsxbd_mem
