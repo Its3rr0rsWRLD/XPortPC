@@ -16,9 +16,11 @@ from pixel_aot import disassemble, native_program  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pixel_aot_draws import FAMILIES, MODULES  # noqa: E402
 # Other checks import these from here: bc7_draw_check, cpu/native_frame_check, pso_readiness_check, form_coverage_check.
-from pixel_aot_draws.common import (ACCEPTED, assembly, lower, must_reject, translate, with_constants,  # noqa: E402,F401
-                                    write_record)
+from pixel_aot_draws.common import (ACCEPTED, assembly, compile_shader, lod_zero_sample, lower, must_reject,  # noqa: E402,F401
+                                    translate, with_constants, write_case, write_record)
 from pixel_aot_draws.container import check_container_selector, envelope  # noqa: E402
+from pixel_aot_draws.unsampled import (attribute_color, buffer_color, translate_attribute,  # noqa: E402,F401
+                                       translate_buffer_color)
 from pixel_aot_draws.dual import dual_program, translate_dual  # noqa: E402,F401
 
 # Draw families, each a module of tests/pixel_aot_draws/ with draw(directory, compiler, renderer, backend). A family

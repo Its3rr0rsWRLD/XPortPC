@@ -240,6 +240,7 @@ def name_branch_targets(decoded, end):
 # are the names this module has always offered; new code imports from the package.
 from pixel_aot_ops.control_flow import (LABEL, find_loops, is_condition, plan_join, scope_free,  # noqa: E402,F401
                                         split_blocks, sync_lines, word_expr)
+from pixel_aot_ops.compat import INTEGER, SCALAR, VOP3P_F16, VOP3P_INT16  # noqa: E402,F401
 from pixel_aot_ops.forms.sdwa import SDWA_ALU, SDWA_SEL, sdwa_dest, sdwa_source  # noqa: E402,F401
 from pixel_aot_ops.forms.sop2 import SALU_BIT64  # noqa: E402,F401
 from pixel_aot_ops.forms.sopc import SCALAR_COMPARE  # noqa: E402,F401
