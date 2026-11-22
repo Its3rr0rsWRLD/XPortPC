@@ -164,8 +164,10 @@ def scalar_load(st, i, m):
         offset = 0 if soffset == "null" else int(soffset, 16)
     if offset % 4 or not 0 <= offset <= 0xffffffff or (soffset[0] != "s" and offset > 0xfffff):
         raise ValueError("Scalar load offset is misaligned or out of range")
-    if not descriptor and offset + 4 * count > 256:
+    if not descriptor and offset + 4 * count > st.constant_limit:
         raise ValueError("Constant read exceeds binding")
+    if not descriptor:
+        st.constant_words = max(st.constant_words, (offset + 4 * count) // 4)
     words = []
     for j in range(count):
         at = offset + 4 * j

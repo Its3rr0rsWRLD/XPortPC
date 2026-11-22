@@ -1,4 +1,4 @@
-"""Exercise offline vertex translation (card V-1, docs/design/vertex-stage.md) with hand-written gfx1013 programs.
+"""Exercise offline vertex translation (cards V-1 to V-3, docs/design/vertex-stage.md) with hand-written gfx1013 programs.
 
 Modes:
     vertex_aot_check.py --list-families
@@ -15,9 +15,13 @@ renderer report vertex_mismatch, and every bug must change at least one dword of
 
 The programs follow the shapes of the RADV-built corpus vertex shaders (base vertex in a user SGPR, a 32-bit descriptor
 pointer completed with s_movk_i32 0x8000, s_load_dwordx4/x8/x16 of V#s, indexed buffer_load_dword*, partial vmcnt waits,
-pos0 and param exports). No corpus binary is used.
+pos0 and param exports). Cards V-2 and V-3 add the same programs inside RADV's NGG passthrough frame (both region
+orders, with the NGG entry registers), the instance id with a start instance, inline push-constant words, a uniform
+block read both as constants and by offen buffer loads, global loads through a 64-bit address in push words, and
+clip and cull distances under PA_CL_VS_OUT_CNTL state. No corpus binary is used.
 """
 from fractions import Fraction
+import math
 import os
 from pathlib import Path
 import re
@@ -41,8 +45,8 @@ HIGH = vertex_aot.RADV_ADDRESS_HIGH
 ACCEPTED = set()
 
 
-def lower(instructions, roles):
-    source, layout = vertex_aot.lower_with_layout(instructions, roles)
+def lower(instructions, roles, vs_out_cntl=None):
+    source, layout = vertex_aot.lower_with_layout(instructions, roles, vs_out_cntl)
     lines = [line.split(";")[0].strip() for line in instructions]
     ACCEPTED.update(line.split()[0] for line in lines if line and not line.endswith(":"))
     for line in lines:
@@ -57,9 +61,9 @@ def write_record(path):
         Path(path).write_text("".join(f"{word}\n" for word in sorted(ACCEPTED)), encoding="utf-8")
 
 
-def must_refuse(instructions, roles, reason=None):
+def must_refuse(instructions, roles, reason=None, vs_out_cntl=None):
     try:
-        vertex_aot.lower_with_layout(instructions, roles)
+        vertex_aot.lower_with_layout(instructions, roles, vs_out_cntl)
     except ValueError as error:
         if reason is not None and reason not in str(error):
             raise AssertionError(f"Refused for another reason: {error} (expected {reason!r})")
@@ -177,17 +181,27 @@ def vsharp(base, stride, records, select):
 class Model:
     """Straight-line execution of one vertex. flaws switches individual rules to a plausible wrong one."""
 
-    def __init__(self, roles, constants, memory, flaws=()):
+    def __init__(self, roles, constants, memory, flaws=(), descriptors=None, push=(), stage="legacy"):
         self.roles, self.constants, self.memory, self.flaws = roles, constants, memory, set(flaws)
+        self.descriptors = constants[:64] if descriptors is None else descriptors
+        self.push, self.stage = list(push) + [0] * (32 - len(push)), stage
 
-    def run(self, program, vertex_id, base_vertex):
+    def run(self, program, vertex_id, base_vertex, instance_id=0, start_instance=0):
         s, v = {}, {}
+        cbv_words = None
+        carries = {}
         for number, role in self.roles.items():
             if role[0] == "descriptors":
                 s[number] = ("pointer", number)
             elif role[0] == "base_vertex":
                 s[number] = 0 if "base_ignored" in self.flaws else base_vertex
-        v[0] = 0 if "instance_id" in self.flaws else vertex_id  # a single-instance draw: the instance id is 0
+            elif role[0] == "start_instance":
+                s[number] = 0 if "start_ignored" in self.flaws else start_instance
+            elif role[0] == "inline":
+                s[number] = self.push[role[1] + ("push_shifted" in self.flaws)]
+        vid, iid = (0, 3) if self.stage == "legacy" else (5, 8)
+        v[vid] = instance_id if "instance_id" in self.flaws else vertex_id
+        v[iid] = vertex_id if "vertex_for_instance" in self.flaws else instance_id
         exports = {}
 
         def sreg(token):
@@ -197,7 +211,7 @@ class Model:
             return value
 
         def word(token):
-            if token.startswith("-"):
+            if token.startswith("-") and not re.fullmatch(r"-\d+", token):
                 return word(token[1:]) ^ 0x80000000
             if re.fullmatch(r"v\d+", token):
                 return v[int(token[1:])]
@@ -230,6 +244,11 @@ class Model:
             elif name == "s_movk_i32":
                 imm = int(ops[1], 0)
                 s[int(ops[0][1:])] = (imm - 0x10000 if imm & 0x8000 else imm) & M32
+            elif name.startswith("s_load_dword") and isinstance(s[span(ops[1])[0]], int):
+                low, high = (s[n] for n in span(ops[1]))  # a 64-bit address in data words: title memory
+                address = ((low | high << 32) & ~3) + (0 if ops[2] == "null" else int(ops[2], 0))
+                for j, n in enumerate(span(ops[0])):
+                    s[n] = self.memory.word((address + 4 * j) % (1 << 64))
             elif name.startswith("s_load_dword"):
                 pointer = s[span(ops[1])[0]]
                 table_high, entries = self.roles[pointer[1]][1:]
@@ -239,17 +258,34 @@ class Model:
                     at = offset + 4 * j
                     start = next(k for k in entries if k <= at < k + 16)
                     entry = entries[start]
-                    s[n] = (("cbv", (at - start) // 4) if entry[0] == "constants"
-                            else self.constants[entry[1] + (at - start) // 4])
+                    if entry == ("constants",):
+                        s[n] = ("cbv", (at - start) // 4)
+                    else:
+                        s[n] = self.descriptors[entry[1] + (at - start) // 4]
+                        if entry[0] == "constants":
+                            cbv_words = self.descriptors[entry[1]:entry[1] + 4]
             elif name.startswith("s_buffer_load_dword"):
                 base = span(ops[1])
-                assert [s[n] for n in base] == [("cbv", j) for j in range(4)]
+                assert [s[n] for n in base] in ([("cbv", j) for j in range(4)], cbv_words)
                 offset = 0 if ops[2] == "null" else int(ops[2], 0)
                 values = [self.constants[offset // 4 + j] for j in range(len(span(ops[0])))]
+                if "window_64" in self.flaws:  # a wrong reference: constant words past 64 read as zero
+                    values = [0 if offset // 4 + j >= 64 else x for j, x in enumerate(values)]
                 for n, value in zip(span(ops[0]), values):
                     s[n] = value
             elif name.startswith("buffer_load_dword"):
                 self.fetch(ops, v, s, span)
+            elif name.startswith("global_load_dword"):
+                tail = ops[2].split()
+                imm = next((int(m[7:]) for m in tail[1:] if m.startswith("offset:")), 0)
+                if tail[0] == "off":
+                    lo, hi = (v[n] for n in span(ops[1]))
+                    address = lo | hi << 32
+                else:
+                    lo, hi = (s[n] for n in span(tail[0]))
+                    address = (lo | hi << 32) + v[int(ops[1][1:])]
+                for j, n in enumerate(span(ops[0])):
+                    v[n] = self.memory.word((address + imm + 4 * j) % (1 << 64))
             elif name == "v_mov_b32":
                 v[int(ops[0][1:])] = word(ops[1])
             elif name in ("v_add_nc_u32", "v_and_b32", "v_xor_b32", "v_or_b32", "v_lshlrev_b32", "v_mul_u32_u24"):
@@ -258,6 +294,35 @@ class Model:
                     "v_add_nc_u32": (a + b) & M32, "v_and_b32": a & b, "v_xor_b32": a ^ b, "v_or_b32": a | b,
                     "v_lshlrev_b32": (b << (a & 31)) & M32, "v_mul_u32_u24": ((a & 0xffffff) * (b & 0xffffff)) & M32,
                 }[name]
+            elif name in ("v_sin_f32", "v_cos_f32", "v_rndne_f32"):
+                source, _, modifier = ops[1].partition(" ")
+                value = f32_fraction(checked(word(source)))
+                if name == "v_rndne_f32":
+                    result = round_f32(Fraction(round(value)))  # ties to even
+                else:
+                    result = round_f32(Fraction(self.trig(name, float(value))))
+                    if modifier == "div:2" and "div2_ignored" not in self.flaws:
+                        result = round_f32(f32_fraction(result) / 2)
+                v[int(ops[0][1:])] = result
+            elif re.fullmatch(r"v_(add|sub|subrev)_co_(ci_)?u32", name):
+                kind = name.split("_")[1]
+                a, b = word(ops[2]), word(ops[3])
+                if kind == "subrev" and "subrev_swapped" not in self.flaws:
+                    a, b = b, a
+                mask = ops[1].replace("vcc_lo", "vcc")
+                carry_in = 0
+                if name.endswith("_ci_u32"):
+                    carry_in = 0 if "no_carry_in" in self.flaws else carries[ops[4].replace("vcc_lo", "vcc")]
+                if kind == "add":
+                    total = a + b + carry_in
+                    out = total >> 32
+                else:
+                    total = a - b - carry_in
+                    out = 1 if total < 0 else 0
+                    if "no_borrow" in self.flaws:
+                        out = 0
+                carries[mask] = out
+                v[int(ops[0][1:])] = total & M32
             elif name == "v_cvt_f32_ubyte0":
                 v[int(ops[0][1:])] = round_f32(Fraction(word(ops[1]) & 0xff))
             elif name == "v_mul_f32":
@@ -279,6 +344,13 @@ class Model:
                 raise AssertionError(f"Model has no instruction {line}")
         return exports
 
+    def trig(self, name, revolutions):
+        """v_sin_f32 and v_cos_f32 take their argument in revolutions. "radians" is the wrong reference that does not
+        scale it, "sin_cos_swapped" exchanges the two."""
+        angle = revolutions if "radians" in self.flaws else 2 * math.pi * revolutions
+        swapped = "sin_cos_swapped" in self.flaws
+        return math.sin(angle) if (name == "v_sin_f32") != swapped else math.cos(angle)
+
     def fetch(self, ops, v, s, span):
         """buffer_load_dword* idxen with an instruction offset: gfx10 range rules as tools/pixel_aot_ops/hlsl.py cites
         them (Mesa ac_set_buf_desc_word3), per dword."""
@@ -287,11 +359,17 @@ class Model:
             raise AssertionError("V# words are not data")
         modifiers = ops[-1].split()[1:]
         inst = next((int(m[7:]) for m in modifiers if m.startswith("offset:")), 0)
-        index = v[int(ops[1][1:])]
+        if "offen" in modifiers:
+            index, voffset = 0, v[int(ops[1][1:])]
+        else:
+            index, voffset = v[int(ops[1][1:])], 0
         base = rsrc[0] | (rsrc[1] & 0xffff) << 32
         stride, records, select = (rsrc[1] >> 16) & 0x3fff, rsrc[2], (rsrc[3] >> 28) & 3
         for j, n in enumerate(span(ops[0])):
-            offset = inst + 4 * j
+            offset = voffset + inst + 4 * j
+            if offset > M32:  # the offset sum wraps: the load reads 0
+                v[n] = 0
+                continue
             index_in = index <= records if "records_inclusive" in self.flaws else index < records
             if select == 0:
                 ok = index_in and (offset < stride or "no_offset_check" in self.flaws)
@@ -317,27 +395,55 @@ class Model:
 
 # --- case files (tests/vertex_aot_render.cpp) --------------------------------------------------------------------------
 
-def case_file(records, base_vertex, params, constants, expected, mask, indices=None, memory=b""):
-    assert len(params) <= 8 and len(constants) == 64 and len(expected) == len(mask)
+DISTANCE_CODES = {"clip": 1, "cull": 2}
+
+
+def case_file(records, base_vertex, params, constants, expected, mask, indices=None, memory=b"", descriptors=None,
+              instances=1, start_instance=0, push=(), distances=()):
+    """distances: the (kind, semantic index) of each distance vector, in stream-output order."""
+    descriptors = constants[:64] if descriptors is None else descriptors
+    wide = len(constants) != 64  # header word 19 names a constant window other than 64 words (multiple of 4, to 16384)
+    assert len(params) <= 8 and len(constants) % 4 == 0 and 64 <= len(constants) <= 16384
+    assert len(descriptors) == 64 and len(expected) == len(mask)
+    assert len(push) <= 32 and len(distances) <= 2
+    codes = [DISTANCE_CODES[kind] << 8 | index for kind, index in distances]
     header = [0x56573258, records, int(indices is not None), base_vertex & M32, len(params),
-              *params, *[0] * (8 - len(params)), 0, 0, 0]
-    body = header + list(constants) + list(indices or []) + list(expected) + list(mask)
+              *params, *[0] * (8 - len(params)), instances, start_instance & M32, len(push), len(codes),
+              *codes, *[0] * (2 - len(codes)), len(constants) if wide else 0, *[0] * 12]
+    assert len(header) == 32
+    body = header + list(constants) + list(descriptors) + list(push) + list(indices or []) + list(expected) + list(mask)
     return struct.pack(f"<{len(body)}I", *body) + memory
 
 
-def outputs(model, program, layout, ids, base_vertex):
-    """Expected words and compare masks of a draw: per record pos0 then each parameter, xyzw. An `off` channel is
-    undefined: its mask is 0. Swapping parameters is one of the wrong references."""
-    order = ["pos0", *(f"param{n}" for n in layout["params"])]
+def distance_semantics(layout):
+    """(kind, semantic index) per distance vector, as vertex_aot numbers SV_ClipDistanceN and SV_CullDistanceN."""
+    seen, out = {"clip": 0, "cull": 0}, []
+    for _, kind, _ in layout["positions"]:
+        out.append((kind, seen[kind]))
+        seen[kind] += 1
+    return out
+
+
+def outputs(model, program, layout, ids, base_vertex, instances=1, start_instance=0):
+    """Expected words and compare masks of a draw: per record (instance-major) pos0, each distance vector, then each
+    parameter, xyzw. An `off` channel, and a distance channel PA_CL_VS_OUT_CNTL does not enable, is undefined: its mask
+    is 0. Swapping parameters or distance vectors are wrong references."""
+    positions = [name for name, _, _ in layout["positions"]]
+    order = ["pos0", *positions, *(f"param{n}" for n in layout["params"])]
+    first = 1 + len(positions)
     if "swap_params" in model.flaws:
+        order[first], order[first + 1] = order[first + 1], order[first]
+    if "swap_distances" in model.flaws:
         order[1], order[2] = order[2], order[1]
     expected, mask = [], []
-    for vertex_id in ids:
-        exports = model.run(program, vertex_id, base_vertex)
-        for name in order:
-            for word in exports[name]:
-                expected.append(0 if word is None else word)
-                mask.append(0 if word is None else M32)
+    for instance in range(instances):
+        for vertex_id in ids:
+            exports = model.run(program, vertex_id, base_vertex, instance, start_instance)
+            for name in order:
+                defined = layout["channels"][name] if name in positions else (True,) * 4
+                for word, on in zip(exports[name], defined):
+                    expected.append(0 if word is None or not on else word)
+                    mask.append(0 if word is None or not on else M32)
     return expected, mask
 
 
@@ -483,20 +589,30 @@ def compile_vs(compiler, source, directory, name):
     return shader
 
 
-def run_sets(directory, compiler, renderer, backend, name, program, roles, sets, flaws, extra=None):
+def run_sets(directory, compiler, renderer, backend, name, program, roles, sets, flaws, extra=None, body=None,
+             vs_out_cntl=None):
     """Draw every set with its reference, then each wrong reference, which must be reported as a mismatch.
-    A set is (constants, memory, record ids or (indices,), base vertex)."""
-    source, layout = lower(program, roles)
+    A set is (constants, memory, record ids or (indices,), base vertex[, extras]), extras a dict with any of
+    descriptors, push, instances, start_instance. `body` is the program the model runs when `program` is an NGG
+    program (the vertex body inside its frame)."""
+    source, layout = lower(program, roles, vs_out_cntl)
+    stage = layout["stage"]
+    body = program if body is None else body
     shader = compile_vs(compiler, source, directory, name)
     case = directory / f"{name}.case"
     draw = [renderer, backend, "--check-vertex-case", shader, case]
     separated = dict.fromkeys(map(frozenset, flaws), False)
-    for constants, memory, ids, base in sets:
+    for constants, memory, ids, base, *more in sets:
+        extras = more[0] if more else {}
+        descriptors, push = extras.get("descriptors"), extras.get("push", ())
+        instances, start = extras.get("instances", 1), extras.get("start_instance", 0)
         indices = ids[0] if isinstance(ids, tuple) else None
         records = list(indices) if indices is not None else list(range(ids))
-        expected, mask = outputs(Model(roles, constants, memory), program, layout, records, base)
-        write = lambda e, m: case.write_bytes(case_file(len(records), base, layout["params"], constants, e, m,
-                                                        indices, memory.section()))
+        model = lambda flaw=(): Model(roles, constants, memory, flaw, descriptors, push, stage)  # noqa: E731
+        expected, mask = outputs(model(), body, layout, records, base, instances, start)
+        write = lambda e, m: case.write_bytes(case_file(  # noqa: E731
+            len(records), base, layout["params"], constants, e, m, indices, memory.section(), descriptors,
+            instances, start, push, distance_semantics(layout)))
         write(expected, mask)
         result = subprocess.run(draw, capture_output=True, text=True)
         sys.stdout.write(result.stdout)
@@ -506,7 +622,7 @@ def run_sets(directory, compiler, renderer, backend, name, program, roles, sets,
             sys.stderr.write(result.stderr)
             raise AssertionError(f"{name}: the draw differs from the reference (base vertex {base:#x}, {len(records)} records)")
         for flaw in separated:
-            wrong, _ = outputs(Model(roles, constants, memory, flaw), program, layout, records, base)
+            wrong, _ = outputs(model(flaw), body, layout, records, base, instances, start)
             if wrong == expected:
                 continue
             separated[flaw] = True
@@ -616,8 +732,302 @@ def draw_nan(directory, compiler, renderer, backend):
     return run_sets(directory, compiler, renderer, backend, "nan", NAN, NAN_ROLES, sets, flaws)
 
 
-DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan}
-PROGRAMS = ((FETCH, FETCH_ROLES), (MATRIX, MATRIX_ROLES), (VERTEX_ID, VERTEX_ID_ROLES), (NAN, NAN_ROLES))
+# --- cards V-2 and V-3 -------------------------------------------------------------------------------------------------
+
+def ngg_registers(program):
+    """A legacy-VS program with the registers it would have in an NGG wave (docs/design/vertex-stage.md, Inputs):
+    VGPRs move up by 5 (v0 vertex id -> v5, v3 instance id -> v8, and the unassigned v1/v2 -> v6/v7), entry user SGPRs
+    s2..s7 move to s8..s13 (user SGPRs start at s8 after the merged wave's system SGPRs), and temporaries s8 and up move
+    up by 8, which keeps every SGPR tuple aligned. s0 and s1 stay temporaries."""
+    def sgpr(n):
+        return n if n < 2 else n + 6 if n < 8 else n + 8
+
+    def one(line):
+        line = re.sub(r"\bv\[(\d+):(\d+)\]", lambda m: f"v[{int(m[1]) + 5}:{int(m[2]) + 5}]", line)
+        line = re.sub(r"(?<![\w\[:])v(\d+)\b", lambda m: f"v{int(m[1]) + 5}", line)
+        line = re.sub(r"\bs\[(\d+):(\d+)\]", lambda m: f"s[{sgpr(int(m[1]))}:{sgpr(int(m[2]))}]", line)
+        return re.sub(r"(?<![\w\[:])s(\d+)\b", lambda m: f"s{sgpr(int(m[1]))}", line)
+    return [one(line) for line in program]
+
+
+def ngg_roles(roles):
+    return {number + 6: role for number, role in roles.items()}
+
+
+def ngg_frame(body, order="prim"):
+    """RADV's NGG passthrough frame around a vertex body (the shape of every NGG dump of the corpus), with the primitive
+    export first (order "prim", 237 corpus shaders) or after the body ("vertex", 7)."""
+    body = [line for line in body if not line.startswith("s_setprio")]
+    head = ["s_setprio 3", "s_barrier", "s_and_b32 s0, s3, 0xf000000", "s_cbranch_scc1 BB3", "BB1:",
+            "s_bfe_u32 s0, s2, 0x90016", "s_lshl_b32 s0, s0, 12", "s_bfe_u32 s2, s2, 0x9000c", "s_or_b32 m0, s0, s2",
+            "s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)", "BB3:"]
+    if order == "prim":
+        return head + ["s_lshl_b32 s0, s3, 8", "s_bfe_u64 exec, -1, s0", "s_cbranch_execz BB9", "BB4:",
+                       "exp prim v0, off, off, off done", "BB9:", "s_pack_ll_b32_b16 s3, 0, s3",
+                       "s_waitcnt expcnt(0)", "s_bfe_u64 exec, -1, s3", "s_cbranch_execz BB15", "BB10:",
+                       *body, "BB15:", "s_endpgm"]
+    return head + ["s_pack_ll_b32_b16 s0, 0, s3", "s_bfe_u64 exec, -1, s0", "s_cbranch_execz BB15", "BB4:",
+                   *body, "BB15:", "s_lshl_b32 s3, s3, 8", "s_waitcnt expcnt(0)", "s_bfe_u64 exec, -1, s3",
+                   "s_cbranch_execz BB21", "BB16:", "exp prim v0, off, off, off done", "BB21:", "s_endpgm"]
+
+
+def ngg_program(program, order="prim"):
+    """(full NGG program, its vertex body without s_endpgm framing for the model)."""
+    body = ngg_registers(program)
+    return ngg_frame([line for line in body if line != "s_endpgm"], order), body
+
+
+NGG_FETCH, NGG_FETCH_BODY = ngg_program(FETCH, "prim")
+NGG_MATRIX, NGG_MATRIX_BODY = ngg_program(MATRIX, "vertex")
+NGG_VERTEX_ID, NGG_VERTEX_ID_BODY = ngg_program(VERTEX_ID, "prim")
+
+# Instance id, start instance, inline push words, a uniform block read both by s_buffer_load (b0) and by an offen
+# buffer load indexed by the instance (its V# words are descriptor words 8..11), and global loads through a 64-bit
+# address held in two push words (buffer device address), in both the saddr and the 64-bit VGPR form.
+INSTANCE = [
+    "s_setprio 3",
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[12:15], s[2:3], null",
+    "s_mov_b32 s2, s5",
+    "s_load_dwordx4 s[16:19], s[2:3], null",
+    "v_add_nc_u32_e32 v3, s4, v3",
+    "v_lshlrev_b32_e32 v4, 4, v3",
+    "v_add_nc_u32_e32 v0, s0, v0",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dwordx4 v[5:8], v4, s[16:19], 0 offen offset:32",
+    "buffer_load_dwordx2 v[9:10], v0, s[12:15], 0 idxen",
+    "s_buffer_load_dwordx4 s[20:23], s[16:19], null",
+    "v_mov_b32_e32 v11, s6",
+    "v_mov_b32_e32 v12, s7",
+    "v_lshlrev_b32_e32 v13, 3, v0",
+    "global_load_dwordx2 v[14:15], v13, s[6:7] offset:8",
+    "global_load_dword v16, v[11:12], off offset:4",
+    "s_waitcnt lgkmcnt(0)",
+    "v_mov_b32_e32 v17, s6",
+    "v_xor_b32_e32 v18, s20, v3",
+    "s_waitcnt vmcnt(0)",
+    "exp pos0 v5, v6, v7, v8 done vm",
+    "exp param0 v9, v10, v14, v15",
+    "exp param1 v16, v17, v18, v3",
+    "s_endpgm",
+]
+INSTANCE_ROLES = {2: ("descriptors", HIGH, {0: ("vsharp", 0)}), 3: ("base_vertex",), 4: ("start_instance",),
+                  5: ("descriptors", HIGH, {0: ("constants", 8)}), 6: ("inline", 0), 7: ("inline", 1)}
+NGG_INSTANCE, NGG_INSTANCE_BODY = ngg_program(INSTANCE, "prim")
+
+# pos1 and pos2 as distance vectors: distances 0 and 2 clip (1 is exported but not enabled, 3 is off), 4 and 5 cull.
+DISTANCE = [
+    "s_setprio 3",
+    "v_add_nc_u32_e32 v1, s3, v0",
+    "v_cvt_f32_ubyte0_e32 v2, v1",
+    "v_mov_b32_e32 v3, 1.0",
+    "v_sub_f32_e32 v4, v2, v3",
+    "v_mov_b32_e32 v5, 0",
+    "v_mul_f32_e32 v6, 0.5, v2",
+    "exp pos0 v2, v3, v5, v3 vm",
+    "exp pos1 v4, v6, v2, off",
+    "exp pos2 v6, v4, v3, v2 done",
+    "exp param0 v1, v2, off, off",
+    "s_endpgm",
+]
+DISTANCE_ROLES = {3: ("base_vertex",)}
+DISTANCE_CNTL = 0b101 | 0b110000 << 8 | 1 << 22 | 1 << 23
+
+
+def instance_set(seed, count, base, instances, start, records):
+    """Title memory: a vertex buffer and the uniform block at HIGH_BASE, the global data at LOW_BASE (it crosses
+    4 GiB). b0 holds the uniform block's first 64 words, as the runtime keeps it equal to that memory."""
+    memory = memory_for(seed)
+    block = HIGH_BASE + 0x100
+    descriptors = [0] * 64
+    descriptors[0:4] = vsharp(HIGH_BASE, 8, 20, 0)
+    descriptors[8:12] = vsharp(block, 0, records, 3)  # raw: offset < num_records
+    constants = [memory.word(block + 4 * k) for k in range(64)]
+    pointer = LOW_BASE + 0x1f0
+    push = [pointer & M32, pointer >> 32, 0x5eed]
+    return (constants, memory, count, base,
+            {"descriptors": descriptors, "push": push, "instances": instances, "start_instance": start})
+
+
+INSTANCE_SETS = [instance_set(50, 4, 0, 3, 5, 144), instance_set(51, 3, 7, 2, 0, 0x80), instance_set(52, 5, 2, 1, 6, 0x100)]
+INSTANCE_FLAWS = [{"base_ignored"}, {"start_ignored"}, {"instance_id"}, {"vertex_for_instance"}, {"push_shifted"},
+                  {"swap_params"}, {"nostride"}]
+
+
+def draw_ngg(directory, compiler, renderer, backend):
+    """The V-1 programs inside RADV's NGG passthrough frame (card V-2): the frame dropped, v5 as the vertex id, both
+    region orders. The references are the legacy model run on the vertex body."""
+    memory = memory_for(11)
+    cross = 0x1_0000_0000 - 8
+    wide = lambda r0, r1: fetch_constants(vsharp(HIGH_BASE + 0x40, 24, r0, 0), vsharp(cross, 12, r1, 1))  # noqa: E731
+    code = run_sets(directory, compiler, renderer, backend, "ngg_fetch", NGG_FETCH, ngg_roles(FETCH_ROLES),
+                    [(wide(16, 16), memory, 7, 0), (wide(10, 8), memory, ([5, 0, 2, 2, 9, 1, 7],), 1)],
+                    [{"base_ignored"}, {"nostride"}, {"records_inclusive"}, {"swap_params"}], body=NGG_FETCH_BODY)
+    if code:
+        return code
+    sets = []
+    for seed, (count, base) in enumerate(((5, 0), (6, 2))):
+        words = float_words(100 + seed, 20) + [0] * 44
+        words[32:48] = (vsharp(HIGH_BASE, 12, 64, 0) + vsharp(LOW_BASE, 4, 1, 0) + vsharp(LOW_BASE, 4, 1, 0)
+                        + vsharp(LOW_BASE + 0x40, 28, 48, 0))
+        sets.append((words, memory_for(30 + seed), count, base))
+    code = run_sets(directory, compiler, renderer, backend, "ngg_matrix", NGG_MATRIX, ngg_roles(MATRIX_ROLES), sets,
+                    [{"fused"}, {"base_ignored"}, {"swap_params"}], body=NGG_MATRIX_BODY)
+    if code:
+        return code
+    return run_sets(directory, compiler, renderer, backend, "ngg_vertex_id", NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES),
+                    [([0] * 64, Memory([]), 6, 0), ([0] * 64, Memory([]), ([0, 1, 2, 2, 1, 0, 7, 1000],), 5)],
+                    [{"base_ignored"}, {"swap_params"}], body=NGG_VERTEX_ID_BODY)
+
+
+def draw_instance(directory, compiler, renderer, backend):
+    """Card V-3: instanced draws with a start instance (root constant), the instance id in v3 (and v8 in the NGG
+    form), inline push words, an offen load out of a uniform block (num_records bounds the last instance), and global
+    loads through a 64-bit push-word address that crosses 4 GiB."""
+    code = run_sets(directory, compiler, renderer, backend, "instance", INSTANCE, INSTANCE_ROLES, INSTANCE_SETS,
+                    INSTANCE_FLAWS)
+    if code:
+        return code
+    return run_sets(directory, compiler, renderer, backend, "ngg_instance", NGG_INSTANCE, ngg_roles(INSTANCE_ROLES),
+                    INSTANCE_SETS, INSTANCE_FLAWS, body=NGG_INSTANCE_BODY)
+
+
+def draw_distance(directory, compiler, renderer, backend):
+    """Card V-3: pos1 and pos2 as SV_ClipDistance0 and SV_CullDistance0 under PA_CL_VS_OUT_CNTL, captured by stream
+    output; channels the state does not enable are undefined (masked)."""
+    sets = [([0] * 64, Memory([]), 6, 0), ([0] * 64, Memory([]), 4, 9)]
+    return run_sets(directory, compiler, renderer, backend, "distance", DISTANCE, DISTANCE_ROLES, sets,
+                    [{"base_ignored"}, {"swap_distances"}], vs_out_cntl=DISTANCE_CNTL)
+
+
+# Card V-4: v_sin_f32 and v_cos_f32 (the argument in revolutions) and the carry-in adds and subtractions. Every
+# transcendental result is scaled and rounded to an integer before it is exported, at angles (n + 0.5) / 16 revolutions
+# whose scaled sine and cosine lie at least 0.05 from a rounding tie, so the result does not depend on the last bits of
+# the desktop's sin and cos.
+TRIG = [
+    "s_setprio 3",
+    "v_add_nc_u32_e32 v1, s3, v0",
+    "v_cvt_f32_ubyte0_e32 v2, v1",
+    "v_add_f32_e32 v3, 0.5, v2",
+    "v_mul_f32_e32 v4, 0x3d800000, v3",
+    "v_sin_f32_e32 v5, v4",
+    "v_cos_f32_e32 v6, v4",
+    "v_mul_f32_e32 v7, 0x41000000, v5",
+    "v_rndne_f32_e32 v7, v7",
+    "v_mul_f32_e32 v8, 0x41000000, v6",
+    "v_rndne_f32_e32 v8, v8",
+    "v_sin_f32_e64 v9, v4 div:2",
+    "v_mul_f32_e32 v9, 0x41800000, v9",
+    "v_rndne_f32_e32 v9, v9",
+    "v_cos_f32_e64 v10, v4 div:2",
+    "v_mul_f32_e32 v10, 0x41800000, v10",
+    "v_rndne_f32_e32 v10, v10",
+    "v_mov_b32_e32 v11, 1.0",
+    "exp pos0 v7, v8, v9, v11 done vm",
+    "exp param0 v10, v1, off, off",
+    "s_endpgm",
+]
+TRIG_ROLES = {3: ("base_vertex",)}
+
+# 64-bit style limbs from the vertex id: v2 and v3 hold bit 0 and bit 1 of the id in bit 31, so v2 + v3 carries when
+# both are set, and v3 - v2 borrows when only bit 1 is. The carry-in forms run in VCC and in a lane-mask SGPR, as the
+# add, subtract and reverse subtract, each reading a mask the previous instruction wrote.
+CARRY = [
+    "s_setprio 3",
+    "v_add_nc_u32_e32 v1, s3, v0",
+    "v_lshlrev_b32_e32 v2, 31, v1",
+    "v_lshlrev_b32_e32 v3, 30, v1",
+    "v_mov_b32_e32 v5, -1",
+    "v_mov_b32_e32 v6, 0",
+    "v_add_co_u32 v4, vcc_lo, v2, v3",
+    "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo",
+    "v_add_co_ci_u32_e32 v8, vcc_lo, 0, v6, vcc_lo",
+    "v_sub_co_u32 v9, vcc_lo, v3, v2",
+    "v_sub_co_ci_u32_e32 v10, vcc_lo, v1, v5, vcc_lo",
+    "v_sub_co_u32 v13, vcc_lo, v3, v2",
+    "v_subrev_co_ci_u32_e32 v11, vcc_lo, v1, v5, vcc_lo",
+    "v_add_co_u32 v12, s10, v2, v3",
+    "v_add_co_ci_u32_e64 v14, s12, v1, v6, s10",
+    "v_add_co_ci_u32_e64 v15, s10, v5, v6, s12",
+    "v_subrev_co_u32 v16, s12, v3, v2",
+    "v_sub_co_ci_u32_e64 v17, s10, v6, v6, s12",
+    "exp pos0 v4, v7, v8, v9 done vm",
+    "exp param0 v10, v11, v12, v13",
+    "exp param1 v14, v15, v16, v17",
+    "s_endpgm",
+]
+CARRY_ROLES = {3: ("base_vertex",)}
+
+
+# Constants past the first 64 words: the window grows to the highest word read (params[17] and params[65] here),
+# up to the 4096 uint4 of a D3D12 constant buffer. Words 72 to 75 and 260 to 263 are read as a uint4 each.
+WIDE = [
+    "s_setprio 3",
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "v_add_nc_u32_e32 v0, s0, v0",
+    "s_movk_i32 s5, 0x8000",
+    "s_load_dwordx4 s[12:15], s[4:5], null",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dwordx4 s[16:19], s[12:15], 0x120",
+    "s_buffer_load_dwordx4 s[20:23], s[12:15], 0x410",
+    "s_waitcnt lgkmcnt(0)",
+    "v_cvt_f32_ubyte0_e32 v1, v0",
+    "v_mov_b32_e32 v2, s16",
+    "v_mov_b32_e32 v3, s19",
+    "v_add_nc_u32_e32 v4, s20, v0",
+    "v_add_nc_u32_e32 v5, s23, v4",
+    "v_mov_b32_e32 v6, s17",
+    "v_mov_b32_e32 v7, s22",
+    "exp pos0 v1, v2, v3, v4 done vm",
+    "exp param0 v5, v6, v7, v0",
+    "s_endpgm",
+]
+WIDE_ROLES = {3: ("base_vertex",), 4: ("descriptors", HIGH, {0: ("constants",)})}
+
+
+def wide_constants(seed, words):
+    state = [0] * words
+    for k in range(words):
+        seed = (seed * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        state[k] = (seed >> 32) | 1
+    return state
+
+
+def draw_wide(directory, compiler, renderer, backend):
+    """s_buffer_load words past the first 64 (byte offsets 0x120 and 0x410): the constant window is sized from the
+    highest word read. The wrong reference reads every word past 64 as zero."""
+    sets = [(wide_constants(5, 272), Memory([]), 6, 0), (wide_constants(9, 1024), Memory([]), 5, 3)]
+    flaws = [{"window_64"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "wide", WIDE, WIDE_ROLES, sets, flaws)
+
+
+def draw_trig(directory, compiler, renderer, backend):
+    """Card V-4: v_sin_f32 and v_cos_f32 (e32, and e64 with the div:2 output modifier) on angles in revolutions, each
+    result scaled and rounded to an integer before export (see TRIG)."""
+    sets = [([0] * 64, Memory([]), 16, 0), ([0] * 64, Memory([]), 8, 3)]
+    flaws = [{"sin_cos_swapped"}, {"radians"}, {"div2_ignored"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "trig", TRIG, TRIG_ROLES, sets, flaws)
+
+
+def draw_carry(directory, compiler, renderer, backend):
+    """Card V-4: v_add_co_ci_u32, v_sub_co_ci_u32 and v_subrev_co_ci_u32 reading the carry or borrow of the previous
+    instruction, in VCC and in an SGPR lane mask, with ids that wrap the 32-bit base-vertex add."""
+    sets = [([0] * 64, Memory([]), 8, 0), ([0] * 64, Memory([]), 6, 0x7ffffffe), ([0] * 64, Memory([]), 5, 0xfffffffd)]
+    flaws = [{"no_carry_in"}, {"no_borrow"}, {"subrev_swapped"}, {"base_ignored"}]
+    return run_sets(directory, compiler, renderer, backend, "carry", CARRY, CARRY_ROLES, sets, flaws)
+
+
+DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan,
+                 "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance, "trig": draw_trig,
+                 "carry": draw_carry, "wide": draw_wide}
+PROGRAMS = ((FETCH, FETCH_ROLES, None), (MATRIX, MATRIX_ROLES, None), (VERTEX_ID, VERTEX_ID_ROLES, None),
+            (NAN, NAN_ROLES, None), (NGG_FETCH, ngg_roles(FETCH_ROLES), None),
+            (NGG_MATRIX, ngg_roles(MATRIX_ROLES), None), (NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES), None),
+            (INSTANCE, INSTANCE_ROLES, None), (NGG_INSTANCE, ngg_roles(INSTANCE_ROLES), None),
+            (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None),
+            (WIDE, WIDE_ROLES, None))
 
 
 # --- controls (no DXC, no GPU) -----------------------------------------------------------------------------------------
@@ -649,18 +1059,33 @@ def check_translation_shape():
     struct_text = source[source.index("struct VertexOutput"):source.index("};", source.index("struct VertexOutput"))]
     order = re.findall(r": (\w+);", struct_text)
     assert order == ["TEXCOORD0", "SV_Position", "TEXCOORD2"], order
-    assert "VertexOutput main(uint vid : SV_VertexID)" in source and "register(b2) { uint base_vertex; }" in source
+    assert "VertexOutput main(uint vid : SV_VertexID)" in source and layout["stage"] == "legacy"
+    assert "register(b2) { uint base_vertex; uint start_instance; }" in source
     assert "(base_vertex + vid)" in source and "title_memory" not in source and "Texture2D" not in source
-    assert "SV_Target" not in source and "params[" not in source
+    assert "SV_Target" not in source and "params[" not in source and "SV_InstanceID" not in source
     source, layout = lower(FETCH, FETCH_ROLES)
-    assert "params[2].x, params[2].y, params[2].z, params[2].w" in source and "buffer_load32(" in source
-    assert "title_memory" in source and "uint4 params[16]" in source and layout["params"] == [0, 1]
+    assert "vsharp_words[2].x, vsharp_words[2].y, vsharp_words[2].z, vsharp_words[2].w" in source
+    assert "buffer_load32(" in source and "uint4 vsharp_words[16]" in source and "params[" not in source
+    assert "title_memory" in source and layout["params"] == [0, 1]
     source, _ = lower(MATRIX, MATRIX_ROLES)
-    assert source.count("uint vmc") == 3, source  # the three words of the load that vmcnt(1) completes
     assert "mad32(" in source and "asfloat(params[0].x)" in source
+    # The NGG form lowers to the same HLSL as the legacy program with its registers renamed: the frame is dropped.
+    for legacy, roles, ngg in ((FETCH, FETCH_ROLES, NGG_FETCH), (MATRIX, MATRIX_ROLES, NGG_MATRIX),
+                               (INSTANCE, INSTANCE_ROLES, NGG_INSTANCE)):
+        source, layout = lower(ngg, ngg_roles(roles))
+        assert layout["stage"] == "ngg" and "MSG_GS" not in source
+        assert layout["params"] == lower(legacy, roles)[1]["params"]
+    source, layout = lower(INSTANCE, INSTANCE_ROLES)
+    assert "VertexOutput main(uint vid : SV_VertexID, uint iid : SV_InstanceID)" in source and layout["instance_id"]
+    assert "register(b3) { uint4 push_words[8]; }" in source and "global_load32(" in source
+    assert "(start_instance + iid)" in source
+    source, layout = lower(DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL)
+    assert "float4 pos1 : SV_ClipDistance0;" in source and "float4 pos2 : SV_CullDistance0;" in source
+    assert layout["channels"]["pos1"] == (True, False, True, False), layout
+    assert layout["channels"]["pos2"] == (True, True, False, False), layout
     # Every hand-written program goes through the same form registry as the pixel stage; record the accepted forms.
-    for program, roles in PROGRAMS:
-        lower(program, roles)
+    for program, roles, cntl in PROGRAMS:
+        lower(program, roles, cntl)
 
 
 def check_refusals():
@@ -675,20 +1100,19 @@ def check_refusals():
         (body("s_cbranch_scc0 _L0", "_L0:"), FETCH_ROLES, "card V-5"),
         (body("s_getpc_b64 s[20:21]"), FETCH_ROLES, "V-5"),
         (body("image_sample_lz v20, v[4:5], s[16:23], s[24:27] dmask:0x1 dim:SQ_RSRC_IMG_2D"), FETCH_ROLES, "V-5"),
-        (body("v_mov_b32_e32 v20, v3"), FETCH_ROLES, "instance id"),
-        (body("v_add_nc_u32_e32 v20, s0, v3"), FETCH_ROLES, "instance id"),
         (body("v_mov_b32_e32 v20, v1"), FETCH_ROLES, "entry VGPR v1"),
         (body("v_mov_b32_e32 v20, v2"), FETCH_ROLES, "entry VGPR v2"),
         (body("exp pos1 v4, off, off, off done"), FETCH_ROLES, "PA_CL_VS_OUT_CNTL"),
+        (body("v_mul_f32_e32 v20, v3, v4"), FETCH_ROLES, None),  # v3 holds the instance id now: accepted below
         (body("buffer_load_format_xyzw v[20:23], v0, s[8:11], 0 idxen"), FETCH_ROLES, "typed vertex fetch"),
         (body("tbuffer_load_format_x v20, v0, s[8:11], 0 format:[BUF_FMT_32_FLOAT] idxen"), FETCH_ROLES, "typed"),
-        (body("buffer_load_dword v20, v0, s[8:11], 0 offen"), FETCH_ROLES, "offen"),
-        (body("buffer_load_dword v20, v[0:1], s[8:11], 0 idxen offen"), FETCH_ROLES, "offen"),
-        (body("buffer_load_dword v20, off, s[8:11], 0"), FETCH_ROLES, "offen"),
-        (body("global_load_dword v20, v[4:5], off"), FETCH_ROLES, "V-3"),
-        ([*base], {**FETCH_ROLES, 5: ("start_instance",)}, "V-3"),
-        ([*base], {**FETCH_ROLES, 5: ("inline",)}, "V-3"),
-        ([*base], {**FETCH_ROLES, 5: ("inline_vsharp",)}, "V-3"),
+        (body("flat_load_dword v20, v[4:5]"), FETCH_ROLES, "flat and scratch"),
+        (body("global_store_dword v[4:5], v6, off"), FETCH_ROLES, "side effects"),
+        ([*base], {**FETCH_ROLES, 5: ("inline",)}, "push-constant word"),
+        ([*base], {**FETCH_ROLES, 5: ("inline", 32)}, "push-constant word"),
+        ([*base], {**FETCH_ROLES, 5: ("inline", 1), 6: ("inline", 1)}, "Push-constant word 1"),
+        ([*base], {**FETCH_ROLES, 5: ("start_instance",), 6: ("start_instance",)}, "At most one"),
+        ([*base], {**FETCH_ROLES, 5: ("inline_vsharp",)}, "unknown role"),
         # NGG frame and lane-cooperative operations.
         (["s_barrier", *base], FETCH_ROLES, "NGG"),
         (body("s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)"), FETCH_ROLES, "NGG"),
@@ -738,14 +1162,179 @@ def check_refusals():
         # A V-1 program in its NGG form keeps the frame: refused until V-2.
         (["s_barrier", "s_and_b32 s4, s3, 0xf000000", *base], FETCH_ROLES, "NGG"),
     ]
+    accepted = refusals.pop(next(k for k, r in enumerate(refusals) if r[2] is None))
+    lower(*accepted[:2])
     for program, roles, reason in refusals:
         must_refuse(program, roles, reason)
+    check_ngg_refusals()
+    check_v3_refusals()
+
+
+def check_ngg_refusals():
+    """Card V-2: the frame matcher refuses any other frame, naming the first difference, and the body's contract."""
+    frame, roles = list(NGG_FETCH), ngg_roles(FETCH_ROLES)
+    at = {line: k for k, line in enumerate(frame)}
+
+    def edit(old, *new):
+        k = at[old]
+        return frame[:k] + list(new) + frame[k + 1:]
+    body_at = at["s_mov_b32 s0, s9"]
+
+    def body(*lines):
+        return frame[:body_at] + list(lines) + frame[body_at:]
+    refusals = [
+        (edit("s_and_b32 s0, s3, 0xf000000", "s_and_b32 s0, s4, 0xf000000"), "wave-id test"),
+        (edit("s_cbranch_scc1 BB3", "s_cbranch_scc1 BB4"), "does not land on BB4"),
+        (edit("s_bfe_u32 s0, s2, 0x90016", "s_bfe_u32 s0, s2, 0x90017"), "primitive count from gs_tg_info"),
+        (edit("s_bfe_u32 s2, s2, 0x9000c", "s_bfe_u32 s0, s2, 0x9000c"), "overwrites the primitive count"),
+        (edit("s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)", "s_sendmsg sendmsg(MSG_GS_DONE)"), "GS_ALLOC_REQ"),
+        (edit("s_lshl_b32 s0, s3, 8", "s_lshl_b32 s0, s3, 9"), "a primitive count"),
+        (edit("s_pack_ll_b32_b16 s3, 0, s3", "s_lshl_b32 s3, s3, 8"), "repeats"),
+        (edit("s_bfe_u64 exec, -1, s3", "s_bfe_u64 exec, -1, s0"), "exec mask from the vertex count"),
+        (edit("exp prim v0, off, off, off done", "exp prim v1, off, off, off done"), "passthrough export"),
+        (edit("exp prim v0, off, off, off done", "exp prim v0, off, off, off done", "exp prim v0, off, off, off done"),
+         "does not land on BB9"),
+        (edit("BB15:", "BB16:"), "names no later label"),
+        (frame + ["s_endpgm"], "s_endpgm after the two regions"),
+        (body("v_mov_b32_e32 v30, v0"), "primitive payload"),
+        (body("v_mov_b32_e32 v30, v6"), "entry VGPR v6"),
+        (body("v_mov_b32_e32 v30, v8", "v_mov_b32_e32 v31, v4"), "entry VGPR v4"),
+        (body("s_mov_b32 s40, s2"), "frame register s2"),
+        (body("s_mov_b32 s40, m0"), "frame register m0"),
+        (body("s_mov_b32 s40, s3"), "frame register s3"),
+        (body("s_barrier"), "frame operation"),
+        (body("exp prim v0, off, off, off done"), "frame operation"),
+        (body("v_mbcnt_lo_u32_b32 v30, -1, 0"), "lane-cooperative"),
+        (body("ds_write_b32 v5, v6"), "lane-cooperative"),
+        (body("v_readfirstlane_b32 s40, v5"), "lane-cooperative"),
+        # A legacy program refuses the NGG entry roles and the other way round.
+        ([line for line in FETCH], {**FETCH_ROLES, 3: ("base_vertex",)}, None),
+    ]
+    refusals.pop()
+    for program, reason in refusals:
+        must_refuse(program, roles, reason)
+    must_refuse(frame, {**roles, 3: ("inline", 0)}, "hardware SGPRs")
+    # Vertex first: the primitive export after the body reads v0 and s3, so the body may not write them.
+    vertex_first = list(NGG_MATRIX)
+    k = vertex_first.index("s_movk_i32 s9, 0x8000")
+    must_refuse(vertex_first[:k] + ["v_mov_b32_e32 v0, 0"] + vertex_first[k:], ngg_roles(MATRIX_ROLES), "writes v0")
+    must_refuse(vertex_first[:k] + ["s_mov_b32 s3, 0"] + vertex_first[k:], ngg_roles(MATRIX_ROLES), "writes s3")
+    # Prim first: the body may reuse v0 and the frame registers once it has written them.
+    k = frame.index("s_mov_b32 s0, s9")
+    lower(frame[:k] + ["v_mov_b32_e32 v0, 1.0", "s_mov_b32 s2, 0", "v_mov_b32_e32 v30, s2"] + frame[k:], roles)
+    # The legacy program unchanged inside the frame reads s3 (merged_wave_info) as its base vertex: refused.
+    must_refuse(ngg_frame([line for line in FETCH if line != "s_endpgm"]),
+                {k + 6: r for k, r in FETCH_ROLES.items()}, "frame register s2, s3")
+
+
+def check_v3_refusals():
+    """Card V-3: PA_CL_VS_OUT_CNTL state and position exports, push words, and the constant buffer read as data."""
+    for cntl, reason in ((None, "PA_CL_VS_OUT_CNTL state"), (1 << 22 | 1, "no pos2"),
+                         (DISTANCE_CNTL | 1 << 16, "point size"), (DISTANCE_CNTL | 1 << 21, "misc vector"),
+                         (DISTANCE_CNTL | 1 << 18, "render-target index"), (DISTANCE_CNTL | 1 << 24, "above"),
+                         (1 << 22 | 1 << 23 | 0b1001 | 0x30 << 8 | 1 << 9, "both"), (1 << 22 | 1 << 23 | 1, "neither"),
+                         (DISTANCE_CNTL | 1 << 8, "both clip and cull"), (0b101 | 1 << 22, "no pos2"),
+                         (DISTANCE_CNTL & ~(1 << 23), "not exported")):
+        must_refuse(DISTANCE, DISTANCE_ROLES, reason, cntl)
+    k = DISTANCE.index("exp pos1 v4, v6, v2, off")
+    must_refuse(DISTANCE[:k] + DISTANCE[k + 2:], DISTANCE_ROLES, "does not export", DISTANCE_CNTL)
+    must_refuse([line.replace("v3, v2 done", "v3, v2") for line in DISTANCE], DISTANCE_ROLES, "must have done",
+                DISTANCE_CNTL)
+    must_refuse([line.replace("v3 vm", "v3 done vm") for line in DISTANCE], DISTANCE_ROLES, "and no other",
+                DISTANCE_CNTL)
+    # A distance vector enabled for distances 4..7 only is pos1, not pos2.
+    lower([line.replace("v4, v6, v2, off", "v4, v6, v2, off done") for line in DISTANCE if not line.startswith("exp pos2")],
+          DISTANCE_ROLES,
+          0b110000 << 8 | 1 << 23)  # pos1 is then cull distances 4 and 5
+    # The constant buffer V# read as data needs its descriptor words; without them buffer_load has no numeric V#.
+    roles = {**INSTANCE_ROLES, 5: ("descriptors", HIGH, {0: ("constants",)})}
+    must_refuse(INSTANCE, roles, "numeric")
+    must_refuse(INSTANCE, {**INSTANCE_ROLES, 5: ("descriptors", HIGH, {0: ("constants", 0)})}, "overlap")
+    # The instance index before the start instance is added, read through a pending scalar load.
+    k = INSTANCE.index("s_waitcnt lgkmcnt(0)")
+    must_refuse(INSTANCE[:k] + ["v_mov_b32_e32 v30, s20"] + INSTANCE[k:], INSTANCE_ROLES, "unset")
+    # A typed fetch stays refused until a corpus build exercises it.
+    must_refuse(INSTANCE[:k + 1] + ["buffer_load_format_x v30, v0, s[12:15], 0 idxen"] + INSTANCE[k + 1:],
+                INSTANCE_ROLES, "typed vertex fetch")
+
+
+def check_v4_controls():
+    """Card V-4: the model's results against values worked out by hand, every wrong reference of the two families
+    differing from the right one on some id, the translation shape, and the refused neighbours."""
+    def run(program, roles, flaws=(), count=16, base=0):
+        source, layout = lower(program, roles)
+        model = Model(roles, [0] * 64, Memory([]), flaws)
+        return outputs(model, program, layout, range(count), base)[0]
+
+    # Angle (n + 0.5) / 16 revolutions: the eighths of sin and cos rounded to integers (exported as floats).
+    words = run(TRIG, TRIG_ROLES)
+    for n in range(16):
+        angle = 2 * math.pi * (n + 0.5) / 16
+        assert all(abs(8 * x % 1 - 0.5) > 0.04 for x in (math.sin(angle), math.cos(angle))), n
+        sin8, cos8 = round(8 * math.sin(angle)), round(8 * math.cos(angle))
+        got = [struct.unpack("<f", struct.pack("<I", w))[0] for w in words[8 * n:8 * n + 5]]
+        assert got == [sin8, cos8, sin8, 1.0, cos8], (n, got)
+    # The carry chain by integer arithmetic, limb by limb as the program's comments describe it.
+    words = run(CARRY, CARRY_ROLES, count=8)
+    for n in range(8):
+        v2, v3, v5 = (n << 31) & M32, (n << 30) & M32, M32
+        c1 = (v2 + v3) >> 32
+        b1 = int(v3 < v2)
+        want = [(v2 + v3) & M32, (v5 + c1) & M32, (v5 + c1) >> 32, (v3 - v2) & M32,    # pos0: v4 v7 v8 v9
+                (n - v5 - b1) & M32, (v5 - n - b1) & M32, (v2 + v3) & M32, (v3 - v2) & M32,  # param0: v10 v11 v12 v13
+                (n + c1) & M32, v5, (v2 - v3) & M32, -int(v2 < v3) & M32]                 # param1: v14 v15 v16 v17
+        assert words[12 * n:12 * n + 12] == want, (n, words[12 * n:12 * n + 12], want)
+    for program, roles, flaws, count in ((TRIG, TRIG_ROLES, ({"sin_cos_swapped"}, {"radians"}, {"div2_ignored"}, {"base_ignored"}), 16),
+                                         (CARRY, CARRY_ROLES, ({"no_carry_in"}, {"no_borrow"}, {"subrev_swapped"}, {"base_ignored"}), 8)):
+        right = run(program, roles, count=count, base=3)
+        for flaw in flaws:
+            assert run(program, roles, flaw, count, 3) != right, flaw
+    source, _ = lower(CARRY, CARRY_ROLES)
+    assert "coc" in source and source.count("bool cmp") >= 9
+    source, _ = lower(TRIG, TRIG_ROLES)
+    # The shared binary32 form lowers both through sin32/cos32 (pixel_aot_draws/trig.py), whole turns removed first.
+    assert "sin32(" in source and "cos32(" in source and "6.28318548f" in source and "ftz32(" in source
+    # The wave64 spellings (VCC and SGPR pairs) lower like the wave32 ones.
+    wide = [line.replace("vcc_lo", "vcc").replace("s10", "s[10:11]").replace("s12", "s[12:13]") for line in CARRY]
+    assert lower(wide, CARRY_ROLES)[0] == lower(CARRY, CARRY_ROLES)[0]
+    # Refused neighbours: a carry-in no instruction produced, one from another mask, one that is a pair
+    # mask whose second half was never written, clamp on the carry-in forms, an output modifier on the e32 sine, an extra operand, and
+    # the binary16 sine.
+    head = CARRY[:6]
+    must_refuse([*head, "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo", "s_endpgm"], CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, s10, v2, v3", "v_add_co_ci_u32_e32 v7, vcc_lo, v5, v6, vcc_lo", "s_endpgm"],
+                CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, vcc_lo, v2, v3", "v_add_co_ci_u32_e64 v7, s10, v5, v6, s11", "s_endpgm"],
+                CARRY_ROLES, "tracked")
+    must_refuse([*head, "v_add_co_u32 v4, vcc_lo, v2, v3", "v_add_co_ci_u32_e64 v7, s10, v5, v6, vcc_lo clamp",
+                 "s_endpgm"], CARRY_ROLES, "Unsupported")
+    must_refuse([*TRIG[:5], "v_sin_f32_e32 v5, v4 div:2", "s_endpgm"], TRIG_ROLES, "Invalid arithmetic")
+    must_refuse([*TRIG[:5], "v_sin_f32_e64 v5, v4 clamp mul:2 extra", "s_endpgm"], TRIG_ROLES, "Unsupported")
+    must_refuse([*TRIG[:5], "v_sin_f32_e32 v5, v4, v3", "s_endpgm"], TRIG_ROLES)
+    must_refuse([*TRIG[:5], "v_sin_f16_e32 v5, v4", "s_endpgm"], TRIG_ROLES, "Unsupported")
+
+
+def check_wide_controls():
+    """The constant window: a program that reads at most 64 words keeps params[16], a read past it sizes params[] to
+    the highest word read rounded up to a uint4, a CBV's 4096 uint4 are the limit, and the wrong reference differs."""
+    source, layout = lower(WIDE, WIDE_ROLES)
+    assert "uint4 params[66];" in source and "params[65].w" in source, source[:400]  # words 260 to 263 are the last read
+    narrow = [line.replace("0x120", "0x20").replace("0x410", "0x30") for line in WIDE]
+    assert "uint4 params[16];" in lower(narrow, WIDE_ROLES)[0]
+    assert "uint4 params[4096];" in lower([line.replace("0x410", "0xfff0") for line in WIDE], WIDE_ROLES)[0]
+    must_refuse([line.replace("0x410", "0x10000") for line in WIDE], WIDE_ROLES, "exceeds")
+    constants = wide_constants(5, 272)
+    model = lambda flaw=(): outputs(Model(WIDE_ROLES, constants, Memory([]), flaw), WIDE, layout, range(6), 3)[0]  # noqa: E731
+    for flaw in ({"window_64"}, {"base_ignored"}):
+        assert model(flaw) != model(), flaw
 
 
 def check_controls():
     check_reference_arithmetic()
     check_translation_shape()
     check_refusals()
+    check_v4_controls()
+    check_wide_controls()
     # Every wrong reference of every family changes the model's output for at least one draw input; the draws check
     # that the renderer then reports the mismatch. Here: the model runs every family's program without error.
     model = Model(FETCH_ROLES, fetch_constants(vsharp(HIGH_BASE, 24, 8, 0), vsharp(HIGH_BASE, 12, 8, 1)),
@@ -759,26 +1348,37 @@ def check_controls():
 # --- LLVM round trip ---------------------------------------------------------------------------------------------------
 
 def llvm_disassemble(assembler, code):
-    """Disassemble with llvm-mc itself (the LLVM 15 that assembled the program) when no libLLVM is given."""
+    """Disassemble with llvm-mc itself (the LLVM 15 that assembled the program) when no libLLVM is given. Returns
+    (byte offset, text) pairs like pixel_aot.disassemble(offsets=True); --show-encoding gives each size."""
     text = " ".join(f"0x{b:02x}" for b in code)
-    result = subprocess.run([assembler, "--disassemble", "-triple=amdgcn--amdpal", "-mcpu=gfx1013"], input=text,
-                            capture_output=True, text=True, check=True)
-    lines = [line.split("//")[0].strip() for line in result.stdout.splitlines()]
-    return [line for line in lines if line and not line.startswith(".")]
+    result = subprocess.run([assembler, "--disassemble", "--show-encoding", "-triple=amdgcn--amdpal", "-mcpu=gfx1013"],
+                            input=text, capture_output=True, text=True, check=True)
+    out, offset = [], 0
+    for line in result.stdout.splitlines():
+        if not (m := re.fullmatch(r"\s*(.*?)\s*(?://|;)\s*encoding:\s*\[(.*)\]\s*", line)):
+            continue
+        out.append((offset, " ".join(m[1].split())))
+        offset += len(m[2].split(","))
+    assert offset == len(code), (offset, len(code))
+    return out
 
 
 def check_binary(directory, assembler, objcopy, library=None):
+    """Assemble every program with llvm-mc 15, disassemble it again (libLLVM, or llvm-mc), name its branch targets as
+    a native program's would be (the NGG frame's labels become _L<n>) and lower it: the HLSL must be the same."""
     sys.path.insert(0, str(ROOT / "tools"))
     import pixel_aot
-    for index, (program, roles) in enumerate(PROGRAMS):
+    for index, (program, roles, cntl) in enumerate(PROGRAMS):
         source, obj, binary = directory / "v.s", directory / "v.o", directory / "v.bin"
         source.write_text("\n".join(program) + "\n", encoding="ascii")
         subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013", "-filetype=obj", source, "-o", obj],
                        check=True)
         subprocess.run([objcopy, "-O", "binary", "--only-section=.text", obj, binary], check=True)
         code = binary.read_bytes()
-        decoded = pixel_aot.disassemble(code, library) if library else llvm_disassemble(assembler, code)
-        assert lower(decoded, roles) == lower(program, roles), (index, decoded)
+        decoded = (pixel_aot.disassemble(code, library, offsets=True) if library
+                   else llvm_disassemble(assembler, code))
+        decoded = pixel_aot.name_branch_targets(decoded, len(code))
+        assert lower(decoded, roles, cntl) == lower(program, roles, cntl), (index, decoded)
     print(f"vertex_aot binary ok: {len(PROGRAMS)} programs")
 
 

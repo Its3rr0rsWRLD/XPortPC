@@ -47,7 +47,7 @@ VOP3_ONLY = ("fma", "mad", "min3", "max3", "med3")
 # omod is accepted on the e64 spellings of arithmetic, min/max, the multiply-adds and the forms the transcendental
 # draws measure; the rounding forms floor, ceil, fract and trunc and rcp_iflag still refuse it.
 OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
-OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3",
+OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "sin", "cos", "rndne", "min3", "max3", "med3",
               "add", "sub", "subrev", "mul", "mul_legacy", "min", "max", "fma", "fmac", "mad", "mac")
 
 # v_sin_f32 and v_cos_f32 compute sin(2 * pi * x) and cos(2 * pi * x). Removing the nearest integer is exact in binary32

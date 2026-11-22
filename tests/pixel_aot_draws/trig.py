@@ -101,15 +101,18 @@ def controls(directory):
     assert trig.count("sin32(") == 3 and trig.count("cos32(") == 3, trig  # two calls plus each definition
     assert "saturate(cos32((-asfloat(params" in trig and "sin32((-abs(" in trig and "cos32(asfloat(params" in trig, trig
     assert trig.count(REDUCED_ARGUMENT) == 2 and trig.count("float turns(") == 1, trig
-    # A sample destination is not written before its wait; a binary64 spelling, a missing or extra operand, a scalar
-    # destination and an output modifier (not drawn) are refused.
+    # A sample destination is not written before its wait; a binary64 spelling, a missing or extra operand and a
+    # scalar destination are refused. The e64 output modifiers are accepted: the vertex trig draws
+    # (tests/vertex_aot_check.py, card V-4) measure div:2 on both, and omod applies after sin32/cos32.
     program = with_constants([])
     wait = program.index("s_waitcnt vmcnt(0)")
     must_reject(translate, program[:wait] + ["v_sin_f32_e32 v12, 1.0"] + program[wait:])
     must_reject(translate, program[:wait] + ["v_cos_f32_e64 v13, 1.0"] + program[wait:])
     translate(program[:wait + 1] + ["v_sin_f32_e32 v12, 1.0"] + program[wait + 1:])
-    for line in ("v_sin_f32_e64 v12, s44 mul:2",
-                 "v_cos_f32_e64 v12, s44 div:2", "v_sin_f32_e32 v12, s44, s45", "v_cos_f32_e32 v12",
+    for line, scale in (("v_sin_f32_e64 v12, s44 mul:2", "2.0f"), ("v_cos_f32_e64 v12, s44 div:2", "0.5f")):
+        op = line[2:5]
+        assert f"ftz32(({op}32(asfloat(params[0].w)) * {scale}))" in translate(with_constants([line])), line
+    for line in ("v_sin_f32_e32 v12, s44 div:2", "v_sin_f32_e32 v12, s44, s45", "v_cos_f32_e32 v12",
                  "v_sin_f64_e32 v[12:13], s[44:45]", "v_sin_f32_e32 s12, s44"):
         must_reject(translate, with_constants([line]))
 
