@@ -123,6 +123,13 @@ target_include_directories(r3_triangle PRIVATE src)
 target_compile_features(r3_triangle PRIVATE cxx_std_17)
 target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
+# Runtime ladder R5: a 600-frame loop in which a compute program (tests/runtime/r5_cs.s, r5_programs.h) on a compute
+# queue moves particles in title memory and the R3 programs draw them on the direct queue, with cross-queue fences.
+add_executable(r5_frames tests/runtime/r5_frames.cpp)
+target_include_directories(r5_frames PRIVATE src)
+target_compile_features(r5_frames PRIVATE cxx_std_17)
+target_link_libraries(r5_frames PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
 target_compile_definitions(root_probe PRIVATE SDK_DXC_DIR=L"${DXC_BIN_DIR}/")
@@ -2676,6 +2683,25 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
+    # Runtime ladder R5 (tests/runtime/r5_frames.cpp): compute translation, compute queue, 600 frames.
+    add_test(NAME runtime_r5_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r5_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r5_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_${adapter}")
+        add_test(NAME runtime_r5_frames_cold_${adapter} COMMAND r5_frames ${adapter} cold)
+        add_test(NAME runtime_r5_frames_warm_${adapter} COMMAND r5_frames ${adapter} warm)
+        add_test(NAME runtime_r5_wrong_reference_${adapter} COMMAND r5_frames ${adapter} wrong_reference)
+        set_tests_properties(runtime_r5_frames_cold_${adapter} PROPERTIES FIXTURES_SETUP r5_cache_${adapter})
+        set_tests_properties(runtime_r5_frames_warm_${adapter} runtime_r5_wrong_reference_${adapter} PROPERTIES
+            FIXTURES_REQUIRED r5_cache_${adapter})
+        set_tests_properties(runtime_r5_frames_cold_${adapter} runtime_r5_frames_warm_${adapter}
+            runtime_r5_wrong_reference_${adapter} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
+            ENVIRONMENT "${r5_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    add_test(NAME runtime_r5_refused_warp COMMAND r5_frames warp refused)
+    set_tests_properties(runtime_r5_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_refused")
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600

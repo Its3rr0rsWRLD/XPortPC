@@ -7,7 +7,8 @@ the pure-Python decoder tools/disasm_rdna2.py, corrected where its text differs 
 - s_waitcnt: the gfx10 fields (vmcnt bits 3:0 and 15:14, expcnt 6:4, lgkmcnt 13:8), each printed only when below its
   maximum, in LLVM's order;
 - SMEM: an immediate offset of 0 with a null SGPR offset prints as `null`;
-- v_interp_mov_f32: the parameter field is p10, p20 or p0 (disasm_rdna2 prints it as a VGPR).
+- v_interp_mov_f32: the parameter field is p10, p20 or p0 (disasm_rdna2 prints it as a VGPR);
+- s_barrier: no operand (disasm_rdna2 prints its zero immediate).
 
 Only mnemonics whose text was compared with LLVM 15's disassembly (tests/runtime/r3_programs_check.py, which also
 re-checks the list against llvm-mc when one is given) are accepted. Any other instruction is refused with its
@@ -26,6 +27,11 @@ VERIFIED = frozenset({
     "exp", "global_load_dword", "global_load_dwordx2", "global_load_dwordx4", "s_endpgm", "s_load_dword",
     "s_load_dwordx2", "s_load_dwordx4", "s_mov_b32", "s_waitcnt", "v_interp_mov_f32_e32", "v_lshlrev_b32_e32",
     "v_mov_b32_e32",
+})
+# Added for the compute program of runtime rung R5 (tests/runtime/r5_cs.s), compared by tests/runtime/r5_programs_check.py.
+VERIFIED = VERIFIED | frozenset({
+    "buffer_load_dwordx4", "buffer_store_dwordx2", "buffer_store_dwordx4", "s_lshl_b32", "s_movk_i32",
+    "s_barrier", "v_add_f32_e32", "v_add_nc_u32_e32", "v_subrev_f32_e32",
 })
 
 
@@ -62,6 +68,10 @@ def decode(code):
             if param is None:
                 raise ValueError(f"v_interp_mov_f32 at byte {offset} has an invalid parameter {word & 0xff}")
             text = re.sub(r"^(v_interp_mov_f32_e32 v\d+), v\d+,", rf"\1, {param},", text)
+        elif name == "s_barrier":
+            if word & 0xffff:
+                raise ValueError(f"s_barrier at byte {offset} has a non-zero immediate")
+            text = "s_barrier"
         out.append((offset, " ".join(text.split())))
         offset += length
         if name == "s_endpgm" and offset != len(code):

@@ -14,6 +14,11 @@
 // X2W_GFX_EVENT_REFUSED event naming the refused form. A PsoInfo record (which root words feed which push words) is
 // attached to the desktop pipeline as private data.
 //
+// Compute (R5). create_compute_pipeline translates a compute container the same way (tools/pso_translate.py --stage
+// compute, tools/compute_aot.py's lowering); bind_for_dispatch supplies the same converter parameters through the
+// compute root arguments before a Dispatch. The compute translation reads and writes title memory through the UAV
+// half of the title-memory table.
+//
 // Draws. bind_for_draw supplies the converter parameters before a draw of a translated pipeline: the push words
 // from the recorded root arguments (title GPU addresses as the title passed them: the shader looks them up with
 // TitleLookup), and the title-memory view of xmem.dll (X2WTitleGpuGetShaderView) as a shader-visible heap the shim
@@ -35,7 +40,8 @@ namespace pipeline {
 enum ConverterParam : unsigned {
     param_range_count = 0,  // root constants b1 space1000: title_range_count
     param_ranges = 1,       // root SRV t2 space1000: StructuredBuffer<TitleRange> title_ranges
-    param_memory = 2,       // table: SRV t0..t7 space1001: ByteAddressBuffer title_memory[8]
+    param_memory = 2,       // table: SRV t0..t7 space1001 (ByteAddressBuffer title_memory[8]), then UAV u0..u7
+                            // space1001 (RWByteAddressBuffer title_memory[8], the compute stage) of the same ranges
     param_push_words = 3,   // root constants b3 space1000: uint4 push_words[8]
     converter_params = 4
 };
@@ -80,6 +86,8 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
 // The records attached at creation, or false for an object the shim did not create this way.
 bool root_info(ID3D12RootSignature* root, RootInfo* info);
 bool pso_info(ID3D12PipelineState* state, PsoInfo* info);
+// The record of a translated compute pipeline (R5); pso_info answers false for one.
+bool compute_pso_info(ID3D12PipelineState* state, PsoInfo* info);
 
 TitleViews* create_title_views(ID3D12Device* device);
 void destroy_title_views(TitleViews* views);
@@ -89,6 +97,11 @@ void destroy_title_views(TitleViews* views);
 // bound. Returns false, after logging, when the draw cannot be bound; the caller then skips the draw.
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
                    const RootArgs& args, ID3D12DescriptorHeap* title_heap, bool* ours_bound);
+
+// The compute counterpart (runtime rung R5): the converter parameters of a translated compute pipeline through the
+// compute root arguments, before a Dispatch. Same contract as bind_for_draw.
+bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
+                       const RootArgs& args, ID3D12DescriptorHeap* title_heap, bool* ours_bound);
 
 // Title GPU address -> desktop GPU address through xmem.dll (X2WTitleGpuTranslate), or the address unchanged when
 // it is not title memory (a desktop resource's address) or xmem.dll is not loaded.

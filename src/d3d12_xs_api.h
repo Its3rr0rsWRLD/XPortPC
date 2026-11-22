@@ -99,13 +99,22 @@ X2W_GFX_API HRESULT WINAPI X2WGfxCreateSwapChainForHwnd(IUnknown* queue, HWND wi
 // the pipeline's root signature (a root CBV/SRV/UAV's title GPU address: word 0 low, 1 high; a root
 // constant: its index), or the pixel stage's interpolation base. Bytecode without the magic is desktop
 // bytecode and is passed to desktop D3D12 unchanged.
+// Compute containers (runtime rung R5) also carry an X2WShaderComputeInfo record at stage_info_offset (the workgroup
+// size and wave size a title's compute pipeline state gives the console GPU); the other stages have none and leave
+// stage_info_offset 0. A compute binding is a root-parameter word (an inline user-data word of the program) or a
+// workgroup id component.
 #define X2W_SHADER_CONTAINER_MAGIC 0x53573258u  // "X2WS"
 #define X2W_SHADER_CONTAINER_VERSION 1u
 
-typedef enum X2WShaderStage { X2W_SHADER_STAGE_VERTEX = 0, X2W_SHADER_STAGE_PIXEL = 1 } X2WShaderStage;
+typedef enum X2WShaderStage {
+    X2W_SHADER_STAGE_VERTEX = 0,
+    X2W_SHADER_STAGE_PIXEL = 1,
+    X2W_SHADER_STAGE_COMPUTE = 2
+} X2WShaderStage;
 typedef enum X2WShaderBindingKind {
     X2W_SHADER_BINDING_ROOT_WORD = 1,  // root_parameter, word
-    X2W_SHADER_BINDING_INTERP = 2      // pixel stage: the SGPR copied into m0 for v_interp_*
+    X2W_SHADER_BINDING_INTERP = 2,     // pixel stage: the SGPR copied into m0 for v_interp_*
+    X2W_SHADER_BINDING_GROUP_ID = 16   // compute stage: workgroup id component `word` (0 x, 1 y, 2 z)
 } X2WShaderBindingKind;
 
 typedef struct X2WShaderContainer {
@@ -116,8 +125,14 @@ typedef struct X2WShaderContainer {
     uint32_t binding_offset;  // byte offset of the bindings from the start of the container
     uint32_t code_offset;     // byte offset of the code, 4-byte aligned
     uint32_t code_bytes;
-    uint32_t reserved;        // 0
+    uint32_t stage_info_offset;  // compute: byte offset of the X2WShaderComputeInfo record; other stages: 0
 } X2WShaderContainer;
+
+typedef struct X2WShaderComputeInfo {
+    uint32_t numthreads[3];   // workgroup size x, y, z (D3D12 limits: x, y <= 1024, z <= 64, product <= 1024)
+    uint32_t wave;            // 32 or 64: the console wave size the program was compiled for
+    uint32_t local_ids;       // 1 to 3: how many of v0, v1, v2 hold the local ids (TIDIG_COMP_CNT + 1)
+} X2WShaderComputeInfo;
 
 typedef struct X2WShaderBinding {
     uint32_t sgpr;            // entry SGPR number, 0..105

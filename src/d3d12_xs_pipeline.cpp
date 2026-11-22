@@ -23,6 +23,7 @@ namespace {
 
 constexpr std::uint32_t root_magic = 0x52573258u;  // "X2WR"
 constexpr std::uint32_t pso_magic = 0x50573258u;   // "X2WP"
+constexpr std::uint32_t compute_pso_magic = 0x43573258u;  // "X2WC": a translated compute pipeline
 // {6b1a3c52-0f6e-4f0e-9a5d-58325752e001} and ...02: private-data keys of RootInfo and PsoInfo.
 constexpr GUID root_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x01}};
 constexpr GUID pso_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x02}};
@@ -280,6 +281,7 @@ struct Program {
     const std::uint8_t* code = nullptr;
     std::uint32_t code_bytes = 0;
     std::vector<X2WShaderBinding> bindings;
+    X2WShaderComputeInfo compute{};  // compute stage only
 };
 
 enum class Parsed { desktop, container, malformed };
@@ -312,12 +314,17 @@ Parsed parse_container(const void* data, SIZE_T size, Program& out, std::string&
     const std::uint64_t binding_end =
         std::uint64_t(header.binding_offset) + std::uint64_t(header.binding_count) * sizeof(X2WShaderBinding);
     const std::uint64_t code_end = std::uint64_t(header.code_offset) + header.code_bytes;
-    if (header.version != X2W_SHADER_CONTAINER_VERSION || header.reserved ||
-        header.stage > X2W_SHADER_STAGE_PIXEL || header.binding_count > 32 || binding_end > size ||
+    const bool compute = header.stage == X2W_SHADER_STAGE_COMPUTE;
+    const std::uint64_t info_end = std::uint64_t(header.stage_info_offset) + sizeof(X2WShaderComputeInfo);
+    if (header.version != X2W_SHADER_CONTAINER_VERSION || header.stage > X2W_SHADER_STAGE_COMPUTE ||
+        (compute ? !header.stage_info_offset || header.stage_info_offset % 4 || info_end > size
+                 : header.stage_info_offset != 0) ||
+        header.binding_count > 32 || binding_end > size ||
         header.code_offset % 4 || header.code_bytes % 4 || !header.code_bytes || code_end > size) {
         why = "malformed container header";
         return Parsed::malformed;
     }
+    if (compute) std::memcpy(&out.compute, bytes + header.stage_info_offset, sizeof(out.compute));
     out.stage = header.stage;
     out.code = bytes + header.code_offset;
     out.code_bytes = header.code_bytes;
@@ -425,7 +432,10 @@ int run_translator(const Config& c, const char* stage, const std::wstring& base,
     return result;
 }
 
-const char* stage_name(std::uint32_t stage) { return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel"; }
+const char* stage_name(std::uint32_t stage)
+{
+    return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : stage == X2W_SHADER_STAGE_COMPUTE ? "compute" : "pixel";
+}
 
 // The DXIL of one console shader: from the cache, or translated and cached. Returns false with `why` set.
 bool translated_shader(const Program& program, const std::string& roles, std::vector<std::uint8_t>& dxil,
@@ -518,20 +528,24 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
         if (params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
             info.constants[i] = static_cast<std::uint8_t>(params[i].Constants.Num32BitValues);
     }
-    D3D12_DESCRIPTOR_RANGE1 memory{};
-    memory.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    memory.NumDescriptors = title_memory_slots;
-    memory.BaseShaderRegister = 0;
-    memory.RegisterSpace = runtime_memory_space;
-    memory.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-    memory.OffsetInDescriptorsFromTableStart = 0;
+    // The title-memory table: SRVs t0..t7 (read by the vertex and pixel translations), then UAVs u0..u7 of the same
+    // ranges (read and written by the compute translation, R5), both in space 1001.
+    D3D12_DESCRIPTOR_RANGE1 memory[2]{};
+    for (UINT r = 0; r < 2; ++r) {
+        memory[r].RangeType = r ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        memory[r].NumDescriptors = title_memory_slots;
+        memory[r].BaseShaderRegister = 0;
+        memory[r].RegisterSpace = runtime_memory_space;
+        memory[r].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+        memory[r].OffsetInDescriptorsFromTableStart = r * title_memory_slots;
+    }
     D3D12_ROOT_PARAMETER1 extra[converter_params]{};
     extra[param_range_count].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_range_count].Constants = {1, runtime_space, 1};
     extra[param_ranges].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     extra[param_ranges].Descriptor = {2, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     extra[param_memory].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    extra[param_memory].DescriptorTable = {1, &memory};
+    extra[param_memory].DescriptorTable = {2, memory};
     extra[param_push_words].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_push_words].Constants = {3, runtime_space, push_word_count};
     for (auto& p : extra) {
@@ -699,19 +713,99 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     return state->QueryInterface(riid, out);
 }
 
+// Compute (runtime rung R5). The entry contract: each root-word SGPR becomes the next push word, which the program
+// reads as its inline user-data word of that index (tools/compute_aot.py's user:N role, from push_words); a
+// workgroup-id binding is SV_GroupID's component. The workgroup and wave size come from the container's
+// X2WShaderComputeInfo and are part of the key.
 HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                 void** out)
 {
+    const char* symbol = "d3d12_xs!ID3D12Device::CreateComputePipelineState";
+    const auto refuse_cs = [symbol](const std::string& key, const std::string& why) {
+        std::string detail = "compute shader";
+        if (!key.empty()) detail += " " + key.substr(0, 16);
+        detail += " refused: " + why + " -> E_NOTIMPL";
+        log_refused(symbol, detail.c_str(), false);
+        return E_NOTIMPL;
+    };
+    if (!desc || !desc->CS.BytecodeLength) return device->CreateComputePipelineState(desc, riid, out);
     Program cs;
     std::string why;
-    if (desc && desc->CS.BytecodeLength &&
-        parse_container(desc->CS.pShaderBytecode, desc->CS.BytecodeLength, cs, why) != Parsed::desktop) {
-        if (why.empty()) why = "console compute shaders are translated from rung R5";
-        log_refused("d3d12_xs!ID3D12Device::CreateComputePipelineState", ("compute shader refused: " + why).c_str(),
-                    false);
-        return E_NOTIMPL;
+    const Parsed kind = parse_container(desc->CS.pShaderBytecode, desc->CS.BytecodeLength, cs, why);
+    if (kind == Parsed::desktop) return device->CreateComputePipelineState(desc, riid, out);
+    if (kind == Parsed::malformed) return refuse_cs("", why);
+    if (cs.stage != X2W_SHADER_STAGE_COMPUTE)
+        return refuse_cs("", "a container's stage does not match the pipeline stage it is bound to");
+    RootInfo root{};
+    if (!root_info(desc->pRootSignature, &root))
+        return refuse_cs("", "the root signature was not created through the shim, so it has no converter parameters");
+
+    PsoInfo info{};
+    info.magic = compute_pso_magic;
+    std::string roles = "{\"sgprs\": {";
+    bool used[106] = {}, group[3] = {}, first = true;
+    for (const X2WShaderBinding& b : cs.bindings) {
+        if (b.sgpr > 105 || used[b.sgpr]) return refuse_cs("", "an entry SGPR is out of range or bound twice");
+        used[b.sgpr] = true;
+        char entry[64];
+        if (b.kind == X2W_SHADER_BINDING_GROUP_ID) {
+            if (b.word > 2 || group[b.word]) return refuse_cs("", "a workgroup id component is out of range or bound twice");
+            group[b.word] = true;
+            std::snprintf(entry, sizeof(entry), "%s\"s%u\": \"group_id.%c\"", first ? "" : ", ", b.sgpr,
+                          "xyz"[b.word]);
+            roles += entry;
+            first = false;
+            continue;
+        }
+        if (b.kind != X2W_SHADER_BINDING_ROOT_WORD)
+            return refuse_cs("", "a compute binding other than a root-parameter word or a workgroup id");
+        if (b.root_parameter >= root.title_params)
+            return refuse_cs("", "a binding names a root parameter the root signature does not have");
+        const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[b.root_parameter]);
+        const bool address = type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                             type == D3D12_ROOT_PARAMETER_TYPE_UAV;
+        if (type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
+            (address ? b.word > 1 : b.word >= root.constants[b.root_parameter])) {
+            return refuse_cs("", type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
+                                     ? "a binding reads a descriptor table parameter (descriptor heaps come with R4)"
+                                     : "a binding reads past its root parameter");
+        }
+        if (info.push_count == push_word_count) return refuse_cs("", "more than 32 root-word bindings");
+        std::snprintf(entry, sizeof(entry), "%s\"s%u\": \"user:%u\"", first ? "" : ", ", b.sgpr,
+                      info.push_count);
+        roles += entry;
+        first = false;
+        info.push[info.push_count++] = {static_cast<std::uint8_t>(b.root_parameter), static_cast<std::uint8_t>(b.word)};
     }
-    return device->CreateComputePipelineState(desc, riid, out);
+    char tail[160];
+    std::snprintf(tail, sizeof(tail), "}, \"numthreads\": [%u, %u, %u], \"wave\": %u, \"local_ids\": %u}",
+                  cs.compute.numthreads[0], cs.compute.numthreads[1], cs.compute.numthreads[2], cs.compute.wave,
+                  cs.compute.local_ids);
+    roles += tail;
+
+    std::vector<std::uint8_t> dxil;
+    std::string key;
+    if (!translated_shader(cs, roles, dxil, key, why)) return refuse_cs(key, why);
+    D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
+    copy.CS = {dxil.data(), dxil.size()};
+    ComPtr<ID3D12PipelineState> state;
+    const HRESULT hr = device->CreateComputePipelineState(&copy, IID_PPV_ARGS(&state));
+    if (FAILED(hr)) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "desktop CreateComputePipelineState of the translation -> 0x%08lx",
+                      static_cast<unsigned long>(hr));
+        log_refused(symbol, detail, false);
+        return hr;
+    }
+    state->SetPrivateData(pso_info_guid, sizeof(info), &info);
+    return state->QueryInterface(riid, out);
+}
+
+bool compute_pso_info(ID3D12PipelineState* state, PsoInfo* info)
+{
+    UINT size = sizeof(*info);
+    return state && SUCCEEDED(state->GetPrivateData(pso_info_guid, &size, info)) && size == sizeof(*info) &&
+           info->magic == compute_pso_magic;
 }
 
 // --- title memory at draw time ----------------------------------------------------------------------------------
@@ -747,7 +841,7 @@ public:
         if (good) {
             *heap = heap_.Get();
             *table = heap_->GetGPUDescriptorHandleForHeapStart();
-            table->ptr += static_cast<UINT64>(block_) * title_memory_slots * increment_;
+            table->ptr += static_cast<UINT64>(block_) * block_size * increment_;
             *ranges = ranges_.back()->GetGPUVirtualAddress();
             *count = static_cast<UINT>(last_.size());
         }
@@ -757,6 +851,7 @@ public:
 
 private:
     static constexpr UINT blocks = 256;
+    static constexpr UINT block_size = 2 * title_memory_slots;  // the SRVs, then the UAVs (create_root_signature)
 
     bool refresh(std::string& why)
     {
@@ -801,7 +896,7 @@ private:
         if (!heap_) {
             D3D12_DESCRIPTOR_HEAP_DESC desc{};
             desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = blocks * title_memory_slots;
+            desc.NumDescriptors = blocks * block_size;
             desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap_)))) {
                 release();
@@ -819,7 +914,9 @@ private:
         }
         block_ = (block_ + 1) % blocks;
         D3D12_CPU_DESCRIPTOR_HANDLE handle = heap_->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += static_cast<SIZE_T>(block_) * title_memory_slots * increment_;
+        handle.ptr += static_cast<SIZE_T>(block_) * block_size * increment_;
+        D3D12_CPU_DESCRIPTOR_HANDLE uav_handle = handle;
+        uav_handle.ptr += static_cast<SIZE_T>(title_memory_slots) * increment_;
         for (UINT i = 0; i < title_memory_slots; ++i) {
             D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
             raw.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -837,6 +934,13 @@ private:
             }
             device_->CreateShaderResourceView(resource, &raw, handle);
             handle.ptr += increment_;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC raw_uav{};
+            raw_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+            raw_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            raw_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            raw_uav.Buffer.NumElements = raw.Buffer.NumElements;
+            device_->CreateUnorderedAccessView(resource, nullptr, &raw_uav, uav_handle);
+            uav_handle.ptr += increment_;
         }
         // The ranges as TitleLookup reads them (stride 24), in an upload buffer kept for the device's lifetime.
         D3D12_HEAP_PROPERTIES upload{};
@@ -919,6 +1023,48 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     list->SetGraphicsRootShaderResourceView(base + param_ranges, ranges);
     list->SetGraphicsRootDescriptorTable(base + param_memory, table);
     list->SetGraphicsRoot32BitConstants(base + param_push_words, push_word_count, words, 0);
+    return true;
+}
+
+// The compute counterpart of bind_for_draw (R5): the same converter parameters through the compute root arguments.
+bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
+                       const RootArgs& args, ID3D12DescriptorHeap* title_heap, bool* ours_bound)
+{
+    const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Dispatch";
+    std::string why;
+    ID3D12DescriptorHeap* heap = nullptr;
+    D3D12_GPU_DESCRIPTOR_HANDLE table{};
+    D3D12_GPU_VIRTUAL_ADDRESS ranges = 0;
+    UINT count = 0;
+    if (!views || !views->current(&heap, &table, &ranges, &count, why)) {
+        log_refused(symbol, ("dispatch skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(),
+                    true);
+        return false;
+    }
+    if (title_heap && title_heap != heap) {
+        log_refused(symbol,
+                    "dispatch skipped: the title bound its own CBV/SRV/UAV heap; the converter's title-memory table "
+                    "needs a shadow heap (R4)",
+                    true);
+        return false;
+    }
+    if (!*ours_bound) {
+        list->SetDescriptorHeaps(1, &heap);
+        *ours_bound = true;
+    }
+    std::uint32_t words[push_word_count] = {};
+    for (std::uint32_t i = 0; i < pso.push_count; ++i) {
+        const PushSource s = pso.push[i];
+        const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[s.parameter]);
+        words[i] = type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                       ? args.constants[s.parameter][s.word]
+                       : static_cast<std::uint32_t>(args.address[s.parameter] >> (32 * s.word));
+    }
+    const UINT base = root.title_params;
+    list->SetComputeRoot32BitConstant(base + param_range_count, count, 0);
+    list->SetComputeRootShaderResourceView(base + param_ranges, ranges);
+    list->SetComputeRootDescriptorTable(base + param_memory, table);
+    list->SetComputeRoot32BitConstants(base + param_push_words, push_word_count, words, 0);
     return true;
 }
 
