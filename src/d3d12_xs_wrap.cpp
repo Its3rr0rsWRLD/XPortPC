@@ -1277,6 +1277,7 @@ HRESULT wrap_device(ID3D12Device* real, REFIID riid, void** out, const void* cal
     }
     count_device();
     device->attach_title_gpu();
+    pipeline::prestart_translator();
     const HRESULT hr = device->query(riid, out, caller);
     device->Release();
     return hr;
