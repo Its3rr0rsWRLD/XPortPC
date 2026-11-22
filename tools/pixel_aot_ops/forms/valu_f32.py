@@ -7,6 +7,10 @@ from ..registers import fp_operand, raw_source, vector_u32
 
 ALU = {
     "log": (1, "log2({0})"), "exp": (1, "exp2({0})"), "rcp": (1, "(1.0f / {0})"),
+    # The same reciprocal: v_rcp_iflag_f32 differs only in not raising the integer-divide exception flag, which has no
+    # desktop equivalent (from R0Y00/Xbox2Windows#350 by denn0x). It stays a plain precise divide like v_rcp_f32, so the
+    # transcendental rule of the e32 draws holds: its draws use only inputs whose reciprocal is exact.
+    "rcp_iflag": (1, "(1.0f / {0})"),
     "sqrt": (1, "sqrt({0})"), "rsq": (1, "rsqrt({0})"),
     "floor": (1, "floor({0})"), "ceil": (1, "ceil({0})"), "fract": (1, "fract32({0})"),
     "trunc": (1, "trunc({0})"), "rndne": (1, "round({0})"),  # HLSL round is DXIL Round_ne: ties to even
@@ -97,7 +101,7 @@ def move(st, i, m):
         st.lines.append(f"    precise float alu{i} = {value};")
 
 
-@form(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
+@form(r"v_(log|exp|rcp_iflag|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
       r"|min3|max3|med3)_f32(_e32|_e64)? (v\d+), (.+?)( clamp)?( mul:2| mul:4| div:2)?")
 def arithmetic(st, i, m):
     op, suffix, dst, operands, clamp, omod = m.groups()

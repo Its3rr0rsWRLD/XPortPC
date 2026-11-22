@@ -162,23 +162,25 @@ def program(st, blocks, labels, latch_of):
     into st.lines around them and snapshots and restores st at branches and loops; lower() lowers each one."""
     def snapshot():
         return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc,
-                "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "sample_pending": st.sample_pending,
-                "sample_dest": set(st.sample_dest), "exported": st.exported, "ended": st.ended}
+                "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "vm_issued": st.vm_issued,
+                "sample_dest": dict(st.sample_dest), "exported": st.exported, "ended": st.ended}
 
     def restore(state):
         st.scalar.clear(), st.vector.clear(), st.pending.clear(), st.sample_dest.clear()
         st.scalar.update(state["scalar"]), st.vector.update(state["vector"])
         st.pending.update(state["pending"]), st.sample_dest.update(state["sample_dest"])
         st.scc, st.ex, st.wqm, st.samples = state["scc"], state["ex"], state["wqm"], state["samples"]
-        st.sample_pending, st.exported, st.ended = state["sample_pending"], state["exported"], state["ended"]
+        st.vm_issued, st.exported, st.ended = state["vm_issued"], state["exported"], state["ended"]
 
     def forget_scc():
         st.scc = None
 
     def same_provenance(first, second, where):
-        for key in ("ex", "wqm", "sample_pending", "pending", "sample_dest"):
+        for key in ("ex", "wqm", "pending", "sample_dest"):
             if first[key] != second[key]:
                 raise ValueError(f"Execution or load state differs at {where}")
+        if first["sample_dest"] and first["vm_issued"] != second["vm_issued"]:
+            raise ValueError(f"Execution or load state differs at {where}")
 
     def condition(term):
         """Capture the SCC of a branch in a local, so that join assignments cannot change it. The SCC comes from uniform

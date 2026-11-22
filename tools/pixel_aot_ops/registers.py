@@ -112,12 +112,12 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
         if isinstance(value, int):
             return f"asfloat({value}u)"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
-            if sample_pending and value[1].startswith("mem"):
+            if token in sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return f"asfloat({value[1]})"
         if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError("Expected a numeric register")
-        if sample_pending and value.startswith("sample"):
+        if token in sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
         return value
     if re.fullmatch(r"0x[0-9a-f]{1,8}|\d+", token):
@@ -233,12 +233,12 @@ def vector_u32(token, scalar, vector, pending, sample_pending):
         if value is None:
             raise ValueError(f"Read of unset vector register {token}")
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
-            if sample_pending and value[1].startswith("mem"):
+            if token in sample_pending and value[1].startswith("mem"):
                 raise ValueError("Memory load used before vmcnt wait")
             return value[1]
         if not isinstance(value, str) or not value.startswith(("sample", "alu")):
             raise ValueError(f"Expected a numeric register: {token}")
-        if sample_pending and value.startswith("sample"):
+        if token in sample_pending and value.startswith("sample"):
             raise ValueError("Sample used before vmcnt wait")
         return f"asuint({value})"
     if re.fullmatch(r"s\d+", token) and token not in scalar:

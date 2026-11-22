@@ -271,7 +271,7 @@ def f64_destination(token, st):
     if not pair:
         raise ValueError(f"Expected a 64-bit vector register pair, got {token}")
     names = [f"v{n}" for n in registers(pair[1], pair[2], 2)]
-    if st.sample_dest.intersection(names):
+    if any(name in st.sample_dest for name in names):
         raise ValueError("Write overlaps an outstanding sample")
     return names
 

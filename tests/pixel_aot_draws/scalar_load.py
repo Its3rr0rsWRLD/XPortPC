@@ -264,9 +264,10 @@ def check_scalar_load_controls() -> None:
     shape = lambda source: re.sub(r"(valu|alu)\d+", r"\1", source)
     for waits in (SPLIT_WAITS, COMBINED_WAITS, ALL_WAITS):
         assert shape(translate(make(*X16, regs=group(64), **waits))) == shape(translate(make(*X16, regs=group(64))))
-    # Nonzero counts are refused in every spelling the plain forms refuse, and so are repeats and SGPR operands.
+    # Nonzero counts are refused in every spelling the plain forms refuse (the lone s_waitcnt vmcnt(N) is the one
+    # partial wait, see dual_texture partial controls), and so are repeats and SGPR operands.
     for wait in ("s_waitcnt_vmcnt null, 0x1", "s_waitcnt_lgkmcnt null, 0x2", "s_waitcnt_expcnt null, 0x1",
-                 "s_waitcnt_vmcnt null, 0xffff", "s_waitcnt vmcnt(1)", "s_waitcnt vmcnt(0) lgkmcnt(1)", "s_waitcnt expcnt(1)",
+                 "s_waitcnt_vmcnt null, 0xffff", "s_waitcnt vmcnt(1) lgkmcnt(0)", "s_waitcnt vmcnt(0) lgkmcnt(1)", "s_waitcnt expcnt(1)",
                  "s_waitcnt lgkmcnt(0) lgkmcnt(0)", "s_waitcnt vmcnt(0) vmcnt(0)"):
         for slot in ("lgkm", "vm"):
             refuses(translate, "Only zero wait counts", make(*X16, regs=group(64), **{slot: wait}))

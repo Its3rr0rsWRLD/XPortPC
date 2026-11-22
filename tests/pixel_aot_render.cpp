@@ -58,6 +58,8 @@ struct PixelInput {
     std::vector<BYTE> secondRows;
     std::vector<Word> constants = std::vector<Word>(64);
     TitleMemory memory;
+    bool integerRT = false;      // bit 0 of the flags word of the optional 'X2WF' case section
+    std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
 };
 
 struct MipDraw {
@@ -120,7 +122,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     desc.SampleMask = UINT_MAX;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     desc.NumRenderTargets = desc.SampleDesc.Count = 1;
-    desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.RTVFormats[0] = input.integerRT ? DXGI_FORMAT_R32G32B32A32_UINT
+                                         : DXGI_FORMAT_R32G32B32A32_FLOAT;
     ComPtr<ID3D12PipelineState> pso;
     check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)), "Translated pixel pipeline");
 
@@ -286,10 +289,37 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                 const auto offset = y * resultLayout.Footprint.RowPitch / 4 + x * 4;
                 Color actual;
                 std::memcpy(actual.data(), words.data() + offset, sizeof(actual));
-                const auto matches = [&](const Color& ref) {
-                    return std::memcmp(actual.data(), ref.data(), sizeof(actual)) == 0;
+                const auto bits = [](float value) {
+                    UINT word;
+                    std::memcpy(&word, &value, sizeof(word));
+                    return word;
                 };
-                bool matched = matches(expected);
+                const auto is_nan_bits = [](UINT word) {
+                    return (word & 0x7f800000u) == 0x7f800000u && (word & 0x007fffffu) != 0u;
+                };
+                // Per-channel compare against one expected texel. Unmasked channels are strict
+                // bitwise. A masked channel accepts a NaN against an expected NaN of any sign or
+                // payload and still logs both raw words; masking a channel whose expected word is
+                // not NaN is a case-format error.
+                const auto matches_at = [&](size_t index) {
+                    const auto& reference = sampled.expected[index];
+                    const BYTE mask = index < sampled.nanMask.size() ? sampled.nanMask[index] : BYTE{0};
+                    for (size_t c = 0; c < actual.size(); ++c) {
+                        const UINT expected_bits = bits(reference[c]);
+                        const UINT actual_bits = bits(actual[c]);
+                        if (mask >> c & 1) {
+                            if (!is_nan_bits(expected_bits))
+                                throw std::runtime_error("NaN-class mask on a channel whose expected word is not NaN");
+                            std::printf("nan_class x=%u y=%u ch=%zu expected=%08x actual=%08x\n",
+                                        x, y, c, expected_bits, actual_bits);
+                            if (!is_nan_bits(actual_bits)) return false;
+                        } else if (expected_bits != actual_bits) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                bool matched = matches_at(sampleY * sampled.width + sampleX);
                 // The exact texel is always tried first. Neighbors are admitted only
                 // for magnified tail draws, which sample through the root signature's
                 // single static sampler (MIN_MAG_MIP_POINT, clamp addressing).
@@ -309,14 +339,15 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                     const UINT nearX = neighbor(numeratorX, 2 * width, sampleX, sampled.width);
                     const UINT nearY = neighbor(numeratorY, 2 * height, sampleY, sampled.height);
                     // Each candidate must match as a whole RGBA texel.
-                    matched = matches(sampled.expected[sampleY * sampled.width + nearX]) ||
-                              matches(sampled.expected[nearY * sampled.width + sampleX]) ||
-                              matches(sampled.expected[nearY * sampled.width + nearX]);
+                    matched = matches_at(sampleY * sampled.width + nearX) ||
+                              matches_at(nearY * sampled.width + sampleX) ||
+                              matches_at(nearY * sampled.width + nearX);
                 }
                 if (!matched) {
                     std::fprintf(stderr, "pixel_mismatch x=%u y=%u\n", x, y);
                     for (size_t c = 0; c < actual.size(); ++c)
-                        std::fprintf(stderr, "channel=%zu expected=%g actual=%g\n", c, expected[c], actual[c]);
+                        std::fprintf(stderr, "channel=%zu expected=%g actual=%g expected_bits=%08x actual_bits=%08x\n",
+                                     c, expected[c], actual[c], bits(expected[c]), bits(actual[c]));
                     throw std::runtime_error("AOT color export differs from CPU reference");
                 }
                 if (capture) {
@@ -344,6 +375,13 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
 }
 
 namespace {
+UINT readWord(const char* data)
+{
+    UINT value;
+    std::memcpy(&value, data, 4);
+    return value;
+}
+
 // Memory section after the 1280-byte case: magic 'X2WM', range count (0..8), slot count (0..8), a zero
 // word, the ranges (begin and end as u64, slot, zero word) and then each slot as a byte size and its bytes.
 TitleMemory parse_memory_section(const char* data, size_t size)
@@ -412,7 +450,22 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
         std::memcpy(input.constants.data(), bytes.data(), input.constants.size() * sizeof(Word));
         std::memcpy(input.expected.data(), bytes.data() + input.constants.size() * sizeof(Word),
                     input.expected.size() * sizeof(Color));
-        if (bytes.size() > fixed) input.memory = parse_memory_section(bytes.data() + fixed, bytes.size() - fixed);
+        size_t at = fixed;
+        // Optional sections follow the fixed case, each led by its magic word: the 'X2WF' float-mode section
+        // (from R0Y00/Xbox2Windows#363 by abilliontokens, as a magic-led section so it can precede the memory section)
+        // and then the memory section, which runs to the end of the file.
+        if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x46573258u) {
+            constexpr size_t section = 4 + 4 + 64;
+            if (bytes.size() - at < section) throw BadCase("Float-mode section is truncated");
+            const UINT flags = readWord(bytes.data() + at + 4);
+            if (flags & ~1u) throw BadCase("Unknown float-mode section flag bits");
+            input.integerRT = (flags & 1u) != 0;
+            input.nanMask.assign(bytes.data() + at + 8, bytes.data() + at + section);
+            for (BYTE mask : input.nanMask)
+                if (mask & 0xf0u) throw BadCase("NaN-class mask names a channel beyond the fourth");
+            at += section;
+        }
+        if (bytes.size() > at) input.memory = parse_memory_section(bytes.data() + at, bytes.size() - at);
     }
     std::vector<PixelInput> levels;
     levels.push_back(std::move(input));

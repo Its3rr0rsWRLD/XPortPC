@@ -24,10 +24,12 @@ def wait_lgkmcnt_zero(st, i, m):
     st.pending.clear()
 
 
-@form(r"s_waitcnt vmcnt\(0\)")
-def wait_vmcnt_zero(st, i, m):
-    st.sample_pending = False
-    st.sample_dest.clear()
+@form(r"s_waitcnt vmcnt\((\d+)\)")
+def wait_vmcnt(st, i, m):
+    # vmcnt(N): all but the newest N samples and loads have completed (Lowering.vm_wait), so a result whose own load
+    # is older than that is readable while a newer one is in flight (R0Y00/Xbox2Windows#176 by descent81). A count
+    # above the six-bit gfx10 field is not an instruction.
+    st.vm_wait(int(m[1]))
 
 
 @form(r"s_waitcnt((?: (?:vmcnt|expcnt|lgkmcnt)\(\d+\))+)")
@@ -41,8 +43,7 @@ def wait_counters(st, i, m):
     if any(name == "lgkmcnt" for name, _ in fields):
         st.pending.clear()
     if any(name == "vmcnt" for name, _ in fields):
-        st.sample_pending = False
-        st.sample_dest.clear()
+        st.vm_wait(0)
 
 
 @form(r"s_waitcnt_(vmcnt|expcnt|lgkmcnt|vscnt) null, (0x[0-9a-f]+|\d+)")
@@ -60,8 +61,7 @@ def wait_split_counter(st, i, m):
     elif op == "lgkmcnt":
         st.pending.clear()
     elif op == "vmcnt":
-        st.sample_pending = False
-        st.sample_dest.clear()
+        st.vm_wait(0)
     # expcnt(0) waits for exports; the only export is the last instruction.
 
 

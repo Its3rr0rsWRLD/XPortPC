@@ -4,6 +4,7 @@ import functools
 from pathlib import Path
 import math
 import struct
+import subprocess
 
 import pixel_aot
 from pixel_aot_ops.dispatch import claimants as _claimants
@@ -145,3 +146,54 @@ def f16_const(token, bug):
 def move(register, source):
     return f"v_or_b32_e64 v{register}, 0, {source}"
 f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+# The binary32 denormal mode of a draw that states one (from R0Y00/Xbox2Windows#363 by abilliontokens). CPU references
+# built from Python floats keep binary32 subnormals, so a fixture that depends on them assumes the desktop shader
+# preserves them, and DXC runs with a matching -denorm flag. The Scarlett pipeline's FLOAT_MODE is unmeasured: this
+# records the harness's assumption, not a claim about the console. Binary16 and binary64 denormals are drawn elsewhere.
+F32_DENORM_MODE = "preserve"
+
+
+def compile_shader(compiler, source, shader, *, listing=None, mode=F32_DENORM_MODE, ieee=True):
+    """Run DXC on one translated shader under an explicit binary32 denormal mode."""
+    # DXC accepts -denorm only at shader model 6.2 and above; ps_6_2 is the minimum target.
+    command = [compiler, *(["-Gis"] if ieee else []), "-denorm", mode, "-T", "ps_6_2", "-E", "main", "-Fo", shader]
+    if listing is not None:
+        command += ["-Fc", listing]
+    command.append(source)
+    subprocess.run(command, check=True)
+
+
+def flush_ftz(value):
+    """Flush one binary32 subnormal input or result to signed zero, as -denorm ftz would."""
+    bits, = struct.unpack("<I", struct.pack("<f", value))
+    if bits & 0x7f800000 == 0 and bits & 0x007fffff:
+        return struct.unpack("<f", struct.pack("<I", bits & 0x80000000))[0]
+    return value
+
+
+FLOAT_MODE_MAGIC = 0x46573258  # 'X2WF' little-endian: the float-mode section of a renderer case, before any memory section
+
+
+def write_case(path, constants, pixels, *, nan_mask=None, integer_rt=False):
+    """Write a renderer case: 256 constant bytes, then 64 expected float4 rows in row-major order. A single float4
+    broadcasts to every texel. The optional 'X2WF' section (magic, a flags word whose bit 0 selects the lossless
+    R32G32B32A32_UINT readback target, then 64 per-texel mask bytes whose bit ch accepts a NaN of any sign or payload on
+    channel ch) follows. Without integer_rt or nan_mask the case is the plain 1280 bytes."""
+    rows = [pixels] * 64 if len(pixels) == 4 and not isinstance(pixels[0], (list, tuple)) else list(pixels)
+    if len(rows) != 64 or any(len(row) != 4 for row in rows):
+        raise ValueError("A case needs 64 float4 expectations")
+    data = bytearray(bytes(constants))
+    for row in rows:
+        data += struct.pack("<4f", *row)
+    if integer_rt or nan_mask is not None:
+        if isinstance(nan_mask, int):
+            nan_mask = bytes([nan_mask]) * 64
+        elif nan_mask is None:
+            nan_mask = bytes(64)
+        elif len(nan_mask) != 64:
+            raise ValueError("The NaN-class mask needs exactly 64 texel bytes")
+        data += struct.pack("<II", FLOAT_MODE_MAGIC, 1 if integer_rt else 0) + bytes(nan_mask)
+    Path(path).write_bytes(data)
+    return Path(path)

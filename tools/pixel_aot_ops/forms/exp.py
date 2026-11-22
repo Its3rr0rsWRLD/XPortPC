@@ -16,7 +16,9 @@ def pack_e32(st, i, m):
             st.lines.append(f"    precise float alu{i}_{n} = asfloat({value[1]});")
             value = f"alu{i}_{n}"
         pair.append(value)
-    if st.ex != "true" or st.sample_pending or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair):
+    # Only the sources and the destination must be settled: another load may still be in flight (R0Y00/Xbox2Windows#176).
+    if (st.ex != "true" or lo in st.sample_dest or hi in st.sample_dest or dst in st.sample_dest
+            or not all(isinstance(v, str) and v.startswith(("sample", "alu")) for v in pair)):
         raise ValueError("Unsupported pack operand")
     st.vector[dst] = tuple(pair)
 
@@ -53,4 +55,23 @@ def export(st, i, m):
         raise ValueError("Unsupported export")
     args = [f"export16({v})" for pair in pairs for v in pair]
     st.lines.append(f"    return float4({', '.join(args)});")
+    st.exported = True
+
+
+@form(r"exp mrt0,? (v\d+), (v\d+), (v\d+), (v\d+) done vm")
+def export_uncompressed(st, i, m):
+    # Four distinct registers of computed, sampled or raw-word values, exported as the four binary32 channels (from
+    # R0Y00/Xbox2Windows#363 by abilliontokens). A raw word is exported as the float with those bits, as the pack above
+    # does. With lower(integer_export=True) the shader returns uint4 of the bit patterns instead, so the render target
+    # cannot canonicalize a NaN or flush a denormal: the lossless readback of integer moves, bit operations and bitcasts.
+    registers = m.groups()
+    values = [st.vector.get(v) for v in registers]
+    if (st.ex != "true" or st.exported or len(set(registers)) != 4 or any(v in st.sample_dest for v in registers)
+            or any(tracked_word(v) is None for v in values)):
+        raise ValueError("Unsupported export")
+    if st.integer_export:
+        st.lines.append(f"    return uint4({', '.join(tracked_word(v) for v in values)});")
+    else:
+        args = [v if isinstance(v, str) else f"asfloat({v[1]})" for v in values]
+        st.lines.append(f"    return float4({', '.join(args)});")
     st.exported = True

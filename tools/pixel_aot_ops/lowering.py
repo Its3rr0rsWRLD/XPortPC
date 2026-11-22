@@ -9,7 +9,7 @@ from . import forms  # noqa: F401  (registers every form)
 
 class Lowering:
     """The state of one lower() call. Forms read and write it as `st`; the control-flow walk snapshots and restores
-    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_pending, sample_dest, exported, ended)."""
+    the per-path part (scalar, vector, pending, scc, ex, wqm, samples, sample_dest, vm_issued, exported, ended)."""
 
     def __init__(self, scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words):
         self.scalar = scalar  # SGPR name (and "m0", "vcc") -> tracked value, see registers.py
@@ -32,12 +32,38 @@ class Lowering:
         # depends on the interpolated coordinate. An implicit-LOD sample may read only these.
         self.quad_values = {"uv.x": True, "uv.y": True}
         self.samples = 0  # samples taken on the path so far
-        self.sample_pending = False  # a sample or vector memory load is outstanding (cleared by vmcnt(0))
-        self.sample_dest = set()  # VGPRs that load writes
+        # VGPR -> (issue number, kind) of the outstanding sample or vector memory load that writes it. vmcnt(N) completes
+        # all but the newest N of them (from R0Y00/Xbox2Windows#176 by descent81); vmcnt(0) completes all.
+        self.sample_dest = {}
+        self.integer_export = False  # the uncompressed export returns uint4 bit patterns (lower(integer_export=True))
+        self.vm_issued = 0  # vector memory loads and samples issued on the path so far (the vmcnt issue order)
         self.flat_attrs = set()  # attributes read without interpolation
         self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
         self.exported = False  # the color export has been emitted
         self.ended = False  # s_endpgm after the export
+
+    @property
+    def sample_pending(self):
+        """The outstanding loads' destination VGPRs: truthy while any load is outstanding. The operand readers in
+        registers.py take it as their `sample_pending` argument and refuse a source register that is in it, so a
+        register whose own load has completed is readable while a newer load is still in flight."""
+        return self.sample_dest
+
+    def vm_issue(self, registers, kind):
+        """Record a sample or load of `kind` ("sample", "mubuf", "mtbuf", "flat") that writes `registers`."""
+        self.vm_issued += 1
+        for register in registers:
+            self.sample_dest[register] = (self.vm_issued, kind)
+
+    def vm_wait(self, limit):
+        """s_waitcnt vmcnt(limit): only the newest `limit` loads can remain outstanding. Loads of different kinds are
+        not known to return in order, so while two kinds are outstanding only a wait for all of them (limit 0) completes
+        any. Filtering the current set keeps what earlier, tighter waits already guaranteed."""
+        if limit > 63:
+            raise ValueError("VM wait count exceeds the gfx10 six-bit field")
+        if limit and len({kind for _, kind in self.sample_dest.values()}) > 1:
+            return
+        self.sample_dest = {reg: entry for reg, entry in self.sample_dest.items() if entry[0] > self.vm_issued - limit}
 
     @property
     def mask(self):
@@ -75,7 +101,7 @@ def masked_writes(st, i, ex, before):
 
 
 def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=None, *, second_texture_offset=None,
-          buffer_descriptors=None):
+          buffer_descriptors=None, integer_export=False):
     """Track descriptor provenance, interpolation and packed exports through register writes."""
     if (texture_sgpr == interp_sgpr or not 0 <= texture_sgpr <= 105 or not 0 <= interp_sgpr <= 105
             or len(sampler) != 4 or any(not 0 <= word <= 0xffffffff for word in sampler)):
@@ -109,6 +135,7 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                 or constant_descriptor < offset + 16 and offset < constant_descriptor + 16):
             raise ValueError("Buffer and texture or constant descriptors overlap")
     st = Lowering(scalar, vector, lines, bindings, sampler, constant_descriptor, vsharp_words)
+    st.integer_export = integer_export
     blocks, labels = split_blocks(instructions)
     latch_of = find_loops(blocks, labels)
     for i, line in program(st, blocks, labels, latch_of):
@@ -138,4 +165,9 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
         note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
         st.lines[pos] = (note
                          + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
-    return "\n".join([*st.lines, "}",""])
+    text = "\n".join([*st.lines, "}",""])
+    if integer_export:
+        if "return uint4(" not in text:
+            raise ValueError("Integer export requires the uncompressed export form")
+        text = text.replace("float4 main(", "uint4 main(", 1)
+    return text

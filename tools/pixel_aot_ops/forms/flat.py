@@ -54,8 +54,7 @@ def global_load(st, i, m):
         st.lines.append(f"    uint mem{i}_{j} = global_load32(uint2({base[0]}, {base[1]}), {voffset}, "
                      f"uint2({bits & 0xffffffff}u, {bits >> 32}u), {j}u);")
         st.vector[d] = ("uint", f"mem{i}_{j}")
-    st.sample_dest.update(dsts)
-    st.sample_pending = True
+    st.vm_issue(dsts, "flat")
 
 
 @form(r"global_load_(" + "|".join(sorted(SUB_DWORD, key=len, reverse=True)) + r") (v\d+), (v\d+|v\[\d+:\d+\]), "
@@ -72,8 +71,7 @@ def global_load_sub(st, i, m):
            f"{SUB_DWORD[op][0]}u)")
     st.lines.append(f"    uint mem{i}_0 = {sub_dword_word(op, raw, old)};")
     st.vector[dst] = ("uint", f"mem{i}_0")
-    st.sample_dest.add(dst)
-    st.sample_pending = True
+    st.vm_issue([dst], "flat")
 
 
 @form(r"(?s)flat_load.*")
