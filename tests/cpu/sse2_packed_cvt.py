@@ -36,14 +36,15 @@ def emit(native_dll: Path, output_cpp: Path) -> None:
 
 
 def check_controls() -> None:
-    # VEX vcvtdq2ps xmm0, xmm1 (C5 F8 5B C1) followed by ret must be rejected.
-    vex = list(Decoder(64, b"\xc5\xf8\x5b\xc1\xc3", ip=0x1000))
+    # VEX vcvtdq2ps xmm4, xmm1 (C5 F8 5B E1) followed by ret must be rejected: the AVX conversion
+    # lowering owns VEX forms on XMM0-XMM3, and the legacy-only path must not take an unmodeled one.
+    vex = list(Decoder(64, b"\xc5\xf8\x5b\xe1\xc3", ip=0x1000))
     try:
         lower(vex, [], {}, {}, {})
     except ValueError:
         pass
     else:
-        raise AssertionError("expected VEX vcvtdq2ps to be rejected")
+        raise AssertionError("expected VEX vcvtdq2ps xmm4 to be rejected")
 
 
 def aligned_buf(data: bytes):

@@ -42,14 +42,15 @@ def emit(native_dll: Path, output_cpp: Path) -> None:
 
 
 def check_controls() -> None:
-    # VEX vaddps xmm0, xmm1, xmm2 (C5 F0 58 C2) followed by ret (C3) must be rejected by legacy-only lowering.
-    vex = list(Decoder(64, b"\xc5\xf0\x58\xc2\xc3", ip=0x1000))
+    # VEX vaddps xmm4, xmm1, xmm2 (C5 F0 58 E2) followed by ret (C3) must be rejected: the AVX packed-FP
+    # lowering owns VEX forms on XMM0-XMM3, and the legacy-only path must not take an unmodeled one.
+    vex = list(Decoder(64, b"\xc5\xf0\x58\xe2\xc3", ip=0x1000))
     try:
         lower(vex, [], {}, {}, {})
     except ValueError:
         pass
     else:
-        raise AssertionError("expected VEX vaddps to be rejected")
+        raise AssertionError("expected VEX vaddps xmm4 to be rejected")
 
 
 def run_vec(native, lifted, name: str, a: bytes, b: bytes) -> None:

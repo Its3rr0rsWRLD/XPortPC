@@ -43,14 +43,15 @@ def emit(native_dll: Path, output_cpp: Path) -> None:
 
 
 def check_controls() -> None:
-    # Unmodeled register xmm3 in sha1msg1 xmm3, xmm0 (0F 38 C9 D8) followed by ret must be rejected.
-    bad = list(Decoder(64, b"\x0f\x38\xc9\xd8\xc3", ip=0x1000))
+    # Unmodeled register xmm4 in sha1msg1 xmm4, xmm0 (0F 38 C9 E0) followed by ret must be rejected.
+    # (The AVX shuffle and shift lowerings model XMM0-XMM3, so xmm3 is no longer unmodeled.)
+    bad = list(Decoder(64, b"\x0f\x38\xc9\xe0\xc3", ip=0x1000))
     try:
         lower(bad, [], {}, {}, {})
     except ValueError:
         pass
     else:
-        raise AssertionError("expected unmodeled xmm3 in sha1msg1 to be rejected")
+        raise AssertionError("expected unmodeled xmm4 in sha1msg1 to be rejected")
 
 
 def check(native_dll: Path, lifted_dll: Path) -> None:
