@@ -696,7 +696,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
 {
     const auto& top = levels.front();
     draw_verified(device, path, levels, {top.width << firstResident, top.height << firstResident},
-                  firstResident, {{sampledLevel, levels.at(sampledLevel).scale}}, capture, gpuConstants);
+                  firstResident, {{sampledLevel, levels.at(sampledLevel).scale}}, capture, nullptr,
+                  gpuConstants);
 }
 
 ComPtr<ID3D12Resource> produce_pixel_constants(ID3D12Device* device, const char* path)
