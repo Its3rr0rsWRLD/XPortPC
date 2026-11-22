@@ -37,6 +37,13 @@ static_assert(sizeof(void*) == sizeof(word));
 template<class T> T load(word address) {
     T v; memcpy(&v, reinterpret_cast<const void*>(address), sizeof v); return v;
 }
+template<class T> T load_always(word address) {
+    T v;
+    const volatile auto* p = reinterpret_cast<const volatile uint8_t*>(address);
+    auto* q = reinterpret_cast<uint8_t*>(&v);
+    for (size_t i = 0; i < sizeof v; ++i) q[i] = p[i];
+    return v;
+}
 template<class T> void store(word address, T v) {
     memcpy(reinterpret_cast<void*>(address), &v, sizeof v);
 }
@@ -202,6 +209,14 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             stmt = write(f"zero ? {operand(1)} : {operand(0)}")
         elif op == M.CMOVBE:
             stmt = write(f"(carry || zero) ? {operand(1)} : {operand(0)}")
+        elif op in (M.CMOVE, M.CMOVNE, M.CMOVA, M.CMOVAE, M.CMOVB, M.CMOVBE):
+            cond = {M.CMOVE: "zero", M.CMOVNE: "!zero", M.CMOVA: "!carry && !zero",
+                    M.CMOVAE: "!carry", M.CMOVB: "carry", M.CMOVBE: "carry || zero"}[op]
+            if i.op1_kind == K.MEMORY:
+                width = UINT[MemorySizeExt.size(i.memory_size)]
+                stmt = f"{{ const {width} src = load_always<{width}>({address()}); {write(f'({cond}) ? src : {operand(0)}')} }}"
+            else:
+                stmt = write(f"({cond}) ? {operand(1)} : {operand(0)}")
         elif op == M.LEA:
             stmt = write(address())
         elif op == M.MOVBE:
@@ -424,8 +439,10 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
                                             f"static_cast<{host}>({operand(n)}))")
         elif op == M.NOP or (op == M.XCHG and i.op0_register == i.op1_register == R.AX):
             stmt = ";"
-        elif op == M.SETE:
-            stmt = write("zero")
+        elif op in (M.SETE, M.SETNE, M.SETA, M.SETAE, M.SETB, M.SETBE):
+            cond = {M.SETE: "zero", M.SETNE: "!zero", M.SETA: "!carry && !zero",
+                    M.SETAE: "!carry", M.SETB: "carry", M.SETBE: "carry || zero"}[op]
+            stmt = write(f"({cond})")
         elif op == M.CALL:
             stmt = calls[i.ip]
         elif op == M.XLATB:
