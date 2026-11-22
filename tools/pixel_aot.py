@@ -432,6 +432,27 @@ SALU_HELPERS = {
         "    return asuint(asint(src) >> off);\n"
         "}"
     ),
+    # MIMG helpers take the texture as a parameter. Out-of-range access is explicit so that no driver's
+    # out-of-bounds convention is relied on: a texel outside the mip's extent, or a mip beyond the level count, is zero.
+    "image_load": (
+        "float4 image_load2d(Texture2D<float4> t, uint x, uint y, uint mip) {\n"
+        "    uint w, h, levels;\n"
+        "    t.GetDimensions(0u, w, h, levels);\n"
+        "    if (mip >= levels) return float4(0.0f, 0.0f, 0.0f, 0.0f);\n"
+        "    t.GetDimensions(mip, w, h, levels);\n"
+        "    if (x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);\n"
+        "    return t.Load(int3(int(x), int(y), int(mip)));\n"
+        "}"
+    ),
+    "image_resinfo": (
+        "uint4 image_resinfo2d(Texture2D<float4> t, uint mip) {\n"
+        "    uint w, h, levels;\n"
+        "    t.GetDimensions(0u, w, h, levels);\n"
+        "    if (mip >= levels) return uint4(0u, 0u, 0u, levels);\n"
+        "    t.GetDimensions(mip, w, h, levels);\n"
+        "    return uint4(w, h, 0u, levels);\n"
+        "}"
+    ),
 }
 
 
@@ -952,6 +973,75 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             for j, n in enumerate(dest):
                 vector[f"v{n}"] = f"sample{i}.{'xyzw'[j]}"
                 sample_dest.add(f"v{n}")
+        elif m := match(r"image_(load|load_mip|get_resinfo|gather4|gather4_lz) (v\d+|v\[\d+:\d+\]), (v\d+|v\[\d+:\d+\]), "
+                        r"s\[(\d+):(\d+)\](?:, s\[(\d+):(\d+)\])? dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D((?: (?:unorm|glc|slc|dlc))*)"):
+            # MIMG loads, level queries and gathers of a 2D T#, with the descriptor provenance rules of image_sample. Cache
+            # modifiers do not change the value; unorm is accepted for loads and queries, where it has no effect on an
+            # integer-addressed access. a16, d16, tfe, lwe, r128 and array or other dimensions do not match this
+            # grammar. Destination and address widths must agree with the dmask and the form, as the assembler requires.
+            op, dst_token, addr_token, f0, f1, s0, s1, dmask_digit, modifiers = m.groups()
+            flags = modifiers.split()
+            if len(set(flags)) != len(flags) or ("unorm" in flags and op.startswith("gather4")):
+                raise ValueError("Repeated or unsupported image modifier")
+            dmask = int(dmask_digit, 16)
+            if mask != "entry" or not dmask:
+                raise ValueError("Invalid image operation")
+            if op == "gather4":
+                raise ValueError("image_gather4 picks its mip level from derivatives, which Gather* cannot reproduce; "
+                                 "only image_gather4_lz is lowered")
+            gather = op.startswith("gather4")
+            if gather != (s0 is not None):
+                raise ValueError("Sampler operand does not match the image form")
+            channels = [c for c in range(4) if dmask >> c & 1]
+            if gather and len(channels) != 1:
+                raise ValueError("image_gather4 needs exactly one dmask bit")
+            if op == "get_resinfo" and 2 in channels:
+                raise ValueError("image_get_resinfo depth word of a 2D resource is not defined by Direct3D; refused")
+            dests = vgprs(dst_token, 4 if gather else len(channels))
+            addr_width = {"load": 2, "load_mip": 3, "get_resinfo": 1, "gather4": 2, "gather4_lz": 2}[op]
+            addrs = vgprs(addr_token, addr_width)
+            image = [f"s{n}" for n in registers(f0, f1, 8)]
+            descriptor = [scalar.get(r) for r in image]
+            texture = next((name for name in bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
+            if texture is None or int(f0) % 4 or int(f1) > 105 or any(r in pending for r in image):
+                raise ValueError("Unsupported image binding")
+            if gather:
+                state = [f"s{n}" for n in registers(s0, s1, 4)]
+                if any(r in pending for r in state) or [scalar.get(r) for r in state] != list(sampler) or int(s0) % 4:
+                    raise ValueError("Unsupported sampler binding")
+            if any(d in sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
+                raise ValueError("Write overlaps an outstanding sample")
+            if gather:
+                # Footprint order is the Direct3D one: x, y, z, w = (-,+), (+,+), (+,-), (-,-) texel offsets, which is
+                # VDATA[0..3] = lower left, lower right, upper right, upper left. The coordinate is normalized.
+                coords = []
+                for r in addrs:
+                    value = vector.get(r)
+                    coords.append(value if value in ("uv.x", "uv.y") else fp_operand(r, scalar, vector, pending, sample_pending))
+                call = f"{texture}.Gather{('Red', 'Green', 'Blue', 'Alpha')[channels[0]]}(samp, float2({coords[0]}, {coords[1]}))"
+                lines.append(f"    float4 sample{i} = {call};")
+                results = [f"sample{i}.{c}" for c in "xyzw"]
+            elif op == "get_resinfo":
+                # D3D resinfo: [width, height, depth or array size, level count]. The depth word of a 2D resource is
+                # refused above; a level at or beyond the count returns zero extents and the level count.
+                level = vector_u32(addrs[0], scalar, vector, pending, sample_pending)
+                helpers.add("image_resinfo")
+                lines.append(f"    uint4 mem_info{i} = image_resinfo2d({texture}, {level});")
+                results = None
+            else:
+                x, y = (vector_u32(r, scalar, vector, pending, sample_pending) for r in addrs[:2])
+                level = vector_u32(addrs[2], scalar, vector, pending, sample_pending) if op == "load_mip" else "0u"
+                helpers.add("image_load")
+                lines.append(f"    float4 sample{i} = image_load2d({texture}, {x}, {y}, {level});")
+                results = [f"sample{i}.{c}" for c in "xyzw"]
+            sample_pending = True
+            if results is None:
+                for d, c in zip(dests, channels):
+                    vector[d] = ("uint", f"mem_info{i}.{'xyzw'[c]}")
+            else:
+                for d, c in zip(dests, [0, 1, 2, 3] if gather else channels):
+                    vector[d] = results[c]
+            sample_dest.update(dests)
         elif m := match(r"v_(fmaak|fmamk)_f32 (v\d+), ([^,]+), ([^,]+), ([^,]+)"):
             op, dst, *tokens = m.groups()
             literal = tokens[2] if op == "fmaak" else tokens[1]
