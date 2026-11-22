@@ -241,7 +241,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     const UINT residentCount = static_cast<UINT>(levels.size());
     srcDesc.MipLevels = static_cast<UINT16>(firstResident + residentCount);
     auto texture = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
-    const D3D12_CLEAR_VALUE clear{targetFormat, {-1, -1, -1, -1}};
+    // Every target has its pipeline format: R32G32B32A32_UINT for an integer-export case, R32G32B32A32_FLOAT otherwise.
+    const D3D12_CLEAR_VALUE clear{desc.RTVFormats[0], {-1, -1, -1, -1}};
     D3D12_CLEAR_VALUE depthClear{DXGI_FORMAT_D32_FLOAT};
     depthClear.DepthStencil.Depth = 1;
     std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(residentCount);
@@ -362,7 +363,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             partialTriangle = upload(device, std::vector<Word>{3, 4, 5});
         const auto [width, height] = req.isTailDraw ? base.mip(req.requestedMip)
                                                    : Extent{sampled.width * req.scale, sampled.height * req.scale};
-        auto dstDesc = texture_desc(width, height, targetFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        auto dstDesc = texture_desc(width, height, desc.RTVFormats[0], D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT resultLayout{};
         UINT64 resultBytes = 0;
         device->GetCopyableFootprints(&dstDesc, 0, 1, 0, &resultLayout, nullptr, nullptr, &resultBytes);
