@@ -55,6 +55,16 @@ An independent contributor passed all three smoke tests from a clean checkout of
 
 Contributing from macOS or Linux? See the [non-Windows host guide](docs/non-windows-hosts.md) for the platform-independent Python and LLVM 15 checks.
 
+## Shader cache for a title
+
+XPortPC translates a title's shaders when it creates its pipelines and keeps the results in `%LOCALAPPDATA%\XPortPC\cache\<title>`, so they are translated only once. To have every shader ready before you play, run the title once (even a short run that reaches its menus), then translate everything it recorded on all your cores:
+
+```powershell
+python tools\precompile_cache.py <title>
+```
+
+`<title>` is the title's executable name without `.exe`. The next launch finds all of those shaders in the cache. Run the command again after updating XPortPC. The cache directory holds a copy of the title's shader code for this step: it stays on your PC, do not share it.
+
 ## Working on XPortPC
 
 Work is split into small batches of instruction forms. Each batch adds the lowering, draws on hardware and WARP compared against a CPU reference, wrong-reference controls, an LLVM 15 binary round trip, and a paragraph in [docs/experiments.md](docs/experiments.md). Run the GPU checks with:

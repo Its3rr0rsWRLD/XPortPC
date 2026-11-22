@@ -262,7 +262,10 @@ bool start_process(const Settings& c, HANDLE job, Service& out, std::string& why
            UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), nullptr,
                                      nullptr);
     if (good) {
-        std::wstring command = L"\"" + c.python + L"\" -B \"" + c.tools + L"\\pso_service.py\" --dxc \"" + c.dxc + L"\"";
+        // Bytecode cached outside the converter's directory: start-up then skips compiling the converter's modules.
+        const std::wstring flags = c.pycache.empty() ? L"-B" : L"-X \"pycache_prefix=" + c.pycache + L"\"";
+        std::wstring command = L"\"" + c.python + L"\" " + flags + L" \"" + c.tools + L"\\pso_service.py\" --dxc \"" +
+                               c.dxc + L"\"";
         if (!c.llvm.empty()) command += L" --llvm \"" + c.llvm + L"\"";
         if (!c.scratch.empty()) command += L" --scratch \"" + c.scratch + L"\"";
         std::vector<wchar_t> line(command.begin(), command.end());

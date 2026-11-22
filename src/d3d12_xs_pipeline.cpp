@@ -249,6 +249,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
     std::wstring root = env(L"X2W_CACHE_DIR");
     if (root.empty()) root = env(L"LOCALAPPDATA") + L"\\XPortPC\\cache";
     config->cache = root + L"\\" + title_name();
+    const std::wstring pycache = root + L"\\pycache";
     for (std::wstring* path : {&config->python, &config->tools, &config->dxc, &config->llvm, &config->cache})
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
@@ -284,6 +285,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
     settings.dxc = config->dxc;
     settings.llvm = config->llvm;
     settings.scratch = config->cache;
+    settings.pycache = pycache;
     settings.max_services = config->mode == Mode::service ? config->services : 0;
     translator::configure(settings);
     g_config = config;

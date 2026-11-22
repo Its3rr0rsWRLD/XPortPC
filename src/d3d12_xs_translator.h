@@ -22,6 +22,7 @@ namespace translator {
 
 struct Settings {
     std::wstring python, tools, dxc, llvm, scratch;  // scratch: a directory for dxc.exe if the library cannot load
+    std::wstring pycache;  // Python's bytecode cache for the services (the converter's directory stays untouched)
     unsigned max_services = 1;
 };
 

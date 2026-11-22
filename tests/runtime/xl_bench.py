@@ -9,7 +9,8 @@ distinct pixel programs of the pixel_aot draw checks) four ways, and requires ev
 be byte-identical across them:
     process    one `python -B tools/pso_translate.py` (and dxc.exe) per shader, one after another: the shim's
                per-process path, and its only path before the translator service
-    service    one tools/pso_service.py, shaders sent one after another (start-up reported apart)
+    service    one tools/pso_service.py, shaders sent one after another (start-up reported apart, without and with
+               Python's bytecode cached, as the shim keeps it under the cache root)
     pool       N services at once, fed from one queue, as the shim's pool runs them
     precompile tools/precompile_cache.py's process pool on N processes (start-up included)
 It prints the start-up, the time per shader and the throughput of each. It fails if any output differs, if the
@@ -27,6 +28,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -179,9 +181,11 @@ def by_process(dxc, items, work):
 class Service:
     """One tools/pso_service.py, as the shim drives it (src/d3d12_xs_translator.cpp)."""
 
-    def __init__(self, dxc):
+    def __init__(self, dxc, pycache):
         self.started = time.perf_counter()
-        self.process = subprocess.Popen([sys.executable, "-B", str(TOOLS / "pso_service.py"), "--dxc", dxc],
+        # As the shim starts it: bytecode cached outside the converter's directory.
+        self.process = subprocess.Popen([sys.executable, "-X", f"pycache_prefix={pycache}", str(TOOLS / "pso_service.py"),
+                                         "--dxc", dxc],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def frame(self):
@@ -222,8 +226,8 @@ class Service:
         self.process.wait(timeout=60)
 
 
-def by_service(dxc, items):
-    service = Service(dxc).ready()
+def by_service(dxc, items, pycache):
+    service = Service(dxc, pycache).ready()
     results, seconds = [], []
     for s in items:
         started = time.perf_counter()
@@ -233,9 +237,9 @@ def by_service(dxc, items):
     return results, seconds, service
 
 
-def by_pool(dxc, items, count):
+def by_pool(dxc, items, count, pycache):
     started = time.perf_counter()
-    services = [Service(dxc) for _ in range(count)]
+    services = [Service(dxc, pycache) for _ in range(count)]
     work = queue.Queue()
     for i, s in enumerate(items):
         work.put((i, s))
@@ -282,8 +286,13 @@ def run(dxc, work, processes):
     r3, batch = items[:2], items[2:]
     print(f"shaders: {len(r3)} R3 programs, {len(batch)} batch programs; {processes} processes for pool/precompile")
     process_results, process_seconds = by_process(dxc, items, work / "process")
-    service_results, service_seconds, service = by_service(dxc, items)
-    pool_results, pool_seconds, pool = by_pool(dxc, items, processes)
+    pycache = work / "pycache"
+    if pycache.exists():
+        shutil.rmtree(pycache)
+    service_results, service_seconds, service = by_service(dxc, items, pycache)
+    again = Service(dxc, pycache).ready()
+    again.close()
+    pool_results, pool_seconds, pool = by_pool(dxc, items, processes, pycache)
     pre_results, pre_seconds, pre_compilers = by_precompile(dxc, items, processes, work / "precompile")
 
     failures = []
@@ -317,6 +326,7 @@ def run(dxc, work, processes):
     print(f"precompile {processes} processes: {len(items)} shaders in {pre_seconds:.2f} s wall, start-up included "
           f"({len(items) / pre_seconds:.1f} shaders/s, {1000 * pre_seconds / len(items):.1f} ms/shader), "
           f"DXC {'/'.join(pre_compilers)}")
+    print(f"service start-up: {service.ready_seconds:.3f} s with no bytecode cached, {again.ready_seconds:.3f} s with it")
     print(f"service DXC: {service.compiler}" + (f" ({service.why})" if service.why else ""))
     if service.compiler != "library" or any(p.compiler != "library" for p in pool):
         failures.append("the service did not load DXC's library")

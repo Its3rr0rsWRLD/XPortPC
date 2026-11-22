@@ -162,16 +162,26 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
    naming the form. It does not substitute a different shader.
 4. Create the desktop PSO with the translated root signature.
 
-**Performance, honestly.** The converter is Python and DXC is slow; translating at PSO creation would stall the title for
-seconds per pipeline. The path:
+**Performance, honestly.** The converter is Python and DXC is slow to start; one process each per shader cost about
+0.39 s per shader cold on the owner's PC (R3), almost all of it start-up. The path:
 
-- **Now (R3-R5):** translate at creation, synchronously. Acceptable for test programs with a handful of pipelines.
-- **Next:** an ahead-of-time pass. The first run of a title records each pipeline's inputs (bytecode hash and the
-  state the translation needs) in the cache index; `x2w_aot_cache` translates the recorded set offline in parallel
-  processes; later runs hit the cache. Misses still translate synchronously and are logged.
+- **Done: a translator service.** `d3d12_xs.dll` keeps a pool of `tools/pso_service.py` processes
+  (`src/d3d12_xs_translator.h`): each has the converter imported once and DXC's library (`IDxcCompiler3`, the
+  `dxcompiler.dll` beside `dxc.exe`) loaded in process, and takes framed requests over its stdin/stdout. The first is
+  started at device creation; the pool grows while requests wait (at most cores - 1, 8 at most). A pipeline's shaders
+  and pipelines from several title threads translate in parallel. If no service can run, or one fails mid-request, the
+  shim falls back to one `tools/pso_translate.py` process per shader. Output, cache format and keys are unchanged:
+  the paths write byte-identical DXIL and HLSL (`runtime_r3_translator_paths_warp`, `runtime_r3_translator_bench`).
+- **Done: ahead of time.** The shim records every console shader it sees in the title's cache directory
+  (`manifest.txt`, `inputs\`, `translator.json`; `tools/pso_cache.py`). `tools/precompile_cache.py <title>`
+  translates the recorded set on all cores, recomputing each key with the current converter fingerprint, so the next
+  launch is all cache hits (README, "Shader cache for a title"). `X2W_TRANSLATE=defer` records without translating
+  (the pipeline fails), for a fast recording run. Misses still translate at creation.
 - **Later:** port the converter's lowering to C++ inside the graphics shim, checked against the Python converter on the
   whole draw-check suite and corpus (identical HLSL text, or identical bit-exact draws). Only then is creation-time
-  translation fast enough for titles that create pipelines while running.
+  translation of a title that creates pipelines while running free of a process round trip.
+
+Measured numbers are in [experiments.md](../experiments.md#translator-service-and-ahead-of-time-cache-runtime-rung-r3).
 
 ### Console-only features
 
