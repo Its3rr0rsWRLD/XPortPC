@@ -1749,6 +1749,39 @@ An `ALTER_IMM` variant changes immediates or memory displacements on 10 exports 
 
 Not covered by this experiment: the 5 move forms carved out to `cpu_vex_aot.py (PR #325)`, memory operands on the 28 register-only AVX forms, FP arithmetic/compare/convert/test instructions, control flow or calls mixed with AVX state, nonvolatile `XMM6`..`XMM15` save/restore prologues, and title CPU code execution.
 
+## Mesh draw fallback
+
+The bounded mesh translator can emit `cs_6_0` entry `main` and `vs_6_0` entry
+`vertex_main` from the same validated three-vertex, one-primitive program using
+`tools/mesh_entry_aot.py --compute-fallback`. The compute stage keeps the
+original constant buffers and indexed vertex SRV. It writes counts, positions,
+primitive indices and optional PARAM0 to a 128-byte buffer. The runner transitions
+the buffer from UAV to vertex SRV and issues a triangle-list draw. The vertex stage
+uses `SV_VertexID` to follow the generated indices and passes PARAM0 to the
+translated pixel stage as `TEXCOORD0`.
+
+```powershell
+cmake --build --preset dev --target offscreen_check
+ctest --preset dev --no-tests=error -R '^mesh_indexed_fallback_(hardware|warp)$' -V
+```
+
+On Windows 10 22H2 build 19045.6456, the GTX 1060 6 GB (32.0.15.6094) and in-box
+WARP (10.0.19041.5794) both matched all 128 output bytes and all 1,024 pixels for
+the full and partial triangles, two partial draws with independent changes to
+the compute constant buffers, and both vertex-color gradients. The controls
+required a clean debug layer when available. They detected a changed guard
+at byte 76 with zero pixel differences, a collapsed index at byte 72 with 276
+pixel differences, and a stale palette with 992 pixel differences and matching
+exports. DXC 1.9.2602.17 compiled all stages
+at Shader Model 6.0. The debug layer reported zero errors and warnings.
+All seven native and fallback mesh tests also passed on app-local WARP 1.0.22
+with Agility SDK 1.620.2.
+
+This fallback covers the single-group specialization below. The supported
+shape has three vertices, one triangle and optional PARAM0. The hardware's
+native wave width is not involved because the translator specializes the
+guest wave behavior offline for this shape.
+
 ## Single-group mesh entry specialization
 
 The indexed variant, selected with `--vertex-header WORD`, specializes packed
