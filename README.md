@@ -1,5 +1,9 @@
 # XPortPC
 
+**Based on Xbox2Windows**
+
+(This version is because I've got agents working on it fast, which does better alone)
+
 XPortPC converts Xbox Series X|S (Scarlett) programs to run on Windows PCs. Scarlett titles are already x64 code, so XPortPC loads them natively and replaces what only exists on the console: the system libraries, the GPU shaders and the GPU memory model. Only the CPU code that needs patching is translated.
 
 The center of the project is the shader converter. It translates gfx1013 (RDNA) shader programs into HLSL and then into desktop DXIL. Every supported instruction form is checked on real hardware and on WARP: each draw is compared bit for bit against an independent CPU reference, and wrong references must fail. The converter is meant to work for any title, so nothing in it is tied to one game.
