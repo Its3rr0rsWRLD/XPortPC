@@ -8,7 +8,8 @@ XMM0 or RAX. Control flow and the integer instructions are those of cpu_switch_a
 Only the low quadword of an XMM register is modelled. Every supported instruction computes
 that quadword from low quadwords alone, so the upper half never reaches a result. The two
 dwords of the low quadword are tracked separately as defined or undefined: a float argument
-defines the low dword only, and a read of an undefined part is rejected.
+defines the low dword only, and a read of an undefined part is rejected. Integer registers are
+tracked as cpu_switch_aot tracks them, by how many low bytes are defined.
 """
 
 import argparse
@@ -19,7 +20,8 @@ import pefile
 from iced_x86 import ConditionCode as CC, FlowControl, MemorySizeExt, Mnemonic as M, OpKind, Register as R, RegisterExt
 
 from cpu_leaf_aot import export_rva
-from cpu_switch_aot import ALU, Function, Lifter, NAMES, PRELUDE, VOLATILE, full, signed, unsigned
+from cpu_switch_aot import (ALU, CMOVCC, SETCC, Function, Lifter, NAMES, PRELUDE, VOLATILE, flag_producer, full,
+                            signed, unsigned)
 
 
 SLOTS = (R.RCX, R.RDX, R.R8, R.R9)
@@ -45,6 +47,16 @@ CONDITIONS = {CC.E: "(fc & 4u) != 0", CC.NE: "(fc & 4u) == 0", CC.B: "(fc & 1u) 
 def parts(register, width):
     """Definedness keys of the low dword and, for a double, of bits 32-63."""
     return {(register, 0)} if width == 4 else {(register, 0), (register, 1)}
+
+
+def whole(keys):
+    """Reads or writes of XMM parts, in the width form of cpu_switch_aot: each part is one dword."""
+    return dict.fromkeys(keys, 4)
+
+
+def gpr(reads, register):
+    """Record a read of the low bytes of an integer register, as cpu_switch_aot's lower() does."""
+    reads[full(register)] = max(reads.get(full(register), 0), RegisterExt.size(register))
 
 
 def describe(key):
@@ -83,30 +95,44 @@ class ScalarLifter(Lifter):
 
     def pointer(self, ins, reads):
         address = self.address(ins)
-        reads.update(full(r) for r in (ins.memory_base, ins.memory_index) if r != R.NONE)
+        for register in (ins.memory_base, ins.memory_index):
+            if register != R.NONE:
+                gpr(reads, register)
         return address
 
     def source(self, ins, number, width, reads):
         """The bits of a float or double operand, from an XMM register or from memory."""
         if ins.op_kind(number) == OpKind.MEMORY and MemorySizeExt.size(ins.memory_size) == width:
-            return f"load<{unsigned(width)}>({self.pointer(ins, reads)})"
+            # A guest read: performed even when its value is unused, since the original faults either way.
+            return f"load_always<{unsigned(width)}>({self.pointer(ins, reads)})"
         register = self.xmm(ins, number)
-        reads.update(parts(register, width))
+        reads.update(whole(parts(register, width)))
         return XMM[register] if width == 8 else f"static_cast<std::uint32_t>({XMM[register]})"
 
     def assign(self, register, width, bits):
         name = XMM[register]
         return f"{name} = {bits};" if width == 8 else f"{name} = low({name}, {bits});"
 
-    def statement(self, ins, next_ins):
+    def statement(self, ins, sets_flags=False, producer=None):
+        """Return C++ for one instruction, its reads and its writes, in the form of cpu_switch_aot's
+        Lifter.statement(): each maps a full integer register to the low bytes read or the width
+        written. XMM parts are keyed (register, half) and always read or written as one dword.
+
+        sets_flags and producer are passed to the integer lifter; float compares and the jumps that
+        read them are handled by condition() below."""
         mnemonic = ins.mnemonic
-        reads, writes = set(), set()
+        reads, writes = {}, {}
         self.merges = []
-        if mnemonic == M.RET and self.result != "q":
+        if mnemonic == M.RET:
+            if self.result == "q":
+                # The integer lifter leaves the returned width to its own definedness pass; here the
+                # whole of RAX is the result.
+                text, _, _ = super().statement(ins, sets_flags, producer)
+                return text, {R.RAX: 8}, writes
             width = 4 if self.result == "f" else 8
             self.vectors.add(R.XMM0)
             bits = "xmm0" if width == 8 else "static_cast<std::uint32_t>(xmm0)"
-            return f"return cast<{TYPES[width]}>({bits});", parts(R.XMM0, width), writes
+            return f"return cast<{TYPES[width]}>({bits});", whole(parts(R.XMM0, width)), writes
         vector = any(ins.op_kind(n) == OpKind.REGISTER and not RegisterExt.is_gpr(ins.op_register(n))
                      for n in range(ins.op_count))
         unsupported = ValueError(f"unsupported instruction at RVA {ins.ip:#x}: {ins}")
@@ -114,7 +140,7 @@ class ScalarLifter(Lifter):
                 ins.op_kind(n) in (OpKind.REGISTER, OpKind.MEMORY) for n in range(2)):
             if vector:
                 raise unsupported
-            return super().statement(ins, next_ins)
+            return super().statement(ins, sets_flags, producer)
 
         if mnemonic in MOVES or mnemonic in (M.MOVD, M.MOVQ):
             width = MOVES.get(mnemonic, 4 if mnemonic == M.MOVD else 8)
@@ -129,21 +155,21 @@ class ScalarLifter(Lifter):
                 if mnemonic != M.MOVD:
                     raise unsupported
                 bits = self.source(ins, 1, 4, reads)
-                writes.add(full(ins.op0_register))
+                writes[full(ins.op0_register)] = 4
                 return self.write(ins, 4, bits), reads, writes
             destination = self.xmm(ins, 0)
             if ins.op1_kind == OpKind.REGISTER and ins.op1_register not in XMM:
                 if mnemonic != M.MOVD:
                     raise unsupported
-                reads.add(full(ins.op1_register))
+                gpr(reads, ins.op1_register)
                 bits = self.operand(ins, 1, 4)
             else:
                 bits = self.source(ins, 1, width, reads)
             if mnemonic == M.MOVSS and ins.op1_kind == OpKind.REGISTER:
-                writes.update(parts(destination, 4))
+                writes.update(whole(parts(destination, 4)))
                 return self.assign(destination, 4, bits), reads, writes
             # Loads, MOVD, MOVQ and MOVSD between registers define the whole low quadword.
-            writes.update(parts(destination, 8))
+            writes.update(whole(parts(destination, 8)))
             return f"{XMM[destination]} = {bits};", reads, writes
         if mnemonic in TRUNCATIONS:
             width = RegisterExt.size(ins.op0_register) if ins.op0_kind == OpKind.REGISTER else 0
@@ -151,7 +177,7 @@ class ScalarLifter(Lifter):
                 raise unsupported
             source = TRUNCATIONS[mnemonic]
             bits = self.source(ins, 1, source, reads)
-            writes.add(full(ins.op0_register))
+            writes[full(ins.op0_register)] = width
             value = f"truncate<{signed(width)}>(cast<{TYPES[source]}>({bits}))"
             return self.write(ins, width, value), reads, writes
 
@@ -163,14 +189,14 @@ class ScalarLifter(Lifter):
                 # Only the zeroing idiom: any other use combines the two registers bit by bit.
                 if source != destination:
                     raise unsupported
-                writes.update(parts(destination, 8))
+                writes.update(whole(parts(destination, 8)))
                 return f"{name} = 0;", reads, writes
             # A register copy may carry undefined parts, which stay undefined in the copy.
             self.merges = [((destination, half), (source, half)) for half in (0, 1)]
             return f"{name} = {XMM[source]};", reads, writes
         if mnemonic in ARITHMETIC:
             operator, width = ARITHMETIC[mnemonic]
-            reads.update(parts(destination, width))
+            reads.update(whole(parts(destination, width)))
             a = name if width == 8 else f"static_cast<std::uint32_t>({name})"
             b = self.source(ins, 1, width, reads)
             return self.assign(destination, width, f"arith<{TYPES[width]}>({a}, {b}, '{operator}')"), reads, writes
@@ -180,25 +206,24 @@ class ScalarLifter(Lifter):
                 source = RegisterExt.size(ins.op1_register)
                 if source not in (4, 8) or not RegisterExt.is_gpr(ins.op1_register):
                     raise unsupported
-                reads.add(full(ins.op1_register))
+                gpr(reads, ins.op1_register)
                 integer = self.operand(ins, 1, source)
             else:
                 source = MemorySizeExt.size(ins.memory_size)
-                integer = f"load<{unsigned(source)}>({self.pointer(ins, reads)})"
-            writes.update(parts(destination, width))
+                integer = f"load_always<{unsigned(source)}>({self.pointer(ins, reads)})"
+            writes.update(whole(parts(destination, width)))
             value = f"static_cast<{TYPES[width]}>(static_cast<{signed(source)}>({integer}))"
             return self.assign(destination, width, f"cast<{unsigned(width)}>({value})"), reads, writes
         if mnemonic in RESIZES:
             source = RESIZES[mnemonic]
             width = 12 - source
             bits = self.source(ins, 1, source, reads)
-            writes.update(parts(destination, width))
+            writes.update(whole(parts(destination, width)))
             value = f"resize<{TYPES[width]}>(cast<{TYPES[source]}>({bits}))"
             return self.assign(destination, width, f"cast<{unsigned(width)}>({value})"), reads, writes
+        # lift() has checked that a conditional jump follows.
         width = COMPARES[mnemonic]
-        if next_ins is None or next_ins.flow_control != FlowControl.CONDITIONAL_BRANCH:
-            raise ValueError(f"float compare without a conditional branch at RVA {ins.ip:#x}")
-        reads.update(parts(destination, width))
+        reads.update(whole(parts(destination, width)))
         a = name if width == 8 else f"static_cast<std::uint32_t>({name})"
         b = self.source(ins, 1, width, reads)
         self.compare = True
@@ -206,7 +231,9 @@ class ScalarLifter(Lifter):
 
 
 def condition(function, edges, lifter, jcc):
-    """A float compare may feed a run of conditional jumps; integer flags feed the next jump only."""
+    """A float compare may feed a run of conditional jumps; integer flags feed the next jump only.
+
+    Returns the C++ condition and the integer instruction whose flags it reads, or None after a float compare."""
     current = jcc
     while True:
         producer = function.ending.get(current.ip)
@@ -219,12 +246,12 @@ def condition(function, edges, lifter, jcc):
     if producer.mnemonic in COMPARES:
         if jcc.condition_code not in CONDITIONS:
             raise ValueError(f"unsupported condition after a float compare at RVA {jcc.ip:#x}")
-        return CONDITIONS[jcc.condition_code]
+        return CONDITIONS[jcc.condition_code], None
     if current is not jcc:
         raise ValueError(f"flags cross a branch before RVA {jcc.ip:#x}")
     if producer.mnemonic not in (*ALU, M.CMP, M.TEST, M.INC, M.DEC):
         raise ValueError(f"unsupported flag producer at RVA {producer.ip:#x}")
-    return lifter.condition(producer, jcc)
+    return lifter.condition(producer, jcc), producer
 
 
 def lift(pe, name, result, slots):
@@ -232,59 +259,79 @@ def lift(pe, name, result, slots):
     function = LeafFunction(pe, entry)
     edges = function.explore()
     lifter = ScalarLifter(result)
+    sets_flags = set()
     order = sorted(function.instructions)
     instructions = function.instructions
     body = {}
     effects = {}
+    # Conditional jumps first: they decide which integer instructions record flags (sets_flags).
+    # SETcc and CMOVcc find their producer as cpu_switch_aot does, which rejects a float compare.
+    producers = {}
+    for ip in order:
+        ins = instructions[ip]
+        if ins.flow_control == FlowControl.CONDITIONAL_BRANCH:
+            test, producer = condition(function, edges, lifter, ins)
+            body[ip] = f"if ({test}) goto loc_{ins.near_branch_target:x};"
+        elif ins.mnemonic in SETCC | CMOVCC:
+            producer = producers[ip] = flag_producer(function, edges, ins)
+        else:
+            continue
+        if producer is not None:
+            sets_flags.add(producer.ip)
     for ip in order:
         ins = instructions[ip]
         if ins.has_lock_prefix or ins.has_rep_prefix or ins.has_repne_prefix:
             raise ValueError(f"unsupported prefix at RVA {ip:#x}")
-        following = instructions.get(ins.next_ip) if ins.flow_control == FlowControl.NEXT else None
-        effects[ip] = (set(), set(), [])
+        effects[ip] = ({}, {}, [])
         if ins.flow_control == FlowControl.CONDITIONAL_BRANCH:
-            body[ip] = f"if ({condition(function, edges, lifter, ins)}) goto loc_{ins.near_branch_target:x};"
+            pass
         elif ins.flow_control == FlowControl.UNCONDITIONAL_BRANCH:
             body[ip] = f"goto loc_{ins.near_branch_target:x};"
         else:
             if ins.mnemonic != M.RET and ins.is_stack_instruction:
                 raise ValueError(f"stack operation in leaf profile at RVA {ip:#x}")
-            body[ip], reads, writes = lifter.statement(ins, following)
-            # The shared scalar lifter reports reads and writes as ordered dicts; the dataflow below wants sets.
-            reads, writes = set(reads), set(writes)
+            following = instructions.get(ins.next_ip) if ins.flow_control == FlowControl.NEXT else None
+            if ins.mnemonic in COMPARES and (following is None
+                                             or following.flow_control != FlowControl.CONDITIONAL_BRANCH):
+                raise ValueError(f"float compare without a conditional branch at RVA {ip:#x}")
+            body[ip], reads, writes = lifter.statement(ins, ip in sets_flags, producers.get(ip))
             effects[ip] = (reads, writes, lifter.merges)
         reads, writes, merges = effects[ip]
-        touched = set(reads) | set(writes) | {key for pair in merges for key in pair}
+        touched = {*reads, *writes, *(key for pair in merges for key in pair)}
         saved = sorted(describe(key) for key in touched
                        if (key[0] not in VOLATILE_XMM if isinstance(key, tuple) else key not in VOLATILE))
         if saved:
             raise ValueError(f"nonvolatile register {saved[0]} at RVA {ip:#x}")
 
-    # Must-defined registers and XMM parts: the arguments at entry, intersected at every join.
+    # Low bytes defined on every path, per integer register and XMM part (0 or 8 for a part): the
+    # arguments at entry, the minimum at every join.
     arguments = set()
     for number, kind in enumerate(slots):
         arguments |= {SLOTS[number]} if kind == "q" else parts(XMM_SLOTS[number], 4 if kind == "f" else 8)
     everything = {*NAMES, *((register, half) for register in XMM for half in (0, 1))}
-    defined = {ip: set(everything) for ip in order}
-    defined[entry] = set(arguments)
+    defined = {ip: dict.fromkeys(everything, 8) for ip in order}
+    defined[entry] = {key: 8 if key in arguments else 0 for key in everything}
     changed = True
     while changed:
         changed = False
         for ip in order:
             _, writes, merges = effects[ip]
-            out = defined[ip] | set(writes)
+            out = dict(defined[ip])
+            for key, width in writes.items():
+                # A 32- or 64-bit write (and any XMM part write) defines all eight bytes; an 8- or 16-bit
+                # write keeps the rest.
+                out[key] = 8 if width >= 4 else max(out[key], width)
             for destination, source in merges:
-                if source not in defined[ip]:
-                    out.discard(destination)
-                else:
-                    out.add(destination)
+                # A register copy carries the definedness of its source.
+                out[destination] = defined[ip][source]
             for successor in function.successors[ip]:
-                merged = defined[successor] & out
-                if merged != defined[successor]:
+                old = defined[successor]
+                merged = {key: min(old[key], out[key]) for key in everything}
+                if merged != old:
                     defined[successor] = merged
                     changed = True
     for ip in order:
-        missing = sorted(describe(key) for key in effects[ip][0] - defined[ip])
+        missing = sorted(describe(key) for key, width in effects[ip][0].items() if defined[ip][key] < width)
         if missing:
             raise ValueError(f"undefined register {missing[0]} at RVA {ip:#x}")
 
