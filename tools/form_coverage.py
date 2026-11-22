@@ -102,6 +102,7 @@ CPU_FIXTURES = {
     "avx_f16c_maskmov": "cpu_aot_avx_f16c_maskmov",
     "avx_int_extend_hadd": "cpu_aot_avx_int_extend_hadd",
     "avx_packed_int": "cpu_aot_avx_packed_int",
+    "avx_scalar_fp": "cpu_aot_avx_scalar_fp",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
