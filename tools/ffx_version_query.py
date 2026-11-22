@@ -53,6 +53,7 @@ template<class T> void store(word address, T v) {
     volatile uint32_t sink = 1u / zero_divisor;
     (void)sink;
     for (;;) {}
+}
 template<class F, class U> static F quiet_nan(F x) {
     U bits; memcpy(&bits, &x, sizeof bits);
     bits |= (sizeof(U) == 4) ? static_cast<U>(0x00400000u) : static_cast<U>(0x0008000000000000ull);
@@ -67,6 +68,7 @@ template<class F, class U> static F fma_x86(F s0, F s1, F s2, int order, bool ne
     const F b = order == 213 ? s0 : s2;
     const F c = order == 231 ? s0 : (order == 132 ? s1 : s2);
     return std::fma(neg_p ? -a : a, b, neg_c ? -c : c);
+}
 static inline uint8_t aes_gf_mul(uint8_t a, uint8_t b) {
     uint8_t p = 0;
     for (int i = 0; i < 8; ++i) {
@@ -134,6 +136,7 @@ static inline void pclmul_x86(uint8_t out[16], const uint8_t lhs[16], const uint
         if ((b >> k) & 1ull) { lo ^= (a << k); if (k > 0u) hi ^= (a >> (64u - k)); }
     }
     memcpy(out, &lo, 8); memcpy(out + 8, &hi, 8);
+}
 static inline uint32_t sha_rol32(uint32_t x, unsigned n) { return (x << n) | (x >> (32u - n)); }
 static inline uint32_t sha_ror32(uint32_t x, unsigned n) { return (x >> n) | (x << (32u - n)); }
 static inline void sha1_rnds4(uint32_t d[4], const uint32_t s[4], unsigned func) {
@@ -160,6 +163,7 @@ static inline void sha256_rnds2(uint32_t d[4], const uint32_t s[4], const uint32
         h = g; g = f; f = e; e = ne; dv = c; c = b; b = a; a = na;
     }
     d[3] = a; d[2] = b; d[1] = e; d[0] = f;
+}
 template<class T> T round_x86(T x, unsigned mode) {
     if (!std::isfinite(x) || x == T(0)) return x;
     if (mode == 1u) return std::floor(x);
@@ -168,17 +172,7 @@ template<class T> T round_x86(T x, unsigned mode) {
     const T f = std::floor(x), d = x - f;
     const T r = (d < T(0.5)) ? f : ((d > T(0.5)) ? (f + T(1)) : (std::fmod(f, T(2)) == T(0) ? f : (f + T(1))));
     return r == T(0) ? std::copysign(T(0), x) : r;
-static inline int32_t cvt_to_i32(double x, bool trunc) {
-    if (!std::isfinite(x)) return static_cast<int32_t>(0x80000000u);
-    double r;
-    if (trunc) {
-        r = std::trunc(x);
-    } else {
-        const double f = std::floor(x), d = x - f;
-        r = (d < 0.5) ? f : ((d > 0.5) ? (f + 1.0) : (std::fmod(f, 2.0) == 0.0 ? f : (f + 1.0)));
-    }
-    if (r < -2147483648.0 || r >= 2147483648.0) return static_cast<int32_t>(0x80000000u);
-    return static_cast<int32_t>(r);
+}
 static inline uint32_t f16_to_f32_bits(uint16_t h) {
     const uint32_t sign = uint32_t(h >> 15) << 31;
     uint32_t exp = (h >> 10) & 0x1fu, frac = h & 0x3ffu;
@@ -222,6 +216,7 @@ static inline uint16_t f32_to_f16_bits(uint32_t f, unsigned mode) {
     const bool inc = mode == 0u ? (gt || (eq && (mant & 1u) != 0u))
                    : (mode == 1u ? (neg && nz) : (mode == 2u ? (!neg && nz) : false));
     return static_cast<uint16_t>(sign | (mant + (inc ? 1u : 0u)));
+}
 static inline double round_even_or_trunc(double x, bool trunc) {
     if (trunc) return std::trunc(x);
     const double f = std::floor(x), d = x - f;
@@ -574,12 +569,6 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             src_bits = 8 * (MemorySizeExt.size(i.memory_size) if i.op1_kind == K.MEMORY else RegisterExt.size(i.op1_register))
             dst_bits = 8 * RegisterExt.size(i.op0_register)
             stmt = write(f"static_cast<int{dst_bits}_t>(static_cast<int{src_bits}_t>({operand(1)}))")
-        elif op == M.CMOVNE:
-            stmt = write(f"zero ? {operand(0)} : {operand(1)}")
-        elif op == M.CMOVE:
-            stmt = write(f"zero ? {operand(1)} : {operand(0)}")
-        elif op == M.CMOVBE:
-            stmt = write(f"(carry || zero) ? {operand(1)} : {operand(0)}")
         elif op in (M.CMOVE, M.CMOVNE, M.CMOVA, M.CMOVAE, M.CMOVB, M.CMOVBE):
             cond = {M.CMOVE: "zero", M.CMOVNE: "!zero", M.CMOVA: "!carry && !zero",
                     M.CMOVAE: "!carry", M.CMOVB: "carry", M.CMOVBE: "carry || zero"}[op]
@@ -664,17 +653,13 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
         elif op in (M.ADD, M.ADC, M.AND, M.OR, M.XOR, M.INC, M.DEC, M.SUB, M.SBB):
             operator = {M.ADD: "+", M.ADC: "+", M.INC: "+", M.DEC: "-", M.AND: "&", M.OR: "|", M.XOR: "^", M.SUB: "-", M.SBB: "-"}[op]
             rhs = "1" if op in (M.INC, M.DEC) else operand(1)
-            width = UINT[MemorySizeExt.size(i.memory_size) if i.op0_kind == K.MEMORY else RegisterExt.size(i.op0_register)]
-            expr = f"a {operator} b" + (" + word(carry)" if op == M.ADC else " - word(carry)" if op == M.SBB else "")
-            update = {M.ADD: "carry = v < a;", M.ADC: "carry = v < a || (carry && v == a);",
-                      M.SUB: "carry = a < b;", M.SBB: "carry = a < b || (carry && a == b);",
-                      M.INC: "", M.DEC: "", M.XOR: "carry = false;", M.AND: "carry = false;", M.OR: "carry = false;"}[op]
             size = MemorySizeExt.size(i.memory_size) if i.op0_kind == K.MEMORY else RegisterExt.size(i.op0_register)
             width = UINT[size]
             sign_shift = 8 * size - 1
-            expr = f"a {operator} b" + (" - word(carry)" if op == M.SBB else "")
+            expr = f"a {operator} b" + (" + word(carry)" if op == M.ADC else " - word(carry)" if op == M.SBB else "")
             update = {
                 M.ADD: f"carry = v < a; overflow = (((~(a ^ b)) & (a ^ v)) >> {sign_shift}) != 0;",
+                M.ADC: f"carry = v < a || (carry && v == a); overflow = (((~(a ^ b)) & (a ^ v)) >> {sign_shift}) != 0;",
                 M.SUB: f"carry = a < b; overflow = (((a ^ b) & (a ^ v)) >> {sign_shift}) != 0;",
                 M.SBB: f"carry = a < b || (carry && a == b); overflow = (((a ^ b) & (a ^ v)) >> {sign_shift}) != 0;",
                 M.INC: f"overflow = (((~(a ^ b)) & (a ^ v)) >> {sign_shift}) != 0;",
@@ -2504,8 +2489,6 @@ def lower(body, initial, globals_, calls, exits, *, host_ops=None, x87=False):
             cond = {M.SETE: "zero", M.SETNE: "!zero", M.SETA: "!carry && !zero",
                     M.SETAE: "!carry", M.SETB: "carry", M.SETBE: "carry || zero"}[op]
             stmt = write(f"({cond})")
-        elif op == M.SETE:
-            stmt = write("zero")
         elif op == M.SETO:
             stmt = write("overflow")
         elif op == M.CALL:
