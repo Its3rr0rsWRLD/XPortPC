@@ -10,7 +10,8 @@ from ..registers import LANE_MASK, fp_operand, lane_mask, vector_u32
 # the VOP2/VOP3 sections): V_ADD_NC_U32 D=S0+S1, V_SUB_NC_U32 D=S0-S1, V_SUBREV_NC_U32 D=S1-S0, V_MUL_U32_U24
 # D=S0.u[23:0]*S1.u[23:0], V_MUL_I32_I24 D=S0.i[23:0]*S1.i[23:0], V_MUL_HI_U32_U24 D=(S0.u24*S1.u24)>>32,
 # V_MUL_HI_I32_I24 D=(S0.i24*S1.i24)>>32, V_MUL_HI_U32/V_MUL_HI_I32 D=(S0*S1)>>32, V_MUL_LO_U32 D=(S0*S1)[31:0],
-# V_MAD_U32_U24 D=S0.u[23:0]*S1.u[23:0]+S2, V_MAD_I32_I24 D=S0.i[23:0]*S1.i[23:0]+S2, V_ADD3_U32 D=S0+S1+S2,
+# V_MAD_U32_U24 D=S0.u[23:0]*S1.u[23:0]+S2, V_MAD_I32_I24 D=S0.i[23:0]*S1.i[23:0]+S2, V_MAD_U32_U16 and V_MAD_I32_I16
+# D=S0.[15:0]*S1.[15:0]+S2 (unsigned, signed), V_ADD3_U32 D=S0+S1+S2,
 # V_LSHL_ADD_U32 D=(S0<<S1[4:0])+S2, V_ADD_LSHL_U32 D=(S0+S1)<<S2[4:0], V_LSHL_OR_B32 D=(S0<<S1[4:0])|S2,
 # V_AND_OR_B32 D=(S0&S1)|S2, V_OR3_B32 D=S0|S1|S2, V_XOR3_B32 D=S0^S1^S2, V_XAD_U32 D=(S0^S1)+S2,
 # V_ADD_NC_I32 D=S0+S1, V_SUB_NC_I32 D=S0-S1. Shift counts are the bit slice [4:0], so they are masked to five bits.
@@ -20,12 +21,16 @@ from ..registers import LANE_MASK, fp_operand, lane_mask, vector_u32
 INT_VOP2 = ("add_nc_u32", "sub_nc_u32", "subrev_nc_u32", "mul_u32_u24", "mul_i32_i24", "mul_hi_u32_u24", "mul_hi_i32_i24")
 INT_VOP3 = ("add_nc_i32", "sub_nc_i32", "mul_lo_u32", "mul_hi_u32", "mul_hi_i32")
 INT_CLAMPED = ("add_nc_u32", "sub_nc_u32", "subrev_nc_u32", "add_nc_i32", "sub_nc_i32")
-INT_TERNARY = ("mad_u32_u24", "mad_i32_i24", "add3_u32", "lshl_add_u32", "add_lshl_u32", "lshl_or_b32", "and_or_b32",
+INT_TERNARY = ("mad_u32_u24", "mad_i32_i24", "mad_u32_u16", "mad_i32_i16", "add3_u32", "lshl_add_u32", "add_lshl_u32", "lshl_or_b32", "and_or_b32",
                "or3_b32", "xor3_b32", "xad_u32")
 
 
 def sext24(word):
     return f"asuint(asint({word} << 8u) >> 8)"
+
+
+def sext16(word):
+    return f"asuint(asint({word} << 16u) >> 16)"
 
 
 def int_binary(op, a, b, clamp, helpers):
@@ -52,6 +57,9 @@ def int_ternary(op, a, b, c):
     return {
         "mad_u32_u24": f"((({a} & 0xffffffu) * ({b} & 0xffffffu)) + {c})",
         "mad_i32_i24": f"(({sext24(a)} * {sext24(b)}) + {c})",
+        # The 16-bit forms read bits [15:0] of the first two sources (ported from R0Y00/Xbox2Windows#532 by Vonsek).
+        "mad_u32_u16": f"((({a} & 0xffffu) * ({b} & 0xffffu)) + {c})",
+        "mad_i32_i16": f"(({sext16(a)} * {sext16(b)}) + {c})",
         "add3_u32": f"({a} + {b} + {c})",
         "lshl_add_u32": f"(({a} << ({b} & 31u)) + {c})",
         "add_lshl_u32": f"(({a} + {b}) << ({c} & 31u))",

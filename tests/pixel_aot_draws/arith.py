@@ -11,6 +11,8 @@ from .int import INT_PROGRAMS
 # Results that need a vector source are copied with v_or_b32 so that no word passes through a float register.
 u24 = lambda value: value & 0xffffff
 i24 = lambda value: (value & 0xffffff) - (1 << 24) if value & 0x800000 else value & 0xffffff
+u16 = lambda value: value & 0xffff
+i16 = lambda value: (value & 0xffff) - (1 << 16) if value & 0x8000 else value & 0xffff
 hi_u = lambda a, b: (a * b) >> 32
 hi_i = lambda a, b: ((signed(a) * signed(b)) >> 32) & M32
 sat_u = lambda value: min(max(value, 0), M32)
@@ -135,6 +137,24 @@ ARITH_PROGRAMS = (
       (1, lambda x, y, z, w: byte((i24(x) * i24(w) + z) & M32, 3)),  # operands in the wrong slots
       (2, lambda x, y, z, w: byte((0x01000005 * z + 7) & M32, 3)),  # no 24-bit mask
       (3, lambda x, y, z, w: byte((u24(z) * 0xfffffd + w) & M32, 3))]),  # unsigned for signed
+    # Multiply-add with 16-bit operands (v_mad_u32_u16, v_mad_i32_i16; ported from R0Y00/Xbox2Windows#532 by Vonsek): only
+    # bits [15:0] of the first two sources are read, zero- or sign-extended, and the addend is the third source.
+    ([
+        copy(18, "s46"),
+        "v_mad_u32_u16 v19, s44, s45, v18",
+        "v_mad_i32_i16 v20, s44, v18, s47",
+        "v_mad_u32_u16 v21, 0x2345, s46, 7",
+        "v_mad_i32_i16 v22, v18, -3, s47",
+        ubyte(3, 12, "v19", "e32"), ubyte(3, 13, "v20", "e32"), ubyte(3, 14, "v21", "e32"), ubyte(3, 15, "v22", "e32"),
+    ], lambda x, y, z, w: [byte((u16(x) * u16(y) + z) & M32, 3), byte((i16(x) * i16(z) + w) & M32, 3),
+                           byte((0x2345 * u16(z) + 7) & M32, 3), byte((i16(z) * -3 + w) & M32, 3)],
+     ((0xa5c3e187, 0x3c1b7e69, 0xc2f0171d, 0x6d1e8f2b), (0x93f1c2d4, 0x5a96b45a, 0x4be3a05c, 0x1c2d3e4f),
+      (0x0000ffff, 0xffff0003, 0x7fff8000, 0xfffe0001)),
+     [(0, lambda x, y, z, w: byte((x * y + z) & M32, 3)),  # no 16-bit mask
+      (0, lambda x, y, z, w: byte((u16(x) * u16(z) + y) & M32, 3)),  # operands in the wrong slots
+      (1, lambda x, y, z, w: byte((u16(x) * u16(z) + w) & M32, 3)),  # unsigned for signed
+      (2, lambda x, y, z, w: byte((0x2345 * z + 7) & M32, 3)),  # no 16-bit mask on the second source
+      (3, lambda x, y, z, w: byte((u16(z) * 0xfffd + w) & M32, 3))]),  # unsigned for signed
     # Three-input adds and bitwise forms; the operand order matters for and_or.
     ([
         copy(18, "s46"),
@@ -243,6 +263,7 @@ def controls(directory):
                  "v_mul_hi_u32 v19, s44, v18 clamp", "v_mul_hi_u32_u24_e64 v19, s44, v18 clamp",
                  "v_mul_u32_u24_e64 v19, s44, v18 clamp", "v_mul_i32_i24_e64 v19, s44, v18 clamp",
                  "v_mad_u32_u24 v19, s44, v18, 5 clamp", "v_mad_i32_i24 v19, s44, v18, 5 clamp",
+                 "v_mad_u32_u16 v19, s44, v18, 5 clamp", "v_mad_i32_i16 v19, s44, v18, 5 clamp",
                  "v_mul_lo_u32_e32 v19, s44, v18", "v_add_nc_i32_e32 v19, s44, v18"):
         must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", line]))
     for line in ("v_add_nc_u32_e32 v19, s44, v30", "v_sub_nc_u32_e32 v19, v30, v18", "v_mul_i32_i24_e32 v19, s44, v30",
