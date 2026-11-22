@@ -3,7 +3,7 @@ import math
 import struct
 import subprocess
 
-from .common import assembly, f32, half_rtz, must_reject, translate, with_constants
+from .common import assembly, byte, f32, half_rtz, must_reject, translate, ubyte, with_constants
 
 
 # v_cvt_pkrtz_f16_f32_e64 and v_interp_mov_f32. The pack converts each source to binary16 rounding toward zero (a tie goes
@@ -93,7 +93,69 @@ INTERP_PROGRAMS = (
 SWAPPED = {"p0": "p10", "p10": "p20", "p20": "p10"}
 
 
+# The pack as a plain word (ported from R0Y00/Xbox2Windows#528 by Vonsek): S0 is the low half and S1 the high half, each
+# rounded toward zero, read back byte by byte through v_cvt_f32_ubyteN. e32 takes S0 from an SGPR or an inline constant, e64
+# carries neg and abs on the binary32 sources.
+def half_bits(x):
+    return struct.unpack("<H", struct.pack("<e", rtz_ref(x)))[0]
+
+
+WORD_PROGRAMS = (
+    (["v_mov_b32_e32 v13, s45", "v_cvt_pkrtz_f16_f32_e32 v20, s44, v13"],
+     lambda x, y: half_bits(x) | half_bits(y) << 16),
+    (["v_mov_b32_e32 v13, s45", "v_cvt_pkrtz_f16_f32_e32 v20, 1.0, v13"],
+     lambda x, y: half_bits(1.0) | half_bits(y) << 16),
+    (["v_cvt_pkrtz_f16_f32_e64 v20, -s44, |s45|"], lambda x, y: half_bits(-x) | half_bits(abs(y)) << 16),
+)
+WORD_SETS = ((TIE, -65520.0), (-(3 + 3 * 2.0 ** -10), f32(0.3)), (0.0, -0.75))
+WORD_BYTES = tuple(ubyte(n, 12 + k, "v20", "e32") for k, n in enumerate((0, 1, 2, 3)))
+
+
+def check_pkrtz_word_draws(directory, compiler, renderer, backend):
+    case = directory / "pkrtz_word.case"
+    for index, (body, reference) in enumerate(WORD_PROGRAMS):
+        source = directory / f"pkrtz_word{index}.hlsl"
+        shader = directory / f"pkrtz_word{index}.cso"
+        source.write_text(translate(with_constants([*body, *WORD_BYTES])), encoding="ascii")
+        subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        for x, y in WORD_SETS:
+            x, y = f32(x), f32(y)
+            constants = bytearray(256)
+            struct.pack_into("<2f", constants, 12, x, y)
+            word = reference(x, y)
+            expected = [float(byte(word, n)) for n in range(4)]
+            case.write_bytes(bytes(constants) + struct.pack("<4f", *expected) * 64)
+            subprocess.run(draw, check=True)
+            # Swapped halves and the nearest-even conversion must each be told apart on some set.
+            swapped = word >> 16 | (word & 0xffff) << 16
+            if swapped != word:
+                wrong = [float(byte(swapped, n)) for n in range(4)]
+                case.write_bytes(bytes(constants) + struct.pack("<4f", *wrong) * 64)
+                result = subprocess.run(draw, capture_output=True, text=True)
+                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+                    raise AssertionError(f"Swapped halves escaped detection in pkrtz_word{index}")
+
+
+def check_pkrtz_word_controls():
+    for body, reference in WORD_PROGRAMS:
+        source = translate(with_constants([*body, *WORD_BYTES]))
+        assert "uint pack16_rtz(float value)" in source and "pack16_rtz(" in source.split("float4 main", 1)[1], source
+        for x, y in WORD_SETS:
+            assert all(0 <= (reference(f32(x), f32(y)) >> (8 * n) & 255) <= 255 for n in range(4))
+    # A program that only exports its pack keeps the export path and carries no helper.
+    assert "pack16_rtz" not in translate(pack_program(*PKRTZ_PROGRAMS[0][:3]))
+    # An outstanding sample is refused as the S1 of the word form, and clamp and omod stay refused.
+    program = assembly(False)
+    wait = program.index("s_waitcnt vmcnt(0)")
+    must_reject(translate, program[:wait] + ["v_cvt_pkrtz_f16_f32_e32 v20, s44, v13"] + program[wait:])
+    must_reject(translate, with_constants(["v_cvt_pkrtz_f16_f32_e32 v20, s44, v13 clamp"]))
+    must_reject(translate, with_constants(["v_cvt_pkrtz_f16_f32_e32 v20, v13, s44"]))
+
+
+
 def check_pkrtz_draws(directory, compiler, renderer, backend):
+    check_pkrtz_word_draws(directory, compiler, renderer, backend)
     case = directory / "pkrtz.case"
 
     def draw_program(name, instructions, shader_model, constants, expected, wrongs):
@@ -140,6 +202,7 @@ def check_pkrtz_draws(directory, compiler, renderer, backend):
 
 
 def check_pkrtz_controls():
+    check_pkrtz_word_controls()
     for index, (body, first, second, *_) in enumerate(PKRTZ_PROGRAMS):
         source = translate(pack_program(body, first, second)).split("float4 main", 1)[1]
         assert "nointerpolation" not in source and source.count("export16(") == 4, source
