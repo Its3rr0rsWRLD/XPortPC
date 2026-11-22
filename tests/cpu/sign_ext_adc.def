@@ -1,0 +1,12 @@
+EXPORTS
+    cbw_op
+    cwde_op
+    cdqe_op
+    cqo_op
+    movsx_r16_r8
+    movsx_r32_r8
+    movsx_r64_r8
+    movsx_r32_r16
+    movsx_r64_r16
+    adc32_op
+    adc64_op

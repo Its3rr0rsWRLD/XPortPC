@@ -11,8 +11,10 @@ covering a form in one fixture does not prove every operand variant or any title
 Rules:
 - A fixture's forms are covered only when its test passed. A skipped or failed test (or one that is
   not registered) leaves them uncovered; forms held back only by a skip are listed separately.
-- x64: the mnemonics of a tests/cpu/*.asm source count for the test CPU_FIXTURES names. An unlisted
-  .asm is never counted; it is reported as unclassified so it can be added, without failing the run.
+- x64: new fixtures declare their test in a first-line MASM comment (see CONTRIBUTING.md).
+  Existing CPU_FIXTURES classifications take precedence. Unclassified files are reported.
+  Fixtures registered in record mode instead require decoded-instruction records
+  emitted by their differential test during the JUnit run; source macro tokens are not counted.
 - gfx: only programs the translator accepted count. tests/pixel_aot_check.py records the first word
   of each line of every program tools/pixel_aot.py lowered without an error, in the file CTest names
   in FORM_COVERAGE_RECORD (<build>/form_coverage/<test>.txt). Programs a check expects to be rejected
@@ -37,28 +39,43 @@ RECORDS = ROOT / "out" / "build" / "dev" / "form_coverage"  # CMakePresets.json 
 # map to None: their forms are known but never covered. An unlisted .asm is reported as unclassified.
 CPU_FIXTURES = {
     "branch": "cpu_leaf_aot_branches",
+    "rcx_branches": "cpu_aot_rcx_branches",
     "direct": "cpu_aot_direct_call",
     "chained": "cpu_aot_chained_ranges",
     "callback": "cpu_aot_object_callback",
     "x87_add": "cpu_aot_x87_add",
+    "x87_mul": "cpu_aot_x87_mul",
+    "x87_div": "cpu_aot_x87_div",
+    "x87_sub": "cpu_aot_x87_sub",
+    "x87_moves": "cpu_aot_x87_moves",
     "x87_harness": None,  # native x87 entry and exit state for x87_add
     "destroy": "cpu_aot_destroy_contract",
     "create_context": "cpu_aot_context_lifecycle",
     "bink_heap": "cpu_aot_bink_heap",
     "heap_layout": "cpu_aot_heap_layout",
     "shift_count": "cpu_aot_shift_count",
+    "carry_rotates": "cpu_aot_carry_rotates",
     "version_query": "cpu_aot_version_query",
     "bink_descriptors": "cpu_bink_descriptors",
     "switch": "cpu_aot_jump_tables",
+    "flag_conditions": "cpu_aot_flag_conditions",
     "switch_addr32": "cpu_aot_switch_addr32",
     "fourth_arg": "cpu_aot_fourth_argument",
     "repeat_call": "cpu_aot_repeated_call",
     "working_set_delta": "cpu_working_set_delta",
     "xlatb": "cpu_aot_xlatb",
     "exe_entry": "cpu_aot_exe_entry",
+    "xchg": "cpu_aot_xchg",
     "address_size": "cpu_aot_address_size",
     "call_pair": "cpu_aot_call_pair",
+    "movbe": "cpu_aot_movbe",
     "bmi1": "cpu_aot_bmi1",
+    "rotates_shifts": "cpu_aot_rotates_shifts",
+    "frame": "cpu_aot_stack_frames",
+    "calls": "cpu_aot_direct_calls",
+    "call_entries": "cpu_aot_call_entries",
+    "bare_calls": "cpu_aot_bound_callees",
+    "string_ops": "cpu_aot_string_ops",
     "register_probe": None,  # measurement harness
     "two_imports": None,     # mapped and run unchanged by pe_map
     "exe_start": None,       # mapped and run unchanged by pe_map
@@ -66,6 +83,10 @@ CPU_FIXTURES = {
     "seh_route": None,       # mapped and run unchanged by pe_map
     "tls_route": None,       # mapped and run unchanged by pe_map
 }
+
+# These sources use parameterized macros. Count decoded instructions recorded by
+# their passing differential test, rather than guessing the macro expansion.
+CPU_RECORD_FIXTURES = {"flag_conditions"}
 
 MASM_DIRECTIVES = {"ifdef", "ifndef", "if", "else", "elseif", "endif", "end", "public", "extern",
                    "externdef", "include", "includelib", "option", "align", "even", "org", "assume", "local"}
@@ -185,14 +206,28 @@ def measure(results, root=ROOT, records=None):
     """results: {test: status}. root: the repository whose tests/cpu is scanned (the check passes a
     temporary one). records: {test: accepted gfx mnemonics} from read_records."""
     cpu = {}
+    records = records or {}
+    cpu_tests = set(CPU_FIXTURES.values()) - {None}
     for asm in sorted((root / "tests" / "cpu").glob("*.asm")):
-        if asm.stem not in CPU_FIXTURES:
-            status = "unclassified"
-        else:
+        source = asm.read_text(encoding="utf-8-sig")
+        record = asm.stem in CPU_RECORD_FIXTURES
+        if asm.stem in CPU_FIXTURES:
             test = CPU_FIXTURES[asm.stem]
             status = fixture_status(results, [test]) if test else "not translated"
-        cpu[asm.name] = (masm_mnemonics(asm.read_text(encoding="utf-8")), status)
-    shaders = {test: (forms, fixture_status(results, [test])) for test, forms in (records or {}).items()}
+        else:
+            header = re.fullmatch(r"; coverage: (source|record) (cpu_[a-zA-Z0-9_]+)", source.partition("\n")[0].strip())
+            test = header[2] if header else None
+            record = bool(header and header[1] == "record")
+            status = fixture_status(results, [test]) if test else "unclassified"
+            if test:
+                cpu_tests.add(test)
+        if record:
+            forms = {x64_canonical(m) for m in records.get(test, set())}
+        else:
+            forms = masm_mnemonics(source)
+        cpu[asm.name] = (forms, status)
+    shaders = {test: (forms, fixture_status(results, [test]))
+               for test, forms in records.items() if test not in cpu_tests}
     x64 = load_reference("x64_zen2.tsv")
     fixtures = {name: status for name, (_, status) in {**cpu, **shaders}.items()}
     return {
@@ -218,7 +253,7 @@ def report(m):
     lines += ["", "Shader translation records from this run: "
               + (", ".join(m["shader_records"]) or "none, so no gfx form is covered")]
     if m["unclassified"]:
-        lines.append("Not counted until classified in tools/form_coverage.py: " + ", ".join(m["unclassified"]))
+        lines.append("Not counted until classified: " + ", ".join(m["unclassified"]))
     return "\n".join(lines)
 
 

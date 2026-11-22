@@ -85,6 +85,8 @@ def check_raw_word_draws(directory, compiler, renderer, backend):
             expected = [float(byte(model(word), n)) for n in range(4)]
             case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
             result = subprocess.run(draw, capture_output=True, text=True)
+            if result.returncode == 77:  # no adapter: a skip, reported by pixel_aot_check.py
+                raise subprocess.CalledProcessError(77, draw, result.stdout, result.stderr)
             if result.returncode:
                 raise AssertionError(f"raw word {word:#010x} through {name} is not bit-exact on {backend}: "
                                      f"{result.stdout}{result.stderr}")

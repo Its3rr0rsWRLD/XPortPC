@@ -85,7 +85,27 @@ def arithmetic(st, i, m):
         raise ValueError("Invalid arithmetic operation")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
-    values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    # CF-2a: whole-quad execution does not restrict VALU, every lane is active. What an implicit-LOD sample may read is
+    # the set of values defined on the helper lanes (Lowering.quad_values): before the first sample, affine coordinate
+    # arithmetic (add, fma and legacy multiply of such values and ready constants, with at most one varying factor, no
+    # absolute value and no clamp) extends it (from R0Y00/Xbox2Windows#283 by Vonsek); anything else is lowered but
+    # does not join it.
+    quad = (st.wqm and st.ex == "true" and not st.samples and len(st.bindings) <= 1 and op in ("add", "fma", "mul_legacy") and not clamp
+            and not any("|" in t or "abs(" in t for t in tokens))
+    provenance = st.quad_values if quad else None
+    try:
+        values = [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending, quad_values=provenance)
+                  for t in tokens]
+    except ValueError as error:
+        if not quad or "helper-lane" not in str(error):
+            raise
+        quad, values = False, [fp_operand(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    if quad:
+        varying = [st.quad_values.get(st.vector.get(t.lstrip("-"), ""), False) for t in tokens]
+        if op != "add" and all(varying[:2]):
+            quad = False
+    if quad:
+        st.quad_values[f"alu{i}"] = any(varying)
     expression = template.format(*values)
     if clamp:
         expression = f"saturate({expression})"

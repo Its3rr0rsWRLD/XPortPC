@@ -14,7 +14,7 @@
 using Microsoft::WRL::ComPtr;
 
 // Use the validator and blob factory from the same SDK as the project's shader compiler.
-int inspect_shader(const std::vector<char>& bytes, std::string_view mode)
+int inspect_shader(std::vector<char>& bytes, std::string_view mode)
 {
     HMODULE compiler = LoadLibraryExW(SDK_DXC_DIR L"dxcompiler.dll", nullptr,
                                     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -45,9 +45,35 @@ int inspect_shader(const std::vector<char>& bytes, std::string_view mode)
         FAILED(create_validator(CLSID_DxcValidator, IID_PPV_ARGS(&validator))) ||
         FAILED(utils->CreateBlobFromPinned(bytes.data(), static_cast<UINT32>(bytes.size()), DXC_CP_ACP, &blob)))
         return 4;
+    const bool sign = mode == "--sign";
+    const UINT32 flags = mode == "--module" ? DxcValidatorFlags_ModuleOnly :
+                         sign               ? DxcValidatorFlags_InPlaceEdit :
+                                              DxcValidatorFlags_Default;
     ComPtr<IDxcOperationResult> result;
-    HRESULT hr = validator->Validate(blob.Get(), mode == "--module" ? DxcValidatorFlags_ModuleOnly :
-                                                                     DxcValidatorFlags_Default, &result);
+    HRESULT hr = validator->Validate(blob.Get(), flags, &result);
+    if (sign) {
+        HRESULT status = E_FAIL;
+        if (FAILED(hr) || !result || FAILED(result->GetStatus(&status))) return 4;
+        if (FAILED(status)) {
+            ComPtr<IDxcBlobEncoding> errors;
+            if (SUCCEEDED(result->GetErrorBuffer(&errors)) && errors && errors->GetBufferPointer()) {
+                std::fwrite(errors->GetBufferPointer(), 1, (std::min)(errors->GetBufferSize(), size_t{2048}), stderr);
+            }
+            return 5;
+        }
+        ComPtr<IDxcBlob> signed_blob;
+        const void* ptr = blob->GetBufferPointer();
+        std::size_t size = blob->GetBufferSize();
+        if (SUCCEEDED(result->GetResult(&signed_blob)) && signed_blob &&
+            signed_blob->GetBufferPointer() && signed_blob->GetBufferSize()) {
+            ptr = signed_blob->GetBufferPointer();
+            size = signed_blob->GetBufferSize();
+        }
+        if (!ptr || !size) return 4;
+        if (_setmode(_fileno(stdout), _O_BINARY) == -1) return 4;
+        if (std::fwrite(ptr, 1, size, stdout) != size || std::fflush(stdout) != 0) return 4;
+        return 0;
+    }
     std::printf("{\"call_hr\":\"0x%08lx\"", static_cast<unsigned long>(hr));
     if (SUCCEEDED(hr) && result) {
         HRESULT status = E_FAIL;
@@ -72,7 +98,7 @@ int main(int argc, char** argv)
     if (bytes.empty() || std::cin.bad()) return 2;
     if (argc == 2) {
         std::string_view mode(argv[1]);
-        if (mode == "--container" || mode == "--module" || mode == "--disassemble")
+        if (mode == "--container" || mode == "--module" || mode == "--disassemble" || mode == "--sign")
             return inspect_shader(bytes, mode);
         return 2;
     }

@@ -84,6 +84,28 @@ def compare_f32(st, i, m):
     st.lines.append(f"    bool cmp{i} = {COMPARE[op].format(*values)};")
 
 
+# Integer comparisons (V_CMP_{EQ,NE,LT,LE,GT,GE}_{I32,U32}, VOPC and their VOP3 e64 forms): the signed or unsigned
+# order of the two words, written per lane to the lane mask like the float comparisons. llvm-mc refuses source
+# modifiers and clamp on them. v_cmpx (which writes EXEC) is not lowered here. V_CMP_F and V_CMP_T (always false,
+# always true; from R0Y00/Xbox2Windows#306 by Alexander) still read and check both sources.
+INT_COMPARE = {"f": None, "eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">=", "t": None}
+
+
+@form(rf"v_cmp_({'|'.join(INT_COMPARE)})_(i32|u32)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
+def compare_int(st, i, m):
+    op, kind, dst, *tokens = m.groups()
+    regs = lane_mask(dst)
+    if st.ex != "true" or st.pending.intersection(regs):
+        raise ValueError("Invalid comparison")
+    words = [vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    if kind == "i32":
+        words = [f"asint({w})" for w in words]
+    for j, reg in enumerate(regs):
+        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+    relation = {"f": "false", "t": "true"}.get(op) or f"{words[0]} {INT_COMPARE[op]} {words[1]}"
+    st.lines.append(f"    bool cmp{i} = {relation};")
+
+
 @form(rf"v_cndmask_b32(?:_e32|_e64)? (v\d+), ([^,]+), ([^,]+), {LANE_MASK}")
 def select(st, i, m):
     dst, unset, chosen, source = m.groups()

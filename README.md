@@ -45,6 +45,8 @@ cmake --build --preset dev
 ctest --preset dev --no-tests=error
 ```
 
+To build and test at /O2 as Windows CI also does, use the `release` preset in place of `dev`. Its build directory is `out/build/release`.
+
 `shader_metadata_probe` also needs a DXC validator that accepts module-only validation. The DXC 1.7.2308 shipped with the original Windows SDK 10.0.26100 refuses it with `call_hr 0x80070057`, as do releases 1.8.2403 through 1.8.2407, and the test then reports a skip. A serviced SDK can include a newer validator: Windows SDK 10.0.26100.8249 installs DXC 1.8.2502.11, which passes without a separate download. [DXC 1.8.2502](https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.8.2502) is the first release that passes, and the later 1.8 and 1.9 releases through 1.9.2609 pass too. To use a release, extract its zip and configure with `cmake --preset dev -DDXC_EXECUTABLE=C:/path/to/dxc/bin/x64/dxc.exe`. `root_probe` loads `dxil.dll` from the same directory. [Report](https://github.com/R0Y00/Xbox2Windows/issues/98) · [Results by release](docs/experiments.md#module-only-validation-by-dxc-release)
 
 On Windows 10 the in-box D3D12 runtime and WARP lack SM 6.5 and DXR, so the BVH and DXR WARP checks skip. To run them, configure with the app-local Agility SDK and WARP packages. [Windows 10 setup](docs/experiments.md#windows-10-with-the-app-local-agility-sdk-and-warp)
@@ -68,6 +70,8 @@ Do not add game files, dumps, distribution links or credentials to the repositor
 ## Hardware reports
 
 Build the suite, run `.\tools\package-gpu-check.ps1` to make the standalone GPU check, run it, and paste the full contents of `gpu-report-hardware.md` as a comment on the [hardware thread](https://github.com/Its3rr0rsWRLD/XPortPC/issues/1). Do not open a new GitHub issue. Reports with a failure or a capability skip are welcome.
+
+On a PC with more than one GPU, use `.\Run-GpuCheck.ps1 -Adapter Radeon` to select a hardware adapter by part of its name. For source builds, set `XBOX2WINDOWS_ADAPTER` before running CTest (the variable keeps its upstream name).
 
 ## FAQ
 

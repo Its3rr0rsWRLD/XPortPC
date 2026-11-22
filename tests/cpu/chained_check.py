@@ -16,7 +16,8 @@ from cpu_ranges import function_ranges
 
 
 def check(native, compiled, harness, native_jne=None, compiled_jne=None,
-          native_zero=None, compiled_zero=None, native_imm=None, compiled_imm=None):
+          native_zero=None, compiled_zero=None, native_imm=None, compiled_imm=None,
+          native_frame=None, compiled_frame=None):
     probe = register_probe(str(harness))
     pairs = [(native, compiled, 7)]
     if native_jne is not None and compiled_jne is not None:
@@ -25,6 +26,8 @@ def check(native, compiled, harness, native_jne=None, compiled_jne=None,
         pairs.append((native_zero, compiled_zero, 0))
     if native_imm is not None and compiled_imm is not None:
         pairs.append((native_imm, compiled_imm, 7))
+    if native_frame is not None and compiled_frame is not None:
+        pairs.append((native_frame, compiled_frame, 7))
     for orig_path, lifted_path, null_expected in pairs:
         source = ctypes.CDLL(str(orig_path)).choose_value
         lifted = ctypes.CDLL(str(lifted_path)).try_lifted
@@ -98,7 +101,27 @@ def check(native, compiled, harness, native_jne=None, compiled_jne=None,
                 raise
         else:
             raise AssertionError("strict translation accepted an indirect call")
-    print("two null paths, two non-null inputs (JE, JNE, XOR zeroing and 32-bit immediates), RBX/RSI, guarded writes, version-2 chained unwind and ten rejection controls passed")
+        if native_frame is not None:
+            with pefile.PE(str(native_frame), fast_load=True) as pe:
+                frame_entry = export_rva(pe, "choose_value")
+                frame_ranges = function_ranges(pe, frame_entry)
+                primary = list(Decoder(64, pe.get_data(frame_entry, frame_ranges[0][1] - frame_entry), ip=frame_entry))
+                finish = list(Decoder(64, pe.get_data(frame_ranges[2][0], frame_ranges[2][1] - frame_ranges[2][0]), ip=frame_ranges[2][0]))
+                sub_ins = next(i for i in primary if i.code == Code.SUB_RM64_IMM32)
+                assert any(i.code == Code.ADD_RM64_IMM32 for i in finish)
+                imm_offset = pe.get_offset_from_rva(sub_ins.next_ip - 4)
+            oversized = bytearray(native_frame.read_bytes())
+            oversized[imm_offset:imm_offset + 4] = struct.pack("<i", 4096)
+            over_path = Path(folder) / "oversized_frame.dll"
+            over_path.write_bytes(oversized)
+            try:
+                translate(over_path, "choose_value")
+            except ValueError as exc:
+                if "unsupported stack adjustment" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("accepted stack frame exceeding 4096 bytes")
+    print("two null paths, two non-null inputs (JE, JNE, XOR zeroing, 32-bit immediates and 32-bit stack frames), RBX/RSI, guarded writes, version-2 chained unwind and eleven rejection controls passed")
 
 
 if __name__ == "__main__":

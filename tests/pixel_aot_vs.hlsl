@@ -12,9 +12,12 @@ static const float4 FLAT2[3] = { float4(7, 13, 21, 34), float4(10, 29, 3, 55), f
 Vertex main(uint id : SV_VertexID)
 {
     Vertex v;
-    v.uv = float2((id << 1) & 2, id & 2);
-    v.flat1 = FLAT1[id];
-    v.flat2 = FLAT2[id];
+    // Vertices 3, 4 and 5 (the --check-pixel-quad-lod draw) are the same corners scaled to a partial triangle.
+    const bool partial = id >= 3;
+    const uint corner = partial ? id - 3 : id;
+    v.uv = float2((corner << 1) & 2, corner & 2) * (partial ? 7.75f / 16.0f : 1.0f);
+    v.flat1 = FLAT1[corner];
+    v.flat2 = FLAT2[corner];
     v.position = float4(v.uv * float2(2,-2) + float2(-1,1), 0, 1);
     return v;
 }

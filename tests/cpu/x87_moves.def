@@ -1,0 +1,27 @@
+EXPORTS
+    fld_st0
+    fld_st1
+    fld_st2
+    fld_st6_depth8
+    fst_st1
+    fst_st2
+    fstp_st1
+    fstp_st0
+    fstp_st2
+    fxch_st0
+    fxch_st1
+    fxch_st2
+    fxch_st7_depth8
+    fchs_m80
+    fchs_m64
+    fchs_m32
+    fabs_m80
+    fabs_m64
+    fabs_m32
+    chs_abs_chs
+    fst_m32
+    fst_m64
+    fst_m64_m32
+    chs_add
+    abs_mul
+    fxch_sub

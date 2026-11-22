@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -265,28 +266,89 @@ def check_pure_python_controls() -> None:
     else:
         raise AssertionError("Accepted DXBC container without DXIL part")
 
-    # 4. CLI smoke test (container + --extract-module)
+    # 4. CLI smoke test (container + --extract-module + flag validation)
     tool = Path(__file__).resolve().parents[1] / "tools" / "dxil_retarget.py"
     with TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         in_file = tmp_dir / "in.dxbc"
         out_file = tmp_dir / "out.dxbc"
         bc_file = tmp_dir / "out.bc"
+        fake_probe = tmp_dir / "fake_probe"
+        fake_probe.write_bytes(b"")
         in_file.write_bytes(synth_dxbc)
         cli_out = json.loads(subprocess.check_output([sys.executable, "-B", str(tool), str(in_file), str(out_file)]))
-        assert cli_out["kind"] == "dxbc" and out_file.read_bytes() == out_dxbc
+        assert cli_out["kind"] == "dxbc" and cli_out["signed"] is False and out_file.read_bytes() == out_dxbc
         cli_bc = json.loads(subprocess.check_output(
             [sys.executable, "-B", str(tool), str(in_file), str(bc_file), "--extract-module"]
         ))
         assert cli_bc["kind"] == "bitcode" and bc_file.read_bytes() == new_bc
 
+        for bad_args in (
+            [str(in_file), str(out_file), "--sign"],
+            [str(in_file), str(bc_file), "--extract-module", "--sign", "--probe", str(fake_probe)],
+            [str(in_file), str(bc_file), "--extract-module", "--pso-probe", str(fake_probe)],
+            [str(in_file), str(out_file), "--warp-only"],
+            [str(bc_file), str(out_file), "--sign", "--probe", str(fake_probe)],
+        ):
+            bad_run = subprocess.run([sys.executable, "-B", str(tool), *bad_args], capture_output=True)
+            assert bad_run.returncode != 0, f"Accepted invalid CLI arguments {bad_args}"
+
+    # 5. Pure-Python controls for sign_container and check_compute_pso
+    try:
+        rt.sign_container(Path("unused"), b"NOPE")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("sign_container accepted non-DXBC input")
+
+    try:
+        rt.check_compute_pso(Path("unused"), b"NOPE")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("check_compute_pso accepted non-DXBC input")
+
+    signed_synth = out_dxbc[:4] + bytes(range(1, 17)) + out_dxbc[20:]
+    with patch.object(rt.subprocess, "run") as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(["probe", "--sign"], 0, signed_synth, b"")
+        assert rt.sign_container(Path("probe"), out_dxbc) == signed_synth
+        assert mock_run.call_args[0][0] == ["probe", "--sign"]
+
+        for bad_proc, expected in (
+            (subprocess.CompletedProcess(["probe", "--sign"], 5, b"", b"validation error"), "validation error"),
+            (subprocess.CompletedProcess(["probe", "--sign"], 0, b"NOPE", b""), "invalid DXBC"),
+            (subprocess.CompletedProcess(["probe", "--sign"], 0, out_dxbc, b""), "digest zeroed"),
+        ):
+            mock_run.return_value = bad_proc
+            try:
+                rt.sign_container(Path("probe"), out_dxbc)
+            except RuntimeError as exc:
+                assert expected in str(exc), str(exc)
+            else:
+                raise AssertionError(f"sign_container accepted {bad_proc}")
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["dev", "--compute-pso", "--warp-only"], 0, b'{"warp_pso":"0x00000000"}\n', b""
+        )
+        assert rt.check_compute_pso(Path("dev"), signed_synth, warp_only=True) == {"warp_pso": "0x00000000"}
+        assert mock_run.call_args[0][0] == ["dev", "--compute-pso", "--warp-only"]
+        rt.check_compute_pso(Path("dev"), signed_synth, warp_only=False)
+        assert mock_run.call_args[0][0] == ["dev", "--compute-pso"]
+
     print("pure-python dxil_retarget controls: ok")
 
 
-def check_validator_fixtures(probe: Path, shaders: list[Path], validator_dll: Path) -> int:
+def check_validator_fixtures(
+    probe: Path,
+    shaders: list[Path],
+    validator_dll: Path,
+    device_probe: Path | None = None,
+    offscreen: Path | None = None,
+) -> int:
     from probe_roots import validate_shader
     from shader_probe_check import file_version, module_outcome
 
+    tool = Path(__file__).resolve().parents[1] / "tools" / "dxil_retarget.py"
     module_records = []
     for idx, shader_path in enumerate(shaders):
         desktop_blob = shader_path.read_bytes()
@@ -313,12 +375,18 @@ def check_validator_fixtures(probe: Path, shaders: list[Path], validator_dll: Pa
         assert kept["container"]["status"] == "0x80aa0013", kept["container"]
         assert "Unsupported bit-flag set (root signature flags 0x3000000)" in "\n".join(kept["container"]["diagnostics"])
 
+        # Signing must also reject every invalid container without emitting bytes on stdout.
+        for label, invalid_blob in (("xb2", xb2_blob), ("dxil-ms", bad_triple_blob), ("xbox-flags", kept_blob)):
+            bad_sign = subprocess.run([str(probe), "--sign"], input=invalid_blob, capture_output=True, timeout=10)
+            assert bad_sign.returncode != 0 and not bad_sign.stdout and bad_sign.stderr, (label, bad_sign)
+
         # Positive check: full retarget passes container, module-only, disassembly, STAT, and D3D12 root signature.
         retargeted_blob, info = rt.retarget_container(xb2_blob)
         ret_secs = parts(retargeted_blob)
         assert info["dxil"]["triple_rewritten"] is True
         assert info["dxil"]["removed_named_metadata"] == ["xbox.compiler.options"]
         assert info["cleared_root_flags"] == "0x3000000"
+        assert retargeted_blob[4:20] == bytes(16)
 
         after = validate_shader(probe, retargeted_blob, ret_secs[b"DXIL"], optional_modes=("module",))
         assert after["container"]["status"] == "0x00000000", after["container"]
@@ -337,7 +405,69 @@ def check_validator_fixtures(probe: Path, shaders: list[Path], validator_dll: Pa
         # Verify D3D12 root signature deserializer + serializer accept the retargeted container
         root_res = json.loads(subprocess.check_output([str(probe)], input=retargeted_blob))
         assert root_res["legacy_hr"] == root_res["versioned_hr"] == root_res["original_serialize_hr"] == "0x00000000"
-        print(f"fixture {shader_path.name}: container=0x00000000 module={after['module'].get('status', after['module']['call_hr'])}")
+
+        # Re-sign the retargeted container via dxil.dll and verify both validation and CLI --sign.
+        signed_blob = rt.sign_container(probe, retargeted_blob)
+        assert len(signed_blob) == len(retargeted_blob)
+        assert signed_blob[4:20] != bytes(16)
+        signed_after = validate_shader(probe, signed_blob, parts(signed_blob)[b"DXIL"], optional_modes=("module",))
+        assert signed_after["container"]["status"] == "0x00000000", signed_after["container"]
+        assert not signed_after["container"]["diagnostics"], signed_after["container"]["diagnostics"]
+
+        with TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            xb2_path = tmp_dir / f"{shader_path.stem}_xb2.dxbc"
+            unsigned_path = tmp_dir / f"{shader_path.stem}_unsigned.dxbc"
+            signed_path = tmp_dir / f"{shader_path.stem}_signed.dxbc"
+            xb2_path.write_bytes(xb2_blob)
+            unsigned_path.write_bytes(retargeted_blob)
+            cli_cmd = [sys.executable, "-B", str(tool), str(xb2_path), str(signed_path),
+                       "--sign", "--probe", str(probe)]
+            if device_probe is not None:
+                cli_cmd.extend(["--pso-probe", str(device_probe), "--warp-only"])
+            cli_res = json.loads(subprocess.check_output(cli_cmd))
+            assert cli_res["signed"] is True
+            assert cli_res["digest"] == signed_blob[4:20].hex()
+            assert signed_path.read_bytes() == signed_blob
+
+            pso_summary = "skipped"
+            if device_probe is not None:
+                # Negative control 4: unsigned (zero-digest) retargeted DXBC must fail CreateComputePipelineState.
+                unsigned_pso = rt.check_compute_pso(device_probe, retargeted_blob, warp_only=True)
+                assert unsigned_pso["warp_root"] == "0x00000000", unsigned_pso
+                assert unsigned_pso["warp_pso"] != "0x00000000", unsigned_pso
+
+                signed_pso = cli_res["pso"]
+                warp_sm = int(signed_pso["warp_shader_model"], 16)
+                if shader_path.name == "compute_root.cso" or warp_sm >= 0x65:
+                    assert signed_pso["warp_root"] == "0x00000000", signed_pso
+                    assert signed_pso["warp_pso"] == "0x00000000", signed_pso
+
+                    # Negative control 5: flipping one bit in the digest must fail CreateComputePipelineState.
+                    tampered_blob = signed_blob[:4] + bytes([signed_blob[4] ^ 1]) + signed_blob[5:]
+                    tampered_pso = rt.check_compute_pso(device_probe, tampered_blob, warp_only=True)
+                    assert tampered_pso["warp_pso"] != "0x00000000", tampered_pso
+                    pso_summary = f"unsigned={unsigned_pso['warp_pso']} signed={signed_pso['warp_pso']} tampered={tampered_pso['warp_pso']}"
+                else:
+                    pso_summary = f"skipped_sm=0x{warp_sm:x}"
+
+            if offscreen is not None and shader_path.name == "compute_root.cso":
+                bad_run = subprocess.run([str(offscreen), "warp", "--compute-root-file", str(unsigned_path)],
+                                         capture_output=True, text=True, timeout=45)
+                assert bad_run.returncode == 1 and "Create compute pipeline" in bad_run.stderr, (
+                    bad_run.returncode, bad_run.stdout, bad_run.stderr
+                )
+                good_run = subprocess.run([str(offscreen), "warp", "--compute-root-file", str(signed_path)],
+                                          capture_output=True, text=True, timeout=45)
+                assert good_run.returncode == 0, (good_run.returncode, good_run.stdout, good_run.stderr)
+                assert "mismatches=0" in good_run.stdout, good_run.stdout
+                pso_summary += " dispatch=ok"
+
+        print(
+            f"fixture {shader_path.name}: container=0x00000000 "
+            f"module={after['module'].get('status', after['module']['call_hr'])} "
+            f"signed={signed_blob[4:20].hex()[:8]}.. pso=({pso_summary})"
+        )
 
     version = file_version(validator_dll)
     outcome = module_outcome(module_records, version)
@@ -352,10 +482,14 @@ def main() -> int:
     check_pure_python_controls()
     if len(sys.argv) == 1:
         return 0
-    if len(sys.argv) != 5:
-        raise SystemExit("Usage: dxil_retarget_check.py [root_probe.exe shader1.cso shader2.cso dxil.dll]")
-    probe, shader1, shader2, validator_dll = map(Path, sys.argv[1:])
-    return check_validator_fixtures(probe, [shader1, shader2], validator_dll)
+    if len(sys.argv) not in (5, 7):
+        raise SystemExit(
+            "Usage: dxil_retarget_check.py [root_probe.exe shader1.cso shader2.cso dxil.dll "
+            "[root_device_probe.exe offscreen_check.exe]]"
+        )
+    probe, shader1, shader2, validator_dll = map(Path, sys.argv[1:5])
+    device_probe, offscreen = (map(Path, sys.argv[5:7]) if len(sys.argv) == 7 else (None, None))
+    return check_validator_fixtures(probe, [shader1, shader2], validator_dll, device_probe, offscreen)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ HRESULT check_feature(ID3D12Device* device, D3D12_FEATURE feature, void* data, U
 Microsoft::WRL::ComPtr<ID3D12Resource> resource(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc,
     D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear = nullptr);
 void check_compute(ID3D12Device* device, bool tables);
+void check_compute_file(ID3D12Device* device, const char* path);
 void check_ffx_device_init(ID3D12Device* device);
 void check_ffx_recurrent(ID3D12Device* device);
 void check_dual_uav(ID3D12Device* device);
@@ -19,6 +20,7 @@ void check_dual_pixel(ID3D12Device*, const char*, const char*, bool);
 struct BadCase : std::runtime_error { using std::runtime_error::runtime_error; };
 void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference = nullptr);
 void check_translated_pixel_mips(ID3D12Device* device, const char* path, const char* reference);
+void check_pixel_quad_lod(ID3D12Device* device, const char* shader);
 void check_bc7_pixel(ID3D12Device* device, const char* shader, const char* input,
                      const char* capture, const char* mip1 = nullptr);
 void check_bc7_tail(ID3D12Device* device, const char* shader, const char* firstMip, int count, char** paths);

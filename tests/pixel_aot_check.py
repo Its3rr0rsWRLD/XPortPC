@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from pixel_aot import disassemble, native_program  # noqa: E402
@@ -32,6 +33,31 @@ def check_controls(directory):
     for module in MODULES:
         if hasattr(module, "controls"):
             module.controls(directory)
+    check_adapter_skip(directory)
+
+
+def check_adapter_skip(directory):
+    """Without a hardware adapter the renderer exits 77, and every family must report that skip to CTest, not a
+    failure (from R0Y00/Xbox2Windows#322 by Vonsek). The compiler is a stub that writes empty outputs."""
+    compiler, renderer = "stub-dxc", "stub-offscreen"
+
+    def run_without_adapter(args, *, check=False, **_):
+        assert args[0] in (compiler, renderer), args
+        if args[0] == compiler:
+            for flag, text in (("-Fo", ""), ("-Fc", "fcmp uno \n")):
+                if flag in args:
+                    Path(args[args.index(flag) + 1]).write_text(text, encoding="ascii")
+        result = subprocess.CompletedProcess(args, 77 if args[0] == renderer else 0, "", "")
+        if check:
+            result.check_returncode()
+        return result
+
+    for name in DRAW_FAMILIES:
+        work = directory / f"no-adapter-{name}"
+        work.mkdir()
+        with patch.object(subprocess, "run", side_effect=run_without_adapter):
+            code = check_render(work, compiler, renderer, "hardware", [name])
+        assert code == 77, (name, code)
 
 
 def check_binary(directory, assembler, objcopy, library):

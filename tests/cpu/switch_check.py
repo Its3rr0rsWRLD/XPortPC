@@ -350,7 +350,6 @@ def check_flag_rejections(original_path):
     if setl.len != 3 or between.mnemonic != Mnemonic.MOV or between.len != 2 or jump.len != 2:
         raise AssertionError("unexpected flag_select encoding")
     controls = [
-        (setl.ip, bytes.fromhex("0f 90 c0"), "unsupported condition"),  # SETO AL
         (setl.ip, bytes.fromhex("0f 9c c4"), "unsupported register"),  # SETL AH
         # NEG writes the flags, so CMOVGE may no longer read those of the CMP.
         (between.ip, bytes.fromhex("f7 d8"), "unsupported flag producer"),
@@ -359,6 +358,10 @@ def check_flag_rejections(original_path):
     ]
     with TemporaryDirectory() as folder:
         path = Path(folder) / "control.dll"
+        supported = bytearray(data)
+        supported[offset(setl.ip):offset(setl.ip) + 3] = bytes.fromhex("0f 90 c0")
+        path.write_bytes(supported)
+        translate(path, ["flag_select"])  # SETO is supported; hardware differential checks live separately.
         for rva, patch, reason in controls:
             damaged = bytearray(data)
             damaged[offset(rva):offset(rva) + len(patch)] = patch

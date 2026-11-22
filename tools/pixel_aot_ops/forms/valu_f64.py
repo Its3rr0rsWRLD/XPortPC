@@ -290,7 +290,7 @@ def arithmetic(st, i, m):
     # VOP3-only binary64 arithmetic; the output modifiers and the e32 spelling are not accepted.
     op, _, dst, operands, clamp = m.groups()
     tokens = operands.split(", ")
-    if st.mask != "entry" or len(tokens) != {"fma": 3}.get(op, 2):
+    if st.ex != "true" or len(tokens) != {"fma": 3}.get(op, 2):
         raise ValueError("Invalid arithmetic operation")
     f64_destination(dst, st)
     if op == "ldexp":
@@ -309,7 +309,7 @@ def arithmetic(st, i, m):
 def rounding(st, i, m):
     # Rounding to an integral value on the bit pattern; see f64_round.
     op, suffix, dst, source, clamp = m.groups()
-    if st.mask != "entry" or (suffix == "_e32" and (clamp or source.startswith(("-", "|")))):
+    if st.ex != "true" or (suffix == "_e32" and (clamp or source.startswith(("-", "|")))):
         raise ValueError("Invalid arithmetic operation")
     f64_destination(dst, st)
     operand = f64_operand(source, st)
@@ -325,7 +325,7 @@ def rounding(st, i, m):
 @form(r"v_cvt_f64_(f32|i32|u32)(_e32|_e64)? (v\[\d+:\d+\]), (.+?)( clamp)?")
 def widen(st, i, m):
     kind, suffix, dst, source, clamp = m.groups()
-    if st.mask != "entry" or (suffix == "_e32" and (clamp or source.startswith(("-", "|")) and kind == "f32")):
+    if st.ex != "true" or (suffix == "_e32" and (clamp or source.startswith(("-", "|")) and kind == "f32")):
         raise ValueError("Invalid conversion")
     f64_destination(dst, st)
     if kind == "f32":
@@ -342,7 +342,7 @@ def narrow(st, i, m):
     # The result is one word. clamp is accepted only for the float result, applied to the double before rounding,
     # which is the same as clamping the binary32 result because 0 and 1 are exact.
     kind, suffix, dst, source, clamp = m.groups()
-    if (st.mask != "entry" or (clamp and (kind != "f32" or suffix == "_e32"))
+    if (st.ex != "true" or (clamp and (kind != "f32" or suffix == "_e32"))
             or (suffix == "_e32" and source.startswith(("-", "|")))):
         raise ValueError("Invalid conversion")
     if dst in st.sample_dest:

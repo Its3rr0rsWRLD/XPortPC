@@ -15,7 +15,8 @@ def sample(st, i, m):
             or [st.scalar.get(f"s{n}") for n in state] != list(st.sampler)):
         raise ValueError("Unsupported image or sampler binding")
     uv = [st.vector[f"v{n}"] for n in coords]
-    if any(v not in ("uv.x", "uv.y") for v in uv):
+    # The implicit level comes from the derivatives of the coordinates, so each must be defined on helper lanes.
+    if any(not isinstance(v, str) or v not in st.quad_values for v in uv):
         raise ValueError("Unsupported texture coordinate")
     st.lines.append(f"    float4 sample{i} = {texture}.Sample(samp, float2({', '.join(uv)}));")
     st.samples += 1

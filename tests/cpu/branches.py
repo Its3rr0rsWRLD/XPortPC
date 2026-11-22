@@ -18,30 +18,42 @@ def invoke(function, value):
     return result, tuple(words)
 
 
+def signed32(value):
+    value &= MASK
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
 def simulate(value, *, inverted=False):
     eax = value & MASK
     stages = []
-    for threshold, predicate, taken_delta, fall_delta in (
-        (5, eax < 5, -7, 3),
-        (15, None, -5, 2),
-        (21, None, -1, 4),
-        (32, None, -3, 6),
-        (300, None, 512, -260),
-        (0xfffffff0, None, 19, -41),
+    for threshold, signed, taken_delta, fall_delta in (
+        (5, False, -7, 3),
+        (15, False, -5, 2),
+        (21, False, -1, 4),
+        (32, False, -3, 6),
+        (300, False, 512, -260),
+        (0xfffffff0, False, 19, -41),
+        (-12, True, -13, 11),
+        (-300, True, 37, -29),
     ):
+        lhs = signed32(eax) if signed else eax
         if threshold == 5:
-            cond = eax < 5
+            cond = lhs < 5
         elif threshold == 15:
-            cond = eax == 15
+            cond = lhs == 15
         elif threshold == 21:
-            cond = eax != 21
+            cond = lhs != 21
         elif threshold == 32:
-            cond = eax <= 32
+            cond = lhs <= 32
         elif threshold == 300:
-            cond = eax > 300
+            cond = lhs > 300
+        elif threshold == 0xfffffff0:
+            cond = lhs <= 0xfffffff0
+        elif threshold == -12:
+            cond = lhs < -12
         else:
-            cond = eax <= 0xfffffff0
-        relation = "lt" if eax < threshold else "eq" if eax == threshold else "gt"
+            cond = lhs <= -300
+        relation = "lt" if lhs < threshold else "eq" if lhs == threshold else "gt"
         stages.append((threshold, relation))
         take = (not cond) if inverted else cond
         eax = (eax + (taken_delta if take else fall_delta)) & MASK
@@ -60,10 +72,11 @@ def check(original_path, lifted_path, inverted_path):
         *range(320),
         0x7fffffff,
         0x80000000,
+        *range(0xfffffcbe, 0xfffffcca),
         *range(0xfffffdea, 0xfffffdf5),
         *range(0xffffffea, MASK + 1),
     ]
-    seen = {threshold: set() for threshold in (5, 15, 21, 32, 300, 0xfffffff0)}
+    seen = {threshold: set() for threshold in (5, 15, 21, 32, 300, 0xfffffff0, -12, -300)}
     for value in values:
         reference, stages = simulate(value)
         for threshold, relation in stages:
@@ -82,7 +95,7 @@ def check(original_path, lifted_path, inverted_path):
         if relations != {"lt", "eq", "gt"}:
             raise AssertionError(f"threshold {threshold:#x} missing relations: {relations}")
     print(f"{len(values)} native/translated matches and {len(values)} inverted-branch differences across "
-          "jb/jae, je/jne, jbe/ja, 32-bit immediates and sign-extended imm8")
+          "jb/jae, je/jne, jbe/ja, jl/jge, jle/jg, 32-bit immediates and sign-extended imm8")
 
 
 def check_rejections():

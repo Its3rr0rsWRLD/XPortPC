@@ -377,8 +377,12 @@ int main(int argc, char** argv)
 {
     if (argc < 3) return 2;
     const std::string_view operation = argv[2];
-    if (operation == "--check-bc7-tail") {
+    if (operation == "--check-pixel-quad-lod") {
+        if (argc != 4) return 2;
+    } else if (operation == "--check-bc7-tail") {
         if (argc < 6) return 2;
+    } else if (operation == "--compute-root-file") {
+        if (argc != 4) return 2;
     } else {
         if (argc != 3 && argc != 5 && argc != 6) return 2;
         if (argc == 6 && operation != "--check-bc7" && operation != "--check-bc7-mip1") return 2;
@@ -428,6 +432,8 @@ int main(int argc, char** argv)
         if (argc == 3 && needs_cs_6_5(operation) && !supports_cs_6_5(device.Get())) return 77;
         if (argc == 3 && (operation == "--compute-root" || operation == "--compute-tables")) {
             check_compute(device.Get(), operation == "--compute-tables");
+        } else if (argc == 4 && operation == "--compute-root-file") {
+            check_compute_file(device.Get(), argv[3]);
         } else if (argc == 3 && operation == "--ffx-device-init") {
             check_ffx_device_init(device.Get());
         } else if (argc == 3 && operation == "--ffx-provider-loop") {
@@ -449,6 +455,8 @@ int main(int argc, char** argv)
         } else if (argc == 5 && operation == "--check-pixel-case-f64") {
             if (!supports_doubles(device.Get())) return 77;
             check_translated_pixel(device.Get(), argv[3], false, argv[4]);
+        } else if (operation == "--check-pixel-quad-lod") {
+            check_pixel_quad_lod(device.Get(), argv[3]);
         } else if (operation == "--check-pixel") {
             if (argc != 5 || (std::string_view(argv[4]) != "rgba" && std::string_view(argv[4]) != "bgra"))
                 throw std::runtime_error("Expected --check-pixel <pixel.cso> rgba|bgra");

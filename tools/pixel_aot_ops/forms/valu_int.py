@@ -1,6 +1,9 @@
-"""Integer vector forms (VOP1, VOP2, VOP3): bitwise, shifts, add/sub/mul, three-input forms, v_cvt_f32_ubyte."""
+"""Integer vector forms (VOP1, VOP2, VOP3): bitwise, shifts, add/sub/mul, three-input forms, min/max/min3/max3/med3, add and
+subtract with carry out, v_cvt_f32_ubyte and the conversions between binary32 and 32-bit integers."""
+import re
+
 from ..dispatch import form
-from ..registers import vector_u32
+from ..registers import LANE_MASK, fp_operand, lane_mask, vector_u32
 
 # Integer add, subtract, multiply and three-input forms. Semantics: AMD RDNA 2 ISA guide (instruction pseudocode in
 # the VOP2/VOP3 sections): V_ADD_NC_U32 D=S0+S1, V_SUB_NC_U32 D=S0-S1, V_SUBREV_NC_U32 D=S1-S0, V_MUL_U32_U24
@@ -123,4 +126,150 @@ def ternary(st, i, m):
         raise ValueError("Write overlaps an outstanding sample")
     a, b, c = (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second, third))
     st.lines.append(f"    uint valu{i} = {int_ternary(op, a, b, c)};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+# Conversions between binary32 and 32-bit integers. Semantics: AMD RDNA 2 ISA guide, VOP1 (V_CVT_F32_I32,
+# V_CVT_F32_U32, V_CVT_I32_F32, V_CVT_U32_F32), and LLVM, which selects V_CVT_I32_F32/V_CVT_U32_F32 for
+# llvm.fptosi.sat/llvm.fptoui.sat (SIISelLowering: FP_TO_SINT_SAT/FP_TO_UINT_SAT legal for i32):
+# - integer to float rounds to nearest, ties to even. The lowering does not rely on the D3D integer-to-float
+#   conversion for that: it converts the high and low 16 bits separately, which is exact, and lets the one binary32
+#   add round the exact sum, which D3D requires to be correctly rounded.
+# - float to integer rounds toward zero, saturates at the limits of the result type (+-2^31 or 0 and 2^32 - 1, with
+#   the infinities) and gives 0 for a NaN; -0.0 and every denormal give 0. HLSL leaves an out-of-range or NaN
+#   conversion undefined, so the NaN and range tests are made on the bits, in uint, and the value HLSL converts is
+#   clamped on the bits first (every lane evaluates both sides of the select), so no undefined cast is ever made.
+# Only the e64 form of an integer-to-float conversion has clamp and omod. omod scales the result by 2, 4 or 1/2, then
+# clamp saturates it to [0, 1] (the VOP3 output modifiers, in that order). The scaling is exact here: the result is an
+# integer value below 2^34 in magnitude, so it neither overflows nor reaches the denormals. The hardware ignores omod
+# when the IEEE mode bit is set (LLVM SIFoldOperands::tryFoldOMod); graphics shaders run with it clear (LLVM
+# SIModeRegisterDefaults: IEEE only for compute), and a compiler emits omod only where it is honoured.
+# Float-to-integer conversions take neg and abs on the source in the e64 form. llvm-mc also assembles clamp and omod
+# there; what they do to an integer result is not established here, so they are refused.
+OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
+
+
+@form(r"v_cvt_f32_(i32|u32)(_e32|_e64)? (v\d+), ([^,\s]+)( clamp)?( mul:2| mul:4| div:2)?")
+def convert_to_float(st, i, m):
+    kind, suffix, dst, src, clamp, omod = m.groups()
+    if st.ex != "true" or ((clamp or omod) and suffix != "_e64"):
+        raise ValueError("Invalid conversion")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    word = vector_u32(src, st.scalar, st.vector, st.pending, st.sample_pending)
+    st.lines.append(f"    uint cvtw{i} = {word};")
+    high = f"asint(cvtw{i}) >> 16" if kind == "i32" else f"cvtw{i} >> 16u"
+    expression = f"float({high}) * 65536.0f + float(cvtw{i} & 0xffffu)"
+    if omod:
+        expression = f"({expression}) * {OMOD[omod]}"
+    if clamp:
+        expression = f"saturate({expression})"
+    st.vector[dst] = f"alu{i}"
+    st.lines.append(f"    precise float alu{i} = {expression};")
+
+
+def source_modified(token):
+    return bool(re.fullmatch(r"-?(?:\|.*\||abs\(.*\))|-[vs]\d+", token))
+
+
+@form(r"v_cvt_(i32|u32)_f32(_e32|_e64)? (v\d+), ([^,\s]+)")
+def convert_to_int(st, i, m):
+    kind, suffix, dst, src = m.groups()
+    if st.ex != "true" or (source_modified(src) and suffix != "_e64"):
+        raise ValueError("Invalid conversion")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    value = fp_operand(src, st.scalar, st.vector, st.pending, st.sample_pending)
+    st.lines.append(f"    uint cvtb{i} = asuint({value});")
+    if kind == "i32":
+        # NaN: magnitude above infinity. |x| >= 2^31 (0x4f000000), the infinities included: the limit of the sign.
+        st.lines.append(f"    uint cvtm{i} = cvtb{i} & 0x7fffffffu;")
+        # The cast reads the word with its magnitude clamped to 0x4effffff (2^31 - 128), so it is always in range.
+        st.lines.append(f"    float cvti{i} = asfloat(min(cvtm{i}, 0x4effffffu) | (cvtb{i} & 0x80000000u));")
+        expression = (f"cvtm{i} > 0x7f800000u ? 0u : cvtm{i} >= 0x4f000000u ? 0x7fffffffu + (cvtb{i} >> 31u)"
+                      f" : asuint(int(cvti{i}))")
+    else:
+        # Every word from 0x7f800001 up is a positive NaN or has the sign set (negative, -0.0, negative NaN): 0.
+        # Positive x >= 2^32 (0x4f800000), +inf included: 2^32 - 1.
+        # The cast reads 0 in place of any word from 0x4f800000 up, so it is always of a value in [0, 2^32).
+        st.lines.append(f"    float cvti{i} = asfloat(cvtb{i} < 0x4f800000u ? cvtb{i} : 0u);")
+        expression = (f"cvtb{i} > 0x7f800000u ? 0u : cvtb{i} >= 0x4f800000u ? 0xffffffffu"
+                      f" : uint(cvti{i})")
+    st.lines.append(f"    uint valu{i} = {expression};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+# V_MAX_I32, V_MIN_I32, V_MAX_U32, V_MIN_U32 (VOP2) and V_MED3_I32, V_MED3_U32 (VOP3): signed or unsigned order of
+# the words. The result is one of the source words, copied. llvm-mc refuses clamp and source modifiers on all of them.
+def ordered(kind, words):
+    return [f"asint({w})" for w in words] if kind == "i32" else list(words)
+
+
+@form(r"v_(max|min)_(i32|u32)(_e32|_e64)? (v\d+), ([^,\s]+), ([^,\s]+)")
+def min_max(st, i, m):
+    op, kind, _, dst, first, second = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid integer operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    a, b = ordered(kind, (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second)))
+    expression = f"{op}({a}, {b})"
+    st.lines.append(f"    uint valu{i} = {f'asuint({expression})' if kind == 'i32' else expression};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+@form(r"v_med3_(i32|u32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
+def median(st, i, m):
+    kind, dst, *tokens = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid integer operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    words = [vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    cast = "int" if kind == "i32" else "uint"
+    for name, word in zip("abc", words):
+        st.lines.append(f"    {cast} med{name}{i} = {f'asint({word})' if kind == 'i32' else word};")
+    expression = f"max(min(meda{i}, medb{i}), min(max(meda{i}, medb{i}), medc{i}))"
+    st.lines.append(f"    uint valu{i} = {f'asuint({expression})' if kind == 'i32' else expression};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+# V_MIN3_I32, V_MAX3_I32, V_MIN3_U32 and V_MAX3_U32 (VOP3 only): the smallest or largest of three words in the
+# signed or unsigned order, which is one of the source words, copied. From R0Y00/Xbox2Windows#308 by Alexander,
+# kept in uint words here.
+@form(r"v_(min3|max3)_(i32|u32)(?:_e64)? (v\d+), ([^,\s]+), ([^,\s]+), ([^,\s]+)")
+def min_max3(st, i, m):
+    op, kind, dst, *tokens = m.groups()
+    if st.ex != "true":
+        raise ValueError("Invalid integer operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    a, b, c = ordered(kind, (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens))
+    fn = op[:-1]
+    expression = f"{fn}({fn}({a}, {b}), {c})"
+    st.lines.append(f"    uint valu{i} = {f'asuint({expression})' if kind == 'i32' else expression};")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+# V_ADD_CO_U32 D = S0 + S1, V_SUB_CO_U32 D = S0 - S1, V_SUBREV_CO_U32 D = S1 - S0 (VOP3b), modulo 2^32, with the
+# carry out of the add, or the borrow of the subtraction, written per lane to the lane mask (VCC or an SGPR), where a
+# v_cndmask_b32 reads it like a comparison. clamp is refused: its saturation is not established for these forms.
+@form(rf"v_(add|sub|subrev)_co_u32(?:_e64)? (v\d+), {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
+def add_sub_carry(st, i, m):
+    op, dst, carry, first, second = m.groups()
+    regs = lane_mask(carry)
+    if st.ex != "true" or st.pending.intersection(regs):
+        raise ValueError("Invalid integer operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    a, b = (vector_u32(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in (first, second))
+    st.lines.append(f"    uint coa{i} = {a};")
+    st.lines.append(f"    uint cob{i} = {b};")
+    result, carry_out = {"add": (f"coa{i} + cob{i}", f"valu{i} < coa{i}"),
+                         "sub": (f"coa{i} - cob{i}", f"cob{i} > coa{i}"),
+                         "subrev": (f"cob{i} - coa{i}", f"coa{i} > cob{i}")}[op]
+    st.lines.append(f"    uint valu{i} = {result};")
+    st.lines.append(f"    bool cmp{i} = {carry_out};")
+    for j, reg in enumerate(regs):
+        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     st.vector[dst] = ("uint", f"valu{i}")

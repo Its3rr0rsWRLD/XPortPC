@@ -1,0 +1,26 @@
+EXPORTS
+    immediate_iat
+    thunk_call
+    data_unwritten
+    pointer_written
+    data_written
+    set_word
+    register_copy
+    register_call
+    tail_argument
+    forward_free
+    reserved_bit
+    zero_word
+    computed_word
+    jump_reached
+    read_only_constant
+    indirect_reached
+    join_same
+    join_differ
+    loop_constant
+    call_clobber
+    saved_across_call
+    low_half
+    partial_write
+    exported_passthrough
+    forward_alloc

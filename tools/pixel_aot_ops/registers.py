@@ -90,18 +90,25 @@ def lane_mask(token):
     return [token]
 
 
-def fp_operand(token, scalar, vector, pending, sample_pending):
+def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=None):
+    """quad_values: under whole-quad execution, the values defined on helper lanes (Lowering.quad_values); a VGPR
+    source must then hold one of them."""
     if re.fullmatch(r"-\d+", token):
         return f"asfloat({int(token) & 0xffffffff}u)"
     if token.startswith("-"):
-        return "(-" + fp_operand(token[1:], scalar, vector, pending, sample_pending) + ")"
+        return "(-" + fp_operand(token[1:], scalar, vector, pending, sample_pending, quad_values=quad_values) + ")"
     if absolute := re.fullmatch(r"abs\(([^()|]+)\)|\|([^()|]+)\|", token):
         inner = absolute.group(1) or absolute.group(2)
-        return f"abs({fp_operand(inner, scalar, vector, pending, sample_pending)})"
+        return f"abs({fp_operand(inner, scalar, vector, pending, sample_pending, quad_values=quad_values)})"
     if re.fullmatch(r"[vs]\d+", token):
         if token in pending:
             raise ValueError("Constant read before load completion")
         value = (vector if token.startswith("v") else scalar)[token]
+        if quad_values is not None and token.startswith("v"):
+            if not isinstance(value, str) or value not in quad_values:
+                raise ValueError("Operand lacks a helper-lane definition")
+            if value.startswith("uv."):
+                return value
         if isinstance(value, int):
             return f"asfloat({value}u)"
         if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":

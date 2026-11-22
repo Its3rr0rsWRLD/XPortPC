@@ -1,0 +1,7 @@
+EXPORTS
+    entry_caller
+    entry_tail
+    entry_leaf
+    entry_inner
+    entry_data DATA
+    entry_forward = kernel32.GetTickCount

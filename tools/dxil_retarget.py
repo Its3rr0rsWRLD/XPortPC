@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import subprocess
 import sys
 from tempfile import NamedTemporaryFile
 
@@ -591,6 +592,33 @@ def retarget_container(
     return out_blob, info
 
 
+def sign_container(probe: Path, blob: bytes) -> bytes:
+    """Validate and sign a retargeted DXBC container via root_probe --sign (dxil.dll)."""
+    if len(blob) < 32 or blob[:4] != b"DXBC":
+        raise ValueError("Cannot sign non-DXBC input")
+    run = subprocess.run([str(probe), "--sign"], input=blob, capture_output=True, timeout=10)
+    if run.returncode != 0:
+        diag = run.stderr.decode("utf-8", "replace").rstrip("\0\r\n")
+        raise RuntimeError(f"DXIL signing failed (exit {run.returncode}): {diag or 'no diagnostics'}")
+    signed = run.stdout
+    if len(signed) < 32 or signed[:4] != b"DXBC":
+        raise RuntimeError("DXIL signer returned invalid DXBC output")
+    if signed[4:20] == bytes(16):
+        raise RuntimeError("DXIL signer left container digest zeroed")
+    return signed
+
+
+def check_compute_pso(device_probe: Path, blob: bytes, *, warp_only: bool = False) -> dict:
+    """Test CreateRootSignature and CreateComputePipelineState via root_device_probe --compute-pso."""
+    if len(blob) < 32 or blob[:4] != b"DXBC":
+        raise ValueError("Cannot create compute PSO from non-DXBC input")
+    command = [str(device_probe), "--compute-pso"]
+    if warp_only:
+        command.append("--warp-only")
+    run = subprocess.run(command, input=blob, capture_output=True, check=True, timeout=30)
+    return json.loads(run.stdout)
+
+
 def validate_pe_containers(
     pe_path: Path,
     probe: Path,
@@ -601,6 +629,9 @@ def validate_pe_containers(
     target_triple: str,
     drop_named_metadata: tuple[str, ...],
     clear_root_flags: bool,
+    sign: bool = False,
+    pso_probe: Path | None = None,
+    warp_only: bool = False,
 ) -> dict:
     """Extract DXBC containers from a PE image, retarget selected DXIL modules, and validate via root_probe."""
     import pefile
@@ -641,19 +672,31 @@ def validate_pe_containers(
             retargeted_secs = parts(retargeted_blob)
             after = validate_shader(probe, retargeted_blob, retargeted_secs[b"DXIL"], optional_modes=("module",))
 
+            signed = False
+            digest = None
+            pso_result = None
+            if sign and after["container"].get("status") == "0x00000000":
+                retargeted_blob = sign_container(probe, retargeted_blob)
+                signed = True
+                digest = retargeted_blob[4:20].hex()
+            if pso_probe is not None and after["container"].get("status") == "0x00000000":
+                pso_result = check_compute_pso(pso_probe, retargeted_blob, warp_only=warp_only)
+
             saved_path = None
             if output_dir is not None:
                 out_file = output_dir / f"{pe_path.stem}_{rva}.dxbc"
                 out_file.write_bytes(retargeted_blob)
                 saved_path = str(out_file)
 
-            results.append({
+            entry = {
                 "rva": rva,
                 "original_bytes": len(blob),
                 "retargeted_bytes": len(retargeted_blob),
                 "dx_op_count": len(before["ir"]["dx_op_call_sites"]),
                 "xbox_call_count": sum(xbox_calls.values()),
                 "retarget": info,
+                "signed": signed,
+                "digest": digest,
                 "before": {
                     "triple": before["ir"]["target_triple"],
                     "container_status": before["container"].get("status"),
@@ -669,9 +712,12 @@ def validate_pe_containers(
                     "module_diagnostics": after["module"]["diagnostics"],
                 },
                 "output_file": saved_path,
-            })
+            }
+            if pso_result is not None:
+                entry["pso"] = pso_result
+            results.append(entry)
 
-    return {
+    report = {
         "image": pe_path.name,
         "image_sha256": hashlib.sha256(raw).hexdigest(),
         "total_containers": len(containers),
@@ -680,8 +726,18 @@ def validate_pe_containers(
         "processed": len(results),
         "container_passed": sum(r["after"]["container_status"] == "0x00000000" for r in results),
         "module_passed": sum(r["after"]["module_status"] == "0x00000000" for r in results),
+        "signed_count": sum(r["signed"] for r in results),
         "entries": results,
     }
+    if pso_probe is not None:
+        report["warp_pso_passed"] = sum(
+            r.get("pso", {}).get("warp_pso") == "0x00000000" for r in results
+        )
+        if not warp_only:
+            report["hardware_pso_passed"] = sum(
+                r.get("pso", {}).get("hardware_pso") == "0x00000000" for r in results
+            )
+    return report
 
 
 def main() -> int:
@@ -703,7 +759,13 @@ def main() -> int:
                         help="Leave RTS0 flags unmodified instead of clearing Xbox flags 0x03000000")
     parser.add_argument("--extract-module", action="store_true",
                         help="Write bare retargeted DXIL bitcode instead of a DXBC container")
-    parser.add_argument("--probe", type=Path, help="Optional root_probe.exe path to validate the output")
+    parser.add_argument("--probe", type=Path, help="Optional root_probe.exe path to validate or sign the output")
+    parser.add_argument("--sign", action="store_true",
+                        help="Re-sign retargeted DXBC containers with dxil.dll via --probe")
+    parser.add_argument("--pso-probe", type=Path,
+                        help="Optional root_device_probe.exe path to test CreateComputePipelineState")
+    parser.add_argument("--warp-only", action="store_true",
+                        help="Use only the WARP adapter with --pso-probe")
     args = parser.parse_args()
 
     if not args.pe:
@@ -712,6 +774,14 @@ def main() -> int:
                 parser.error(f"{dead} requires --pe")
     elif args.extract_module:
         parser.error("--extract-module does not apply to --pe")
+    if args.sign and not args.probe:
+        parser.error("--sign requires --probe")
+    if args.sign and args.extract_module:
+        parser.error("--sign cannot be combined with --extract-module")
+    if args.pso_probe and args.extract_module:
+        parser.error("--pso-probe cannot be combined with --extract-module")
+    if args.warp_only and not args.pso_probe:
+        parser.error("--warp-only requires --pso-probe")
 
     drop_md = tuple(args.drop_metadata) if args.drop_metadata is not None else DEFAULT_DROP_METADATA
 
@@ -729,6 +799,9 @@ def main() -> int:
             target_triple=args.target_triple,
             drop_named_metadata=drop_md,
             clear_root_flags=not args.keep_root_flags,
+            sign=args.sign,
+            pso_probe=args.pso_probe.resolve(strict=True) if args.pso_probe else None,
+            warp_only=args.warp_only,
         )
         if args.report:
             dest = args.report.resolve()
@@ -765,7 +838,15 @@ def main() -> int:
                 drop_named_metadata=drop_md,
                 clear_root_flags=not args.keep_root_flags,
             )
+            if args.sign:
+                result_bytes = sign_container(args.probe.resolve(strict=True), result_bytes)
+                info["signed"] = True
+                info["digest"] = result_bytes[4:20].hex()
+            else:
+                info["signed"] = False
     elif raw[:4] == BITCODE_MAGIC:
+        if args.sign or args.pso_probe:
+            parser.error("--sign and --pso-probe require a DXBC container input")
         result_bytes, info = retarget_bitcode(
             raw,
             source_triple=args.source_triple,
@@ -788,8 +869,6 @@ def main() -> int:
         )
 
     if args.probe:
-        import subprocess
-
         probe = args.probe.resolve(strict=True)
         if info["kind"] == "dxbc":
             from probe_roots import validate_shader
@@ -801,6 +880,13 @@ def main() -> int:
             rec = json.loads(run.stdout)
             rec["diagnostics"] = run.stderr.decode("utf-8", "replace").rstrip("\0\r\n").splitlines()
             info["validation"] = {"module": rec}
+
+    if args.pso_probe:
+        info["pso"] = check_compute_pso(
+            args.pso_probe.resolve(strict=True),
+            result_bytes,
+            warp_only=args.warp_only,
+        )
 
     print(json.dumps(info, indent=2))
     return 0

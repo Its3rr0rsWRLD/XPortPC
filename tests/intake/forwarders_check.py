@@ -5,6 +5,7 @@ import shutil
 import struct
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pefile
 
@@ -118,6 +119,49 @@ def check(root, caller, forward, provider):
     assert problems["forwarded_missing"]["package_chain"][-1]["symbol"] == "absent_value"
 
     check_descriptor_names(root, caller, report, entry)
+
+    # The loader maps a KnownDLL from System32 before it searches the application directory, so a
+    # package file named kernel32.dll is never loaded. Its exports must not decide KERNEL32 imports.
+    shadow = root / "kernel32.dll"
+    shutil.copyfile(provider, shadow)
+    shadowed = scan(root)
+    shadow.unlink()
+    assert "kernel32.dll" in shadowed["known_dlls"] and "kernel32.dll" in shadowed["images"]
+    system = [r for r in shadowed["imports"] if r["image"] == entry and r["dll"] == "kernel32.dll"]
+    assert system and all(r["bundle_exports_in"] == [] for r in system)
+    for r in system:
+        assert r["package_resolution"]["status"] == r["desktop_resolution"]["status"] == "export_present"
+        first = r["package_resolution"]["chain"][0]
+        assert (first["provider"], first["package"], first["known_dll"]) == ("kernel32.dll", False, True)
+        assert [(s["provider"], s["symbol"], s["package"]) for s in r["package_resolution"]["chain"]] == [
+            (s["provider"], s["symbol"], False) for s in r["desktop_resolution"]["chain"]]
+    shadowed_paths = trace(shadowed, entry)
+    assert "kernel32.dll" in shadowed_paths["unlinked_in_this_graph"]
+    assert not any(f["dll"] == "kernel32.dll" for f in shadowed_paths["findings"])
+
+    # Put the source-built KnownDLL only in a separate synthetic system directory.
+    with TemporaryDirectory() as directory:
+        system_dir = Path(directory)
+        system_copy = system_dir / FORWARD
+        (root / FORWARD).rename(system_copy)
+        try:
+            with patch("pe_inventory.known_dlls", return_value={FORWARD}), patch("pe_inventory.api_sets", return_value={}):
+                first_system = scan(root, system=system_dir)
+                with TemporaryDirectory(dir=root) as other:
+                    shutil.copyfile(provider, Path(other) / PROVIDER)
+                    duplicate = trace(scan(root, system=system_dir), entry)
+        finally:
+            system_copy.rename(root / FORWARD)
+    edges = {r["symbol"]: r for r in first_system["imports"] if r["image"] == entry and r["dll"] == FORWARD}
+    resolved = edges["forwarded_value"]
+    assert not resolved["bundle_exports_in"]
+    assert resolved["package_resolution"]["status"] == "export_present"
+    assert [s["package"] for s in resolved["package_resolution"]["chain"]] == [False, True]
+    missing = {r["symbol"] for r in first_system["unresolved_edges"] if r["image"] == entry and r["dll"] == FORWARD}
+    assert "forwarded_value" not in missing and "forwarded_missing" in missing
+    assert PROVIDER in trace(first_system, entry)["reachable"]
+    assert any(f["symbol"] == "forwarded_value" and f["problem"] == "ambiguous_package_basename"
+               for f in duplicate["findings"])
 
     # Older inventories lack package chains and keep the first-hop bundled result.
     for row in report["imports"]:

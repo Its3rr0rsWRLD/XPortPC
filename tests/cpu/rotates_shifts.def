@@ -1,0 +1,16 @@
+EXPORTS
+    rol32_cl
+    rol64_cl
+    ror32_cl
+    ror64_cl
+    rol32_imm
+    ror64_imm
+    shld32_cl
+    shld64_cl
+    shrd32_cl
+    shrd64_cl
+    shld32_imm
+    shrd64_imm
+    shld32_imm32
+    rol32_cl_zf
+    shld32_cl_zf

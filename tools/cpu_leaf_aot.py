@@ -38,12 +38,16 @@ def function_bytes(image, name):
 
 
 CONDITIONS = {
-    0x72: "<",
-    0x73: ">=",
-    0x74: "==",
-    0x75: "!=",
-    0x76: "<=",
-    0x77: ">",
+    0x72: ("<", False),
+    0x73: (">=", False),
+    0x74: ("==", False),
+    0x75: ("!=", False),
+    0x76: ("<=", False),
+    0x77: (">", False),
+    0x7c: ("<", True),
+    0x7d: (">=", True),
+    0x7e: ("<=", True),
+    0x7f: (">", True),
 }
 
 
@@ -63,16 +67,18 @@ def translate(start, code):
         jump = False
         if prefix == b"\x83\xf8" and pos + 5 <= len(code) and code[pos + 3] in CONDITIONS:
             limit = struct.unpack_from("b", code, pos + 2)[0] & 0xffffffff
-            condition = CONDITIONS[code[pos + 3]]
+            condition, signed = CONDITIONS[code[pos + 3]]
             offset += 5
             jump = True
-            statement = f"if (eax {condition} {limit}u) "
+            statement = (f"if (static_cast<std::int32_t>(eax) {condition} static_cast<std::int32_t>({limit}u)) "
+                         if signed else f"if (eax {condition} {limit}u) ")
         elif opcode == 0x3d and pos + 7 <= len(code) and code[pos + 5] in CONDITIONS:
             limit = struct.unpack_from("<I", code, pos + 1)[0]
-            condition = CONDITIONS[code[pos + 5]]
+            condition, signed = CONDITIONS[code[pos + 5]]
             offset += 7
             jump = True
-            statement = f"if (eax {condition} {limit}u) "
+            statement = (f"if (static_cast<std::int32_t>(eax) {condition} static_cast<std::int32_t>({limit}u)) "
+                         if signed else f"if (eax {condition} {limit}u) ")
         elif opcode == 0xeb and pos + 2 <= len(code):
             offset += 2
             jump = True

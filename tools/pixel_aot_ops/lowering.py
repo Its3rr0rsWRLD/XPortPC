@@ -27,6 +27,10 @@ class Lowering:
         # lane is provably active. Every lane starts active; desktop helper invocations run with ex true throughout.
         self.ex = "true"
         self.wqm = False  # s_wqm_b64 exec, exec has put the wave in whole-quad mode (attribute interpolation needs it)
+        # Values defined on the helper lanes of the quad too: the interpolated coordinate and whole-quad affine
+        # arithmetic on it (valu_f32.arithmetic). Each name is unique, so the set only grows; True marks a value that
+        # depends on the interpolated coordinate. An implicit-LOD sample may read only these.
+        self.quad_values = {"uv.x": True, "uv.y": True}
         self.samples = 0  # samples taken on the path so far
         self.sample_pending = False  # a sample or vector memory load is outstanding (cleared by vmcnt(0))
         self.sample_dest = set()  # VGPRs that load writes

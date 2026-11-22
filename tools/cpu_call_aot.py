@@ -33,7 +33,7 @@ def callee_name(index):
     return "lifted_callee" if index == 0 else f"lifted_callee{index + 1}"
 
 
-def lift_body(start, code, *, caller, bind_import=None, name="lifted_callee"):
+def lift_body(start, code, *, caller, bind_import=None, name=None):
     # In this profile only RBX/RSI survive the call. The host compiler owns
     # physical register allocation and emits its own ABI frame for each function.
     frame = 40 if caller else 8
@@ -151,7 +151,8 @@ def lift_body(start, code, *, caller, bind_import=None, name="lifted_callee"):
 
     if "rax" not in available or (caller and target is None):
         raise ValueError(f"missing return value or call at RVA {start:#x}")
-    name = "lifted" if caller else name
+    if name is None:
+        name = "lifted" if caller else "lifted_callee"
     signature = f'extern "C" __declspec(dllexport) __declspec(noinline) word {name}(word rcx, word rdx, word* r8)'
     return "\n".join([signature + " {", "    word rax, rbx, rsi;", *lines, "    return rax;", "}"]), target
 

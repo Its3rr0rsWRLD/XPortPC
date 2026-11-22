@@ -414,7 +414,12 @@ extern "C" __declspec(dllexport) void* pe_map_image(const wchar_t* path, Resolve
     };
 
     const auto delta = reinterpret_cast<std::uint64_t>(base) - opt.ImageBase;
-    const auto& relocs = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
+    // Like the Windows loader (RtlImageDirectoryEntryToData), a relocation directory at address 0
+    // is absent whatever its Size: the image maps as relocation-free instead of the headers being
+    // parsed as relocation blocks.
+    const auto& linked_relocs = directory(nt, IMAGE_DIRECTORY_ENTRY_BASERELOC);
+    static const IMAGE_DATA_DIRECTORY no_relocs{};
+    const auto& relocs = linked_relocs.VirtualAddress ? linked_relocs : no_relocs;
     if (nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED)
         return release(fail(MAP_RELOCATION, "relocations stripped"));
     if (!inside(relocs.VirtualAddress, relocs.Size, opt.SizeOfImage))

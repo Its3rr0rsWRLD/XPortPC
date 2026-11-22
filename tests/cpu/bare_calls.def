@@ -1,0 +1,4 @@
+EXPORTS
+    call_bare
+    twice_bare
+    tail_bare

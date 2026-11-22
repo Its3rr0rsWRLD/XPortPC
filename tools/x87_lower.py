@@ -1,25 +1,43 @@
 """Opt-in x87 leaf-function profile for ffx_version_query.lower(x87=True).
 
-The profile accepts FLD and FSTP with an m32, m64 or m80 operand and FADDP ST(i), ST(0) for i from 1 to
-7. A function starts with control word 0x027F, TOP 0, eight empty registers and a clear status word, and
+The profile accepts:
+- FLD and FSTP with an m32, m64 or m80 operand, and FST with an m32 or m64 operand;
+- FLD, FST, FSTP and FXCH with ST(i), and FCHS and FABS;
+- FADD, FSUB, FSUBR, FMUL, FDIV and FDIVR with an m32 or m64 operand, with ST(0), ST(i) and with
+  ST(i), ST(0), and their popping forms FADDP, FSUBP, FSUBRP, FMULP, FDIVP and FDIVRP ST(i), ST(0) for
+  i from 1 to 7.
+A function starts with control word 0x027F, TOP 0, eight empty registers and a clear status word, and
 must return with the stack empty. The stack depth before every instruction is fixed at translation
 time, so each register maps to a C++ slot and no TOP is needed at run time. Translation rejects any x87
-instruction outside the profile (including control-word and status-word access and FADDP ST(0), ST(0)),
-a stack overflow or underflow, a depth that differs where control flow joins, an x87 instruction it
-cannot reach from the entry through direct edges, and x87 state that is live at a call, a return, an
-indirect branch or an external edge. The helpers are in tools/x87_soft.h, which the generated source
-must include before the lowered functions (X87_HEADER).
+instruction outside the profile (including control-word and status-word access, a popping form with
+ST(0) as the destination, and the undocumented FSTP and FXCH alias encodings), a stack overflow or
+underflow, a depth that differs where control flow joins, an x87 instruction it cannot reach from the entry through direct edges, and x87 state that is
+live at a call, a return, an indirect branch or an external edge. The helpers are in tools/x87_soft.h,
+which the generated source must include before the lowered functions (X87_HEADER).
 """
 from pathlib import Path
 
-from iced_x86 import FlowControl, MemorySize as S, Mnemonic as M, OpKind as K, Register as R
+from iced_x86 import Code as C, FlowControl, MemorySize as S, Mnemonic as M, OpKind as K, Register as R
 
 X87_HEADER = Path(__file__).with_name("x87_soft.h").read_text(encoding="ascii")
-X87_OPS = frozenset({M.FLD, M.FSTP, M.FADDP})
+X87_OPS = frozenset({M.FLD, M.FST, M.FSTP, M.FXCH, M.FCHS, M.FABS, M.FADD, M.FADDP, M.FSUB, M.FSUBP, M.FSUBR, M.FSUBRP, M.FMUL, M.FMULP,
+                     M.FDIV, M.FDIVP, M.FDIVR, M.FDIVRP})
 DECLARATION = "X87Value x87_slot[8]{};"
 
 LOADS = {S.FLOAT32: "x87_from_f32(load<uint32_t>(a))", S.FLOAT64: "x87_from_f64(load<uint64_t>(a))",
          S.FLOAT80: "x87_from_m80(load<uint64_t>(a), load<uint16_t>(a + 8))"}
+# An arithmetic memory operand keeps a signaling NaN signaling until the NaN rules have seen it.
+OPERANDS = {S.FLOAT32: "x87_operand_f32(load<uint32_t>(a))", S.FLOAT64: "x87_operand_f64(load<uint64_t>(a))"}
+# Two-operand register arithmetic: mnemonic -> helper. The P forms pop after writing ST(i).
+ARITHMETIC = {M.FADD: "x87_add", M.FADDP: "x87_add", M.FSUB: "x87_sub", M.FSUBP: "x87_sub", M.FSUBR: "x87_subr",
+              M.FSUBRP: "x87_subr", M.FMUL: "x87_mul", M.FMULP: "x87_mul", M.FDIV: "x87_div", M.FDIVP: "x87_div",
+              M.FDIVR: "x87_divr", M.FDIVRP: "x87_divr"}
+# Arithmetic with a memory operand or with ST(0), ST(i) / ST(i), ST(0), which keeps the stack depth.
+TWO_FORM = frozenset({M.FADD, M.FSUB, M.FSUBR, M.FMUL, M.FDIV, M.FDIVR})
+POPPING = frozenset({M.FADDP, M.FSUBP, M.FSUBRP, M.FMULP, M.FDIVP, M.FDIVRP})
+# Undocumented aliases of FSTP ST(i) (DF D0+i, DF D8+i) and FXCH ST(i) (DD C8+i, DF C8+i). Assemblers do
+# not emit them and the fixtures do not measure them, so they stay outside the profile.
+ALIASES = frozenset({C.FSTP_STI_DFD0, C.FSTP_STI_DFD8, C.FXCH_ST0_STI_DDC8, C.FXCH_ST0_STI_DFC8})
 
 
 # Every x87 mnemonic in iced starts with F (including FXSAVE/FXRSTOR, which store the x87 state, and
@@ -34,6 +52,28 @@ def is_x87(i):
 def _effect(i, depth):
     """Stack depth after i, or a ValueError for an instruction or operand outside the profile."""
     op = i.mnemonic
+    if i.code in ALIASES:
+        raise ValueError(f"unsupported x87 encoding at {i.ip:#x}: {i}")
+    if op in (M.FLD, M.FST, M.FSTP) and i.op0_kind == K.REGISTER:  # ST(i) copies
+        if depth <= i.op0_register - R.ST0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        if op == M.FLD and depth == 8:
+            raise ValueError(f"x87 stack overflow at {i.ip:#x}: {i}")
+        return depth + {M.FLD: 1, M.FST: 0, M.FSTP: -1}[op]
+    if op == M.FXCH and i.op_count == 2 and i.op0_register == R.ST0:
+        if depth <= i.op1_register - R.ST0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth
+    if op in (M.FCHS, M.FABS):
+        if depth == 0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth
+    if op == M.FST:  # FST m32/m64; there is no FST m80
+        if i.op0_kind != K.MEMORY or i.memory_size not in OPERANDS:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        if depth == 0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth
     if op in (M.FLD, M.FSTP):
         if i.op0_kind != K.MEMORY or i.memory_size not in LOADS:
             raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
@@ -44,7 +84,17 @@ def _effect(i, depth):
         if depth == 0:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth - 1
-    if op == M.FADDP and i.op_count == 2 and i.op1_register == R.ST0 and i.op0_register != R.ST0:
+    if op in TWO_FORM and i.op_count == 1:
+        if i.op0_kind != K.MEMORY or i.memory_size not in OPERANDS:
+            raise ValueError(f"unsupported x87 operand at {i.ip:#x}: {i}")
+        if depth == 0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth
+    if op in TWO_FORM and i.op_count == 2 and R.ST0 in (i.op0_register, i.op1_register):
+        if depth <= max(i.op0_register, i.op1_register) - R.ST0:
+            raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
+        return depth
+    if op in POPPING and i.op_count == 2 and i.op1_register == R.ST0 and i.op0_register != R.ST0:
         if depth <= i.op0_register - R.ST0 or depth < 2:
             raise ValueError(f"x87 stack underflow at {i.ip:#x}: {i}")
         return depth - 1
@@ -92,12 +142,26 @@ def statement(i, depth, address):
     op = i.mnemonic
     _effect(i, depth)
     top = depth - 1  # ST(k) is x87_slot[top - k]
+    if op in (M.FLD, M.FST, M.FSTP) and i.op0_kind == K.REGISTER:
+        k = i.op0_register - R.ST0
+        if op == M.FLD:  # push a copy of ST(k): every encoding is copied as it is
+            return f"x87_slot[{depth}] = x87_slot[{top - k}];  // fld st({k})"
+        return f"x87_slot[{top - k}] = x87_slot[{top}];  // {'fst' if op == M.FST else 'fstp'} st({k})"
+    if op == M.FXCH:
+        k = top - (i.op1_register - R.ST0)
+        return f"{{ const X87Value t = x87_slot[{top}]; x87_slot[{top}] = x87_slot[{k}]; x87_slot[{k}] = t; }}  // fxch"
+    if op in (M.FCHS, M.FABS):
+        return f"x87_slot[{top}] = {'x87_chs' if op == M.FCHS else 'x87_abs'}(x87_slot[{top}]);"
     if op == M.FLD:
         return f"{{ const word a = {address()}; x87_slot[{depth}] = {LOADS[i.memory_size]}; }}"
-    if op == M.FSTP:
+    if op in (M.FST, M.FSTP):  # FST m32/m64 stores without popping
         v = f"x87_slot[{top}]"
         store = {S.FLOAT32: f"store<uint32_t>(a, x87_to_f32({v}));", S.FLOAT64: f"store<uint64_t>(a, x87_to_f64({v}));",
                  S.FLOAT80: f"store<uint64_t>(a, {v}.sig); store<uint16_t>(a + 8, {v}.se);"}[i.memory_size]
-        return f"{{ const word a = {address()}; {store} }}"
-    k = top - (i.op0_register - R.ST0)
-    return f"x87_slot[{k}] = x87_add(x87_slot[{k}], x87_slot[{top}]);"
+        return f"{{ const word a = {address()}; {store} }}" + ("  // fst m" if op == M.FST else "")
+    if i.op_count == 1:  # arithmetic with an m32/m64 operand: ST(0) = ST(0) op operand
+        return (f"{{ const word a = {address()}; "
+                f"x87_slot[{top}] = {ARITHMETIC[op]}(x87_slot[{top}], {OPERANDS[i.memory_size]}); }}")
+    # The destination is the first operand: ST(i) for FMUL ST(i), ST(0) and the P forms, ST(0) otherwise.
+    destination, source = (top - (i.op0_register - R.ST0), top - (i.op1_register - R.ST0))
+    return f"x87_slot[{destination}] = {ARITHMETIC[op]}(x87_slot[{destination}], x87_slot[{source}]);"

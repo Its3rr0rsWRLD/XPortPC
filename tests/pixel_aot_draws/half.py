@@ -44,6 +44,31 @@ def check_half_draw(directory, compiler, renderer, backend):
         if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
             raise AssertionError(f"A wrong half conversion escaped detection in channel {k}")
 
+    # A separate export observes the literal and two scalar results as half encodings.
+    body = [
+        "v_cvt_f32_f16_e32 v12, 0x3c00",
+        "s_ashr_i64 s[72:73], 0xf000, 2",
+        "v_cvt_f32_f16_e32 v13, s72",
+        "s_bfm_b64 s[72:73], 16, 0",
+        "s_and_b64 s[72:73], s[72:73], 0x3c00",
+        "v_cvt_f32_f16_e32 v14, s72",
+        *HALF_BODY[3:],
+    ]
+    source.write_text(translate(with_constants(body)), encoding="ascii")
+    subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
+    scalars = [half_value(0x3c00), half_value(0xf000 // 4), half_value((2**16 - 1) & 0x3c00), fourth * 2.0 ** 24]
+    assert scalars == [1.0, 1.0, 1.0, 1.0]
+    case.write_bytes(constants + struct.pack("<4f", *scalars) * 64)
+    subprocess.run(draw, check=True)
+    # A literal read as zero, a shift by zero (0xf000, -8192.0, in green) and a zero-width s_bfm_b64 mask.
+    for k, value in ((0, 0.0), (1, half_value(0xf000)), (2, 0.0)):
+        wrong_values = list(scalars)
+        wrong_values[k] = value
+        case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
+        result = subprocess.run(draw, capture_output=True, text=True)
+        if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
+            raise AssertionError(f"A wrong literal or scalar half escaped detection in channel {k}")
+
 
 def controls(directory):
     # v_cvt_f32_f16 widens the low half through widen16 and applies modifiers after widening.

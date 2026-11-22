@@ -1,0 +1,16 @@
+EXPORTS
+    push_loop
+    spill_widths
+    home_save
+    home_args
+    two_paths
+    home_spill
+    loop_counter
+    realloc_slot
+    frame_bound
+    stale_save
+    stale_pop
+    guest_spill
+    split_restore
+    partial_push
+    reuse_restored

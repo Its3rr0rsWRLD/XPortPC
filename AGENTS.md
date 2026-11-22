@@ -78,7 +78,7 @@ List the registered tests with `ctest --preset dev -N`. Use
 |---|---|
 | CPU translation | `ctest --preset dev --no-tests=error -R '^cpu_' -V` |
 | Script states | `ctest --preset dev --no-tests=error -R '^script_(state_literals\|path_links)$' -V` |
-| Textures | `ctest --preset dev --no-tests=error -R '^(bcpack_prefix_and_mip_tail\|bc7_draw_warp)$' -V` |
+| Textures | `ctest --preset dev --no-tests=error -R '^(bcpack_prefix_and_mip_tail\|bc7_tile_swizzle\|bc7_draw_warp)$' -V` |
 | Shader translation | `ctest --preset dev -R '^pixel_aot_' -V` |
 | D3D12 and ray tracing | `ctest --preset dev -R '^bvh_(differential\|wave64)_hardware$' -V` |
 | Windows runtime | `ctest --preset dev -R 'era_heap\|desktop_memory_query'` |
@@ -91,18 +91,32 @@ Windows build, commit and debug-layer status.
 
 ## Pure-Python checks
 
-These checks do not need Windows, D3D12 or game files:
+These checks do not need Windows, D3D12 or game files. The list matches the
+platform-independent Python job in `.github/workflows/windows.yml`:
 
 ```bash
 python3 -m venv out/pe-env
 ./out/pe-env/bin/python -m pip install -r requirements-dev.txt
+./out/pe-env/bin/python -B tests/script_state_check.py
+./out/pe-env/bin/python -B tests/resource_root_check.py
 ./out/pe-env/bin/python -B tests/bcpack_check.py
+./out/pe-env/bin/python -B tests/bc7_blocks_check.py
+./out/pe-env/bin/python -B tests/bc7_tiles_check.py
 ./out/pe-env/bin/python -B tests/form_coverage_check.py
+./out/pe-env/bin/python -B tests/resource_ranges_check.py
+./out/pe-env/bin/python -B tests/awc_metadata_check.py
+./out/pe-env/bin/python -B tests/sgd5_effects_check.py
 ./out/pe-env/bin/python -B tests/dxcontainer_part_offsets_check.py
 ./out/pe-env/bin/python -B tests/layout_chunks_check.py
-./out/pe-env/bin/python -B tests/resource_ranges_check.py
-./out/pe-env/bin/python -B tests/script_state_check.py
+./out/pe-env/bin/python -B tests/dependency_paths_check.py
 ./out/pe-env/bin/python -B tests/intake/paths_check.py
+./out/pe-env/bin/python -B tests/shader_probe_check.py
+./out/pe-env/bin/python -B tests/dxil_retarget_check.py
+./out/pe-env/bin/python -B tests/rdna2_tools_check.py
+./out/pe-env/bin/python -B tests/pso_readiness_check.py
+./out/pe-env/bin/python -B tests/xmem_attribute_scan_check.py
+./out/pe-env/bin/python -B tests/docs_links_check.py
+./out/pe-env/bin/python -B tests/bidi_controls_check.py
 ```
 
 `tests/pixel_aot_check.py binary` additionally needs LLVM with gfx1013 support

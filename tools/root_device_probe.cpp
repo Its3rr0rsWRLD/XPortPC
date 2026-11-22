@@ -10,17 +10,41 @@
 #include <vector>
 using Microsoft::WRL::ComPtr;
 
+namespace {
+unsigned highest_shader_model(ID3D12Device* device)
+{
+    D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_5};
+    if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))))
+        return static_cast<unsigned>(sm.HighestShaderModel);
+    sm.HighestShaderModel = D3D_SHADER_MODEL_6_0;
+    if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))))
+        return static_cast<unsigned>(sm.HighestShaderModel);
+    return 0;
+}
+}
+
 int main(int argc, char** argv)
 {
-    const bool warpOnly = argc == 2 && std::string_view(argv[1]) == "--warp-only";
-    if (argc != 1 && !warpOnly) return 1;
+    bool warpOnly = false;
+    bool computePso = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg(argv[i]);
+        if (arg == "--warp-only" && !warpOnly) warpOnly = true;
+        else if (arg == "--compute-pso" && !computePso) computePso = true;
+        else return 1;
+    }
     _setmode(_fileno(stdin), _O_BINARY);
     std::vector<char> input{std::istreambuf_iterator<char>(std::cin), {}};
+    if (input.empty() || std::cin.bad()) return 2;
+
     ComPtr<ID3D12VersionedRootSignatureDeserializer> reader;
-    if (input.empty() || FAILED(D3D12CreateVersionedRootSignatureDeserializer(
-        input.data(), input.size(), IID_PPV_ARGS(&reader)))) return 2;
-    const auto* source = reader->GetUnconvertedRootSignatureDesc();
-    if (!source || source->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return 3;
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* source = nullptr;
+    if (!computePso) {
+        if (FAILED(D3D12CreateVersionedRootSignatureDeserializer(
+            input.data(), input.size(), IID_PPV_ARGS(&reader)))) return 2;
+        source = reader->GetUnconvertedRootSignatureDesc();
+        if (!source || source->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) return 3;
+    }
 
     ComPtr<IDXGIFactory6> factory;
     ComPtr<IDXGIAdapter1> hardware, warp;
@@ -41,6 +65,29 @@ int main(int argc, char** argv)
         }
     }
     if (FAILED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&warpDevice)))) return 6;
+
+    if (computePso) {
+        std::printf("{\"bytes\":%zu", input.size());
+        if (gpuDevice) std::printf(",\"adapter_id\":\"%04x:%04x\"", adapter.VendorId, adapter.DeviceId);
+        for (auto* device : {gpuDevice.Get(), warpDevice.Get()}) {
+            if (!device) continue;
+            const char* name = device == gpuDevice.Get() ? "hardware" : "warp";
+            std::printf(",\"%s_shader_model\":\"0x%x\"", name, highest_shader_model(device));
+            ComPtr<ID3D12RootSignature> root;
+            const HRESULT root_hr = device->CreateRootSignature(0, input.data(), input.size(), IID_PPV_ARGS(&root));
+            std::printf(",\"%s_root\":\"0x%08lx\"", name, static_cast<unsigned long>(root_hr));
+            if (SUCCEEDED(root_hr)) {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+                desc.pRootSignature = root.Get();
+                desc.CS = {input.data(), input.size()};
+                ComPtr<ID3D12PipelineState> pipeline;
+                const HRESULT pso_hr = device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+                std::printf(",\"%s_pso\":\"0x%08lx\"", name, static_cast<unsigned long>(pso_hr));
+            }
+        }
+        std::puts("}");
+        return 0;
+    }
 
     constexpr unsigned observed = 0x03000000;
     unsigned original = source->Desc_1_1.Flags;

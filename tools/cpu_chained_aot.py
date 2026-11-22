@@ -64,9 +64,9 @@ def translate(image, name, partial=False, callback_offset=None, ffx_destroy=Fals
             elif code == Code.POP_R64 and reg_dst and sp in stack:
                 regs[dst] = stack.pop(sp)
                 sp += 8
-            elif code in (Code.ADD_RM64_IMM8, Code.SUB_RM64_IMM8) and dst == R.RSP:
-                delta = ins.immediate8to64
-                sp += delta if code == Code.ADD_RM64_IMM8 else -delta
+            elif code in (Code.ADD_RM64_IMM8, Code.SUB_RM64_IMM8, Code.ADD_RM64_IMM32, Code.SUB_RM64_IMM32) and dst == R.RSP:
+                delta = ins.immediate8to64 if code in (Code.ADD_RM64_IMM8, Code.SUB_RM64_IMM8) else ins.immediate32to64
+                sp += delta if code in (Code.ADD_RM64_IMM8, Code.ADD_RM64_IMM32) else -delta
                 if not -4096 <= sp <= 0 or sp % 8:
                     raise ValueError(f"unsupported stack adjustment at {ip:#x}")
                 stack = {k: v for k, v in stack.items() if k >= sp}

@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -154,6 +157,20 @@ void check_compute(ID3D12Device* device, bool tables)
     const D3D12_SHADER_BYTECODE shader = tables ? D3D12_SHADER_BYTECODE{compute_tables, sizeof(compute_tables)} :
                                                   D3D12_SHADER_BYTECODE{compute_root, sizeof(compute_root)};
     run_compute(device, tables, shader, shader);
+}
+
+void check_compute_file(ID3D12Device* device, const char* path)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) throw std::runtime_error(std::string("Could not open compute shader: ") + path);
+    const auto size = file.tellg();
+    if (size <= 0) throw std::runtime_error(std::string("Empty compute shader: ") + path);
+    std::vector<char> bytes(static_cast<std::size_t>(size));
+    file.seekg(0);
+    if (!file.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+        throw std::runtime_error(std::string("Could not read compute shader: ") + path);
+    const D3D12_SHADER_BYTECODE shader{bytes.data(), bytes.size()};
+    run_compute(device, false, shader, shader);
 }
 
 void check_bvh_root_roundtrip(ID3D12Device* device)

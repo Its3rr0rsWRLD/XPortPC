@@ -460,6 +460,8 @@ def check_f64_draws(directory, compiler, renderer, backend):
         # The capability skip, forced: the harness reports it as exit 77 whatever the adapter supports.
         if name == "add":
             forced = subprocess.run(draw, capture_output=True, text=True, env={**os.environ, "XBOX2WINDOWS_TEST_NO_DOUBLES": "1"})
+            if forced.returncode == 77 and not forced.stdout:  # no adapter at all: a skip, reported by pixel_aot_check.py
+                raise subprocess.CalledProcessError(77, draw, forced.stdout, forced.stderr)
             assert forced.returncode == 77 and "forced_off" in forced.stdout, (forced.returncode, forced.stdout, forced.stderr)
         todo = {bug: False for bug in (*bugs, "halves")}
         for inputs in sets:

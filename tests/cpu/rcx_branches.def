@@ -1,0 +1,9 @@
+EXPORTS
+    loop_count
+    loopd_count
+    loope_scan
+    loopne_scan
+    looped_scan
+    loopned_scan
+    jrcxz_probe
+    jecxz_probe

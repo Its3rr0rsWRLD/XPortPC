@@ -65,6 +65,7 @@ struct MipDraw {
     UINT scale;
     UINT requestedMip = 0;
     bool isTailDraw = false;
+    bool partialQuad = false;
 };
 
 struct Extent {
@@ -193,6 +194,9 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         if (req.isTailDraw)
             std::printf("requested_mip=%u sampled_mip=%u ", req.requestedMip, req.sampledLevel + firstResident);
         const auto& sampled = levels.at(req.sampledLevel);
+        ComPtr<ID3D12Resource> partialTriangle;
+        if (req.partialQuad)
+            partialTriangle = upload(device, std::vector<Word>{3, 4, 5});
         const auto [width, height] = req.isTailDraw ? base.mip(req.requestedMip)
                                                    : Extent{sampled.width * req.scale, sampled.height * req.scale};
         auto dstDesc = texture_desc(width, height, desc.RTVFormats[0], D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
@@ -252,7 +256,14 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         list->ClearRenderTargetView(rtv, clear.Color, 0, nullptr);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        list->DrawInstanced(3,1,0,0);
+        if (partialTriangle) {
+            const D3D12_INDEX_BUFFER_VIEW indices{partialTriangle->GetGPUVirtualAddress(),
+                                                   3 * sizeof(Word), DXGI_FORMAT_R32_UINT};
+            list->IASetIndexBuffer(&indices);
+            list->DrawIndexedInstanced(3, 1, 0, 0, 0);
+        } else {
+            list->DrawInstanced(3,1,0,0);
+        }
         transition(list, target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         src.pResource = target.Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -438,6 +449,26 @@ void check_translated_pixel_mips(ID3D12Device* device, const char* path, const c
     levels[1].expected.resize(16);
     std::memcpy(levels[1].expected.data(), bytes.data() + levels[0].constants.size() * sizeof(Word), 16 * sizeof(Color));
     draw_verified(device, path, levels, {8, 8}, 0, {{1, 1}}, nullptr);
+}
+
+void check_pixel_quad_lod(ID3D12Device* device, const char* shader)
+{
+    PixelInput top{8, 8, 1, DXGI_FORMAT_R8G8B8A8_UNORM};
+    PixelInput next{4, 4, 1, DXGI_FORMAT_R8G8B8A8_UNORM};
+    const float scale = 4.0f;
+    std::memcpy(&top.constants[2], &scale, sizeof(scale));
+    for (UINT y = 0; y < top.height; ++y) {
+        for (UINT x = 0; x < top.width; ++x) {
+            top.rows.insert(top.rows.end(), {255, 0, 0, 255});
+            // Pixel centers have x + y + 1 below the triangle's 7.75-pixel edge.
+            top.expected.push_back(x + y <= 6 ? Color{0, 1, 0, 1} : Color{-1, -1, -1, -1});
+        }
+    }
+    for (UINT texel = 0; texel < next.width * next.height; ++texel)
+        next.rows.insert(next.rows.end(), {0, 255, 0, 255});
+    MipDraw draw{0, 1};
+    draw.partialQuad = true;
+    draw_verified(device, shader, {std::move(top), std::move(next)}, {8, 8}, 0, {draw}, nullptr);
 }
 
 void check_dual_pixel(ID3D12Device* device, const char* shader, const char* capture, bool swap)

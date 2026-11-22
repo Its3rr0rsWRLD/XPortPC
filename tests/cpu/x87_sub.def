@@ -1,0 +1,23 @@
+EXPORTS
+    sub_m80
+    sub_to_m64
+    sub_to_m32
+    subr_m80
+    sub_st0_sti
+    sub_sti_st0
+    subr_st0_sti
+    subr_sti_st0
+    add_st0_sti
+    add_sti_st0
+    sub_self
+    add_self
+    sub_mem32
+    sub_mem64
+    subr_mem32
+    subr_mem64
+    add_mem32
+    add_mem64
+    sub_f32
+    sub_f64
+    add_f64
+    sub_three

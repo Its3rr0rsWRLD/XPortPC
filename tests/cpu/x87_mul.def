@@ -1,0 +1,13 @@
+EXPORTS
+    mul_m80
+    mul_to_m64
+    mul_to_m32
+    mul_st0_sti
+    mul_sti_st0
+    mul_square
+    mul_mem32
+    mul_mem64
+    mul_f32
+    mul_f64
+    mul_three
+    mul_add

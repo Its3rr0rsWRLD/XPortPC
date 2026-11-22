@@ -1,6 +1,12 @@
 ; A CRT-free PE entry. The existing call_mix (direct.asm, IMPORT_MIX)
 ; calls the named DLL import and records the two actual arguments and its output.
 EXTERN call_mix:PROC
+IFDEF FRAME_SELECTOR
+EXTERN call_bare:PROC
+ENDIF
+IFDEF TWO_TARGETS
+EXTERN call_alt:PROC
+ENDIF
 EXTERN __imp_read_selector:QWORD
 EXTERN __imp_emit_trace:QWORD
 
@@ -12,6 +18,13 @@ native_entry PROC FRAME
     call qword ptr [__imp_read_selector]
     cmp eax, -1
     je io_error
+IFDEF FRAME_SELECTOR
+    ; call_bare returns 5 * selector - 5 through a nested, no-unwind leaf.
+    mov ecx, eax
+    mov edx, 5
+    lea r8, [rsp+32]
+    call call_bare
+ENDIF
     test eax, eax
 IFDEF FLIP_SELECTOR
     jnz wide_input
@@ -20,13 +33,28 @@ ELSE
 ENDIF
     mov ecx, 41
     mov edx, 9
+IFDEF TWO_TARGETS
+    lea r8, [rsp+32]
+IFDEF SWAP_TARGETS
+    call call_mix
+ELSE
+    call call_alt
+ENDIF
+    jmp save_result
+ELSE
     jmp dispatch
+ENDIF
 wide_input:
     mov rcx, 1000002fch
     mov rdx, 100000000h
 dispatch:
     lea r8, [rsp+32]
+IFDEF SWAP_TARGETS
+    call call_alt
+ELSE
     call call_mix
+ENDIF
+save_result:
     mov [rsp+56], rax
     lea rcx, [rsp+32]
     call qword ptr [__imp_emit_trace]

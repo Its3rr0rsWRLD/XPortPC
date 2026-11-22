@@ -1,4 +1,5 @@
 LIBRARY intake_provider
 EXPORTS
+    named_alias = named_value
     named_value
     ordinal_value @77 NONAME

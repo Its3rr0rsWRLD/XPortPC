@@ -105,15 +105,18 @@ static inline X87Rounded x87_round(bool sign, int e, uint64_t hi, uint64_t lo, X
     return {hi, biased};
 }
 
-// Loads from m32 and m64 convert exactly; a signaling NaN is quieted (the masked invalid response).
-static inline X87Value x87_from_binary(uint64_t bits, int fraction_bits, int bias, int exponent_max) {
+// Loads from m32 and m64 convert exactly; a signaling NaN is quieted (the masked invalid response). An
+// arithmetic memory operand converts the same way but keeps a signaling NaN signaling (quiet = false), so
+// the NaN rules of the arithmetic see the operand's own kind.
+static inline X87Value x87_from_binary(uint64_t bits, int fraction_bits, int bias, int exponent_max, bool quiet = true) {
     const bool sign = (bits >> (fraction_bits + (fraction_bits == 23 ? 8 : 11))) & 1;
     const uint16_t s = sign ? 0x8000 : 0;
     const uint64_t fraction = bits & ((1ull << fraction_bits) - 1);
     const int exponent = static_cast<int>((bits >> fraction_bits) & static_cast<uint64_t>(exponent_max));
     if (exponent == exponent_max) {
         if (fraction == 0) return {x87_integer_bit, static_cast<uint16_t>(s | 0x7fff)};
-        return x87_quiet({x87_integer_bit | (fraction << (63 - fraction_bits)), static_cast<uint16_t>(s | 0x7fff)});
+        const X87Value nan{x87_integer_bit | (fraction << (63 - fraction_bits)), static_cast<uint16_t>(s | 0x7fff)};
+        return quiet ? x87_quiet(nan) : nan;
     }
     if (exponent == 0) {
         if (fraction == 0) return {0, s};
@@ -125,6 +128,8 @@ static inline X87Value x87_from_binary(uint64_t bits, int fraction_bits, int bia
 }
 static inline X87Value x87_from_f32(uint32_t bits) { return x87_from_binary(bits, 23, 127, 0xff); }
 static inline X87Value x87_from_f64(uint64_t bits) { return x87_from_binary(bits, 52, 1023, 0x7ff); }
+static inline X87Value x87_operand_f32(uint32_t bits) { return x87_from_binary(bits, 23, 127, 0xff, false); }
+static inline X87Value x87_operand_f64(uint64_t bits) { return x87_from_binary(bits, 52, 1023, 0x7ff, false); }
 
 // Stores to m32 and m64 round into the destination's precision and range. A NaN is quieted and its
 // significand truncated; an invalid operand stores the destination's indefinite.
@@ -208,3 +213,64 @@ static inline X87Value x87_add(X87Value a, X87Value b) {
     const X87Rounded r = x87_round(x.sign, e, hi, lo, x87_arith, x87_rc);
     return {r.sig, static_cast<uint16_t>((x.sign ? 0x8000 : 0) | r.biased)};
 }
+
+// FMUL: the exact product rounded to the arithmetic format. The sign is the exclusive or of the operand
+// signs, also for zero and infinite results; infinity times zero is invalid and gives the indefinite.
+static inline X87Value x87_mul(X87Value a, X87Value b) {
+    X87Value out;
+    if (x87_special_operands(a, b, &out)) return out;
+    const bool sign = x87_sign(a) != x87_sign(b);
+    const uint16_t s = sign ? 0x8000 : 0;
+    const bool ia = x87_is_inf(a), ib = x87_is_inf(b), za = x87_is_zero(a), zb = x87_is_zero(b);
+    if ((ia && zb) || (ib && za)) return x87_indefinite;
+    if (ia || ib) return {x87_integer_bit, static_cast<uint16_t>(s | 0x7fff)};
+    if (za || zb) return {0, s};
+    const X87Unpacked x = x87_unpack(a), y = x87_unpack(b);
+    uint64_t hi, lo = _umul128(x.sig, y.sig, &hi);  // x.sig * y.sig in [2^126, 2^128)
+    int e = x.e + y.e;
+    if (hi & x87_integer_bit) ++e;
+    else { hi = (hi << 1) | (lo >> 63); lo <<= 1; }
+    const X87Rounded r = x87_round(sign, e, hi, lo, x87_arith, x87_rc);
+    return {r.sig, static_cast<uint16_t>(s | r.biased)};
+}
+
+// FDIV: the quotient rounded to the arithmetic format. A 64-bit quotient of the significands and a sticky
+// bit for a nonzero remainder are enough to round to 53 bits. The sign is the exclusive or of the operand
+// signs. Zero by zero and infinity by infinity are invalid and give the indefinite; a finite nonzero value
+// by zero gives infinity (the masked divide-by-zero response); a finite value by infinity gives zero.
+static inline X87Value x87_div(X87Value a, X87Value b) {
+    X87Value out;
+    if (x87_special_operands(a, b, &out)) return out;
+    const bool sign = x87_sign(a) != x87_sign(b);
+    const uint16_t s = sign ? 0x8000 : 0;
+    const bool ia = x87_is_inf(a), ib = x87_is_inf(b), za = x87_is_zero(a), zb = x87_is_zero(b);
+    if ((ia && ib) || (za && zb)) return x87_indefinite;
+    if (ia || zb) return {x87_integer_bit, static_cast<uint16_t>(s | 0x7fff)};
+    if (ib || za) return {0, s};
+    const X87Unpacked x = x87_unpack(a), y = x87_unpack(b);
+    // Divide x.sig * 2^64 (or x.sig * 2^63 when x.sig >= y.sig) by y.sig: the quotient lies in [2^63, 2^64).
+    const bool shift = x.sig >= y.sig;
+    uint64_t remainder;
+    const uint64_t q = _udiv128(shift ? x.sig >> 1 : x.sig, shift ? x.sig << 63 : 0, y.sig, &remainder);
+    const uint64_t lo = remainder != 0;  // sticky
+    const X87Rounded r = x87_round(sign, x.e - y.e - (shift ? 0 : 1), q, lo, x87_arith, x87_rc);
+    return {r.sig, static_cast<uint16_t>(s | r.biased)};
+}
+// FDIVR: the same division with the operands exchanged.
+static inline X87Value x87_divr(X87Value a, X87Value b) { return x87_div(b, a); }
+
+// FSUB: a - b as a + (-b). A NaN or invalid operand is selected before the negation, so a NaN result keeps
+// its own sign; x - x is +0, as x + (-x) is.
+static inline X87Value x87_sub(X87Value a, X87Value b) {
+    X87Value out;
+    if (x87_special_operands(a, b, &out)) return out;
+    b.se ^= 0x8000;
+    return x87_add(a, b);
+}
+// FSUBR: the same subtraction with the operands exchanged.
+static inline X87Value x87_subr(X87Value a, X87Value b) { return x87_sub(b, a); }
+
+// FCHS and FABS change only the sign bit, of every encoding: NaNs stay signaling or quiet, and unnormals
+// and pseudo-denormals keep their bits.
+static inline X87Value x87_chs(X87Value v) { v.se ^= 0x8000; return v; }
+static inline X87Value x87_abs(X87Value v) { v.se &= 0x7fff; return v; }

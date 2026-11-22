@@ -5,8 +5,14 @@ PUBLIC choose_value, neighbor
 choose_value PROC
     push rbx
     push rsi
+IFDEF USE_LARGE_FRAME
+    sub rsp, 136
+    mov [rsp + 32], rcx
+    mov rsi, [rsp + 32]
+ELSE
     sub rsp, 8
     mov rsi, rcx
+ENDIF
 IFDEF USE_JNE
     test rsi, rsi
     jnz short load_inner
@@ -53,7 +59,11 @@ ELSE
     mov eax, 7
 ENDIF
 finish_value::
+IFDEF USE_LARGE_FRAME
+    add rsp, 136
+ELSE
     add rsp, 8
+ENDIF
     pop rsi
     pop rbx
     ret
@@ -61,7 +71,11 @@ finish_end LABEL BYTE
 
 .xdata SEGMENT READONLY
 ALIGN 4
+IFDEF USE_LARGE_FRAME
+primary_info DB 1,9,4,0, 9,01h, 11h,00h, 2,60h, 1,30h
+ELSE
 primary_info DB 1,6,3,0, 6,02h, 2,60h, 1,30h, 0,0
+ENDIF
 neighbor_info DB 1,0,0,0
 empty_info DB 21h,0,0,0
     DD IMAGEREL choose_value, IMAGEREL primary_end, IMAGEREL primary_info

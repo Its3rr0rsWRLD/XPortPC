@@ -1,0 +1,11 @@
+EXPORTS
+    load16
+    load32
+    load64
+    load16_r10
+    load64_r11
+    store16
+    store32
+    store64
+    store64_index
+    roundtrip32

@@ -3,7 +3,8 @@
 param(
     [ValidateSet('hardware', 'warp')]
     [string]$Backend = 'hardware',
-    [string]$ReportPath
+    [string]$ReportPath,
+    [Alias('Adapter')][string]$AdapterFilter
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +43,7 @@ foreach ($test in 'dual-uav', 'texture-mips', 'bvh-waves', 'bvh-wave64', 'bvh-di
     $process.StartInfo.RedirectStandardOutput = $true
     $process.StartInfo.RedirectStandardError = $true
     try {
+        if ($AdapterFilter -and $Backend -eq 'hardware') { $process.StartInfo.EnvironmentVariables['XBOX2WINDOWS_ADAPTER'] = $AdapterFilter }
         [void]$process.Start()
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
@@ -84,6 +86,7 @@ $report.Add('')
 $report.Add("Source commit: $revision")
 $report.Add("Windows build: $($windows.CurrentBuildNumber).$($windows.UBR)")
 $report.Add("Backend: $Backend")
+if ($AdapterFilter -and $Backend -eq 'hardware') { $report.Add("Adapter filter: $AdapterFilter") }
 $report.Add('')
 $report.Add('### Summary')
 $report.Add('')

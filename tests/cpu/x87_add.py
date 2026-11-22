@@ -483,8 +483,8 @@ def check_rejections():
     fld, fstp = "d9 01", "dd 19"  # fld dword ptr [rcx]; fstp qword ptr [rdx]
     rejected = {
         "the profile off (default)": (attempt(f"{fld} {fstp} c3", x87=False), "unsupported query operation"),
-        "fld st(1)": (attempt(f"{fld} d9 c1 de c1 de c1 {fstp} c3"), "unsupported x87 operand"),
-        "fadd st, st(1)": (attempt(f"{fld} {fld} d8 c1 de c1 {fstp} c3"), "fadd"),
+        "fild m16": (attempt(f"{fld} df 01 de c1 {fstp} c3"), "unsupported x87 operation"),
+        "fcom st(1)": (attempt(f"{fld} {fld} d8 d1 de c1 {fstp} c3"), "fcom"),
         "fnstsw ax": (attempt(f"{fld} df e0 {fstp} c3"), "unsupported x87 operation"),
         "fldcw": (attempt(f"d9 29 {fld} {fstp} c3"), "fldcw"),
         "fninit": (attempt(f"{fld} db e3 {fstp} c3"), "unsupported x87 operation"),

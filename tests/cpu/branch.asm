@@ -65,9 +65,31 @@ ELSE
     jbe short at_most_minus_sixteen
 ENDIF
     sub eax, 41
-    jmp short store_value
+    jmp short check_signed_lt
 at_most_minus_sixteen:
     add eax, 19
+check_signed_lt:
+    cmp eax, -12
+IFDEF INVERT_BRANCH
+    jge short below_minus_twelve_signed
+ELSE
+    jl short below_minus_twelve_signed
+ENDIF
+    add eax, 11
+    jmp short check_signed_le_imm32
+below_minus_twelve_signed:
+    sub eax, 13
+check_signed_le_imm32:
+    cmp eax, -300
+IFDEF INVERT_BRANCH
+    jg short at_most_minus_three_hundred_signed
+ELSE
+    jle short at_most_minus_three_hundred_signed
+ENDIF
+    sub eax, 29
+    jmp short store_value
+at_most_minus_three_hundred_signed:
+    add eax, 37
 store_value:
     mov DWORD PTR [rdx], eax
     add eax, 1

@@ -58,6 +58,22 @@ def decode_s_reg(reg_id: int) -> str:
     return f"s{reg_id}"
 
 
+def decode_s_reg64(reg_id: int) -> str:
+    """Decode a 64-bit scalar operand as an SGPR pair or a named 64-bit special."""
+    if reg_id <= 105 and reg_id % 2 == 0:
+        return f"s[{reg_id}:{reg_id + 1}]"
+    if reg_id == 106:
+        return "vcc"
+    if 108 <= reg_id <= 122 and (reg_id - 108) % 2 == 0:
+        n = reg_id - 108
+        return f"ttmp[{n}:{n + 1}]"
+    if reg_id == 125:
+        return "null"
+    if reg_id == 126:
+        return "exec"
+    return decode_s_reg(reg_id)
+
+
 def decode_v_reg(reg_id: int) -> str:
     """Decode a 9-bit VOP SRC0 operand: 0..255 scalar/constant, 256..511 VGPR."""
     if 256 <= reg_id <= 511:
@@ -133,6 +149,28 @@ SOPK_OPS = {
     0x18: ("s_waitcnt_vmcnt", "Wait for vector memory counter"),
     0x19: ("s_waitcnt_expcnt", "Wait for export counter"),
     0x1a: ("s_waitcnt_lgkmcnt", "Wait for LDS/GDS/K/M counter"),
+}
+
+SOPC_OPS = {
+    # GFX10 / RDNA 2 opcode numbers, as in LLVM SOPC_Real_gfx10 definitions
+    0x00: ("s_cmp_eq_i32", "Scalar compare equal signed 32-bit"),
+    0x01: ("s_cmp_lg_i32", "Scalar compare not-equal signed 32-bit"),
+    0x02: ("s_cmp_gt_i32", "Scalar compare greater signed 32-bit"),
+    0x03: ("s_cmp_ge_i32", "Scalar compare greater-or-equal signed 32-bit"),
+    0x04: ("s_cmp_lt_i32", "Scalar compare less signed 32-bit"),
+    0x05: ("s_cmp_le_i32", "Scalar compare less-or-equal signed 32-bit"),
+    0x06: ("s_cmp_eq_u32", "Scalar compare equal unsigned 32-bit"),
+    0x07: ("s_cmp_lg_u32", "Scalar compare not-equal unsigned 32-bit"),
+    0x08: ("s_cmp_gt_u32", "Scalar compare greater unsigned 32-bit"),
+    0x09: ("s_cmp_ge_u32", "Scalar compare greater-or-equal unsigned 32-bit"),
+    0x0a: ("s_cmp_lt_u32", "Scalar compare less unsigned 32-bit"),
+    0x0b: ("s_cmp_le_u32", "Scalar compare less-or-equal unsigned 32-bit"),
+    0x0c: ("s_bitcmp0_b32", "Scalar test that bit src1 of src0 is zero"),
+    0x0d: ("s_bitcmp1_b32", "Scalar test that bit src1 of src0 is one"),
+    0x0e: ("s_bitcmp0_b64", "Scalar test that bit src1 of 64-bit src0 is zero"),
+    0x0f: ("s_bitcmp1_b64", "Scalar test that bit src1 of 64-bit src0 is one"),
+    0x12: ("s_cmp_eq_u64", "Scalar compare equal unsigned 64-bit"),
+    0x13: ("s_cmp_lg_u64", "Scalar compare not-equal unsigned 64-bit"),
 }
 
 SMEM_OPS = {
@@ -244,8 +282,36 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         asm = f"{op_name} {decode_s_reg(sdst)}, {decode_s_reg(ssrc0)}"
         return (4, op_name, asm, comment)
 
+    # SOPC: [31:23] == 0b101111110 (0xbf000000)
+    # Must run before the SOPK prefix check, which would otherwise consume these words.
+    if (w0 & 0xff800000) == 0xbf000000:
+        op = (w0 >> 16) & 0x7f
+        ssrc1 = (w0 >> 8) & 0xff
+        ssrc0 = w0 & 0xff
+        op_info = SOPC_OPS.get(op, (f"s_sopc_{op:02x}", "Unknown SOPC"))
+        op_name, comment = op_info
+        length = 4
+        literal = None
+        if ssrc0 == 255 or ssrc1 == 255:
+            if offset + 8 > len(data):
+                return (4, "sopc_truncated", f"{op_name} <truncated>", "Incomplete SOPC literal")
+            literal, = struct.unpack_from("<I", data, offset + 4)
+            length = 8
+
+        def sopc_operand(reg_id: int, wide: bool) -> str:
+            if reg_id == 255 and literal is not None:
+                return f"0x{literal:x}"
+            if wide:
+                return decode_s_reg64(reg_id)
+            return decode_s_reg(reg_id)
+
+        src0_wide = op_name in {"s_cmp_eq_u64", "s_cmp_lg_u64", "s_bitcmp0_b64", "s_bitcmp1_b64"}
+        src1_wide = op_name in {"s_cmp_eq_u64", "s_cmp_lg_u64"}
+        asm = f"{op_name} {sopc_operand(ssrc0, src0_wide)}, {sopc_operand(ssrc1, src1_wide)}"
+        return (length, op_name, asm, comment)
+
     # 3. SOPK: [31:28] == 0b1011 (0xb0000000)
-    if (w0 & 0xf0000000) == 0xb0000000 and (w0 & 0x0f800000) not in (0x0f800000, 0x0e800000):
+    if (w0 & 0xf0000000) == 0xb0000000 and (w0 & 0x0f800000) not in (0x0f800000, 0x0e800000, 0x0f000000):
         op = (w0 >> 23) & 0x1f
         sdst = (w0 >> 16) & 0x7f
         simm = w0 & 0xffff

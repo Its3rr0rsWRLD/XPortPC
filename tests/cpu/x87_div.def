@@ -1,0 +1,18 @@
+EXPORTS
+    div_m80
+    div_to_m64
+    div_to_m32
+    divr_m80
+    div_st0_sti
+    div_sti_st0
+    divr_st0_sti
+    divr_sti_st0
+    div_self
+    div_mem32
+    div_mem64
+    divr_mem32
+    divr_mem64
+    div_f32
+    div_f64
+    div_three
+    div_skip

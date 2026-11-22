@@ -149,11 +149,11 @@ class ScriptStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "parent index"):
             self.run_probe(self_parent=True)
 
-    def test_state_id_must_be_a_label(self):
-        # An integer attribute named id whose hash equals the label must not select the state.
-        result = self.run_probe(id_kind=3)
-        self.assertEqual(result["counts"]["all_five_literals_verified"], 1)
-        self.assertIsNone(result["first_verified_example"])
+    def test_non_label_state_id_is_malformed(self):
+        # An integer or boolean id on a state is malformed, as resolve_script_path reports -3 for it.
+        for kind in (3, 4):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "Non-label state ID"):
+                self.run_probe(id_kind=kind)
 
     def test_other_label_selects_nothing(self):
         result = self.run_probe(state="synthetic_other")

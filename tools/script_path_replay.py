@@ -5,7 +5,7 @@ import json
 import mmap
 from pathlib import Path
 
-from script_state_probe import ATTRIBUTE, NODE, joaat, records, tree_arrays, verified_camera
+from script_state_probe import ATTRIBUTE, NODE, joaat, records, state_ids, tree_arrays, verified_camera
 
 
 def state_index(nodes, attrs):
@@ -18,8 +18,7 @@ def state_index(nodes, attrs):
             raise ValueError("Attribute range outside pool")
         children.setdefault(parent, []).append(i)
         if name == joaat("state"):
-            ids = [digest for key, digest, _, kind, _, _ in attrs[first:first + count]
-                   if key == joaat("id") and kind == 5]
+            ids = state_ids(attrs[first:first + count])
             if len(ids) > 1:
                 raise ValueError("Duplicate state ID attribute")
             if ids:

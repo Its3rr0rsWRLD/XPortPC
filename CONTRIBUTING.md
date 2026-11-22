@@ -25,9 +25,15 @@ Start with the [first build](README.md#first-build). Create the Python environme
 | `tools/` | Build setup and offline metadata tools. The PE fixtures live in `tests/intake/`. |
 | `docs/experiments.md` | Measured results, assumptions and reproduction commands. |
 
-The Windows job builds the C++ and HLSL, runs the CPU, Python and WARP tests, and smoke-tests the standalone GPU package. The Ubuntu job assembles and translates gfx1013 fixtures with LLVM 15. A second Ubuntu job runs the platform-independent Python checks. Contributors supply physical GPU coverage. For a hardware report, record the commit, adapter and driver, Windows version, test names and debug-layer status. Include the reported feature tier or wave width when relevant. Record capability skips separately from passes and failures. [CI workflow](.github/workflows/windows.yml) For macOS and Linux setup and troubleshooting, see the [non-Windows host guide](docs/non-windows-hosts.md).
+The Windows job builds the C++ and HLSL, runs the CPU, Python and WARP tests, and smoke-tests the standalone GPU package. A second Windows job builds and runs the same tests with the `release` preset at /O2, because some translation bugs appear only in optimized code. The Ubuntu job assembles and translates gfx1013 fixtures with LLVM 15. A second Ubuntu job runs the platform-independent Python checks. Contributors supply physical GPU coverage. For a hardware report, record the commit, adapter and driver, Windows version, test names and debug-layer status. Include the reported feature tier or wave width when relevant. Record capability skips separately from passes and failures. [CI workflow](.github/workflows/windows.yml) For macOS and Linux setup and troubleshooting, see the [non-Windows host guide](docs/non-windows-hosts.md).
 
 ## Share a reproducible finding
+
+To register a new translated CPU fixture for the coverage dashboard, put
+`; coverage: source cpu_your_test` on the first line of its MASM file. Name the
+CTest that actually compares the translation. For macro-generated instructions,
+use `; coverage: record cpu_your_test` and have the test emit the decoded forms
+through `FORM_COVERAGE_RECORD`. Existing registrations still work.
 
 Use original source, synthetic inputs or a public sample with its revision and license. Store local inputs in `game-files/` and generated output in `out/`. Keep game files, distribution links, SDK redistributables and dumps out of issues, PRs and Git. Remove personal paths and credentials from logs.
 

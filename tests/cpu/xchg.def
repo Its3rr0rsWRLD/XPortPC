@@ -1,0 +1,21 @@
+EXPORTS
+    xchg_al_cl
+    xchg_ah_al
+    xchg_ah_ch
+    xchg_r8b_al
+    xchg_ax_cx
+    xchg_r9w_r8w
+    xchg_eax_ecx
+    xchg_ecx_r9d
+    xchg_eax_eax
+    xchg_rax_rcx
+    xchg_r8_r9
+    xchg_m8_al
+    xchg_ah_m8
+    xchg_m16_cx
+    xchg_m32_eax
+    xchg_r8d_m32
+    xchg_m64_r9
+    xchg_m64_misaligned
+    swap_tokens64
+    swap_tokens32
