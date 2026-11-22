@@ -312,6 +312,21 @@ def check_pure_python_controls() -> None:
             bad_run = subprocess.run([sys.executable, "-B", str(tool), *bad_args], capture_output=True)
             assert bad_run.returncode != 0, f"Accepted invalid CLI arguments {bad_args}"
 
+        # A damaged or missing input is reported as an error message, not a traceback.
+        damaged = {"garbage": b"not a shader container", "truncated-dxbc": b"DXBC0123456789abcdef",
+                   "truncated-bitcode": b"BC\xc0\xde\x00\x00"}
+        for label, payload in damaged.items():
+            bad_in = tmp_dir / f"damaged-{label}.bin"
+            bad_in.write_bytes(payload)
+            bad_out = tmp_dir / f"damaged-{label}.out"
+            bad_run = subprocess.run([sys.executable, "-B", str(tool), str(bad_in), str(bad_out)],
+                                     capture_output=True, text=True)
+            assert bad_run.returncode == 1, (label, bad_run.returncode, bad_run.stderr)
+            assert "Traceback" not in bad_run.stderr and not bad_out.exists(), (label, bad_run.stderr)
+        missing_run = subprocess.run([sys.executable, "-B", str(tool), str(tmp_dir / "missing.bin"),
+                                      str(tmp_dir / "missing.out")], capture_output=True, text=True)
+        assert missing_run.returncode == 1 and "Traceback" not in missing_run.stderr, missing_run.stderr
+
     # 5. Pure-Python controls for sign_container and check_compute_pso
     try:
         rt.sign_container(Path("unused"), b"NOPE")

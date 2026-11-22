@@ -87,6 +87,8 @@ SCALAR32_SOURCE = r"(?:s\d+|0x[0-9a-f]{1,8}|-?\d+(?:\.\d+)?)"
 SCALAR64_SOURCE = r"(?:s\[\d+:\d+\]|0x[0-9a-f]{1,8}|-?\d+)"
 SDWA_SEL_PATTERN = r"(?:BYTE_[0-3]|WORD_[01]|DWORD)"
 
+WAIT_COUNTER = r"(?:vmcnt\((?:[0-9]|[1-5][0-9]|6[0-3])\)|lgkmcnt\((?:[0-9]|[1-5][0-9]|6[0-3])\)|expcnt\([0-7]\))"
+
 SUPPORTED_INSTRUCTIONS_REGEX = [
     r"s_inst_prefetch\s+.*",
     r"s_nop\s+.*",
@@ -97,7 +99,7 @@ SUPPORTED_INSTRUCTIONS_REGEX = [
     r"s_setreg_imm32_b32\s+hwreg\(HW_REG_FLAT_SCR_(?:LO|HI)\),\s+(?:-?\d+|0x[0-9a-f]{1,8})",
     r"s_setreg_imm32_b32\s+hwreg\(HW_REG_MODE, 2, 2\),\s+[03]",
     r"s_waitcnt_expcnt\s+(?:(?:null|s\d+),\s*)?(?:0x[0-7]|[0-7])",
-    r"s_waitcnt\s+(?:lgkmcnt\(0\)|vmcnt\((?:[0-9]|[1-5][0-9]|6[0-3])\)|expcnt\([0-7]\)|vmcnt\(0\)\s+lgkmcnt\(0\)|lgkmcnt\(0\)\s+vmcnt\(0\))",
+    rf"s_waitcnt\s+(?:{WAIT_COUNTER}(?:\s+{WAIT_COUNTER}){{0,2}}|0(?:x0)?)",
     r"s_mov_b64\s+s\[\d+:\d+\],\s+exec",
     r"s_wqm_b64\s+exec,\s+exec",
     r"s_and_b64\s+exec,\s+exec,\s+s\[\d+:\d+\]",
@@ -397,7 +399,12 @@ def is_instruction_supported(instruction_line: str) -> bool:
     clean = re.split(r"//|[;#]", clean)[0].strip()
     if not clean:
         return True
-    return any(pattern.match(clean) for pattern in COMPILED_SUPPORTED_PATTERNS)
+    if not any(pattern.match(clean) for pattern in COMPILED_SUPPORTED_PATTERNS):
+        return False
+    if wait := re.fullmatch(r"s_waitcnt\s+(.*)", clean):
+        counters = [token.partition("(")[0] for token in wait[1].split()]
+        return len(counters) == len(set(counters))
+    return True
 
 
 def analyze_shader_instructions(shader_name: str, instructions: list[str]) -> dict:

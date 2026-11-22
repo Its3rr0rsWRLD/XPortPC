@@ -284,4 +284,37 @@ pmovmskb_op PROC FRAME
     ret
 pmovmskb_op ENDP
 
+psrld_imm_32_op PROC FRAME
+    .endprolog
+    movdqu xmm0, xmmword ptr [rcx]
+    psrld xmm0, 32
+    movdqu xmmword ptr [r8], xmm0
+    ret
+psrld_imm_32_op ENDP
+
+punpckhqdq_self_op PROC FRAME
+    .endprolog
+    movdqu xmm0, xmmword ptr [rcx]
+    punpckhqdq xmm0, xmm0
+    movdqu xmmword ptr [r8], xmm0
+    ret
+punpckhqdq_self_op ENDP
+
+pshufd_b3_op PROC FRAME
+    .endprolog
+    movdqu xmm1, xmmword ptr [rcx]
+    pshufd xmm0, xmm1, 0B3h
+    movdqu xmmword ptr [r8], xmm0
+    ret
+pshufd_b3_op ENDP
+
+packssdw_reverse_regs_op PROC FRAME
+    .endprolog
+    movdqu xmm1, xmmword ptr [rcx]
+    movdqu xmm0, xmmword ptr [rdx]
+    packssdw xmm1, xmm0
+    movdqu xmmword ptr [r8], xmm1
+    ret
+packssdw_reverse_regs_op ENDP
+
 END

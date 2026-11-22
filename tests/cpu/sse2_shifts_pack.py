@@ -22,6 +22,7 @@ VEC_EXPORTS = (
     "punpcklbw_op", "punpcklwd_op", "punpckldq_op", "punpcklqdq_op",
     "punpckhbw_op", "punpckhwd_op", "punpckhdq_op", "punpckhqdq_op",
     "pshufd_op", "pshuflw_op", "pshufhw_op",
+    "psrld_imm_32_op", "punpckhqdq_self_op", "pshufd_b3_op", "packssdw_reverse_regs_op",
 )
 ALL_EXPORTS = VEC_EXPORTS + ("pmovmskb_op",)
 
@@ -57,6 +58,8 @@ def ref_vec(name: str, a: bytes, b: bytes) -> bytes:
     if name in ("psrlw_imm_op", "psrlw_reg_op"):
         c = 5 if "imm" in name else cnt_q
         return struct.pack("<8H", *(0 if c >= 16 else (x >> c) for x in struct.unpack("<8H", a)))
+    if name == "psrld_imm_32_op":
+        return bytes(16)
     if name in ("psrld_imm_op", "psrld_reg_op"):
         c = 11 if "imm" in name else cnt_q
         return struct.pack("<4I", *(0 if c >= 32 else (x >> c) for x in struct.unpack("<4I", a)))
@@ -76,7 +79,7 @@ def ref_vec(name: str, a: bytes, b: bytes) -> bytes:
     if name == "packsswb_op":
         vals = list(struct.unpack("<8h", a)) + list(struct.unpack("<8h", b))
         return struct.pack("<16b", *(clamp(x, -128, 127) for x in vals))
-    if name == "packssdw_op":
+    if name in ("packssdw_op", "packssdw_reverse_regs_op"):
         vals = list(struct.unpack("<4i", a)) + list(struct.unpack("<4i", b))
         return struct.pack("<8h", *(clamp(x, -32768, 32767) for x in vals))
     if name == "packuswb_op":
@@ -98,9 +101,12 @@ def ref_vec(name: str, a: bytes, b: bytes) -> bytes:
         return a[:8] + b[:8]
     if name == "punpckhqdq_op":
         return a[8:] + b[8:]
-    if name == "pshufd_op":
+    if name == "punpckhqdq_self_op":
+        return a[8:] * 2
+    if name in ("pshufd_op", "pshufd_b3_op"):
+        imm = 0xB3 if name == "pshufd_b3_op" else 0xB1
         lanes = struct.unpack("<4I", a)
-        return struct.pack("<4I", *(lanes[(0xB1 >> (2 * i)) & 3] for i in range(4)))
+        return struct.pack("<4I", *(lanes[(imm >> (2 * i)) & 3] for i in range(4)))
     if name == "pshuflw_op":
         lo = struct.unpack("<4H", a[:8])
         return struct.pack("<4H", *(lo[(0x1B >> (2 * i)) & 3] for i in range(4))) + a[8:]
@@ -141,6 +147,8 @@ def check(native_dll: Path, lifted_dll: Path) -> None:
         bytes([0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x01, 0x02, 0x7f, 0x80, 0x00, 0x7f]),
         bytes([0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
         bytes([0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0x80, 0x7f, 0x00, 0x00, 0x80, 0xff, 0x7f]),
+        # Low qword count 0x0000010000000003, with a signed word of 256 in RHS lane 2.
+        struct.pack("<4I", 3, 256, 0, 0),
     ]
     a_buf = (ctypes.c_ubyte * 16)(*a_bytes)
     out_n = (ctypes.c_ubyte * 16)()
@@ -165,12 +173,14 @@ def check(native_dll: Path, lifted_dll: Path) -> None:
     fn_l = lifted.pmovmskb_op
     fn_n.argtypes = fn_l.argtypes = [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64]
     fn_n.restype = fn_l.restype = ctypes.c_uint64
-    got_n = fn_n(ctypes.addressof(a_buf), 0, 0)
-    got_l = fn_l(ctypes.addressof(a_buf), 0, 0)
-    expected_mask = sum(((a_bytes[i] >> 7) & 1) << i for i in range(16))
-    if got_n != expected_mask or got_l != expected_mask:
-        raise AssertionError(f"pmovmskb_op: expected={expected_mask:#x} native={got_n:#x} lifted={got_l:#x}")
-    cases += 1
+    for mask_input in (a_bytes, bytes(12) + b"\x80" + bytes(3)):
+        mask_buf = (ctypes.c_ubyte * 16)(*mask_input)
+        got_n = fn_n(ctypes.addressof(mask_buf), 0, 0)
+        got_l = fn_l(ctypes.addressof(mask_buf), 0, 0)
+        expected_mask = sum(((mask_input[i] >> 7) & 1) << i for i in range(16))
+        if got_n != expected_mask or got_l != expected_mask:
+            raise AssertionError(f"pmovmskb_op: expected={expected_mask:#x} native={got_n:#x} lifted={got_l:#x}")
+        cases += 1
     print(f"{cases} baseline 128-bit SSE2 shift/pack/unpack/shuffle/movemask cases matched native and translated DLLs")
 
 

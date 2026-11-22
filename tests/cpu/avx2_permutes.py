@@ -13,8 +13,10 @@ from cpu_ranges import function_ranges
 from ffx_version_query import INTEGER_HEADER, lower, region
 
 U64 = ctypes.c_uint64
-TWO_ARG = ("bcast_i128", "extract_i128_hi", "permq256", "permpd256")
-THREE_ARG = ("insert_i128_hi", "pblendd256", "pblendd256_mem", "pblendd256_mem_zero", "perm2i128_hi", "perm2i128_zero", "permd256", "permps256")
+TWO_ARG = ("bcast_i128", "extract_i128_hi", "permq256", "permpd256",
+           "extract_i128_reg_imm2", "permq256_imm4")
+THREE_ARG = ("insert_i128_hi", "pblendd256", "pblendd256_mem", "pblendd256_mem_zero", "perm2i128_hi", "perm2i128_zero", "permd256", "permps256",
+             "insert_i128_reg_imm2", "pblendd256_lane0", "perm2i128_zero_lo")
 
 
 def emit(image, output):
@@ -149,6 +151,18 @@ def check(native_path, lifted_path):
     a_q = struct.unpack("<4Q", a_bytes)
     run2("permq256", a_buf, struct.pack("<4Q", *(a_q[(0x1b >> (2 * i)) & 3] for i in range(4))))
     run2("permpd256", a_buf, struct.pack("<4Q", *(a_q[(0x93 >> (2 * i)) & 3] for i in range(4))))
+
+    run2("extract_i128_reg_imm2", a_buf, a_bytes[:16] + bytes(16))
+    run3("insert_i128_reg_imm2", a_buf, b_buf, b_bytes[:16] + a_bytes[16:])
+    run3("pblendd256_lane0", a_buf, b_buf, b_bytes[:4] + a_bytes[4:])
+    run3("perm2i128_zero_lo", a_buf, b_buf, bytes(16) + b_bytes[16:])
+
+    idx_six = (6,) + idx[1:]
+    idx_six_buf = ctypes.create_string_buffer(struct.pack("<8I", *idx_six), 32)
+    want_permd_six = struct.pack("<8I", *(b_d[i & 7] for i in idx_six))
+    run3("permd256", idx_six_buf, b_buf, want_permd_six)
+
+    run2("permq256_imm4", a_buf, struct.pack("<4Q", a_q[0], a_q[1], a_q[0], a_q[0]))
 
     print(f"{cases} AVX2 lane, blend, and cross-lane permute cases matched native and translated DLLs")
 

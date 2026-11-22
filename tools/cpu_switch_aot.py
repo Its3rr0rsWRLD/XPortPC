@@ -185,11 +185,13 @@ DATA = {2: R.DX, 4: R.EDX, 8: R.RDX}
 STRING_TRANSFERS = {
     Code.MOVSB_M8_M8: ("movs", 1), Code.MOVSW_M16_M16: ("movs", 2),
     Code.MOVSD_M32_M32: ("movs", 4), Code.MOVSQ_M64_M64: ("movs", 8),
+    Code.STOSB_M8_AL: ("stos", 1), Code.STOSW_M16_AX: ("stos", 2),
+    Code.STOSD_M32_EAX: ("stos", 4), Code.STOSQ_M64_RAX: ("stos", 8),
 }
 # Instructions that neither read nor write the arithmetic flags, besides SETcc and CMOVcc,
 # which only read them.
 FLAG_NEUTRAL = {M.MOV, M.MOVZX, M.MOVSX, M.MOVSXD, M.LEA, M.NOP, M.NOT, *SETCC, *CMOVCC, *SIGN_EXTENSIONS,
-                M.MOVSB, M.MOVSW, M.MOVSD, M.MOVSQ, M.CLD}
+                M.MOVSB, M.MOVSW, M.MOVSD, M.MOVSQ, M.STOSB, M.STOSW, M.STOSD, M.STOSQ, M.CLD, M.STD}
 FLAG_PRODUCERS = {*ALU, M.CMP, M.TEST, M.INC, M.DEC}
 MAX_FLAG_DISTANCE = 16
 CONDITIONS = {CC.O: "o", CC.NO: "no", CC.P: "p", CC.NP: "np",
@@ -977,7 +979,12 @@ class Lifter:
             self.used.update(registers)
             reads = dict.fromkeys(registers, 8)
             writes = dict.fromkeys(registers, 8)
-            value = f"load_always<{unsigned(width)}>(rsi)"
+            if kind == "movs":
+                value = f"load_always<{unsigned(width)}>(rsi)"
+            else:
+                self.used.add(R.RAX)
+                reads[R.RAX] = width
+                value = f"static_cast<{unsigned(width)}>(rax)"
             # One element at a time: neither memcpy nor memmove reproduces a forward
             # overlapping MOVS that reads the bytes just written by earlier iterations.
             alignment = " __unaligned" if width > 1 else ""
@@ -987,9 +994,9 @@ class Lifter:
                 self.used.add(R.RCX)
                 reads[R.RCX] = writes[R.RCX] = 8
                 step = f"while (rcx != 0) {{ {step} --rcx; }}"
-            return f"{{ const word step = {width}ull; {step} }}", reads, writes
-        if mnemonic == M.CLD:
-            return "", {}, {}  # DF stays clear throughout this profile.
+            return f"{{ const word step = direction ? 0ull - {width}ull : {width}ull; {step} }}", reads, writes
+        if mnemonic in (M.CLD, M.STD):
+            return f"direction = {'true' if mnemonic == M.STD else 'false'};", {}, {}
         width = self.width(ins)
         reads, writes = {}, {}
 
@@ -1394,6 +1401,28 @@ def check_call_sites(function, offsets):
             raise ValueError(f"call without an aligned home space at entry RSP{offsets[ip]:+#x} at RVA {ip:#x}")
 
 
+def prove_direction(function):
+    """The Windows ABI enters with DF clear and requires it clear at calls and returns.
+
+    Keep both possibilities at joins. The emitted local follows the actual path;
+    this proof prevents a backwards-copy region from leaking DF across an ABI edge.
+    """
+    states = {function.entry: frozenset({False})}
+    work = [function.entry]
+    while work:
+        ip = work.pop()
+        ins = function.instructions[ip]
+        incoming = states[ip]
+        if (ins.mnemonic == M.RET or ip in function.calls or ip in function.tails) and True in incoming:
+            raise ValueError(f"direction flag may be set at call or return RVA {ip:#x}")
+        outgoing = (frozenset({ins.mnemonic == M.STD}) if ins.mnemonic in (M.CLD, M.STD) else incoming)
+        for target in function.successors[ip]:
+            merged = states.get(target, frozenset()) | outgoing
+            if merged != states.get(target):
+                states[target] = merged
+                work.append(target)
+
+
 def lift(pe, name, arguments=DEFAULT_ARGUMENTS, program=None, *, image_data=False):
     """Translate one export that takes the given number of integer arguments, 3 or 4.
 
@@ -1525,6 +1554,7 @@ def lift_function(program, entry, symbol, arguments, internal):
             what = "call" if moved[0] in function.calls else "stack change"
             raise ValueError(f"{what} in a function without unwind data at RVA {moved[0]:#x}")
     check_call_sites(function, frame.offsets)
+    prove_direction(function)
     lifter.frame = {ip: access[0] - frame.start for ip, access in frame.accesses.items()}
     lifter.adjustments = frame.adjustments
     producers = {ip: flag_producer(function, edges, ins) for ip, ins in instructions.items()
@@ -1662,6 +1692,8 @@ def lift_function(program, entry, symbol, arguments, internal):
             labels.add(ins.next_ip)
     locals_ = sorted((lifter.used | {R.RAX}) - set(function.arguments), key=lambda r: NAMES[r])
     declarations = [f"word {NAMES[r]} = 0;" for r in locals_]
+    if any(ins.code in STRING_TRANSFERS or ins.mnemonic in (M.CLD, M.STD) for ins in instructions.values()):
+        declarations.append("bool direction = false;  // Windows x64 ABI entry state")
     function.image_data = lifter.image_used
     if lifter.image_used:
         # Read once at entry: a call while nothing is bound fails here, before any access.

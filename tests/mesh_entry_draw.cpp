@@ -17,6 +17,23 @@ std::vector<char> read_bytes(const char* path)
     return {std::istreambuf_iterator<char>(stream), {}};
 }
 
+void copy_mesh_texture(ID3D12GraphicsCommandList* list, ID3D12Resource* buffer, ID3D12Resource* texture,
+                       const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint)
+{
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = buffer;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint = footprint;
+    to.pResource = texture;
+    list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    transition(list, texture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+}
+
+struct ProducedTexture {
+    ComPtr<ID3D12Resource> buffer, sampled;
+    ComPtr<ID3D12PipelineState> pipeline;
+};
+
 template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Kind, typename T>
 struct alignas(void*) Field {
     D3D12_PIPELINE_STATE_SUBOBJECT_TYPE kind = Kind;
@@ -36,7 +53,8 @@ struct MeshPipeline {
 }
 
 bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* second, const char* fixture,
-                           bool vertices, MeshConstantBinding binding, MeshDrawMode mode)
+                           bool vertices, MeshConstantBinding binding, MeshDrawMode mode,
+                           const MeshTextureProducers* producers)
 {
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 options{};
     check(check_feature(device, D3D12_FEATURE_D3D12_OPTIONS7, &options, sizeof(options)), "Query mesh tier");
@@ -58,7 +76,7 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     const UINT input_bytes = draw_count * draw_bytes;
     const UINT trace_bytes = draw_count * trace_stride;
     const UINT reference_end = input_bytes + trace_bytes + draw_count * image_bytes;
-    if (input.size() != reference_end + (textured ? texel_bytes : 0))
+    if (input.size() != reference_end + (textured && !producers ? texel_bytes : 0))
         throw std::runtime_error("Invalid draw fixture size");
     auto shader = read_bytes(first);
     auto pixel = read_bytes(second);
@@ -198,28 +216,68 @@ bool check_mesh_entry_draw(ID3D12Device* device, const char* first, const char* 
     if (vertices) list->SetGraphicsRootShaderResourceView(vertex_slot, base + 2 * cb_bytes);
     ComPtr<ID3D12Resource> sampled, texture_upload;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12RootSignature> compute_root;
+    std::array<ProducedTexture, 2> produced;
     if (textured) {
         auto sampled_desc = texture;
         sampled_desc.Width = sampled_desc.Height = 2;
         sampled_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT sampled_layout{};
         UINT64 upload_bytes = 0;
         device->GetCopyableFootprints(&sampled_desc, 0, 1, 0, &sampled_layout, nullptr, nullptr, &upload_bytes);
-        texture_upload = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_UPLOAD,
-                                     D3D12_RESOURCE_STATE_GENERIC_READ);
-        check(texture_upload->Map(0, &empty, &mapped), "Map mesh texture upload");
-        for (UINT y = 0; y < 2; ++y)
-            std::memcpy(static_cast<char*>(mapped) + sampled_layout.Offset + y * sampled_layout.Footprint.RowPitch,
-                        input.data() + reference_end + y * 8, 8);
-        texture_upload->Unmap(0, nullptr);
-        D3D12_TEXTURE_COPY_LOCATION from{}, to{};
-        from.pResource = texture_upload.Get();
-        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        from.PlacedFootprint = sampled_layout;
-        to.pResource = sampled.Get();
-        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-        transition(list, sampled.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (producers) {
+            if (sampled_layout.Offset != 0 || sampled_layout.Footprint.RowPitch != D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+                throw std::runtime_error("Unexpected footprint for the compute texture fixture");
+            D3D12_ROOT_PARAMETER output{};
+            output.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            D3D12_ROOT_SIGNATURE_DESC compute_layout{};
+            compute_layout.NumParameters = 1;
+            compute_layout.pParameters = &output;
+            ComPtr<ID3DBlob> compute_blob;
+            check(D3D12SerializeRootSignature(&compute_layout, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &compute_blob, nullptr), "Serialize texture producer root");
+            check(device->CreateRootSignature(0, compute_blob->GetBufferPointer(), compute_blob->GetBufferSize(),
+                                              IID_PPV_ARGS(&compute_root)), "Create texture producer root");
+            list->SetComputeRootSignature(compute_root.Get());
+            const char* paths[]{producers->first, producers->second};
+            const unsigned count = producers->second ? 2 : 1;
+            for (unsigned i = 0; i < count; ++i) {
+                auto& producer = produced[i];
+                const auto bytes = read_bytes(paths[i]);
+                D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
+                compute.pRootSignature = compute_root.Get();
+                compute.CS = {bytes.data(), bytes.size()};
+                check(device->CreateComputePipelineState(&compute, IID_PPV_ARGS(&producer.pipeline)),
+                      "Create texture producer pipeline");
+                producer.buffer = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_DEFAULT,
+                                              D3D12_RESOURCE_STATE_COMMON,
+                                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                producer.sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+                transition(list, producer.buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                list->SetPipelineState(producer.pipeline.Get());
+                list->SetComputeRootUnorderedAccessView(0, producer.buffer->GetGPUVirtualAddress());
+                list->Dispatch(1, 1, 1);
+                transition(list, producer.buffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+                copy_mesh_texture(list, producer.buffer.Get(), producer.sampled.Get(), sampled_layout);
+            }
+            const unsigned selected = producers->bind_first ? 0 : count - 1;
+            sampled = produced[selected].sampled;
+            list->SetPipelineState(pipeline.Get());
+            std::printf("texture_producers=%u bound_texture=%u\n", count, selected);
+        } else {
+            sampled = resource(device, sampled_desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+            texture_upload = make_buffer(device, upload_bytes, D3D12_HEAP_TYPE_UPLOAD,
+                                         D3D12_RESOURCE_STATE_GENERIC_READ);
+            check(texture_upload->Map(0, &empty, &mapped), "Map mesh texture upload");
+            for (UINT y = 0; y < 2; ++y)
+                std::memcpy(static_cast<char*>(mapped) + sampled_layout.Offset + y * sampled_layout.Footprint.RowPitch,
+                            input.data() + reference_end + y * 8, 8);
+            texture_upload->Unmap(0, nullptr);
+            copy_mesh_texture(list, texture_upload.Get(), sampled.Get(), sampled_layout);
+        }
         D3D12_DESCRIPTOR_HEAP_DESC srv_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1,
                                             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         check(device->CreateDescriptorHeap(&srv_desc, IID_PPV_ARGS(&srv_heap)), "Create mesh texture SRV heap");

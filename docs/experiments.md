@@ -121,6 +121,23 @@ cmake --build --preset dev --target cpu_shim_startup_lifted pe_map
 ctest --preset dev --no-tests=error -R '^cpu_shim_compute_(warp|hardware)$' -V
 ```
 
+The same EXE drives a raster draw when the test requests it. The draw branch
+calls the new `cpu_shim_draw` provider, which renders the repository's 64x64
+test triangle offscreen on a D3D12 direct queue, waits for a fence, copies the
+render target to a readback buffer and publishes the raw RGBA bytes. The
+guest exits 42 only when every one of the 16,384 bytes matches the CPU pixel
+rule (`x >= 8 && y >= 8 && x + y <= 63` green, black otherwise, opaque). The
+check compares the native EXE, the `pe_map` mapping and the AOT build byte for
+byte. A mirrored-X shader variant must exit 20 with a different frame that
+still agrees across runners; an unknown draw case must exit 21 with no frame.
+The non-mirrored shader object is unchanged, so the existing triangle draws are
+unaffected.
+
+```powershell
+cmake --build --preset dev --target cpu_shim_startup cpu_shim_startup_lifted pe_map
+ctest --preset dev --no-tests=error -R '^cpu_shim_draw_warp$' -V
+```
+
 ## Source-built EXE entry to a DLL import
 
 MSVC assembles a small CRT-free [EXE entry body](../tests/cpu/exe_entry.asm) and links it with the existing `call_mix` fixture. The [translator](../tools/cpu_exe_aot.py) takes the fixture's `native_entry` export through `--entry-export`, reads its unwind-bounded instruction range, follows the relative call to `call_mix`, and resolves its IAT slot against `cpu_import_provider.dll!mix_args`. It emits both functions as C++. The translated EXE uses ordinary Windows C++ startup to enter the generated `main`. Both versions use the same native provider and the same I/O DLL.
@@ -231,6 +248,22 @@ ctest --preset dev --no-tests=error -R '^pso_(readiness_check|root_signature_war
 Add `--llvm <AMDGPU LLVM library>` to disassemble referenced native pixel code and run the existing pixel scanner and lowering probe. Each unique stage/hash pair is assessed once. A known missing root signature takes precedence over shader diagnostics. Missing references, unassessed stages and unknown signature status require more evidence. Passing the pixel probe leaves the pipeline awaiting PSO validation, since the scanner uses synthetic bindings.
 
 The WARP control compiles the source-built compute shader with its root signature stripped. D3D12 rejects creation without a root signature. The same shader creates a PSO when given the matching signature from the embedded build. The control measures PSO creation on the source-built fixture.
+
+### Shader census tiers and what each percentage divides by
+
+Three counts describe different populations, so each one is named here with its source and its key. A percentage is only comparable with another that divides by the same one.
+
+| Count | Population | Source | Key |
+| --- | --- | --- | --- |
+| 26,503 accepted archive records | Named records in the plaintext archive, before the PSO cache | Independent byte-by-byte enumeration of named records with validated DEFLATE and DXBC framing; `tools/shader_profile_audit.py` reproduces the accepted count through `resource_inventory.scene_records` | End offset plus the 16-byte DXBC digest at container bytes 4..20 |
+| 25,889 distinct DXBC header digests | The same 26,503 records, counted by container header | Same enumeration | Container bytes 4..20 alone |
+| 21,522 cache index entries | Programs in the console PSO cache, a separate population behind the archive | The 8-byte entries that follow the 0x80 header and the 25,471 × 0x70, 2,693 × 0x18 and 54,576 × 8 tables on cache page 0 | The entry itself: a 4-byte offset from a code-area base followed by a 4-byte allocation span |
+
+The profile tables in this document divide by the 26,503 accepted archive records, and each per-stage row divides by that stage's own count (PS 12,101, CS 2,689, MS 9,282, VS 2,236, GS 195). `tools/shader_profile_audit.py` counts those records and caches classification by the full-container SHA-256. Enumerating a start at every byte yields 26,721 accepted candidates; 218 of them are re-detections, leaving 26,503 records and 25,889 digests. Swapping 26,503 records for 25,889 digests would move a denominator by 614 without measuring anything new, so the two keys stay apart: one selects records, the other selects container bytes.
+
+The 21,522 cache entries sit on the other side of the archive. The last named record ends 170,812 B before the cache begins, and the two disk ranges do not overlap. 21,044 was the earlier extractor result. It was revised because that scan assumed a fixed 40-byte `S_CODE_END` tail and a terminating `S_ENDPGM`, and 478 of the entries fell outside that scan's assumptions: 419 carry the standard 8-byte gate and a normal `S_ENDPGM` yet 407 of them end with a 20-byte tail and 12 carry no `S_CODE_END` fill at all, 58 begin directly with the program body without the gate, and one has no terminator. A further 4,485 programs are not aligned to any old record at all: each starts in the gap between two old records and its tail runs on into the next old record, so the record that follows it is bounded wrongly at both ends. Boundaries now come from the index, which gives 21,522 programs. 26,091 is the number of `S_ENDPGM` instructions in the code area and is not a count of records.
+
+The 218 re-detections are suffix aliases. Each one starts inside the name of the previous record, at a byte whose value equals its distance to the name's terminating NUL, and shares that record's terminator, header and payload. The count does not change either way, because de-duplication keeps the earlier start whenever the end offset and the digest match.
 
 ### Fixed-profile archive rescan
 
@@ -832,7 +865,7 @@ The shared lowering also handles 32-bit and 64-bit ADX forms (`adcx`, `adox`) an
 
 The shared lowering also handles 128-bit and 256-bit AVX2 integer broadcasts (`vpbroadcastb`, `vpbroadcastw`, `vpbroadcastd`, `vpbroadcastq`) and variable per-lane shifts (`vpsllvd`, `vpsrlvd`, `vpsravd`, `vpsllvq`, `vpsrlvq`), zeroing upper 128 bits on 128-bit VEX destinations and clamping out-of-range shift counts to match hardware. `cpu_aot_avx2_shifts` probes CPUID (`OSXSAVE`, `XCR0` YMM state, and leaf 7 EBX bit 5 `AVX2`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on AVX2-capable hosts it builds all 10 exports from MASM source (`tests/cpu/avx2_shifts.asm`), translates them, and compares outputs against the native DLL and a reference model. Run `cmake --build --preset dev --target cpu_avx2_shifts_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_avx2_shifts$' -V`.
 
-The shared lowering also handles AVX2 128-bit lane operations, dword blends, and cross-lane permutes (`vbroadcasti128`, `vextracti128`, `vinserti128`, `vpblendd`, `vperm2i128`, `vpermd`, `vpermps`, `vpermq`, `vpermpd`). `cpu_aot_avx2_permutes` probes CPUID (`OSXSAVE`, `XCR0` YMM state, and leaf 7 EBX bit 5 `AVX2`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on AVX2-capable hosts it builds all 12 exports from MASM source (`tests/cpu/avx2_permutes.asm`), translates them, and compares outputs against the native DLL and a reference model. The `vpblendd` memory tests check that native and translated code both fault before writing output when either only masked-off lanes cross into an inaccessible page or all lanes are masked off and the whole operand is inaccessible. Run `cmake --build --preset dev --target cpu_avx2_permutes_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_avx2_permutes$' -V`.
+The shared lowering also handles AVX2 128-bit lane operations, dword blends, and cross-lane permutes (`vbroadcasti128`, `vextracti128`, `vinserti128`, `vpblendd`, `vperm2i128`, `vpermd`, `vpermps`, `vpermq`, `vpermpd`). `cpu_aot_avx2_permutes` probes CPUID (`OSXSAVE`, `XCR0` YMM state, and leaf 7 EBX bit 5 `AVX2`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on AVX2-capable hosts it builds all 17 exports from MASM source (`tests/cpu/avx2_permutes.asm`), translates them, and compares outputs against the native DLL and a reference model. The `vpblendd` memory tests check that native and translated code both fault before writing output when either only masked-off lanes cross into an inaccessible page or all lanes are masked off and the whole operand is inaccessible. Run `cmake --build --preset dev --target cpu_avx2_permutes_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_avx2_permutes$' -V`.
 
 The shared lowering also handles 128-bit legacy `movdqu` and 14 SSE4.1 integer vector instructions (`pminsb`, `pmaxsb`, `pminuw`, `pmaxuw`, `pminsd`, `pmaxsd`, `pminud`, `pmaxud`, `pmulld`, `pmuldq`, `pcmpeqq`, `packusdw`, `pblendw`, `pblendvb`). `cpu_aot_sse41_int` probes CPUID leaf 1 ECX bit 19 (`SSE4.1`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on SSE4.1-capable hosts it builds all 14 exports from MASM source (`tests/cpu/sse41_int.asm`), translates them, and verifies bit-for-bit agreement with the native DLL. Run `cmake --build --preset dev --target cpu_sse41_int_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_sse41_int$' -V`.
 
@@ -850,7 +883,7 @@ SSSE3, SSE4.1, and SSE4.2 integer, insert/extract, `ptest`, and `crc32` forms (`
 
 The shared lowering also handles 128-bit legacy `movdqu` and 14 SSSE3 integer vector instructions (`pabsb`, `pabsw`, `pabsd`, `psignb`, `psignw`, `psignd`, `pshufb`, `palignr`, `phaddw`, `phaddd`, `phsubw`, `phsubd`, `phaddsw`, `phsubsw`), with tracked XMM register sources. The SSSE3 operations reject 64-bit MMX forms, untracked XMM sources, and memory sources. `cpu_aot_ssse3_int` probes CPUID leaf 1 ECX bit 9 (`SSSE3`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on SSSE3-capable hosts it builds all 15 exports from MASM source (`tests/cpu/ssse3_int.asm`), translates them, and verifies bit-for-bit agreement with the native DLL plus rejection controls for all three unsupported source forms. Run `cmake --build --preset dev --target cpu_ssse3_int_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_ssse3_int$' -V`.
 
-Baseline 128-bit SSE2 packed shifts, packs, unpacks, shuffles, and movemask forms (`movdqu`, `psllw`/`d`/`q`, `psrlw`/`d`/`q`, `psraw`/`d`, `pslldq`, `psrldq`, `packsswb`, `packssdw`, `packuswb`, `punpcklbw`/`lwd`/`ldq`/`lqdq`, `punpckhbw`/`hwd`/`hdq`/`hqdq`, `pshufd`, `pshuflw`, `pshufhw`, `pmovmskb`) are also lowered for legacy XMM encodings while preserving upper YMM bytes. The new operations support register and immediate operands and reject legacy memory sources until their alignment requirements are modeled. `movdqu` retains its existing unaligned move semantics. `cpu_aot_sse2_shifts_pack` builds all 33 exports from MASM source (`tests/cpu/sse2_shifts_pack.asm`), translates them, compares outputs against the native DLL and an independent reference across immediate, in-range, boundary, and out-of-range shift counts, and checks that MMX `packsswb` and memory forms of `packsswb`, `psllw`, and `pshufd` are rejected. Run `cmake --build --preset dev --target cpu_sse2_shifts_pack_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_sse2_shifts_pack$' -V`.
+Baseline 128-bit SSE2 packed shifts, packs, unpacks, shuffles, and movemask forms (`movdqu`, `psllw`/`d`/`q`, `psrlw`/`d`/`q`, `psraw`/`d`, `pslldq`, `psrldq`, `packsswb`, `packssdw`, `packuswb`, `punpcklbw`/`lwd`/`ldq`/`lqdq`, `punpckhbw`/`hwd`/`hdq`/`hqdq`, `pshufd`, `pshuflw`, `pshufhw`, `pmovmskb`) are also lowered for legacy XMM encodings while preserving upper YMM bytes. The new operations support register and immediate operands and reject legacy memory sources until their alignment requirements are modeled. `movdqu` retains its existing unaligned move semantics. `cpu_aot_sse2_shifts_pack` builds all 37 exports from MASM source (`tests/cpu/sse2_shifts_pack.asm`), translates them, compares outputs against the native DLL and an independent reference across immediate, in-range, boundary, and out-of-range shift counts, and checks that MMX `packsswb` and memory forms of `packsswb`, `psllw`, and `pshufd` are rejected. Run `cmake --build --preset dev --target cpu_sse2_shifts_pack_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_sse2_shifts_pack$' -V`.
 
 The shared lowering also handles all 36 VEX-encoded packed FMA3 instructions (`vfmadd`/`vfmsub`/`vfnmadd`/`vfnmsub`/`vfmaddsub`/`vfmsubadd` × `132`/`213`/`231` × `ps`/`pd`) in 128-bit and 256-bit forms using single-rounding `std::fmaf`/`std::fma` and rejecting EVEX forms. `cpu_aot_fma_packed` probes CPUID (`OSXSAVE`, `XCR0` YMM state, and leaf 1 ECX bit 12 `FMA`) before invoking the native fixture and exits 77 (capability skip) on unsupported hosts; on FMA3-capable hosts it builds all 38 exports from MASM source (`tests/cpu/fma_packed.asm`), translates them, and compares raw result bits with the native DLL across finite inputs, quiet and signaling NaNs, and pairs or triples with distinct NaN signs and payloads. The NaN result follows the arithmetic operand order for that encoding before any sign change. Extra cases cover 128-bit writes clearing the high YMM half and a 256-bit memory source. These comparisons check result bytes under the host's default masked floating-point environment. Run `cmake --build --preset dev --target cpu_fma_packed_lifted` and `ctest --preset dev --no-tests=error -R '^cpu_aot_fma_packed$' -V`.
 
@@ -1337,9 +1370,9 @@ Sixteen mutations of the translator each fail the test:
 
 Only the alias checks catch the last two.
 
-## Repeated memory copies in the control-flow CPU lifter
+## Direction-aware repeated memory transfers and fills in the control-flow CPU lifter
 
-`tools/cpu_switch_aot.py` now lowers rep movsb/movsw/movsd/movsq copy 1-, 2-, 4- and 8-byte elements. These instructions
+`tools/cpu_switch_aot.py` now lowers rep movs and rep stos copy and fill 1-, 2-, 4- and 8-byte elements in either direction. These instructions
 can occur inside branches, loops and translated callees; they use the existing
 register-definedness and nonvolatile-save proofs. A zero REP count touches no memory
 and leaves the pointers unchanged. The loop updates RSI/RDI and RCX at their architectural widths.
@@ -1348,7 +1381,7 @@ Each element is read before it is written. Forward overlapping copies deliberate
 observe bytes written by preceding iterations, unlike `memmove`. Volatile guest
 reads and writes preserve access faults and iteration order under `/O2`. Multi-byte accesses allow unaligned addresses and keep the original element width.
 Arithmetic flags survive a transfer and remain available to the existing bounded
-flag-consumer proof. DF is assumed clear at entry under the Windows x64 ABI. CLD is accepted; STD is rejected. Non-repeated string instructions remain rejected. STOS remains rejected.
+flag-consumer proof. STD/CLD are represented by a local direction flag. A control-flow proof requires DF clear on every path to calls, tail jumps and returns, including joins with different direction states. The backwards path clears DF before leaving its copy region. Non-repeated string instructions remain rejected.
 Address-size overrides, segment prefixes, REPNE, LODS, CMPS and SCAS remain rejected
 in this control-flow profile. The shared straight-line translator has its separate
 string-instruction coverage. Guest exception resumption, native REP register values
@@ -1367,10 +1400,10 @@ ctest --test-dir out/native --no-tests=error -R '^cpu_aot_switch_strings$' -V
 ```
 
 Windows 11 build 26300.9974, MSVC/ML64 19.44.35230 and Python 3.12.8:
-6 exports, 2,280 native/AOT/reference comparisons and 39 access-violation
+19 exports, 7,608 native/AOT/reference comparisons and 63 access-violation
 comparisons passed, including the `/O2` translation. Compiled incorrect
 implementations must fail the comparison: a bulk `memmove` on destructive overlap
-and a truncated repeat count.
+and a truncated repeat count, plus ignored backwards direction.
 The comparison includes inaccessible addresses with a zero count, and a read that
 copies three bytes before faulting at a protected page; no later trace store executes. It also compares native and translated memory effects when a word, dword or qword straddles the protected page.
 No title startup result is claimed.
@@ -1757,6 +1790,23 @@ references checked byte for byte against each GPU readback.
 ```sh
 python3 -B tests/mesh_textured_check.py binary llvm-mc-15 llvm-objcopy-15 libLLVM-15.so.1
 ctest --preset dev --no-tests=error -R "^mesh_textured_draw_" -V
+```
+
+The compute-to-mesh texture fixture reuses that translated mesh and pixel
+shader. A translated compute program writes four packed RGBA8 texels to a raw
+default-heap UAV, with rows at byte offsets 0 and 256. After a UAV-to-copy-source
+transition, a GPU copy places those rows in a 2×2 texture. The draw samples the
+texture after its transition to pixel-shader-resource state. The dispatch,
+copy, and draw share one direct command list. The test reads back the final
+1,024 pixels and the mesh export trace.
+
+Two independently generated palettes match their CPU references. In the
+stale-binding control, both producers run but the draw binds the first texture
+while expecting the second. All 276 covered pixels differ while the mesh
+export trace and all 748 clear pixels match.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^compute_mesh_texture_(warp|hardware)$' -V
 ```
 
 The mesh depth-pair fixture draws two partially overlapping indexed triangles
@@ -2650,6 +2700,23 @@ Measured at commit `21a65e5`, Windows 11 build 26300, debug layer enabled:
   - a `counts` that creates the registry: exit 1;
   - a `track` that keeps the `era_query` registration after a failed insertion: exit 1.
 
+### BVH buffer operations on in-box WARP
+
+The five source-built buffer shaders compile at `cs_6_0`. The fixture compares
+copy, fill, numbering, span copy and bounds reset against a CPU reference,
+including sentinel words outside the written ranges. Adapters below SM 6.0
+return the capability skip code 77. A mismatch in a dispatched fixture fails
+the test.
+
+```powershell
+cmake --build --preset dev --target offscreen_check
+ctest --preset dev --no-tests=error -V -R '^bvh_buffer_ops_(hardware|warp)$'
+```
+
+On Windows 10 22H2 build 19045.6456, the GTX 1060 6 GB (32.0.15.6094) and
+in-box WARP (10.0.19041.5794) each matched all 384 words in each of 26 cases.
+The D3D12 debug layer reported zero errors and warnings.
+
 ### Windows 10 with the app-local Agility SDK and WARP
 
 The Windows 10 22H2 in-box runtime caps an RTX 3060 at SM 6.5 and the in-box WARP (10.0.19041) at SM 6.2 with no DXR, so the `cs_6_5` BVH fixtures, the DXR checks and forced wave64 skip there. Without Graphics Tools, the debug layer reports `DXGI_ERROR_SDK_COMPONENT_MISSING` even when the SDK layers are app-local. The Agility build therefore continues with `debug_layer=unavailable` for that one result, and other debug-layer failures still stop the test. Capabilities reported on Windows 10 19045.6466:
@@ -2849,7 +2916,7 @@ Passing `--sign` to `tools/dxil_retarget.py` (with `--probe root_probe.exe`) re-
 
 Each container entry of the `--pe` report also carries `xbox_intrinsics`, a read-only inventory of the `xbox.*` names in the module as it was submitted. `calls` counts the symbols referenced by call instructions, `declarations` lists the function-table entries, and `metadata_only` lists names carried by metadata string values (`!"xbox.…"`) without being declared or called; a named-metadata key such as `!xbox.compiler.options` names the node and is not counted. An unused declaration, or a name that only metadata mentions, is therefore never reported as a call. The inventory changes no retargeting or submission behaviour. Passing `--probe root_probe.exe` in the container mode of the same tool prints the inventory inside `validation.ir.xbox_intrinsics`.
 
-Public CI tests pure-Python bitcode/container/signing controls (`dxil_retarget_controls`) and source-built `compute_root.cso` and `CopyBlocks.cso` shaders synthetically injected with `dxil-ms-xb2`, `xbox.compiler.options`, `BitcodeOffset=112` and `RTS0` flags `0x03000000` (`dxil_retarget_probe`). Negative controls verify that unmodified `xb2`, `--target-triple dxil-ms` and `--keep-root-flags` fail both validation and `--sign`, and that unsigned (zero-digest) and tampered-digest containers fail `CreateComputePipelineState` on WARP. Re-signed retargeted containers pass `CreateComputePipelineState` on WARP (for `compute_root.cso`, and for `CopyBlocks.cso` when WARP reports SM 6.5 or newer), and the re-signed `compute_root.cso` executes on WARP with CPU-checked readback through `offscreen_check warp --compute-root-file`. `dxil_retarget_probe_hardware` runs the same signing, `CreateComputePipelineState`, and `offscreen_check hardware --compute-root-file` checks against a physical D3D12 adapter and skips with exit code `77` when no hardware adapter is visible.
+Public CI tests pure-Python bitcode/container/signing controls (`dxil_retarget_controls`) and source-built `compute_root.cso` (SM 6.0) and `CopyBlocksSM65.cso` (SM 6.5) shaders synthetically injected with `dxil-ms-xb2`, `xbox.compiler.options`, `BitcodeOffset=112` and `RTS0` flags `0x03000000` (`dxil_retarget_probe`). Negative controls verify that unmodified `xb2`, `--target-triple dxil-ms` and `--keep-root-flags` fail both validation and `--sign`, and that unsigned (zero-digest) and tampered-digest containers fail `CreateComputePipelineState` on WARP. Re-signed retargeted containers pass `CreateComputePipelineState` on WARP (for `compute_root.cso`, and for `CopyBlocksSM65.cso` when WARP reports SM 6.5 or newer), and the re-signed `compute_root.cso` executes on WARP with CPU-checked readback through `offscreen_check warp --compute-root-file`. `dxil_retarget_probe_hardware` runs the same signing, `CreateComputePipelineState`, and `offscreen_check hardware --compute-root-file` checks against a physical D3D12 adapter and skips with exit code `77` when no hardware adapter is visible.
 
 ```powershell
 ctest --preset dev --no-tests=error -R '^dxil_retarget_' -V
@@ -3214,3 +3281,15 @@ python -B tools/resource_inventory.py "game-files/<build-directory>" --shader-co
 ```
 
 `out/resources/<build-directory>.json` records install chunks, flags, byte counts and missing layout destinations. It records file-header signatures for the build and scans all raw bytes in `appdata0.rpf`, `common.rpf` and `shaders.rpf` for format markers. Candidate DXBC containers are checked for length, section boundaries and DXIL program headers. The synthetic `dxcontainer_part_offsets` regression verifies that part-table entries can be enumerated independently of the physical layout, while rejecting overlapping, out-of-bounds, or duplicate-FourCC part ranges. Both the part map and DXIL scanner reject repeated FourCC tags even when those parts are physically separate; the regression includes a valid framed DXIL control to distinguish duplicate tags from missing shader payloads. It checks structural framing, not shader execution. `sample_streams` covers at most eight qualifying zlib streams per file within the first 4 MiB. Plaintext stays in memory. The sample cannot characterize the rest of the archive. Installation order and runtime I/O need independent checks. [DXIL container format](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst) · [RPF9 observation source](https://gtamodx.com/columns/eXk_fiBUaYta)
+
+### Ballot bit extraction in the named SPIR-V bridge
+
+The HLSL bridge lowers a subgroup ballot read to a dynamic DWORD selection and a bit
+test in that word. The source-built fixture supplies four distinguishable words and
+reads all 128 positions in the resulting logical vector. This checks the mask layout
+independently of the desktop device's wave size. On RTX 4060 Laptop and WARP, both
+readbacks matched 128 output words and 192 guards. Exchanging expected positions
+31 and 32 produced exactly two mismatches on each adapter.
+
+With SPIRV-Tools and SPIRV-Cross available at configure time, run
+`ctest --preset dev --no-tests=error -R spirv_ballot_extract -V`.

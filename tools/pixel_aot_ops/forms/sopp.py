@@ -39,20 +39,31 @@ def wait_vmcnt(st, i, m):
     st.vm_wait(int(m[1]))
 
 
+@form(r"s_waitcnt(?:\s+0(?:x0)?)")
+def wait_raw_zero(st, i, m):
+    # The raw immediate 0 waits for every counter (from R0Y00/Xbox2Windows upstream main).
+    st.pending.clear()
+    st.vm_wait(0)
+
+
 @form(r"s_waitcnt((?: (?:vmcnt|expcnt|lgkmcnt)\(\d+\))+)")
 def wait_counters(st, i, m):
-    # The counters named by one s_waitcnt, as the disassembler spells them (vmcnt expcnt lgkmcnt). Like the
-    # two forms above, only a count of 0 is accepted: a nonzero count leaves loads in flight that lower() does
-    # not model. expcnt waits for exports, which lower() emits as the return of main, so any count of its three-bit
-    # field orders nothing in the translation (from R0Y00/Xbox2Windows#271 by Rachel Amber).
-    fields = re.findall(r"(\w+)\((\d+)\)", m[1])
-    if len({name for name, _ in fields}) != len(fields) or any(
-            int(count) > 7 if name == "expcnt" else int(count) for name, count in fields):
-        raise ValueError("Only zero wait counts without repeats are supported")
-    if any(name == "lgkmcnt" for name, _ in fields):
-        st.pending.clear()
-    if any(name == "vmcnt" for name, _ in fields):
-        st.vm_wait(0)
+    # The counters named by one s_waitcnt, as the disassembler spells them (vmcnt expcnt lgkmcnt). A counter may
+    # repeat nowhere and stays inside its field: six bits for vmcnt and lgkmcnt, three for expcnt (upstream main
+    # accepts nonzero counts in composites). lgkmcnt(0) completes the scalar loads, a larger count leaves them
+    # outstanding; vmcnt(N) is Lowering.vm_wait(N). expcnt waits for exports, which lower() emits as the return of
+    # main, so any count of its field orders nothing (from R0Y00/Xbox2Windows#271 by Rachel Amber).
+    fields = [(name, int(count)) for name, count in re.findall(r"(\w+)\((\d+)\)", m[1])]
+    if len({name for name, _ in fields}) != len(fields):
+        raise ValueError("Duplicate counter in s_waitcnt")
+    for name, count in fields:
+        if count > (7 if name == "expcnt" else 63):
+            raise ValueError(f"{name} count exceeds its gfx10 field")
+    for name, count in fields:
+        if name == "lgkmcnt" and count == 0:
+            st.pending.clear()
+        elif name == "vmcnt":
+            st.vm_wait(count)
 
 
 @form(r"s_waitcnt_expcnt (?:(?:null|s\d+), )?(0x[0-7]|[0-7])")

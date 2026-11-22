@@ -11,3 +11,8 @@ EXPORTS
     permps256
     permq256
     permpd256
+    extract_i128_reg_imm2
+    insert_i128_reg_imm2
+    pblendd256_lane0
+    perm2i128_zero_lo
+    permq256_imm4

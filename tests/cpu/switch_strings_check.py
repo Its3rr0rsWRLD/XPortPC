@@ -17,7 +17,7 @@ MASK = (1 << 64) - 1
 SENTINELS = (0x0123456789abcdef, 0xfedcba9876543210, 0)
 GUARDS = (0xa55aa55adeadbeef, 0x5aa55aa5feedface)
 WIDTHS = dict(b=1, w=2, d=4, q=8)
-NAMES = ('rep_movsb_forward', 'rep_movsw_forward', 'rep_movsd_forward', 'rep_movsq_forward', 'loop_copy', 'call_copy')
+NAMES = ('rep_movsb_forward', 'rep_movsw_forward', 'rep_movsd_forward', 'rep_movsq_forward', 'rep_stosb_forward', 'rep_stosw_forward', 'rep_stosd_forward', 'rep_stosq_forward', 'rep_movsb_backward', 'rep_movsw_backward', 'rep_movsd_backward', 'rep_movsq_backward', 'rep_stosb_backward', 'rep_stosw_backward', 'rep_stosd_backward', 'rep_stosq_backward', 'branch_direction', 'loop_copy', 'call_copy')
 
 
 def spec(name, backwards):
@@ -45,7 +45,7 @@ def reference(initial, source, target, fill, count, name, backwards):
 
 def rejection_checks(image):
     data = Path(image).read_bytes()
-    cases = []
+    cases = [(name, data, 'direction flag') for name in ('bad_df_call', 'bad_df_tail', 'bad_df_join')]
     with pefile.PE(str(image), fast_load=True) as pe:
         def instructions(name):
             start = export_rva(pe, name)
@@ -57,6 +57,9 @@ def rejection_checks(image):
             altered = bytearray(data)
             altered[pos:pos+ins.len] = replacement
             cases.append((name, altered, expected))
+        patch('rep_movsb_backward', lambda i: i.mnemonic == M.CLD, b'\x90', 'direction flag')
+        patch('branch_direction', lambda i: i.mnemonic == M.CLD, b'\xfd', 'direction flag')
+        patch('call_copy', lambda i: i.mnemonic == M.CALL, b'\xfd\x90\x90\x90\x90', 'direction flag')
         patch('rep_movsb_forward', lambda i: i.mnemonic == M.POP, b'\x90', 'stack not balanced')
         patch('rep_movsb_forward', lambda i: i.mnemonic == M.MOVSB, b'\xf2\xa4', 'unsupported prefix')
         # Do not invent an RSI/RDI value if the only definition is removed.
@@ -88,6 +91,7 @@ def emit_mutants(image, output):
     """Three incorrect implementations that the public comparison must distinguish."""
     bodies = []
     for name, export, old, new in (
+        ('rep_movsb_backward', 'bad_direction', 'direction ? 0ull - 1ull : 1ull', '1ull'),
         ('rep_movsb_forward', 'bad_overlap',
          'while (rcx != 0) { *reinterpret_cast<volatile std::uint8_t*>(rdi) = load_always<std::uint8_t>(rsi); rsi += step; rdi += step; --rcx; }',
          'std::memmove(reinterpret_cast<void*>(rdi), reinterpret_cast<void*>(rsi), static_cast<std::size_t>(rcx)); rsi += rcx; rdi += rcx; rcx = 0;'),
@@ -103,6 +107,7 @@ def emit_mutants(image, output):
 def mutation_controls(path):
     library = C.CDLL(str(Path(path).resolve()))
     for export, name, src, dst, backwards in (
+        ('bad_direction', 'rep_movsb_backward', 64, 96, True),
         ('bad_overlap', 'rep_movsb_forward', 64, 65, False),
         ('bad_count', 'rep_movsq_forward', 16, 160, False),
     ):
@@ -115,7 +120,7 @@ def mutation_controls(path):
         function.argtypes, function.restype = [WORD, WORD, C.POINTER(WORD)], WORD
         result = function(C.addressof(context), 7, trace)
         assert (bytes(data), result, tuple(trace)) != (expected, left, (left, base+end_src, base+end_dst, flag)), export
-    print('2 compiled /O2 semantic mutations detected: memmove overlap, truncated REP count')
+    print('3 compiled /O2 semantic mutations detected: ignored DF, memmove overlap, truncated REP count')
 
 
 def differential(probe_path, native_path, *lifted_paths):
