@@ -214,7 +214,7 @@ KNOWN_RDNA2_BASE_OPCODES = {
     # VOP1
     "v_nop", "v_mov_b32", "v_readfirstlane_b32", "v_not_b32", "v_cls_i32",
     "v_log_f32", "v_exp_f32", "v_rcp_f32", "v_rsq_f32", "v_sqrt_f32",
-    "v_sin_f32", "v_cos_f32", "v_bfrev_b32", "v_ffbh_u32", "v_ffbl_b32",
+    "v_sin_f32", "v_cos_f32", "v_bfrev_b32", "v_ffbh_u32", "v_ffbl_b32", "v_ffbh_i32", "v_rcp_iflag_f32",
     "v_cvt_f32_i32", "v_cvt_f32_u32", "v_cvt_i32_f32", "v_cvt_u32_f32",
     "v_cvt_f16_f32", "v_cvt_f32_f16", "v_cvt_rpi_i32_f32", "v_cvt_flr_i32_f32",
     "v_cvt_pkrtz_f16_f32", "v_ceil_f32", "v_floor_f32", "v_rndne_f32",
@@ -236,6 +236,7 @@ KNOWN_RDNA2_BASE_OPCODES = {
     "v_pk_add_f16", "v_pk_mul_f16", "v_pk_min_f16", "v_pk_max_f16",
     "v_dot2_f32_f16", "v_dot2_i32_i16", "v_dot2_u32_u16",
     "v_dot4_i32_i8", "v_dot4_u32_u8", "v_dot8_i32_i4", "v_dot8_u32_u4",
+        "v_mad_legacy_f32", "v_mad_i32_i24", "v_mad_u32_u24", "v_fma_f64", "v_lerp_u8", "v_alignbit_b32", "v_alignbyte_b32", "v_mullit_f32", "v_min3_f32", "v_max3_f32", "v_med3_f32", "v_sad_u8", "v_sad_hi_u8", "v_sad_u16", "v_sad_u32", "v_cvt_pk_u8_f32", "v_div_fixup_f32", "v_div_fixup_f64", "v_add_f64", "v_mul_f64", "v_min_f64", "v_max_f64", "v_ldexp_f64", "v_mul_lo_u32", "v_mul_hi_u32", "v_mul_hi_i32", "v_div_scale_f32", "v_div_scale_f64", "v_div_fmas_f32", "v_div_fmas_f64", "v_msad_u8", "v_qsad_pk_u16_u8", "v_mqsad_pk_u16_u8", "v_trig_preop_f64", "v_mqsad_u32_u8", "v_mad_u64_u32", "v_mad_i64_i32", "v_xor3_b32", "v_lshlrev_b64", "v_lshrrev_b64", "v_ashrrev_i64", "v_add_nc_u16", "v_sub_nc_u16", "v_mul_lo_u16", "v_lshrrev_b16", "v_ashrrev_i16", "v_max_u16", "v_max_i16", "v_min_u16", "v_min_i16", "v_add_nc_i16", "v_sub_nc_i16", "v_add_co_u32", "v_sub_co_u32", "v_pack_b32_f16", "v_cvt_pknorm_i16_f16", "v_cvt_pknorm_u16_f16", "v_lshlrev_b16", "v_subrev_co_u32", "v_mad_u16", "v_interp_p1ll_f16", "v_interp_p1lv_f16", "v_perm_b32", "v_xad_u32", "v_lshl_add_u32", "v_add_lshl_u32", "v_fma_f16", "v_min3_f16", "v_min3_i16", "v_min3_u16", "v_max3_f16", "v_max3_i16", "v_max3_u16", "v_med3_f16", "v_med3_i16", "v_med3_u16", "v_interp_p2_f16", "v_mad_i16", "v_div_fixup_f16", "v_readlane_b32", "v_writelane_b32", "v_bfm_b32", "v_bcnt_u32_b32", "v_mbcnt_lo_u32_b32", "v_mbcnt_hi_u32_b32", "v_cvt_pknorm_i16_f32", "v_cvt_pknorm_u16_f32", "v_cvt_pk_u16_u32", "v_cvt_pk_i16_i32", "v_add3_u32", "v_lshl_or_b32", "v_and_or_b32", "v_or3_b32", "v_mad_u32_u16", "v_mad_i32_i16", "v_sub_nc_i32", "v_permlane16_b32", "v_permlanex16_b32", "v_add_nc_i32", "v_add_co_ci_u32", "v_sub_co_ci_u32", "v_subrev_co_ci_u32",
     "v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16",
     # VINTRP
     "v_interp_p1_f32", "v_interp_p2_f32", "v_interp_mov_f32",
@@ -275,6 +276,11 @@ KNOWN_RDNA2_BASE_OPCODES |= (
         "v_cubeid_f32", "v_cubesc_f32", "v_cubetc_f32", "v_cubema_f32",
         "v_cvt_f32_ubyte0", "v_cvt_f32_ubyte1", "v_cvt_f32_ubyte2", "v_cvt_f32_ubyte3",
         "v_cvt_off_f32_i4", "v_ldexp_f32",
+        "v_cvt_f64_i32", "v_cvt_f64_u32", "v_cvt_f64_f32",
+        "v_cvt_i32_f64", "v_cvt_u32_f64", "v_cvt_f32_f64",
+        "v_fract_f64", "v_trunc_f64", "v_ceil_f64", "v_rndne_f64", "v_floor_f64",
+        "v_rcp_f64", "v_rsq_f64", "v_sqrt_f64",
+        "v_frexp_exp_i32_f64", "v_frexp_mant_f64",
         "v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16",
         "v_dot2_f32_f16", "v_dot2_i32_i16", "v_dot2_u32_u16",
         "v_dot4_i32_i8", "v_dot4_u32_u8", "v_dot8_i32_i4", "v_dot8_u32_u4",
