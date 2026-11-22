@@ -1,0 +1,15 @@
+EXPORTS
+    pminsb_op
+    pmaxsb_op
+    pminuw_op
+    pmaxuw_op
+    pminsd_op
+    pmaxsd_op
+    pminud_op
+    pmaxud_op
+    pmulld_op
+    pmuldq_op
+    pcmpeqq_op
+    packusdw_op
+    pblendw_op
+    pblendvb_op
