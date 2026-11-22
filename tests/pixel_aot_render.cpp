@@ -63,6 +63,15 @@ struct TitleMemory {
     std::vector<StorageImage> images;
 };
 
+// A texture of the 'X2WD' section (tests/pixel_aot_draws/texdims.py, docs/design/pixel-bindings.md): an R8G8B8A8_UNORM
+// 2D array (kind 1), the six faces of a cube as a 2D array (kind 2, bound as the Texture2DArray view a cube T# is
+// translated to) or a 3D texture (kind 3), one level, replacing the view of its texture slot. texels: depth slices of
+// height rows of width texels, packed.
+struct ShapedTexture {
+    UINT slot, kind, width, height, depth;
+    std::vector<BYTE> texels;
+};
+
 struct PixelInput {
     UINT width, height, scale;
     DXGI_FORMAT format;
@@ -74,6 +83,7 @@ struct PixelInput {
     // format and extent of the first) and constant buffers params1..params3 (b2..b4, 64 words each).
     std::vector<std::vector<BYTE>> moreRows;
     std::vector<std::vector<Word>> moreConstants;
+    std::vector<ShapedTexture> shaped;  // the 'X2WD' section
     TitleMemory memory;
     bool integerRT = false;      // bit 0 of the flags word of the optional 'X2WF' case section
     std::vector<BYTE> nanMask;   // 64 per-texel NaN-class mask bytes, empty without that section
@@ -282,6 +292,40 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         moreStaging[k] = upload(device, colors);
         moreTextures[k] = resource(device, srcDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
     }
+    // The 'X2WD' textures: a default-heap resource with every slice (or the 3D depth) and its staging copy.
+    struct ShapedResource {
+        ComPtr<ID3D12Resource> texture, staging;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts;
+    };
+    std::vector<ShapedResource> shapedResources(input.shaped.size());
+    for (size_t n = 0; n < input.shaped.size(); ++n) {
+        const auto& shape = input.shaped[n];
+        auto shapeDesc = texture_desc(shape.width, shape.height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE);
+        if (shape.kind == 3) shapeDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        shapeDesc.DepthOrArraySize = static_cast<UINT16>(shape.depth);
+        const UINT subresources = shape.kind == 3 ? 1 : shape.depth;
+        auto& res = shapedResources[n];
+        res.layouts.resize(subresources);
+        std::vector<UINT> shapeRows(subresources);
+        std::vector<UINT64> shapeRowBytes(subresources);
+        UINT64 shapeBytes = 0;
+        device->GetCopyableFootprints(&shapeDesc, 0, subresources, 0, res.layouts.data(), shapeRows.data(),
+                                      shapeRowBytes.data(), &shapeBytes);
+        std::vector<BYTE> packed(shapeBytes);
+        const size_t row = size_t(shape.width) * 4;
+        for (UINT sub = 0; sub < subresources; ++sub) {
+            const auto& footprint = res.layouts[sub].Footprint;
+            for (UINT z = 0; z < footprint.Depth; ++z) {
+                for (UINT y = 0; y < shape.height; ++y) {
+                    const size_t from = ((size_t(sub) + z) * shape.height + y) * row;
+                    const size_t to = res.layouts[sub].Offset + (size_t(z) * shapeRows[sub] + y) * footprint.RowPitch;
+                    std::memcpy(packed.data() + to, shape.texels.data() + from, row);
+                }
+            }
+        }
+        res.staging = upload(device, packed);
+        res.texture = resource(device, shapeDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
+    }
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
     heapDesc.NumDescriptors = (std::max)(targetCount, 1u);
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -314,6 +358,24 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += size_t(2 + 8 + 8 + 32 + k) * increment;
         device->CreateShaderResourceView(k < moreTextures.size() ? moreTextures[k].Get() : nullptr, &view, handle);
+    }
+    // Each 'X2WD' texture replaces the view of its slot: tex and tex1 at heap offsets 0 and 1, tex2..tex7 at 50..55.
+    for (size_t n = 0; n < input.shaped.size(); ++n) {
+        const auto& shape = input.shaped[n];
+        D3D12_SHADER_RESOURCE_VIEW_DESC shaped{};
+        shaped.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        shaped.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (shape.kind == 3) {
+            shaped.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            shaped.Texture3D.MipLevels = 1;
+        } else {
+            shaped.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            shaped.Texture2DArray.MipLevels = 1;
+            shaped.Texture2DArray.ArraySize = shape.depth;
+        }
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(shape.slot < 2 ? shape.slot : 2 + 8 + 8 + 32 + shape.slot - 2) * increment;
+        device->CreateShaderResourceView(shapedResources[n].texture.Get(), &shaped, handle);
     }
     for (UINT i = 0; i < 8; ++i) {
         D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
@@ -412,6 +474,18 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
                 dst.pResource = moreTextures[k].Get();
                 list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                 transition(list, moreTextures[k].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+            for (const auto& res : shapedResources) {
+                src.pResource = res.staging.Get();
+                src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.pResource = res.texture.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                for (size_t sub = 0; sub < res.layouts.size(); ++sub) {
+                    src.PlacedFootprint = res.layouts[sub];
+                    dst.SubresourceIndex = static_cast<UINT>(sub);
+                    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                }
+                transition(list, res.texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
             for (size_t i = 0; i < writable.size(); ++i) {
                 if (!writable[i]) continue;
@@ -954,6 +1028,40 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
                 std::memcpy(words.data(), bytes.data() + at, bufferBytes);
                 input.moreConstants.push_back(std::move(words));
             }
+        }
+        // The optional 'X2WD' section of textures of other dimensions (tests/pixel_aot_draws/texdims.py), after the
+        // bindings section: magic, a texture count N (1..8) and two zero words, then N headers of eight words (slot
+        // 0..7, kind 1 = 2D array, 2 = cube faces, 3 = 3D, width, height, depth or slice count, three zero words), then
+        // the R8G8B8A8 texels of each texture in header order (see ShapedTexture).
+        if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x44573258u) {
+            if (bytes.size() - at < 16) throw BadCase("Texture dimension section is truncated");
+            const UINT count = readWord(bytes.data() + at + 4);
+            if (!count || count > 8 || readWord(bytes.data() + at + 8) || readWord(bytes.data() + at + 12))
+                throw BadCase("Texture dimension section needs 1 to 8 textures and two zero words");
+            at += 16;
+            if (bytes.size() - at < size_t(count) * 32) throw BadCase("Texture dimension section is truncated");
+            std::vector<ShapedTexture> shaped(count);
+            for (auto& shape : shaped) {
+                std::array<UINT, 8> header{};
+                std::memcpy(header.data(), bytes.data() + at, sizeof(header));
+                at += sizeof(header);
+                shape = {header[0], header[1], header[2], header[3], header[4], {}};
+                const bool sized = shape.width && shape.width <= 64 && shape.height && shape.height <= 64 &&
+                                   shape.depth && shape.depth <= 64;
+                if (shape.slot > 7 || shape.kind < 1 || shape.kind > 3 || !sized || header[5] || header[6] ||
+                    header[7] || (shape.kind == 2 && (shape.depth != 6 || shape.width != shape.height)))
+                    throw BadCase("Invalid texture dimension header");
+                for (const auto& other : shaped)
+                    if (&other != &shape && other.kind && other.slot == shape.slot)
+                        throw BadCase("Two textures of the dimension section share a slot");
+            }
+            for (auto& shape : shaped) {
+                const size_t size = size_t(shape.width) * shape.height * shape.depth * 4;
+                if (bytes.size() - at < size) throw BadCase("Texture dimension section is truncated in its texels");
+                shape.texels.assign(bytes.data() + at, bytes.data() + at + size);
+                at += size;
+            }
+            input.shaped = std::move(shaped);
         }
         if (bytes.size() > at && static_cast<BYTE>(bytes[at]) <= 3u) {
             // Upstream's case trailer (R0Y00/Xbox2Windows#363 and #552), told apart from the magic-led sections by its
