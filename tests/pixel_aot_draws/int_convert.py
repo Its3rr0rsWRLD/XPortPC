@@ -298,7 +298,7 @@ def controls(directory):
                  "v_cvt_i32_f32_e32 v19, v30", "v_cvt_f32_i32_e32 v19, v30", "v_cvt_f32_u32_e32 v19, s90",
                  "v_cvt_flr_i32_f32_e32 v19, v18", "v_cvt_rpi_i32_f32_e32 v19, v18", "v_cvt_f32_i32_sdwa v19, v18 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:DWORD",
                  "v_cvt_u32_f32_sdwa v19, v18 dst_sel:BYTE_3 dst_unused:UNUSED_PRESERVE src0_sel:DWORD",
-                 "v_cvt_f32_i32_dpp v19, v18 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
+                 "v_cvt_f32_i32_dpp v19, v18 row_shl:1 row_mask:0xf bank_mask:0xf",
                  "v_cvt_f32_i32_e32 v19, 0x100000000", "v_cvt_i32_f32_e32 v19, 0x100000000"):
         must_reject(translate, with_constants(["v_mov_b32_e32 v18, s44", line]))
     program = with_constants([])

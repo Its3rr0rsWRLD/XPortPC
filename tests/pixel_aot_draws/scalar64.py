@@ -405,17 +405,9 @@ def controls(directory):
         "s_and_b64 s[70:71], s[50:51], s[52:53]",  # saved exec source
         "s_and_b64 s[70:71], s[20:21], s[52:53]",  # texture_ptr source
         "s_and_b64 s[70:71], s[90:91], s[52:53]",  # unset source
-        "s_cselect_b64 s[70:71], s[52:53], s[54:55]",
-        "s_bfe_u64 s[70:71], s[52:53], s61",
-        "s_bfe_i64 s[70:71], s[52:53], s61",
-        "s_cmp_eq_u64 s[52:53], s[54:55]",
-        "s_bitcmp1_b64 s[52:53], 0",
-        "s_bfm_b32 s70, 4, 8",
+        "s_cselect_b64 s[70:71], s[52:53], s[54:55]",  # before any SCC write
+        # s_bfe_u64/i64, s_cmp_eq_u64, s_bitcmp1_b32/b64 and s_not_b32 are lowered now (draw family salu_rest)
         "s_addc_u32 s70, s56, s57",
-        "s_and_b32 s70, s56, s57",
-        "s_not_b32 s70, s56",
-        "s_bitcmp1_b32 s56, 0",
-        "s_cselect_b32 s70, s56, s57",
     ):
         must_reject(translate, program[:body_start] + [bad] + program[body_start:])
     # s_cmov_b64 rejects unset or non-numeric destination pairs even after SCC is set.

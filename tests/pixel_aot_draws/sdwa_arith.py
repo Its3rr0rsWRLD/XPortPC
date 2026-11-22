@@ -50,6 +50,21 @@ SDWA_ARITH = (
         sdwa_arith("mul", "v15", ["s47", "v18"], "WORD_1"),
     ], (0x3f801234, 1.0, 8388613.0, 0xc0a03fff), [52.0, 18.0, 0.51953125, 1.9921875],
      ((0, 128.0), (1, 63.0), (2, 1.0), (3, -5.0))),
+    # The transcendental and root forms (exact on these powers of two): whole-dword results and then, in program 5,
+    # reciprocal square root, a byte kept inside 1.0, a word padded (the low word of 1.5 is zero) and a negated source.
+    ([
+        sdwa_arith("exp", "v12", ["s47"]),
+        sdwa_arith("log", "v13", ["s44"]),
+        sdwa_arith("rcp", "v14", ["s45"]),
+        sdwa_arith("sqrt", "v15", ["s46"]),
+    ], (8.0, 4.0, 16.0, 3.0), [8.0, 3.0, 0.25, 4.0], ((0, 4.0), (1, 2.0), (2, 0.5), (3, 2.0))),
+    ([
+        sdwa_arith("rsq", "v12", ["s44"]),
+        "v_mov_b32_e32 v13, 1.0",
+        sdwa_arith("exp", "v13", ["s45"], "BYTE_2", "UNUSED_PRESERVE"),
+        sdwa_arith("sqrt", "v14", ["s46"], "WORD_1"),
+        sdwa_arith("rcp", "v15", ["-s47"]),
+    ], (4.0, 0.0, 2.25, -1.0), [0.5, 0.5, 0.0, 1.0], ((0, 2.0), (1, 1.0), (2, 1.5), (3, -1.0))),
 )
 
 
@@ -64,6 +79,11 @@ def sdwa_arith_reference(index, inputs):
         return [max(x, y), min(0.5, y), 0.0 if z == 0 or w == 0 else z * w, float(math.floor(-y))]
     if index == 2:
         return [float(math.ceil(x)), -y - math.floor(-y), float(math.trunc(abs(z))), as_float((bits(w + 0.0) & 0xff) << 24)]
+    if index == 4:
+        return [2.0 ** w, math.log2(x), 1.0 / y, math.sqrt(z)]
+    if index == 5:
+        return [1.0 / math.sqrt(x), as_float((0x3f800000 & ~0xff0000) | ((bits(2.0 ** y) & 0xff) << 16)),
+                as_float((bits(math.sqrt(z)) & 0xffff) << 16), 1.0 / -w]
     product = bits(x * y) & 0xffff
     return [float(product & 0xff), float(product >> 8),
             as_float((0x3f800000 & ~0xff0000) | ((bits(float(math.floor(z))) & 0xff) << 16)), as_float((bits(w * y) & 0xffff) << 16)]
@@ -97,9 +117,18 @@ def check_sdwa_arith_draws(directory, compiler, renderer, backend):
 
 def controls(directory):
     # SDWA arithmetic takes whole-dword sources only and refuses output modifiers and a src1_sel on a unary op.
+    for program, *_ in SDWA_ARITH:
+        translate(with_constants(program))
     body = translate(with_constants(SDWA_ARITH[3][0])).split("float4 main", 1)[1]
     assert body.count("& 0xffff0000u) | ") == 1 and body.count("& 0xff00ffffu) | ") == 1, body
+    body = translate(with_constants(SDWA_ARITH[5][0])).split("float4 main", 1)[1]
+    assert body.count("& 0xff00ffffu) | ") == 1 and body.count("& 0xffffu) << 16u") == 1 and body.count("rsqrt(") == 1, body
+    # The result of a field placement stays a word (movw), and a whole-dword result is a float.
+    assert body.count("uint movw") >= 2 and "asfloat(((" not in body, body
     must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", sdwa_arith("add", "v12", ["s44", "v18 mul:2"])]))
+    must_reject(translate, with_constants([sdwa_arith("rcp", "v12", ["s44"]).replace("src0_sel:DWORD", "src0_sel:BYTE_1")]))
+    must_reject(translate, with_constants([sdwa_arith("exp", "v12", ["s44"]) + " src1_sel:DWORD"]))
+    must_reject(translate, with_constants([sdwa_arith("sqrt", "v12", ["s44"], "BYTE_1", "UNUSED_SEXT")]))
     must_reject(translate, with_constants([sdwa_arith("add", "v12", ["s44", "v13"]).replace("src0_sel:DWORD", "src0_sel:WORD_1")]))
     must_reject(translate, with_constants([sdwa_arith("floor", "v12", ["s44"]) + " src1_sel:DWORD"]))
     # A partial UNUSED_PRESERVE result needs a tracked numeric destination, as for SDWA moves.

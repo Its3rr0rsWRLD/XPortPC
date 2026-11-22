@@ -2,8 +2,8 @@
 import re
 
 from ..dispatch import form
-from ..registers import (LANE_MASK, f16_encoding, f16_operand, fp_operand, lane_mask, raw_source, vector_u32,
-                         word_of)
+from ..registers import (LANE_MASK, f16_bits, f16_encoding, f16_operand, fp_operand, lane_mask, raw_source,
+                         vector_u32, word_of)
 
 # N-prefixed predicates include unordered operands. Keep NLG's NaN case explicit in DXIL.
 COMPARE = {
@@ -104,6 +104,29 @@ def compare_int(st, i, m):
         st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
     relation = {"f": "false", "t": "true"}.get(op) or f"{words[0]} {INT_COMPARE[op]} {words[1]}"
     st.lines.append(f"    bool cmp{i} = {relation};")
+
+
+# 16-bit integer comparisons (V_CMP_{EQ,NE,LT,LE,GT,GE}_{I16,U16}, VOPC and VOP3 e64): both sources are the low 16
+# bits of their words (a register's low half, an inline constant or a literal's low half; bits 16..31 never take
+# part). i16 sign-extends the low half, u16 zero-extends it. There are no F and T forms for 16-bit integers, no
+# source modifiers and no clamp, and v_cmpx is not lowered here.
+INT16_COMPARE = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">="}
+
+
+@form(rf"v_cmp_({'|'.join(INT16_COMPARE)})_(i16|u16)(?:_e32|_e64)? {LANE_MASK}, ([^,\s]+), ([^,\s]+)")
+def compare_int16(st, i, m):
+    op, kind, dst, *tokens = m.groups()
+    regs = lane_mask(dst)
+    if st.ex != "true" or st.pending.intersection(regs):
+        raise ValueError("Invalid comparison")
+    if any("." in t for t in tokens):
+        raise ValueError("A float constant is not a 16-bit integer source")
+    words = [f16_bits(t, st.scalar, st.vector, st.pending, st.sample_pending) for t in tokens]
+    if kind == "i16":
+        words = [f"((int({w}) ^ 0x8000) - 0x8000)" for w in words]
+    for j, reg in enumerate(regs):
+        st.scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+    st.lines.append(f"    bool cmp{i} = {words[0]} {INT16_COMPARE[op]} {words[1]};")
 
 
 @form(rf"v_cndmask_b32(?:_e32|_e64)? (v\d+), ([^,]+), ([^,]+), {LANE_MASK}")

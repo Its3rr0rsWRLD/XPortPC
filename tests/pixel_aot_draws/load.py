@@ -355,8 +355,6 @@ def check_load_controls() -> None:
                 "buffer_load_dword v24, v[18:19], s[52:55], 0 offen",
                 "buffer_load_dword v24, v18, s[28:31], 0 offen",  # texture descriptor words are not numbers
                 "buffer_load_dword v24, v30, s[52:55], 0 offen",
-                "buffer_load_ubyte v24, v18, s[52:55], 0 offen",
-                "buffer_load_format_x v24, v18, s[52:55], 0 offen",
                 "buffer_store_dword v24, v18, s[52:55], 0 offen",
                 "buffer_load_dword v24, v18, s[52:55], s70 offen"):
         must_reject(translate_loads, with_constants([*ready, bad]))
@@ -364,7 +362,7 @@ def check_load_controls() -> None:
                 "global_load_dword v24, v[18:19], off offset:-2049", "global_load_dword v24, v18, off",
                 "global_load_dword v24, v[18:19], s[44:45]", "global_load_dword v24, v20, s[45:46]",
                 "global_load_dword v24, v20, s44", "global_load_dword v24, v[18:19], off offset:4 offset:4",
-                "global_load_ubyte v24, v[18:19], off", "global_store_dword v[18:19], v24, off"):
+                "global_store_dword v[18:19], v24, off"):
         must_reject(translate_loads, with_constants([move(18, "s44"), move(19, "s45"), move(20, "s46"), bad]))
 
 

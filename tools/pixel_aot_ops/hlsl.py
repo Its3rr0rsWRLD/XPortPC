@@ -132,6 +132,11 @@ cbuffer TitleCount : register(b1) { uint title_range_count; };
 # (with NumRecords reduced by sgpr_offset in raw mode) for 3. Per component, a dword is out of range when its own offset
 # (voffset + inst_offset + 4 * dword) fails the rule; SWIZZLE_ENABLE and ADD_TID_ENABLE are not modelled and read zero,
 # as does an offset sum that wraps 32 bits.
+# Sub-dword loads (ubyte, sbyte, ushort, sshort and the d16 forms) read bytes one at a time, so any alignment works,
+# and apply the same range rule to the offset of their first byte. Typed loads (buffer_load_format_*, tbuffer_load_format_*)
+# are exact only for the 32_UINT (20) and 32_SINT (21) formats, whose single component is the raw dword; the V# DST_SEL
+# fields (word 3 bits 0 to 11: 0 = 0, 1 = 1, 4 to 7 = X, Y, Z, W) then place it, with X = the dword, Y = Z = 0, W = 1. Any
+# other format, and an out-of-range element, reads zero in every channel.
 MEMORY_HELPERS = """uint2 add64(uint2 a, uint2 b) {
     uint low = a.x + b.x;
     return uint2(low, a.y + b.y + (low < a.x ? 1u : 0u));
@@ -167,6 +172,48 @@ uint buffer_load32(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uin
 }
 uint global_load32(uint2 base, uint voffset, uint2 immediate, uint dword) {
     return title_load32(add64(add64(base, uint2(voffset, 0u)), add64(immediate, uint2(4u * dword, 0u))));
+}
+uint title_load8(uint2 address) {
+    uint word = title_load32(uint2(address.x & ~3u, address.y));
+    return (word >> ((address.x & 3u) * 8u)) & 0xffu;
+}
+uint title_load16(uint2 address) {
+    return title_load8(address) | (title_load8(add64(address, uint2(1u, 0u))) << 8);
+}
+bool buffer_address(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, out uint2 address) {
+    uint stride = (rsrc.y >> 16) & 0x3fffu;
+    uint num_records = rsrc.z;
+    uint oob_select = (rsrc.w >> 28) & 3u;
+    bool unmodelled = (rsrc.y >> 31) != 0u || ((rsrc.w >> 23) & 1u) != 0u;
+    uint offset = voffset + inst_offset;
+    bool wrapped = offset < voffset;
+    bool in_range;
+    if (oob_select == 0u) in_range = index < num_records && offset < stride;
+    else if (oob_select == 1u) in_range = index < num_records;
+    else if (oob_select == 2u) in_range = num_records != 0u;
+    else in_range = offset < num_records;
+    address = add64(add64(uint2(rsrc.x, rsrc.y & 0xffffu), uint2(soffset, 0u)), add64(mul_stride(stride, index), uint2(offset, 0u)));
+    return !(unmodelled || wrapped || !in_range);
+}
+uint buffer_load_sub(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, uint bytes) {
+    uint2 address;
+    if (!buffer_address(rsrc, soffset, voffset, inst_offset, index, address)) return 0u;
+    return bytes == 1u ? title_load8(address) : title_load16(address);
+}
+uint4 buffer_load_format(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, uint format) {
+    uint2 address;
+    if ((format != 20u && format != 21u) || !buffer_address(rsrc, soffset, voffset, inst_offset, index, address)) return uint4(0u, 0u, 0u, 0u);
+    uint4 raw = uint4(title_load32(address), 0u, 0u, 1u);
+    uint4 result;
+    [unroll] for (uint c = 0u; c < 4u; ++c) {
+        uint select = (rsrc.w >> (3u * c)) & 7u;
+        result[c] = select == 1u ? 1u : (select >= 4u ? raw[select - 4u] : 0u);
+    }
+    return result;
+}
+uint global_load_sub(uint2 base, uint voffset, uint2 immediate, uint bytes) {
+    uint2 address = add64(add64(base, uint2(voffset, 0u)), immediate);
+    return bytes == 1u ? title_load8(address) : title_load16(address);
 }
 """
 

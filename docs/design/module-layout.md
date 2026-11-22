@@ -12,11 +12,12 @@ same command lines, outputs and CTest names as before.
 | `dispatch.py` | `@form(pattern, when=...)`, the registry, and the dispatch of one instruction to its form |
 | `registers.py` | the register model and operand readers: `("uint", expr)` words, `vector_u32`, `word_of`, `tracked_word`, `RAW_WORD_PREFIXES`, `fp_operand`, the binary16 readers |
 | `control_flow.py` | CF-1 ([control-flow.md](control-flow.md)): blocks, `plan_join`, `sync_lines`, and `program()`, the structured walk |
+| `quad.py` | quad lanes: the quad-local DPP16 (`quad_perm`) and DPP8 controls, and `quad_read`, the HLSL quad reads of a uint word |
 | `hlsl.py` | `PREAMBLE`, title-memory helpers, `SALU_HELPERS` (helper functions emitted by name from `st.helpers`) |
 | `forms/<family>.py` | the forms of one family and the tables only they use |
 
 Families today: `sopp`, `sop1`, `sop2`, `sopc`, `exec_mask`, `smem`, `valu_f32`, `valu_int`, `valu_f16`, `valu_f64`, `vopc`,
-`sdwa`, `vop3p`, `vintrp`, `mimg`, `mubuf`, `flat`, `exp`. A table another module needs is imported from its family
+`sdwa`, `dpp`, `vop3p`, `vintrp`, `mimg`, `mubuf`, `mtbuf`, `flat`, `exp`. A table another module needs is imported from its family
 (`sdwa` uses `ALU` from `valu_f32` and `COMPARE` from `vopc`). `tools/pixel_aot.py` re-exports the names it always
 had (`lower`, `ALU`, `TITLE_LOOKUP`, ...); new code imports from the package.
 

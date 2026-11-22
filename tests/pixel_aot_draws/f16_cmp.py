@@ -296,8 +296,8 @@ def check_f16_cmp_controls():
     assert translate(with_constants(["v_cmp_class_f16 vcc_lo, s44, 3"])) == translate(with_constants(["v_cmp_class_f16_e32 vcc_lo, s44, 3"]))
     for operation in ("v_cmp_lt_f16_e64 s0, s44, v13 op_sel:[1,0]", "v_cmp_lt_f16_e64 s0, s44, v13 op_sel:[0,1]",
                       "v_cmp_class_f16_e64 s0, s44, 3 op_sel:[1,0]",
-                      "v_cmp_lt_f16_sdwa vcc_lo, s44, v13 src0_sel:WORD_1 src1_sel:WORD_0",
-                      "v_cmp_class_f16_sdwa vcc_lo, s44, v13 src0_sel:WORD_0 src1_sel:DWORD",
+                      "v_cmp_lt_f16_sdwa vcc_lo, 1.5, v13 src0_sel:WORD_1 src1_sel:WORD_0",
+                      "v_cmp_class_f16_sdwa vcc_lo, s44, 1.0 src0_sel:WORD_0 src1_sel:DWORD",
                       "v_cmp_lt_f16_dpp vcc_lo, v13, v14 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf",
                       "v_cmpx_lt_f16_e32 s44, v13", "v_cmpx_class_f16_e32 s44, v13",
                       "v_cmp_class_f16_e64 s0, s44, 1.0", "v_cmp_class_f16_e64 s0, s44, 0.5",

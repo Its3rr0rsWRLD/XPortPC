@@ -1,8 +1,11 @@
-"""VOP3P: mixed-precision fused multiply-add (v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16)."""
+"""VOP3P: mixed-precision fused multiply-add (v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16), packed binary16
+arithmetic (v_pk_{add,mul,min,max,fma}_f16), packed 16-bit integer arithmetic (v_pk_*_{i16,u16,b16}) and the dot
+products (v_dot2_f32_f16, v_dot2_{i32_i16,u32_u16}, v_dot4_{i32_i8,u32_u8}, v_dot8_{i32_i4,u32_u4})."""
 import re
+import struct
 
 from ..dispatch import form
-from ..hlsl import PREAMBLE
+from ..hlsl import PREAMBLE, SALU_HELPERS
 from ..registers import F16_CONSTANT, tracked_word, word_of
 
 # Mixed-precision fused multiply-add: v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16 (VOP3P encoding).
@@ -188,6 +191,13 @@ uint fma_mix_sat(uint v, bool wide) {
 """
 
 
+def need_fma_mix(st):
+    """Emit FMA_MIX_HELPERS once (fma_mix_round, fma_mix_sat and fm_f16_word are shared with v_pk_fma_f16)."""
+    if "fma_mix" not in st.helpers:
+        st.helpers.add("fma_mix")
+        st.lines.insert(st.lines.index(PREAMBLE), FMA_MIX_HELPERS)
+
+
 def fma_mix_source(token, high, select, scalar, vector, pending, sample_pending):
     """One source of v_fma_mix_*: the binary32 encoding of its value after widening and modifiers, as a uint expression.
 
@@ -252,9 +262,7 @@ def fma_mix(st, i, m):
     old = st.vector.get(dst)
     if op != "mix_f32" and old is not None and tracked_word(old) is None:
         raise ValueError("Unsupported arithmetic destination")
-    if "fma_mix" not in st.helpers:
-        st.helpers.add("fma_mix")
-        st.lines.insert(st.lines.index(PREAMBLE), FMA_MIX_HELPERS)
+    need_fma_mix(st)
     selects = [int(x or 0) for x in (s0, s1, s2)]
     highs = [int(x or 0) for x in (h0, h1, h2)]
     a, b, c = (fma_mix_source(t, h, s, st.scalar, st.vector, st.pending, st.sample_pending)
@@ -271,3 +279,313 @@ def fma_mix(st, i, m):
         expression = f"{keep} | ({expression} << 16u)"
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = asfloat({expression});")
+
+
+# Packed VOP3P forms: v_pk_*_f16, v_pk_*_{i16,u16,b16} and the dot products. A packed word holds two 16-bit lanes; lane 0
+# (bits 15:0) reads the half of each source that op_sel picks and lane 1 (bits 31:16) the half that op_sel_hi picks
+# (defaults: op_sel all 0, op_sel_hi all 1; the printer omits an all-default modifier). neg_lo and neg_hi negate the
+# sources of lane 0 and lane 1; on a binary16 half that flips bit 15, as for the other 16-bit forms. Every packed value
+# is a uint word, never a float-typed value, and no float16 HLSL type is used.
+# Sources:
+#   AMD RDNA 2 ISA Reference Guide (document 70648), section 12.10 VOP3P Instructions (the opcodes of the v_pk_ and
+#   v_dot families) and LLVM 15 VOP3PInstructions.td (modifier operands and which instructions take clamp or neg).
+# An inline float constant is the binary16 value in the low half with the high half zero (the ported draws check this on
+# hardware); an integer inline constant -16..64 is its 32-bit sign extension; a literal is the 32-bit word. Modifiers on a
+# source operand (-, |x|) are not part of the grammar, nor are output modifiers, DPP and SDWA.
+PK_F16 = {"add": 2, "mul": 2, "min": 2, "max": 2, "fma": 3}
+PK_INT16 = {
+    "add_i16": (2, True), "add_u16": (2, True), "sub_i16": (2, True), "sub_u16": (2, True),
+    "min_i16": (2, False), "min_u16": (2, False), "max_i16": (2, False), "max_u16": (2, False),
+    "mul_lo_u16": (2, False), "mad_i16": (3, True), "mad_u16": (3, True),
+    "lshlrev_b16": (2, False), "lshrrev_b16": (2, False), "ashrrev_i16": (2, False),
+}
+DOT_OPS = ("v_dot2_f32_f16", "v_dot2_i32_i16", "v_dot2_u32_u16", "v_dot4_i32_i8", "v_dot4_u32_u8", "v_dot8_i32_i4",
+           "v_dot8_u32_u4")
+
+# Dot products accumulate in 64 bits and saturate once at the end when clamp is set (RDNA 2 ISA: the 32-bit result
+# is clamped to the destination range). Without clamp the low 32 bits wrap.
+SALU_HELPERS.update({
+    "dot_u64_add": (
+        "uint2 dot_u64_add(uint2 acc, uint v) {\n"
+        "    uint lo = acc.x + v;\n"
+        "    return uint2(lo, acc.y + (lo < acc.x ? 1u : 0u));\n"
+        "}"
+    ),
+    "dot_u64_sat": (
+        "uint dot_u64_sat(uint2 s) {\n"
+        "    return s.y != 0u ? 0xffffffffu : s.x;\n"
+        "}"
+    ),
+    "dot_i64_add": (
+        "uint2 dot_i64_add(uint2 acc, int v) {\n"
+        "    uint uv = asuint(v);\n"
+        "    uint lo = acc.x + uv;\n"
+        "    uint hi = acc.y + (v < 0 ? 0xffffffffu : 0u) + (lo < acc.x ? 1u : 0u);\n"
+        "    return uint2(lo, hi);\n"
+        "}"
+    ),
+    "dot_i64_sat": (
+        "uint dot_i64_sat(uint2 s) {\n"
+        "    if (asint(s.y) > 0 || (s.y == 0u && s.x > 0x7fffffffu)) return 0x7fffffffu;\n"
+        "    if (asint(s.y) < -1 || (s.y == 0xffffffffu && s.x < 0x80000000u)) return 0x80000000u;\n"
+        "    return s.x;\n"
+        "}"
+    ),
+    "v_dot2_i32_i16": (
+        "uint v_dot2_i32_i16(uint a0, uint a1, uint b0, uint b1, uint c, bool sat) {\n"
+        "    int p0 = (asint(a0 << 16u) >> 16) * (asint(b0 << 16u) >> 16);\n"
+        "    int p1 = (asint(a1 << 16u) >> 16) * (asint(b1 << 16u) >> 16);\n"
+        "    uint2 s = dot_i64_add(dot_i64_add(dot_i64_add(uint2(0u, 0u), asint(c)), p0), p1);\n"
+        "    return sat ? dot_i64_sat(s) : s.x;\n"
+        "}"
+    ),
+    "v_dot2_u32_u16": (
+        "uint v_dot2_u32_u16(uint a0, uint a1, uint b0, uint b1, uint c, bool sat) {\n"
+        "    uint p0 = (a0 & 0xffffu) * (b0 & 0xffffu);\n"
+        "    uint p1 = (a1 & 0xffffu) * (b1 & 0xffffu);\n"
+        "    uint2 s = dot_u64_add(dot_u64_add(uint2(c, 0u), p0), p1);\n"
+        "    return sat ? dot_u64_sat(s) : s.x;\n"
+        "}"
+    ),
+    "v_dot4_i32_i8": (
+        "uint v_dot4_i32_i8(uint a, uint b, uint c, bool sat) {\n"
+        "    int sum = 0;\n"
+        "    for (uint k = 0u; k < 4u; ++k) {\n"
+        "        int x = asint(((a >> (k * 8u)) & 0xffu) << 24u) >> 24;\n"
+        "        int y = asint(((b >> (k * 8u)) & 0xffu) << 24u) >> 24;\n"
+        "        sum += x * y;\n"
+        "    }\n"
+        "    uint2 s = dot_i64_add(dot_i64_add(uint2(0u, 0u), asint(c)), sum);\n"
+        "    return sat ? dot_i64_sat(s) : s.x;\n"
+        "}"
+    ),
+    "v_dot4_u32_u8": (
+        "uint v_dot4_u32_u8(uint a, uint b, uint c, bool sat) {\n"
+        "    uint sum = 0u;\n"
+        "    for (uint k = 0u; k < 4u; ++k) {\n"
+        "        sum += ((a >> (k * 8u)) & 0xffu) * ((b >> (k * 8u)) & 0xffu);\n"
+        "    }\n"
+        "    uint2 s = dot_u64_add(uint2(c, 0u), sum);\n"
+        "    return sat ? dot_u64_sat(s) : s.x;\n"
+        "}"
+    ),
+    "v_dot8_i32_i4": (
+        "uint v_dot8_i32_i4(uint a, uint b, uint c, bool sat) {\n"
+        "    int sum = 0;\n"
+        "    for (uint k = 0u; k < 8u; ++k) {\n"
+        "        int x = asint(((a >> (k * 4u)) & 0xfu) << 28u) >> 28;\n"
+        "        int y = asint(((b >> (k * 4u)) & 0xfu) << 28u) >> 28;\n"
+        "        sum += x * y;\n"
+        "    }\n"
+        "    uint2 s = dot_i64_add(dot_i64_add(uint2(0u, 0u), asint(c)), sum);\n"
+        "    return sat ? dot_i64_sat(s) : s.x;\n"
+        "}"
+    ),
+    "v_dot8_u32_u4": (
+        "uint v_dot8_u32_u4(uint a, uint b, uint c, bool sat) {\n"
+        "    uint sum = 0u;\n"
+        "    for (uint k = 0u; k < 8u; ++k) {\n"
+        "        sum += ((a >> (k * 4u)) & 0xfu) * ((b >> (k * 4u)) & 0xfu);\n"
+        "    }\n"
+        "    uint2 s = dot_u64_add(uint2(c, 0u), sum);\n"
+        "    return sat ? dot_u64_sat(s) : s.x;\n"
+        "}"
+    ),
+})
+
+
+def packed_word(st, token, *, f16):
+    """One packed source as a uint word expression (see the grammar above)."""
+    if f16 and token in F16_CONSTANT:
+        return f"{F16_CONSTANT[token]:#x}u"
+    if re.fullmatch(r"-?\d+", token):
+        if not -16 <= int(token) <= 64:
+            raise ValueError(f"Integer inline constant out of range: {token}")
+        return f"{int(token) & 0xffffffff:#x}u"
+    if re.fullmatch(r"0x[0-9a-f]{1,8}", token):
+        return f"{int(token, 16):#x}u"
+    if m := re.fullmatch(r"([vs])(\d+)", token):
+        if int(m.group(2)) > (255 if m.group(1) == "v" else 105):
+            raise ValueError(f"Register out of range: {token}")
+        return word_of(token, st.scalar, st.vector, st.pending, st.sample_pending)
+    raise ValueError(f"Unsupported packed operand {token}")
+
+
+def parse_packed(rest, arity, names, *, clamp_allowed):
+    """Split `src, src[, src] [modifiers]` into the sources, the modifier bit lists and the clamp flag."""
+    parts = rest.split(", ")
+    if len(parts) != arity:
+        raise ValueError("Invalid packed operand count")
+    last, _, text = parts[-1].partition(" ")
+    tokens = [*parts[:-1], last]
+    bits, clamp = {}, False
+    for mod in text.split():
+        if mod == "clamp":
+            if clamp or not clamp_allowed:
+                raise ValueError("Invalid clamp modifier")
+            clamp = True
+        elif m := re.fullmatch(r"(" + "|".join(names) + r"):\[([01](?:,[01])*)\]", mod):
+            value = [int(b) for b in m.group(2).split(",")]
+            if m.group(1) in bits or len(value) != arity:
+                raise ValueError(f"Invalid packed modifier {mod}")
+            bits[m.group(1)] = value
+        else:
+            raise ValueError(f"Unsupported packed modifier {mod}")
+    return tokens, bits, clamp
+
+
+def declare_words(st, i, prefix, tokens, f16):
+    names = []
+    for k, token in enumerate(tokens):
+        st.lines.append(f"    uint {prefix}{i}_{k} = {packed_word(st, token, f16=f16)};")
+        names.append(f"{prefix}{i}_{k}")
+    return names
+
+
+def half_of(name, high, negate=False):
+    """The binary16 (or 16-bit) half of a word as an unsigned expression; negate flips bit 15."""
+    half = f"(({name} >> 16u) & 0xffffu)" if high else f"({name} & 0xffffu)"
+    return f"({half} ^ 0x8000u)" if negate else half
+
+
+@form(r"v_pk_(add|mul|min|max|fma)_f16 (v\d+), (.+)")
+def pk_f16(st, i, m):
+    # Each lane is computed from binary16 halves. add and mul widen, operate once in binary32 and narrow once (innocuous
+    # double rounding, as F16_ALU in valu_f16.py); fma is the exactly rounded fma_mix_round; min and max return the
+    # other operand when one is a NaN. clamp saturates to [0, 1] (NaN gives 0).
+    op, dst, rest = m.groups()
+    arity = PK_F16[op]
+    if int(dst[1:]) > 255:
+        raise ValueError("Invalid packed operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    tokens, bits, clamp = parse_packed(rest, arity, ("op_sel", "op_sel_hi", "neg_lo", "neg_hi"), clamp_allowed=True)
+    words = declare_words(st, i, "pkw", tokens, True)
+    if op == "fma":
+        need_fma_mix(st)
+    lanes = []
+    for lane, select, negate, default in ((0, "op_sel", "neg_lo", 0), (1, "op_sel_hi", "neg_hi", 1)):
+        halves = []
+        for k, word in enumerate(words):
+            halves.append(f"pkh{i}_{lane}{k}")
+            high = bits.get(select, [default] * arity)[k]
+            st.lines.append(f"    uint {halves[-1]} = {half_of(word, high, bits.get(negate, [0] * arity)[k])};")
+        if op == "fma":
+            value = "fma_mix_round(" + ", ".join(f"fm_f16_word({h})" for h in halves) + ", false)"
+            if clamp:
+                value = f"fma_mix_sat({value}, false)"
+        else:
+            a, b = (f"widen16({h})" for h in halves)
+            if op in ("min", "max"):
+                nan = lambda h: f"(({h} & 0x7fffu) > 0x7c00u)"
+                value = f"({nan(halves[0])} ? {b} : ({nan(halves[1])} ? {a} : {op}({a}, {b})))"
+            else:
+                value = f"({a} {'+' if op == 'add' else '*'} {b})"
+            st.lines.append(f"    precise float pkf{i}_{lane} = {value};")
+            value = f"narrow16({'saturate(' if clamp else ''}pkf{i}_{lane}{')' if clamp else ''})"
+        lanes.append(value)
+    st.lines.append(f"    uint valu{i} = {lanes[0]} | ({lanes[1]} << 16u);")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+def pk_int_lane(op, w, high, clamp):
+    """The 16-bit result (an unsigned expression below 0x10000) of one lane of v_pk_<op>; high[k] picks the half of
+    source k."""
+    def u16(k):
+        return half_of(w[k], high[k])
+
+    def i16(k):
+        return f"(asint({w[k]}) >> 16)" if high[k] else f"(asint({w[k]} << 16u) >> 16)"
+
+    def signed(r):
+        return f"(asuint({'clamp(' + r + ', -32768, 32767)' if clamp else r}) & 0xffffu)"
+
+    if op in ("add_i16", "sub_i16"):
+        return signed(f"({i16(0)} {'+' if op == 'add_i16' else '-'} {i16(1)})")
+    if op in ("add_u16", "sub_u16"):
+        if op == "add_u16":
+            return f"min({u16(0)} + {u16(1)}, 65535u)" if clamp else f"(({u16(0)} + {u16(1)}) & 0xffffu)"
+        return f"({u16(0)} < {u16(1)} ? 0u : ({u16(0)} - {u16(1)}))" if clamp else f"(({u16(0)} - {u16(1)}) & 0xffffu)"
+    if op in ("min_i16", "max_i16"):
+        return f"(asuint({op[:3]}({i16(0)}, {i16(1)})) & 0xffffu)"
+    if op in ("min_u16", "max_u16"):
+        return f"{op[:3]}({u16(0)}, {u16(1)})"
+    if op == "mul_lo_u16":
+        return f"(({u16(0)} * {u16(1)}) & 0xffffu)"
+    if op == "mad_i16":
+        return signed(f"({i16(0)} * {i16(1)} + {i16(2)})")
+    if op == "mad_u16":
+        r = f"({u16(0)} * {u16(1)} + {u16(2)})"
+        return f"min({r}, 65535u)" if clamp else f"({r} & 0xffffu)"
+    if op == "lshlrev_b16":
+        return f"(({u16(1)} << ({u16(0)} & 15u)) & 0xffffu)"
+    if op == "lshrrev_b16":
+        return f"({u16(1)} >> ({u16(0)} & 15u))"
+    return f"(asuint({i16(1)} >> ({u16(0)} & 15u)) & 0xffffu)"  # ashrrev_i16
+
+
+@form(r"v_pk_(" + "|".join(PK_INT16) + r") (v\d+), (.+)")
+def pk_int16(st, i, m):
+    # The shift forms are reversed (src0 is the count, masked to 4 bits). clamp is accepted only where llvm-mc has it
+    # (add, sub, mad); it saturates the exact result to the signed or unsigned 16-bit range. No neg modifiers.
+    op, dst, rest = m.groups()
+    arity, clamp_allowed = PK_INT16[op]
+    if int(dst[1:]) > 255:
+        raise ValueError("Invalid packed integer operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    tokens, bits, clamp = parse_packed(rest, arity, ("op_sel", "op_sel_hi"), clamp_allowed=clamp_allowed)
+    words = declare_words(st, i, "pki", tokens, False)
+    low = pk_int_lane(op, words, bits.get("op_sel", [0] * arity), clamp)
+    high = pk_int_lane(op, words, bits.get("op_sel_hi", [1] * arity), clamp)
+    st.lines.append(f"    uint valu{i} = {low} | ({high} << 16u);")
+    st.vector[dst] = ("uint", f"valu{i}")
+
+
+@form(r"(" + "|".join(DOT_OPS) + r") (v\d+), (.+)")
+def dot(st, i, m):
+    # v_dot2_f32_f16 sums two binary32 products of binary16 halves and a binary32 accumulator (neg_lo[2] negates it);
+    # the integer forms sum exact products into 64 bits (see the dot_* helpers). op_sel and op_sel_hi pick halves for the
+    # dot2 forms only; neg modifiers exist only on the binary16 form; the accumulator lane modifiers must stay default.
+    op, dst, rest = m.groups()
+    is_f16, is_dot2 = op == "v_dot2_f32_f16", op.startswith("v_dot2_")
+    names = (("op_sel", "op_sel_hi") if is_dot2 else ()) + (("neg_lo", "neg_hi") if is_f16 else ())
+    if int(dst[1:]) > 255:
+        raise ValueError("Invalid dot-product operation")
+    if dst in st.sample_dest:
+        raise ValueError("Write overlaps an outstanding sample")
+    tokens, bits, clamp = parse_packed(rest, 3, names, clamp_allowed=True)
+    if (bits.get("op_sel", [0] * 3)[2] or bits.get("op_sel_hi", [1] * 3)[2] != 1 or bits.get("neg_hi", [0] * 3)[2]):
+        raise ValueError("Unsupported accumulator lane modifier on dot product")
+    if is_f16:
+        words = declare_words(st, i, "dotw", tokens[:2], True)
+        if tokens[2] in F16_CONSTANT:
+            accumulator = f"asfloat({struct.unpack('<I', struct.pack('<f', float(tokens[2])))[0]:#x}u)"
+        elif re.fullmatch(r"-?\d+", tokens[2]):
+            raise ValueError("An integer inline constant is not a binary32 accumulator")
+        else:
+            accumulator = f"asfloat({packed_word(st, tokens[2], f16=False)})"
+        if bits.get("neg_lo", [0] * 3)[2]:
+            accumulator = f"(-{accumulator})"
+        terms = []
+        for select, negate in (("op_sel", "neg_lo"), ("op_sel_hi", "neg_hi")):
+            defaults = [0, 0, 0] if select == "op_sel" else [1, 1, 1]
+            halves = [half_of(words[k], bits.get(select, defaults)[k], bits.get(negate, [0] * 3)[k]) for k in range(2)]
+            terms.append(f"(widen16({halves[0]}) * widen16({halves[1]}))")
+        expression = f"({terms[0]} + {terms[1]} + {accumulator})"
+        st.lines.append(f"    precise float alu{i} = {'saturate(' + expression + ')' if clamp else expression};")
+        st.vector[dst] = f"alu{i}"
+        return
+    signed = "_i32_" in op
+    st.helpers.update(("dot_i64_add", "dot_i64_sat", op) if signed else ("dot_u64_add", "dot_u64_sat", op))
+    sat = "true" if clamp else "false"
+    if is_dot2:
+        words = declare_words(st, i, "dotw", tokens, False)
+        select = lambda name, default: bits.get(name, [default] * 3)
+        a = [half_of(words[0], select("op_sel", 0)[0]), half_of(words[0], select("op_sel_hi", 1)[0])]
+        b = [half_of(words[1], select("op_sel", 0)[1]), half_of(words[1], select("op_sel_hi", 1)[1])]
+        call = f"{op}({a[0]}, {a[1]}, {b[0]}, {b[1]}, {words[2]}, {sat})"
+    else:
+        call = f"{op}(" + ", ".join(packed_word(st, t, f16=False) for t in tokens) + f", {sat})"
+    st.lines.append(f"    uint valu{i} = {call};")
+    st.vector[dst] = ("uint", f"valu{i}")

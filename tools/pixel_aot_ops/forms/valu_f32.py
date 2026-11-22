@@ -2,20 +2,43 @@
 import re
 
 from ..dispatch import form
+from ..hlsl import SALU_HELPERS
 from ..registers import fp_operand, raw_source, vector_u32
 
 ALU = {
     "log": (1, "log2({0})"), "exp": (1, "exp2({0})"), "rcp": (1, "(1.0f / {0})"),
     "sqrt": (1, "sqrt({0})"), "rsq": (1, "rsqrt({0})"),
     "floor": (1, "floor({0})"), "ceil": (1, "ceil({0})"), "fract": (1, "fract32({0})"),
-    "trunc": (1, "trunc({0})"),
+    "trunc": (1, "trunc({0})"), "rndne": (1, "round({0})"),  # HLSL round is DXIL Round_ne: ties to even
     "add": (2, "({0} + {1})"), "mul": (2, "({0} * {1})"),
     "max": (2, "max({0}, {1})"), "min": (2, "min({0}, {1})"), "sub": (2, "({0} - {1})"),
     "subrev": (2, "({1} - {0})"),
     "mul_legacy": (2, "(({0} == 0 || {1} == 0) ? 0.0f : {0} * {1})"),
     "fma": (3, "mad({0}, {1}, {2})"), "fmac": (3, "mad({0}, {1}, {2})"),
     "mad": (3, "mad32({0}, {1}, {2})"), "mac": (3, "mad32({0}, {1}, {2})"),
+    # Each result is one of the operands, so no rounding occurs. HLSL min and max return the other operand of a NaN,
+    # as v_min_f32 and v_max_f32 already lower. v_med3_f32 is min3 when any operand is NaN (RDNA ISA, V_MED3_F32).
+    "min3": (3, "min(min({0}, {1}), {2})"), "max3": (3, "max(max({0}, {1}), {2})"),
+    "med3": (3, "med3_f32({0}, {1}, {2})"),
 }
+# Forms that exist only in the VOP3 encoding: an _e32 spelling of them is not an instruction.
+VOP3_ONLY = ("fma", "mad", "min3", "max3", "med3")
+# VOP3 output modifiers (omod) scale the result by 2, 4 or 0.5 before clamp. A power-of-two scale is exact for every
+# result that stays a normal number; a result scaled into the denormal range is not drawn. omod is accepted only on
+# the forms whose draws (vop3_f32) measure it, the ones the corpus uses it with and their neighbours; the others,
+# including the denormal-flushing mad and mac, still refuse it.
+OMOD = {" mul:2": "2.0f", " mul:4": "4.0f", " div:2": "0.5f"}
+OMOD_FORMS = ("log", "exp", "rcp", "sqrt", "rsq", "rndne", "min3", "max3", "med3")
+
+SALU_HELPERS["med3_f32"] = (
+    "float med3_f32(float a, float b, float c) {\n"
+    "    if (isnan(a) || isnan(b) || isnan(c)) return min(min(a, b), c);\n"
+    "    precise float high = max(max(a, b), c);\n"
+    "    if (high == a) return max(b, c);\n"
+    "    if (high == b) return max(a, c);\n"
+    "    return max(a, b);\n"
+    "}"
+)
 
 
 @form(r"v_cube(id|sc|tc|ma)_f32(?:_e64)? (v\d+), ([^,]+), ([^,]+), ([^,]+?)( clamp)?")
@@ -74,15 +97,18 @@ def move(st, i, m):
         st.lines.append(f"    precise float alu{i} = {value};")
 
 
-@form(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac)_f32(?:_e32|_e64)? (v\d+), (.+?)( clamp)?")
+@form(r"v_(log|exp|rcp|sqrt|rsq|floor|ceil|fract|trunc|rndne|add|mul|max|min|sub|subrev|mul_legacy|fma|fmac|mad|mac"
+      r"|min3|max3|med3)_f32(_e32|_e64)? (v\d+), (.+?)( clamp)?( mul:2| mul:4| div:2)?")
 def arithmetic(st, i, m):
-    op, dst, operands, clamp = m.groups()
+    op, suffix, dst, operands, clamp, omod = m.groups()
     tokens = operands.split(", ")
     if op in ("fmac", "mac"):
         tokens.append(dst)
     arity, template = ALU[op]
-    if len(tokens) != arity:
+    if len(tokens) != arity or (suffix == "_e32" and (op in VOP3_ONLY or omod)):
         raise ValueError("Invalid arithmetic operation")
+    if omod and op not in OMOD_FORMS:
+        raise ValueError("Unsupported output modifier")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
     # CF-2a: whole-quad execution does not restrict VALU, every lane is active. What an implicit-LOD sample may read is
@@ -107,6 +133,10 @@ def arithmetic(st, i, m):
     if quad:
         st.quad_values[f"alu{i}"] = any(varying)
     expression = template.format(*values)
+    if op == "med3":
+        st.helpers.add("med3_f32")
+    if omod:
+        expression = f"({expression} * {OMOD[omod]})"
     if clamp:
         expression = f"saturate({expression})"
     st.vector[dst] = f"alu{i}"

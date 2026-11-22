@@ -35,6 +35,7 @@ class Lowering:
         self.sample_pending = False  # a sample or vector memory load is outstanding (cleared by vmcnt(0))
         self.sample_dest = set()  # VGPRs that load writes
         self.flat_attrs = set()  # attributes read without interpolation
+        self.quad_position = False  # the quad lane of this pixel is needed (quad.quad_read): declare SV_Position
         self.exported = False  # the color export has been emitted
         self.ended = False  # s_endpgm after the export
 
@@ -130,10 +131,11 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
     if st.uses_memory:
         pos = st.lines.index(PREAMBLE)
         st.lines[pos:pos] = [TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS]
-    if st.flat_attrs:
+    if st.flat_attrs or st.quad_position:
         pos = st.lines.index(PREAMBLE)
         # SV_Position is declared so that the inputs after it sit in the registers the vertex shader gave them.
         inputs = "".join(f", nointerpolation float4 attr{n} : TEXCOORD{n}" for n in sorted(st.flat_attrs))
-        st.lines[pos] = ("// Shader model 6.1 or later: GetAttributeAtVertex.\n"
+        note = "// Shader model 6.1 or later: GetAttributeAtVertex.\n" if st.flat_attrs else ""
+        st.lines[pos] = (note
                          + PREAMBLE.replace("float4 main(float2 uv : TEXCOORD0)", f"float4 main(float2 uv : TEXCOORD0, float4 frag_position : SV_Position{inputs})"))
     return "\n".join([*st.lines, "}",""])

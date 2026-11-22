@@ -335,8 +335,8 @@ def controls(directory):
     must_reject(translate, with_constants(["v_mul_f16_e64 v12, s44, v13 op_sel:[0,0,1]"]))
     must_reject(translate, with_constants(["v_add_f16_e64 v12, s44, v13 clamp mul:2"]))
     must_reject(translate, with_constants(["v_add_f16_e32 v12, s44, v13 clamp"]))
-    must_reject(translate, with_constants(["v_add_f16_sdwa v12, v13, v14 dst_sel:WORD_1 dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_0"]))
-    must_reject(translate, with_constants(["v_add_f16_dpp v12, v13, v14 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf"]))
+    must_reject(translate, with_constants(["v_add_f16_sdwa v12, s44, v13 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:WORD_0 src1_sel:WORD_0"]))
+    must_reject(translate, with_constants(["v_add_f16_dpp v12, v13, v14 row_shl:1 row_mask:0xf bank_mask:0xf"]))
     for operation in ("v_fma_f16 v12, s44, v13, v14", "v_fmac_f16_e32 v12, s44, v13", "v_mad_f16 v12, s44, v13, v14",
                       "v_sqrt_f16_e32 v12, s44", "v_rcp_f16_e32 v12, s44", "v_rsq_f16_e32 v12, s44",
                       "v_log_f16_e32 v12, s44", "v_exp_f16_e32 v12, s44", "v_sin_f16_e32 v12, s44", "v_cos_f16_e32 v12, s44",

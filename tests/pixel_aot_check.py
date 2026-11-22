@@ -64,19 +64,21 @@ def check_binary(directory, assembler, objcopy, library):
     fixtures = [fixture for module in MODULES if hasattr(module, "binary_fixtures")
                 for fixture in module.binary_fixtures()]
     selector = assembly(False)  # the program the container selection is checked with, once
-    for instructions, lower_fixture in fixtures:
+    for entry in fixtures:
+        instructions, lower_fixture = entry[:2]
+        cpu = entry[2] if len(entry) > 2 else "gfx1013"  # a fixture may name another target (the dot products: gfx1030)
         source = directory / "fixture.s"
         obj = directory / "fixture.o"
         binary = directory / "fixture.bin"
         source.write_text("\n".join(instructions) + "\n", encoding="ascii")
-        subprocess.run([assembler, "-triple=amdgcn--amdpal", "-mcpu=gfx1013",
+        subprocess.run([assembler, "-triple=amdgcn--amdpal", f"-mcpu={cpu}",
                         "-filetype=obj", source, "-o", obj], check=True)
         subprocess.run([objcopy, "-O", "binary", "--only-section=.text", obj, binary], check=True)
         archive = directory / "fixture.rpf"
         archive.write_bytes(envelope(binary.read_bytes()))
         _, native = native_program(archive, "fixture")
         assert native == binary.read_bytes()
-        assert lower_fixture(disassemble(native, library)) == lower_fixture(instructions)
+        assert lower_fixture(disassemble(native, library, cpu=cpu.encode())) == lower_fixture(instructions)
         if instructions == selector:
             check_container_selector(directory, native, library)
             selector = None

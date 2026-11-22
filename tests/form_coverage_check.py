@@ -231,9 +231,12 @@ def check_shader_records():
     }
     rejected_forms = {
         "s_and_saveexec_b64", "s_or_saveexec_b64", "s_andn2_saveexec_b64",
-        "s_cselect_b64", "s_bfe_u64", "s_bfe_i64",
-        "s_cmp_eq_u64", "s_bitcmp1_b64", "s_bfm_b32",
-        "s_and_b32", "s_not_b32", "s_cselect_b32",  # s_add_u32 is lowered now
+        # Removed as lowered (salu_rest lowering; its draws are pending): s_cselect_b64, s_bfe_u64, s_bfe_i64, s_cmp_eq_u64,
+        # s_bitcmp1_b64 and s_not_b32, as were s_add_u32, s_and_b32, s_bfm_b32 and s_cselect_b32 before them.
+        # What is left reads or writes EXEC or is lane-mask or control flow (CF-2/CF-3): s_wqm_b32, s_quadmask_*,
+        # the saveexec/wrexec family, s_getpc/s_setpc/s_swappc_b64, s_rfe_b64, s_movrel*.
+        "s_wqm_b32", "s_quadmask_b32", "s_quadmask_b64", "s_and_saveexec_b32", "s_getpc_b64", "s_setpc_b64",
+        "s_swappc_b64", "s_rfe_b64", "s_movrels_b32", "s_movreld_b32",
     }
     assert not (pixel.ACCEPTED & rejected_forms), pixel.ACCEPTED & rejected_forms
     # The int_compare draws accept the signed scalar comparisons (lowered before any test used them).

@@ -1,6 +1,6 @@
 """SOP1 and SOPK: 64-bit unary scalar forms and 32-bit scalar moves."""
 from ..dispatch import form
-from ..registers import sgpr_pair, scalar_u64
+from ..registers import sgpr_pair, scalar_u32, scalar_u64
 
 
 @form(r"s_(cmov|not|brev)_b64 (s\[\d+:\d+\]), ([^,]+)")
@@ -36,3 +36,20 @@ def move_32(st, i, m):
             raise ValueError("Invalid movk immediate")
         val = (val if val < 0x8000 else val - 0x10000) & 0xffffffff
     st.scalar[dst] = val
+
+
+@form(r"s_bitset(0|1)_b64 (s\[\d+:\d+\]), ([^,\s]+)")
+def bitset_64(st, i, m):
+    # D = D with bit S0[5:0] cleared or set; the 64-bit destination is also the source. SCC is not written.
+    value, dst, src = m.groups()
+    regs = sgpr_pair(dst)
+    if st.pending.intersection(regs):
+        raise ValueError("Write overlaps an outstanding scalar load")
+    bit = scalar_u32(src, st.scalar, st.pending)
+    d0, d1 = scalar_u64(dst, st.scalar, st.pending)
+    st.helpers.add("s_lshl_b64")
+    st.lines.append(f"    uint2 salu{i}_m = s_lshl_b64(uint2(1u, 0u), {bit});")
+    expr = f"uint2({d0} | salu{i}_m.x, {d1} | salu{i}_m.y)" if value == "1" else \
+        f"uint2({d0} & ~salu{i}_m.x, {d1} & ~salu{i}_m.y)"
+    st.lines.append(f"    uint2 salu{i} = {expr};")
+    st.scalar[regs[0]], st.scalar[regs[1]] = ("uint", f"salu{i}.x"), ("uint", f"salu{i}.y")
