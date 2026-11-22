@@ -38,6 +38,18 @@ float expected_channel(UINT byte)
 }
 using Color = std::array<float, 4>;
 
+// Optional title memory for a case (see docs/experiments.md): ranges in title address order and
+// the contents of the buffers they alias, bound for pixel shaders through title_va_lookup.hlsli.
+struct TitleRangeRecord {
+    UINT64 begin, end;
+    UINT slot, reserved;
+};
+static_assert(sizeof(TitleRangeRecord) == 24);
+struct TitleMemory {
+    std::vector<TitleRangeRecord> ranges;
+    std::vector<std::vector<BYTE>> slots;
+};
+
 struct PixelInput {
     UINT width, height, scale;
     DXGI_FORMAT format;
@@ -45,6 +57,7 @@ struct PixelInput {
     std::vector<Color> expected;
     std::vector<BYTE> secondRows;
     std::vector<Word> constants = std::vector<Word>(64);
+    TitleMemory memory;
 };
 
 struct MipDraw {
@@ -66,6 +79,25 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
 {
     const auto& input = levels.front();
     auto cb = upload(device, input.constants);
+    // Title memory is always bound. Without a memory section the range buffer holds one zeroed range
+    // and the count is 0, and every slot views the same small zero buffer.
+    std::vector<TitleRangeRecord> rangeRecords = input.memory.ranges;
+    const UINT rangeCount = static_cast<UINT>(rangeRecords.size());
+    if (rangeRecords.empty()) rangeRecords.push_back({});
+    auto rangeBuffer = upload(device, rangeRecords);
+    const std::vector<BYTE> zeroBytes(16);
+    auto zeroBuffer = upload(device, zeroBytes);
+    std::array<ComPtr<ID3D12Resource>, 8> slotBuffers;
+    std::array<UINT, 8> slotWords{};
+    for (size_t i = 0; i < slotBuffers.size(); ++i) {
+        if (i < input.memory.slots.size() && !input.memory.slots[i].empty()) {
+            slotBuffers[i] = upload(device, input.memory.slots[i]);
+            slotWords[i] = static_cast<UINT>(input.memory.slots[i].size() / 4);
+        } else {
+            slotBuffers[i] = zeroBuffer;
+            slotWords[i] = 4;
+        }
+    }
     std::ifstream file(path, std::ios::binary);
     std::vector<char> ps{std::istreambuf_iterator<char>(file), {}};
     if (ps.empty() || file.bad()) throw std::runtime_error("Cannot read compiled pixel shader");
@@ -129,7 +161,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     ComPtr<ID3D12DescriptorHeap> rtvs, srvs;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvs)), "Pixel target heap");
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heapDesc.NumDescriptors = 2;
+    heapDesc.NumDescriptors = 2 + 8;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&srvs)), "Pixel texture heap");
     const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
@@ -143,6 +175,18 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
     auto secondHandle = srvs->GetCPUDescriptorHandleForHeapStart();
     secondHandle.ptr += device->GetDescriptorHandleIncrementSize(heapDesc.Type);
     device->CreateShaderResourceView(secondTexture.Get(), &view, secondHandle);
+    const UINT increment = device->GetDescriptorHandleIncrementSize(heapDesc.Type);
+    for (UINT i = 0; i < 8; ++i) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
+        raw.Format = DXGI_FORMAT_R32_TYPELESS;
+        raw.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        raw.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        raw.Buffer.NumElements = slotWords[i];
+        raw.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(2 + i) * increment;
+        device->CreateShaderResourceView(slotBuffers[i].Get(), &raw, handle);
+    }
 
     bool textureUploaded = false;
     for (const auto& req : draws) {
@@ -185,6 +229,11 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         list->SetGraphicsRootSignature(root.Get());
         list->SetGraphicsRootDescriptorTable(0, srvs->GetGPUDescriptorHandleForHeapStart());
         list->SetGraphicsRootConstantBufferView(1, cb->GetGPUVirtualAddress());
+        list->SetGraphicsRootShaderResourceView(2, rangeBuffer->GetGPUVirtualAddress());
+        auto memoryTable = srvs->GetGPUDescriptorHandleForHeapStart();
+        memoryTable.ptr += UINT64(2) * increment;
+        list->SetGraphicsRootDescriptorTable(3, memoryTable);
+        list->SetGraphicsRoot32BitConstants(4, 1, &rangeCount, 0);
         // WARP and hardware can use either the rounded SRV extent or the
         // unrounded base extent for implicit LOD. Their geometric mean is
         // within half a mip of both, since rounding discards less than one texel.
@@ -283,6 +332,55 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
 }
 }
 
+namespace {
+// Memory section after the 1280-byte case: magic 'X2WM', range count (0..8), slot count (0..8), a zero
+// word, the ranges (begin and end as u64, slot, zero word) and then each slot as a byte size and its bytes.
+TitleMemory parse_memory_section(const char* data, size_t size)
+{
+    size_t at = 0;
+    const auto word = [&](const char* what) {
+        if (size - at < 4) throw BadCase(std::string("Memory section is truncated at ") + what);
+        UINT value;
+        std::memcpy(&value, data + at, 4);
+        at += 4;
+        return value;
+    };
+    if (word("magic") != 0x4d573258u) throw BadCase("Memory section has the wrong magic");
+    const UINT rangeCount = word("range count"), slotCount = word("slot count");
+    if (rangeCount > 8 || slotCount > 8) throw BadCase("Memory section has more than 8 ranges or slots");
+    if (word("reserved") != 0) throw BadCase("Memory section reserved word is not zero");
+    TitleMemory memory;
+    for (UINT i = 0; i < rangeCount; ++i) {
+        if (size - at < sizeof(TitleRangeRecord)) throw BadCase("Memory section is truncated in the ranges");
+        TitleRangeRecord range;
+        std::memcpy(&range, data + at, sizeof(range));
+        at += sizeof(range);
+        memory.ranges.push_back(range);
+    }
+    for (UINT i = 0; i < slotCount; ++i) {
+        const UINT bytes = word("slot size");
+        if (bytes % 4 || bytes > (1u << 20)) throw BadCase("Memory slot size is not a multiple of 4 or exceeds 1 MiB");
+        if (size - at < bytes) throw BadCase("Memory section is truncated in a slot");
+        memory.slots.emplace_back(data + at, data + at + bytes);
+        at += bytes;
+    }
+    if (at != size) throw BadCase("Memory section has trailing bytes");
+    for (size_t i = 0; i < memory.ranges.size(); ++i) {
+        const auto& range = memory.ranges[i];
+        if (range.reserved != 0) throw BadCase("Memory range reserved word is not zero");
+        if (range.begin % 4 || range.begin >= range.end)
+            throw BadCase("Memory range is empty, reversed or not 4-byte aligned");
+        if (range.end - range.begin >= (UINT64(1) << 32)) throw BadCase("Memory range is 4 GiB or larger");
+        if (range.slot >= slotCount) throw BadCase("Memory range names a slot that does not exist");
+        if (range.end - range.begin > memory.slots[range.slot].size())
+            throw BadCase("Memory range is larger than its slot");
+        if (i && memory.ranges[i - 1].end > range.begin)
+            throw BadCase("Memory ranges are unsorted or overlap");
+    }
+    return memory;
+}
+}
+
 void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference)
 {
     PixelInput input{8, 8, 8, DXGI_FORMAT_R8G8B8A8_UNORM};
@@ -296,10 +394,14 @@ void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB,
     }
     if (reference) {
         std::ifstream file(reference, std::ios::binary);
-        file.read(reinterpret_cast<char*>(input.constants.data()), input.constants.size() * sizeof(Word));
-        file.read(reinterpret_cast<char*>(input.expected.data()), input.expected.size() * sizeof(Color));
-        if (!file || file.peek() != std::char_traits<char>::eof())
-            throw std::runtime_error("Expected a 256-byte constant buffer and 64 float4 reference colors");
+        const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
+        constexpr size_t fixed = 64 * sizeof(Word) + 64 * sizeof(Color);
+        if (file.bad() || bytes.size() < fixed)
+            throw BadCase("Expected a 256-byte constant buffer and 64 float4 reference colors");
+        std::memcpy(input.constants.data(), bytes.data(), input.constants.size() * sizeof(Word));
+        std::memcpy(input.expected.data(), bytes.data() + input.constants.size() * sizeof(Word),
+                    input.expected.size() * sizeof(Color));
+        if (bytes.size() > fixed) input.memory = parse_memory_section(bytes.data() + fixed, bytes.size() - fixed);
     }
     std::vector<PixelInput> levels;
     levels.push_back(std::move(input));
