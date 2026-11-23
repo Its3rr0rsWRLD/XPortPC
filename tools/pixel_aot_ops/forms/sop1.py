@@ -35,14 +35,16 @@ def unary_b64(st, i, m):
         st.scc = f"((salu{i}.x | salu{i}.y) != 0u)"
 
 
-@form(r"(s_mov_b32|s_movk_i32) (s\d+|m0), (s\d+|0x[0-9a-f]+|\d+)")
+@form(r"(s_mov_b32|s_movk_i32) (s\d+|m0), (s\d+|m0|0x[0-9a-f]+|\d+)")
 def move_32(st, i, m):
+    # The source may be m0 (a copy back out of it: RADV saves the interpolation base through m0 across a call); it is
+    # read as a tracked word like an SGPR, so an m0 nothing has set is refused.
     op, dst, src = m.groups()
     if src in st.pending or dst in st.pending:
         raise ValueError("Unresolved scalar memory dependency")
-    if src.startswith("s") and src not in st.scalar:
+    if src[0] in "sm" and src not in st.scalar:
         raise ValueError(f"Read of unset scalar register {src}")
-    val = st.scalar[src] if src.startswith("s") else int(src, 0)
+    val = st.scalar[src] if src[0] in "sm" else int(src, 0)
     if op == "s_movk_i32":
         if not isinstance(val, int) or not 0 <= val <= 0xffff:
             raise ValueError("Invalid movk immediate")
