@@ -63,6 +63,8 @@ struct XgrInterface {
     unsigned class_index;  // into xgr_classes
     void* const* targets;  // slot -> function taking (this, flat args...); null: not implemented
     unsigned count;
+    void* const* inferred;              // slot -> function for a guessed (untraced) slot; served only with X2W_XGR_INFERRED=1
+    const char* const* inferred_names;  // slot -> the guessed function's name (logged), or null
 };
 
 #include "xgr_table.inc"  // xgr_classes, xgr_class_count, xgr_interfaces, xgr_interface_count
@@ -199,6 +201,17 @@ bool strict()
     static const bool value = [] {
         char text[8] = {};
         return GetEnvironmentVariableA("X2W_XGR_STRICT", text, sizeof text) && text[0] == '1';
+    }();
+    return value;
+}
+
+// X2W_XGR_INFERRED=1 serves the table's inferred slots (positions guessed, not traced). Off by default: a wrong
+// guess that writes through an argument corrupts the title's memory, where an unserved slot only fails.
+bool serve_inferred()
+{
+    static const bool value = [] {
+        char text[8] = {};
+        return GetEnvironmentVariableA("X2W_XGR_INFERRED", text, sizeof text) && text[0] == '1';
     }();
     return value;
 }
@@ -405,6 +418,16 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
     } else if (self->iface && slot < self->iface->count) {
         target = self->iface->targets[slot];
     }
+    // A guessed slot: its name for the log, and its function only when asked for (X2W_XGR_INFERRED=1).
+    const char* guess = nullptr;
+    if (!target && slot >= 3 && !self->real && self->iface && slot < self->iface->count && self->iface->inferred_names)
+        guess = self->iface->inferred_names[slot];
+    if (guess && serve_inferred() && self->iface->inferred && self->iface->inferred[slot]) {
+        target = self->iface->inferred[slot];
+        emit_once("xgr-assume", format("%s.%u", self->name.c_str(), slot),
+                  format("%s slot %u taken to be %s (inferred, not traced; X2W_XGR_INFERRED=1)", self->name.c_str(),
+                         slot, guess));
+    }
     if (!target && slot >= 3) known = false;
 
     bool log = false;
@@ -420,11 +443,13 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
         }
     }
     if (!known) {
+        // Never read or write through the arguments of a slot we cannot name from facts: only their values are logged.
         const bool ours = current == Mode::ours;
         emit_once("xgr-unknown-slot", self->name,
-                  format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx caller=%s", slot,
+                  format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx%s%s%s caller=%s", slot,
                          (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
                          (unsigned long long)args[4], ours ? static_cast<unsigned long>(self->fallback_hr) : 0x80004001ul,
+                         guess ? " (inferred " : "", guess ? guess : "", guess ? ", not served)" : "",
                          where(caller).c_str()));
         if (current == Mode::ours) return fallback_function(self->fallback_hr);  // null: E_NOTIMPL
         if (current != Mode::record) return nullptr;
@@ -454,16 +479,6 @@ extern "C" uintptr_t xgr_slot_leave(Object* self, unsigned /*slot*/, uintptr_t r
         emit("xgr-call", self->name,
              format("%s -> 0x%llx caller=%s", call.text.c_str(), (unsigned long long)result, where(caller).c_str()));
     return result;
-}
-
-// A logging object for the gateway-local functions that must hand a title an object (xgr_extra.cpp).
-void* xgr_fallback_object(const char* what) noexcept
-{
-    static const GUID net = {0x37e56907, 0x2f10, 0x41e8, {0xb7, 0x2f, 0x36, 0xed, 0xb1, 0x85, 0x33, 0x1a}};
-    static const GUID iid = {0x5e3a0c13, 0x0b0b, 0x4c1d, {0x9a, 0x7e, 0x11, 0x22, 0x33, 0x44, 0x55, 0x68}};
-    Object* object = singleton(net, iid, nullptr);
-    object->name = what;
-    return object;
 }
 
 // ---------------------------------------------------------------- the six exports

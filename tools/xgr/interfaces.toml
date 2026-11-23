@@ -13,7 +13,10 @@
 #
 # Slots 0-2 are IUnknown; the thunks call slot 2 (Release) after each call. Slots not listed are unknown
 # and answer E_NOTIMPL through the gateway's logging thunks. impl = "xgr" marks a function x2w_gdk.dll does
-# not have, implemented in src/xgr/xgr_extra.cpp (returns/params give its signature).
+# not have, implemented in src/xgr/xgr_extra.cpp (returns/params give its signature). inferred = true marks a
+# slot whose position is a guess (not traced): it is NOT served (it answers like an unlisted slot, logged with
+# the guessed name) unless X2W_XGR_INFERRED=1, because a wrong guess that writes through an argument corrupts
+# the title's memory. Unknown and inferred slots never read or write through their arguments.
 
 # Optional class field: fallback = "NAME" is the HRESULT a slot of this class with no implementation answers
 # (instead of E_NOTIMPL): E_NOTIMPL (default), E_GAMEUSER_NO_DEFAULT_USER (XUser: a title treats it as "no user
@@ -314,56 +317,67 @@ evidence = "static: thunk XUserAddResult in GameSaveCombo: mov rax,[rax+0x40], C
 index = 3
 function = "XUserDuplicateHandle"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 5
 function = "XUserCompare"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 6
 function = "XUserGetMaxUsers"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 9
 function = "XUserGetId"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 10
 function = "XUserFindUserById"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 11
 function = "XUserGetLocalId"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 12
 function = "XUserFindUserByLocalId"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 13
 function = "XUserGetIsGuest"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 14
 function = "XUserGetState"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 19
 function = "XUserGetAgeGroup"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 20
 function = "XUserCheckPrivilege"
 evidence = "inferred from the public XUser.h order (see above), not traced"
+inferred = true
 
 [[classes.interfaces.slots]]
 index = 16
@@ -453,24 +467,27 @@ index = 14
 function = "XNetworkingVerifyServerCertificate"
 evidence = "trace: args (request handle, the security information from slot 10), called per connection"
 
-# Slots 3-7 and 15-17 are INFERENCE, not trace facts. Observed: the security-information trio at 8-10 (header order:
+# Slots 3-7 and 16-17 are INFERENCE, not trace facts (inferred = true: not served by default). Observed: the security-information trio at 8-10 (header order:
 # Async, ResultSize, Result), and Verify at 14, so 11-13 are the Utf16 trio (same header order) and slots 3-7 are the
 # functions the public XNetworking.h lists before them. In the header those are the connectivity-hint group
 # (Get, Register, Unregister) and the preferred-UDP-port group (Register..Changed, Unregister..Changed beside it,
 # since the Query/QueryAsync/AsyncResult trio is not adjacent in a vtable that puts Verify at 14).
-# A title's first networking call was slot 15 with one pointer argument (the other two argument registers hold
-# leftovers: 0x7ffffffffffffffc, 0x40): the first function after Verify that takes a single pointer is
-# XNetworkingQueryPreferredLocalUdpMultiplayerPort(uint16_t*) - but a later owner run showed the title then reads
-# null+0x38 (a lock in an object it expected from this call) with arg1 a stack address, so slot 15 is served as an
-# out-parameter that receives a logging object (XNetworkingSlot15Object); 16 and 17 keep the port-query guess.
+# Slot 15 is UNMAPPED. A title's first networking call was slot 15 with (pointer to a caller stack struct whose
+# first qword is 0x20, 0x7ffffffffffffffc, 0x40). Two guesses were wrong in practice: answering E_NOTIMPL left the
+# title reading null+0x38 later, and writing an object pointer into arg1 clobbered the title's struct (heap
+# corruption 0xc0000374). Its identity is not established from facts (see docs/design/runtime.md, section 2:
+# the GDK license forbids disassembling xgameruntime.lib), so it answers E_NOTIMPL without touching arguments; an
+# x2w_launch --xgr trace run (the Windows runtime's answer, logged at our boundary) is how to name it.
+# 16 and 17 keep the port-query guess as inferred (not served unless X2W_XGR_INFERRED=1).
 # 18-20 (QueryConfigurationSetting, SetConfigurationSetting, QueryStatistics, order unknown) stay unmapped: they
 # answer E_NOTIMPL, which their documentation lists for a platform that does not support the setting or statistic.
-# Each assumption is logged once at the first call ("xgr-assume"), so a wrong guess shows up in the run log.
+# With X2W_XGR_INFERRED=1 each served assumption is logged once at the first call ("xgr-assume").
 
 [[classes.interfaces.slots]]
 index = 3
 function = "XNetworkingGetConnectivityHint"
 evidence = "assumed (see above): first function of XNetworking.h"
+inferred = true
 impl = "xgr"
 returns = "HRESULT"
 params = "XNetworkingConnectivityHint* connectivityHint"
@@ -479,6 +496,7 @@ params = "XNetworkingConnectivityHint* connectivityHint"
 index = 4
 function = "XNetworkingRegisterConnectivityHintChanged"
 evidence = "assumed (see above): follows Get in XNetworking.h"
+inferred = true
 impl = "xgr"
 returns = "HRESULT"
 params = "XTaskQueueHandle queue, void* context, XNetworkingConnectivityHintChangedCallback* callback, XTaskQueueRegistrationToken* token"
@@ -487,6 +505,7 @@ params = "XTaskQueueHandle queue, void* context, XNetworkingConnectivityHintChan
 index = 5
 function = "XNetworkingUnregisterConnectivityHintChanged"
 evidence = "assumed (see above): follows Register in XNetworking.h"
+inferred = true
 impl = "xgr"
 returns = "bool"
 params = "XTaskQueueRegistrationToken token, bool wait"
@@ -495,6 +514,7 @@ params = "XTaskQueueRegistrationToken token, bool wait"
 index = 6
 function = "XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged"
 evidence = "assumed (see above): the two slots between the hint group and the security group"
+inferred = true
 impl = "xgr"
 returns = "HRESULT"
 params = "XTaskQueueHandle queue, void* context, XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* callback, XTaskQueueRegistrationToken* token"
@@ -503,22 +523,16 @@ params = "XTaskQueueHandle queue, void* context, XNetworkingPreferredLocalUdpMul
 index = 7
 function = "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged"
 evidence = "assumed (see above): the two slots between the hint group and the security group"
+inferred = true
 impl = "xgr"
 returns = "bool"
 params = "XTaskQueueRegistrationToken token, bool wait"
 
 [[classes.interfaces.slots]]
-index = 15
-function = "XNetworkingSlot15Object"
-evidence = "trace: a title's first networking call: (stack address, 0x7ffffffffffffffc, 0x40); it then dereferenced null+0x38 (a lock in an object it expected), so the stack address is taken to be an out-parameter for an object pointer; we write a logging fallback object there"
-impl = "xgr"
-returns = "HRESULT"
-params = "void** outObject"
-
-[[classes.interfaces.slots]]
 index = 16
 function = "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync"
-evidence = "assumed (see above): sibling of slot 15"
+evidence = "assumed (see above): after the single-pointer port query in XNetworking.h order"
+inferred = true
 impl = "xgr"
 returns = "HRESULT"
 params = "XAsyncBlock* asyncBlock"
@@ -526,7 +540,8 @@ params = "XAsyncBlock* asyncBlock"
 [[classes.interfaces.slots]]
 index = 17
 function = "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult"
-evidence = "assumed (see above): sibling of slot 15"
+evidence = "assumed (see above): after the single-pointer port query in XNetworking.h order"
+inferred = true
 impl = "xgr"
 returns = "HRESULT"
 params = "XAsyncBlock* asyncBlock, uint16_t* preferredLocalUdpMultiplayerPort"

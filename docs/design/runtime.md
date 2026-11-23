@@ -154,11 +154,16 @@ the title's `xgameruntime.dll`, with no `windows-fallback`:
   `X2W_XGR_STRICT=1` restores the old `0x80070032` answer. `xgr_gen.py --audit` (test `xgr_audit`) lists which spec
   functions have a slot. XNetworking's boot calls (connectivity hint: internet access, unrestricted cost, network
   initialized; register/unregister with the documented initial notification; preferred UDP port 3074, sync and async)
-  are in `xgr_extra.cpp`. Their slots, and XUser's slots 3, 5, 6, 9-14, 19 and 20, are inferred from the public
-  header order against the traced slots (the table says so per slot; the first use of each networking slot logs
-  `xgr-assume`); XUser's change-event, deferral and token slots, XPackage, XGameUI, XStore, XGameEvent, XAchievements
-  and XAppCapture have no learned CLSID or slot yet and run on fallback objects until a trace or a scan of the
-  public GDK's `xgameruntime.lib` thunks names them. `XSystemGetDeviceType` answers Xbox Series X (a console
+  are in `xgr_extra.cpp`. Their slots (3-7, 16, 17), and XUser's slots 3, 5, 6, 9-14, 19 and 20, are inferred from
+  the public header order against the traced slots (`inferred = true` in the table). Inferred slots are **not served**
+  by default: they answer like an unmapped slot, and the `xgr-unknown-slot` line names the guess. A wrong guess that
+  writes through an argument corrupts the title (XNetworking slot 15, once guessed to be an out-parameter for an
+  object, overwrote a title's stack struct and caused heap corruption 0xc0000374). `X2W_XGR_INFERRED=1` serves them
+  for experiments (`xgr-assume` on first use). Unknown and inferred slots never read or write through their
+  arguments. XNetworking slot 15 is unmapped. XUser's change-event, deferral and token slots, XPackage, XGameUI,
+  XStore, XGameEvent, XAchievements and XAppCapture have no learned CLSID or slot yet and run on fallback objects
+  until a trace run names them. Disassembling the GDK's own `xgameruntime.lib` is not a fact source: the Microsoft
+  Game Development Kit License Agreement (section 4(d)) forbids disassembling any part of the GDK. `XSystemGetDeviceType` answers Xbox Series X (a console
   code path), and XGameRuntimeIsFeatureAvailable answers false for every feature.
 - `trace`: queries go to Windows' own `xgameruntime.dll`; every returned interface is wrapped in a proxy whose
   slots log index, arguments, result and caller, then call the real slot.

@@ -2,9 +2,10 @@
 // InitializeApiImplEx2, QueryApiImpl(CLSID, IID), then a call through the object's vtable and Release. Built
 // with only the public flat-API types (src/gdk/x2w_gdk_types.h); the gateway is loaded by path (argv[1]).
 //
-// Usage: gateway_title x2w_xgr.dll [strict]
-//   default  unknown CLSIDs and IIDs get logging fallback objects; unknown slots answer failure codes and never
-//            fault; the networking and XUser paths work (exit 0 when every check passes).
+// Usage: gateway_title x2w_xgr.dll [strict|inferred]
+//   default  unknown CLSIDs and IIDs get logging fallback objects; unknown and inferred slots answer failure codes,
+//            never fault and never touch their arguments; the traced XUser paths work (exit 0 when every check passes).
+//   inferred X2W_XGR_INFERRED=1 (set by the caller): the inferred XNetworking/XUser slots are served.
 //   strict   X2W_XGR_STRICT=1 (set by the caller): an unlisted query is refused with 0x80070032.
 // The Python driver (gateway_check.py) also reads this process's stderr for the gateway's log lines.
 #include <cstdio>
@@ -16,6 +17,7 @@
 namespace {
 
 int failures = 0;
+bool g_inferred = false;  // argv[2] == "inferred": the run with X2W_XGR_INFERRED=1
 #define CHECK(cond)                                                          \
     do {                                                                     \
         if (!(cond)) {                                                       \
@@ -114,38 +116,60 @@ void networking()
 {
     void* net = query(clsid_networking, iid_networking);
     if (!net) return;
-    // Slot 15 with the arguments the title used: arg1 is an out-parameter that receives an object.
-    void* made[8] = {};
-    CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(made), static_cast<uintptr_t>(0x7ffffffffffffffcull), static_cast<uintptr_t>(0x40)), S_OK);
-    CHECK(made[0] != nullptr);
-    if (made[0]) {
-        CHECK_HR(call<HRESULT>(made[0], 3), notimpl);  // a logging object: its slots fail, never fault
-        CHECK_HR(call<HRESULT>(made[0], 56), notimpl);
+    // Slot 15 with the arguments a title used (a caller struct whose first qword is 0x20): unmapped, so it answers
+    // E_NOTIMPL and must leave the struct exactly as it was (an earlier guess wrote into it: heap corruption).
+    uint64_t title_struct[8] = {0x20, 0x297bbedf052ull, 0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666};
+    uint64_t before[8];
+    std::memcpy(before, title_struct, sizeof before);
+    CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(title_struct), static_cast<uintptr_t>(0x7ffffffffffffffcull), static_cast<uintptr_t>(0x40)), notimpl);
+    CHECK(std::memcmp(before, title_struct, sizeof before) == 0);
+    CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(nullptr)), notimpl);
+
+    // Inferred slots (positions guessed from header order, not traced) are not served by default and never touch
+    // their arguments: the connectivity hint (3), the registrations (4, 6) and the port query (17).
+    unsigned char canary[64];
+    std::memset(canary, 0xa5, sizeof canary);
+    auto untouched = [&] {
+        for (unsigned char b : canary)
+            if (b != 0xa5) return false;
+        return true;
+    };
+    if (!g_inferred) {
+        CHECK_HR(call<HRESULT>(net, 3, static_cast<void*>(canary)), notimpl);
+        CHECK(untouched());
+        CHECK_HR(call<HRESULT>(net, 4, static_cast<XTaskQueueHandle>(nullptr), static_cast<void*>(nullptr),
+                               reinterpret_cast<void*>(&on_hint), static_cast<void*>(canary)), notimpl);
+        CHECK(untouched());
+        CHECK_HR(call<HRESULT>(net, 17, static_cast<void*>(canary), static_cast<void*>(canary + 32)), notimpl);
+        CHECK(untouched());
+    } else {
+        // X2W_XGR_INFERRED=1: the guesses are served (the experiment path).
+        struct Hint {
+            uint32_t level, cost, iana;
+            bool initialized, approaching, over, roaming;
+        } hint = {};
+        CHECK_HR(call<HRESULT>(net, 3, &hint), S_OK);
+        CHECK(hint.level == 3 && hint.cost == 1 && hint.initialized && !hint.approaching && !hint.over && !hint.roaming);
+
+        // Register: a token, the initial notification on the process queue, then Unregister.
+        g_notified = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        XTaskQueueRegistrationToken token = {};
+        CHECK_HR(call<HRESULT>(net, 4, static_cast<XTaskQueueHandle>(nullptr), static_cast<void*>(nullptr),
+                               reinterpret_cast<void*>(&on_hint), &token), S_OK);
+        CHECK(token.token != 0);
+        CHECK(WaitForSingleObject(g_notified, 10000) == WAIT_OBJECT_0);
+        CHECK(g_hint_level == 3);
+        CHECK(static_cast<bool>(call<unsigned char>(net, 5, token, false)));
+        CHECK(!static_cast<bool>(call<unsigned char>(net, 5, token, false)));  // already unregistered
+
+        XTaskQueueRegistrationToken port_token = {};
+        CHECK_HR(call<HRESULT>(net, 6, static_cast<XTaskQueueHandle>(nullptr), static_cast<void*>(nullptr),
+                               reinterpret_cast<void*>(&on_port), &port_token), S_OK);
+        CHECK(static_cast<bool>(call<unsigned char>(net, 7, port_token, false)));
+        // Slot 15 stays unmapped even here.
+        CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(title_struct)), notimpl);
+        CHECK(std::memcmp(before, title_struct, sizeof before) == 0);
     }
-    CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(nullptr)), E_POINTER);
-
-    struct Hint {
-        uint32_t level, cost, iana;
-        bool initialized, approaching, over, roaming;
-    } hint = {};
-    CHECK_HR(call<HRESULT>(net, 3, &hint), S_OK);
-    CHECK(hint.level == 3 && hint.cost == 1 && hint.initialized && !hint.approaching && !hint.over && !hint.roaming);
-
-    // Register: a token, the initial notification on the process queue, then Unregister.
-    g_notified = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    XTaskQueueRegistrationToken token = {};
-    CHECK_HR(call<HRESULT>(net, 4, static_cast<XTaskQueueHandle>(nullptr), static_cast<void*>(nullptr),
-                           reinterpret_cast<void*>(&on_hint), &token), S_OK);
-    CHECK(token.token != 0);
-    CHECK(WaitForSingleObject(g_notified, 10000) == WAIT_OBJECT_0);
-    CHECK(g_hint_level == 3);
-    CHECK(static_cast<bool>(call<unsigned char>(net, 5, token, false)));
-    CHECK(!static_cast<bool>(call<unsigned char>(net, 5, token, false)));  // already unregistered
-
-    XTaskQueueRegistrationToken port_token = {};
-    CHECK_HR(call<HRESULT>(net, 6, static_cast<XTaskQueueHandle>(nullptr), static_cast<void*>(nullptr),
-                           reinterpret_cast<void*>(&on_port), &port_token), S_OK);
-    CHECK(static_cast<bool>(call<unsigned char>(net, 7, port_token, false)));
 
     // The slots that have no implementation (the security/Verify slots we do not serve, 18+) log and fail.
     CHECK_HR(call<HRESULT>(net, 8, static_cast<void*>(nullptr), static_cast<void*>(nullptr)), notimpl);
@@ -169,27 +193,39 @@ void user()
         CHECK_HR(call<HRESULT>(users, 8, &block, &handle), S_OK);
         CHECK(handle != nullptr);
         if (!handle) continue;
-        uint64_t id = 0;
-        CHECK_HR(call<HRESULT>(users, 9, handle, &id), S_OK);
-        CHECK(id != 0);
-        XUserLocalId local = {};
-        CHECK_HR(call<HRESULT>(users, 11, handle, &local), S_OK);
-        CHECK(local.value != 0);
-        bool guest = true;
-        CHECK_HR(call<HRESULT>(users, 13, handle, &guest), S_OK);
-        CHECK(!guest);
-        XUserState state = XUserState::SignedOut;
-        CHECK_HR(call<HRESULT>(users, 14, handle, &state), S_OK);
-        CHECK(state == XUserState::SignedIn);
+        if (g_inferred) {
+            uint64_t id = 0;
+            CHECK_HR(call<HRESULT>(users, 9, handle, &id), S_OK);
+            CHECK(id != 0);
+            XUserLocalId local = {};
+            CHECK_HR(call<HRESULT>(users, 11, handle, &local), S_OK);
+            CHECK(local.value != 0);
+            bool guest = true;
+            CHECK_HR(call<HRESULT>(users, 13, handle, &guest), S_OK);
+            CHECK(!guest);
+            XUserState state = XUserState::SignedOut;
+            CHECK_HR(call<HRESULT>(users, 14, handle, &state), S_OK);
+            CHECK(state == XUserState::SignedIn);
+        } else {
+            // The inferred accessors (9-14) are not served: "no default user", and the out-parameter untouched.
+            uint64_t id = 0x5a5a5a5a5a5a5a5aull;
+            CHECK_HR(call<HRESULT>(users, 9, handle, &id), no_default_user);
+            CHECK(id == 0x5a5a5a5a5a5a5a5aull);
+            XUserState state = static_cast<XUserState>(0x77);
+            CHECK_HR(call<HRESULT>(users, 14, handle, &state), no_default_user);
+            CHECK(static_cast<unsigned>(state) == 0x77);
+        }
         char tag[32] = {};
         size_t used = 0;
         CHECK_HR(call<HRESULT>(tags, 3, handle, XUserGamertagComponent::Modern, sizeof tag, tag, &used), S_OK);
         CHECK(std::strcmp(tag, "Player") == 0);
-        XUserHandle copy = nullptr;
-        CHECK_HR(call<HRESULT>(users, 3, handle, &copy), S_OK);  // XUserDuplicateHandle
-        CHECK(call<int>(users, 5, handle, copy) == 0);           // XUserCompare
-        call<void>(users, 4, copy);
-        call<void>(users, 4, handle);  // XUserCloseHandle
+        if (g_inferred) {
+            XUserHandle copy = nullptr;
+            CHECK_HR(call<HRESULT>(users, 3, handle, &copy), S_OK);  // XUserDuplicateHandle (inferred)
+            CHECK(call<int>(users, 5, handle, copy) == 0);           // XUserCompare (inferred)
+            call<void>(users, 4, copy);
+        }
+        call<void>(users, 4, handle);  // XUserCloseHandle (traced)
     }
     // A slot nothing is known about (RegisterForChangeEvent and the token functions have no traced position):
     // "no default user", logged.
@@ -201,6 +237,7 @@ void user()
 int main(int argc, char** argv)
 {
     const bool strict = argc > 2 && std::strcmp(argv[2], "strict") == 0;
+    g_inferred = argc > 2 && std::strcmp(argv[2], "inferred") == 0;
     if (argc < 2) return 2;
     wchar_t path[MAX_PATH];
     MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, path, MAX_PATH);
@@ -233,6 +270,6 @@ int main(int argc, char** argv)
         user();
     }
     uninit();
-    std::printf("xgr-gateway %s failures=%d\n", strict ? "strict" : "fallback", failures);
+    std::printf("xgr-gateway %s failures=%d\n", strict ? "strict" : g_inferred ? "inferred" : "fallback", failures);
     return failures ? 1 : 0;
 }

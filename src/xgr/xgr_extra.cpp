@@ -249,35 +249,6 @@ bool xgr_impl_XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(XTask
     return unregister(token);
 }
 
-// Slot 15 (see tools/xgr/interfaces.toml): arg1 is an out-parameter on the caller's stack; the title uses what it
-// gets as an object (it read null+0x38 when it got none). Log 64 bytes at arg1 before and after, write a logging
-// fallback object (every slot logs and answers E_NOTIMPL), return S_OK.
-void* xgr_fallback_object(const char* what) noexcept;
-
-namespace {
-std::string qwords(const void* p, size_t n)
-{
-    std::string out;
-    char text[24];
-    for (size_t i = 0; i < n / 8; ++i) {
-        std::snprintf(text, sizeof text, "%s0x%llx", i ? " " : "", static_cast<unsigned long long>(static_cast<const uint64_t*>(p)[i]));
-        out += text;
-    }
-    return out;
-}
-}  // namespace
-
-HRESULT xgr_impl_XNetworkingSlot15Object(void** outObject) noexcept
-{
-    assumed("XNetworkingSlot15Object (out-parameter receiving a logging object)", 15);
-    if (!writable(outObject, sizeof(void*))) return E_POINTER;
-    const size_t dump = writable(outObject, 64) ? 64 : 8;
-    x2w_note("xgr-slot15-before", qwords(outObject, dump).c_str());
-    *outObject = xgr_fallback_object("XNetworkingSlot15Object");
-    x2w_note("xgr-slot15-after", qwords(outObject, dump).c_str());
-    return S_OK;
-}
-
 // .../xnetworking/functions/xnetworkingquerypreferredlocaludpmultiplayerportasync
 HRESULT xgr_impl_XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync(XAsyncBlock* asyncBlock) noexcept
 {

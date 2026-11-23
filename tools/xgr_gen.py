@@ -61,7 +61,7 @@ def load_slots(owner, entries):
             raise TableError(f"{owner}: slot index {index!r} must be 3..{MAX_SLOTS - 1}")
         if index in slots:
             raise TableError(f"{owner}: slot {index} is listed twice")
-        unknown = set(slot) - {"index", "function", "evidence", "impl", "returns", "params"}
+        unknown = set(slot) - {"index", "function", "evidence", "impl", "returns", "params", "inferred"}
         if unknown:
             raise TableError(f"{owner}: slot {index}: unknown fields {sorted(unknown)}")
         if "evidence" not in slot:
@@ -69,6 +69,10 @@ def load_slots(owner, entries):
         function = slot.get("function", "")
         if function and not IDENT.match(function):
             raise TableError(f"{owner}: slot {index} function {function!r}")
+        if not isinstance(slot.get("inferred", False), bool):
+            raise TableError(f"{owner}: slot {index}: inferred must be true or false")
+        if slot.get("inferred") and not function:
+            raise TableError(f"{owner}: slot {index}: an inferred slot names the function it is taken to be")
         if slot.get("impl") not in (None, "xgr"):
             raise TableError(f"{owner}: slot {index}: impl must be \"xgr\" (src/xgr/xgr_extra.cpp) or absent")
         if slot.get("impl") == "xgr":
@@ -215,25 +219,44 @@ def render(classes, specs, source):
             slots = interface["_slots"]
             count = max([3] + [i + 1 for i in slots])
             targets = ["nullptr"] * count
+            inferred = ["nullptr"] * count
             for index in sorted(slots):
                 definition, target = wrapper(interface["name"], index, slots[index], specs, cache)
                 if definition:
                     out.append(definition)
-                targets[index] = target
-            out.append(f"static void* const xgr_targets_{interface['name']}[{count}] = {{")
+                # An inferred slot (position not traced) is never served by default: a wrong guess that writes
+                # through an argument corrupts the title's memory. X2W_XGR_INFERRED=1 serves it (experiments).
+                (inferred if slots[index].get("inferred") else targets)[index] = target
+            name = interface["name"]
+            out.append(f"static void* const xgr_targets_{name}[{count}] = {{")
             for i, t in enumerate(targets):
                 label = slots[i].get("function", "") if i in slots else ("IUnknown" if i < 3 else "")
+                if i in slots and slots[i].get("inferred"):
+                    label += " (inferred: not served)"
                 out.append(f"    {t},  // {i} {label}".rstrip())
             out.append("};")
+            inferred_ref = "nullptr"
+            if any(t != "nullptr" for t in inferred) or any(s.get("inferred") for s in slots.values()):
+                inferred_ref = f"xgr_inferred_{name}"
+                out.append(f"static void* const xgr_inferred_{name}[{count}] = {{")
+                for i, t in enumerate(inferred):
+                    out.append(f"    {t},  // {i} {slots[i].get('function', '') if i in slots and slots[i].get('inferred') else ''}".rstrip())
+                out.append("};")
+                out.append(f"static const char* const xgr_inferred_names_{name}[{count}] = {{")
+                for i in range(count):
+                    label = slots[i]["function"] if i in slots and slots[i].get("inferred") else ""
+                    out.append(f'    {f"{chr(34)}{label}{chr(34)}" if label else "nullptr"},')
+                out.append("};")
             out.append("")
-            interface_rows.append(f'    {{"{interface["name"]}", {guid_initializer(interface["iid"])}, {class_index}u, '
-                                  f"xgr_targets_{interface['name']}, {count}u}},")
+            names_ref = f"xgr_inferred_names_{name}" if inferred_ref != "nullptr" else "nullptr"
+            interface_rows.append(f'    {{"{name}", {guid_initializer(interface["iid"])}, {class_index}u, '
+                                  f"xgr_targets_{name}, {count}u, {inferred_ref}, {names_ref}}},")
     out.append(f"static const XgrClass xgr_classes[{max(1, len(class_rows))}] = {{")
     out.extend(class_rows or ['    {"(none)", {}, 0},'])
     out.append("};")
     out.append(f"static const unsigned xgr_class_count = {len(class_rows)}u;")
     out.append(f"static const XgrInterface xgr_interfaces[{max(1, len(interface_rows))}] = {{")
-    out.extend(interface_rows or ['    {"(none)", {}, 0u, nullptr, 0u},'])
+    out.extend(interface_rows or ['    {"(none)", {}, 0u, nullptr, 0u, nullptr, nullptr},'])
     out.append("};")
     out.append(f"static const unsigned xgr_interface_count = {len(interface_rows)}u;")
     return "\n".join(out) + "\n"
@@ -243,7 +266,8 @@ def audit(classes, specs):
     """Prints, per shimgen family, which flat functions the gateway reaches through a slot. A function with no
     slot cannot be called by a PC GDK title (its CLSID/IID/slot is not yet learned); the title's query for it
     gets a logging fallback object (src/xgr/xgr_gateway.cpp), not a crash."""
-    reached = {s.get("function") for k in classes for i in k["interfaces"] for s in i["_slots"].values()}
+    reached = {s.get("function") for k in classes for i in k["interfaces"] for s in i["_slots"].values()
+               if not s.get("inferred")}
     families = {}
     for name, function in specs.functions.items():
         families.setdefault(function.family, []).append((name, name in reached))
@@ -276,8 +300,9 @@ def main(argv=None):
     named = sum(1 for s in own if s.get("function"))
     implemented = sum(1 for s in own if s.get("impl") == "xgr" or (
         s.get("function") in specs.functions and specs.functions[s["function"]].body == "impl"))
+    inferred = sum(1 for s in own if s.get("inferred"))
     print(f"xgr_gen: {len(classes)} classes, {sum(len(k['interfaces']) for k in classes)} interfaces, "
-          f"{len(own)} slots ({named} named, {implemented} implemented)")
+          f"{len(own)} slots ({named} named, {implemented} implemented, {inferred} inferred and not served)")
     if args.audit:
         audit(classes, specs)
         return 0
