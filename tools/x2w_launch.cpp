@@ -780,6 +780,8 @@ int wmain(int argc, wchar_t** argv) {
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
     }
+    // The title memory layer's informational lines (configuration, windows, arenas) belong in a title run's output.
+    if (!GetEnvironmentVariableW(L"X2W_XMEM_LOG", nullptr, 0)) SetEnvironmentVariableW(L"X2W_XMEM_LOG", L"1");
     for (const auto& [name, value] : xmem_settings) {
         SetEnvironmentVariableW(name.c_str(), value.c_str());
         std::fprintf(stderr, "[x2w] xmem setting %ls=%ls\n", name.c_str(), value.c_str());

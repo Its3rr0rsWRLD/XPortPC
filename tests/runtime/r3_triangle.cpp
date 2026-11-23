@@ -457,6 +457,7 @@ void WINAPI adopting_free(PVOID, ULONGLONG) {}
 
 int sources_check(bool warp, bool slots_control)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // each line survives a crash
     std::vector<std::uint8_t> expected;
     unsigned covered = 0;
     reference(0, expected, covered);
@@ -491,8 +492,9 @@ int sources_check(bool warp, bool slots_control)
         ComPtr<ID3D12PipelineState> pso;
         const HRESULT hr = root ? create_pipeline(gpu.device.Get(), root.Get(), vs, ps, pso, nullptr) : E_FAIL;
         good = good && SUCCEEDED(hr);
-        // Draws from `title`; `hit` says whether the layer registered it.
-        const auto draw_from = [&](const char* name, std::uint8_t* title, bool hit) {
+        // Draws from title address `address`, whose bytes the CPU writes through `title`; `hit` says whether the
+        // layer registered it.
+        const auto draw_at = [&](const char* name, std::uint8_t* title, std::uintptr_t address, bool hit) {
             if (!good || !title) {
                 std::printf("source=%s missing\n", name);
                 return false;
@@ -503,8 +505,7 @@ int sources_check(bool warp, bool slots_control)
             X2WXMemDescribe(title, &info);
             const auto before = counters();
             unsigned mismatches = 0;
-            const bool drawn = draw_frame(gpu, root.Get(), pso.Get(), reinterpret_cast<std::uintptr_t>(title), expected,
-                                          mismatches);
+            const bool drawn = draw_frame(gpu, root.Get(), pso.Get(), address, expected, mismatches);
             const auto after = counters();
             const auto misses = after.title_lookup_misses - before.title_lookup_misses;
             const auto refused = after.draws_refused - before.draws_refused;
@@ -514,12 +515,15 @@ int sources_check(bool warp, bool slots_control)
                                     reinterpret_cast<std::uintptr_t>(title) < graphics.end);
             std::printf("source=%s address=0x%llx backing=%u region_offset=0x%llx mismatches=%u title_misses=%llu "
                         "draws_refused=%u in_window=%d\n", name,
-                        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(title)), info.backing,
+                        static_cast<unsigned long long>(address), info.backing,
                         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(title) - info.region_base),
                         mismatches, static_cast<unsigned long long>(misses), refused, in_window);
             if (slots_control) return drawn && refused > 0 && mismatches == covered;
             return drawn && in_window && (hit ? mismatches == 0 && misses == 0 && refused == 0
                                               : mismatches == covered && misses > 0);
+        };
+        const auto draw_from = [&](const char* name, std::uint8_t* title, bool hit) {
+            return draw_at(name, title, reinterpret_cast<std::uintptr_t>(title), hit);
         };
         constexpr ULONGLONG w64k = (ULONGLONG{5} << 29) | (ULONGLONG{1} << 14) | (ULONGLONG{8} << 24);
         if (slots_control) {
@@ -549,12 +553,32 @@ int sources_check(bool warp, bool slots_control)
             auto* adopted = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w64k));
             XMemSetAllocationHooks(nullptr, nullptr);
             good = draw_from("adopted", adopted, true) && good;
-            // Control: memory the layer never saw.
-            auto* plain = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, title_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-            const bool missed = draw_from("unregistered", plain, false);
+            // Control: the correct inputs in a desktop upload buffer, drawn from its own GPU virtual address, which no
+            // title memory range holds. The address is valid for the desktop root views, so only TitleLookup decides:
+            // every load must miss and no triangle may be drawn. (An unmapped title address must not be used here:
+            // desktop D3D12 reads root CBVs, and WARP faults on one.)
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC upload_desc{};
+            upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            upload_desc.Width = title_bytes;
+            upload_desc.Height = 1;
+            upload_desc.DepthOrArraySize = 1;
+            upload_desc.MipLevels = 1;
+            upload_desc.SampleDesc.Count = 1;
+            upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> upload;
+            void* mapped = nullptr;
+            const bool made = SUCCEEDED(gpu.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                          IID_PPV_ARGS(&upload))) &&
+                              SUCCEEDED(upload->Map(0, nullptr, &mapped));
+            const bool missed = made && draw_at("unregistered", static_cast<std::uint8_t*>(mapped),
+                                                static_cast<std::uintptr_t>(upload->GetGPUVirtualAddress()), false);
             std::printf("control=%s\n", missed ? "miss_detected" : "miss_missed");
             good = good && missed;
-            VirtualFree(plain, 0, MEM_RELEASE);
+            if (made) upload->Unmap(0, nullptr);
+            upload.Reset();
             XMemFree(pad, w64k);
             XMemFree(arena, w64k);
             XMemFree(standalone, w8m);

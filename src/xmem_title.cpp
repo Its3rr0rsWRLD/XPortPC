@@ -116,6 +116,24 @@ SRWLOCK g_log_lock = SRWLOCK_INIT;
 X2WXMemLogSink g_log_sink = nullptr;
 void* g_log_context = nullptr;
 
+// Informational lines (configuration, windows, arenas, pools, hooks) reach stderr only with X2W_XMEM_LOG=1, which
+// x2w_launch sets for its titles; "unimplemented", "fallback", "slots" and "window" misses always do. A sink set with
+// X2WXMemSetLogSink receives every line.
+bool informational(const char* kind)
+{
+    return std::strcmp(kind, "unimplemented") != 0 && std::strcmp(kind, "fallback") != 0 && std::strcmp(kind, "slots") != 0;
+}
+
+bool verbose()
+{
+    static const bool on = [] {
+        wchar_t value[8];
+        const DWORD n = GetEnvironmentVariableW(L"X2W_XMEM_LOG", value, 8);
+        return n > 0 && n < 8 && value[0] != L'0';
+    }();
+    return on;
+}
+
 void log_line(const char* kind, const char* format, ...)
 {
     char detail[512];
@@ -128,7 +146,7 @@ void log_line(const char* kind, const char* format, ...)
     AcquireSRWLockShared(&g_log_lock);
     if (g_log_sink) {
         g_log_sink(line, g_log_context);
-    } else {
+    } else if (!informational(kind) || verbose()) {
         std::fprintf(stderr, "[x2w] %s\n", line);
         std::fflush(stderr);
     }
@@ -643,7 +661,7 @@ bool place(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignment
                 p = commit_at(nullptr, want, 0, align, nullptr, use_large, false, watch);
                 if (p && window_enabled(s, w)) {
                     ++s.window_misses;
-                    log_once("window", "%s window full; placed outside it", window_name(w));
+                    log_once("fallback", "%s window full; placed outside it", window_name(w));
                 }
             }
         }

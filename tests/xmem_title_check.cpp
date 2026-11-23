@@ -171,8 +171,8 @@ bool attributes()
                                     static_cast<std::size_t>(q.info.RegionSize), addr(q.info.AllocationBase) == addr(p));
                         failed = true;
                     }
-                    // Control: one byte past the requested alignment must fail the same predicate.
-                    controls += (addr(p) + 16) % alignment != 0;
+                    // Control: a pointer half an alignment off must fail the same predicate.
+                    controls += (addr(p) + alignment / 2) % alignment != 0;
                     arena += info.backing == X2W_XMEM_BACKING_ARENA;
                     standalone += info.backing == X2W_XMEM_BACKING_STANDALONE;
                     gpu += info.gpu_visible;
