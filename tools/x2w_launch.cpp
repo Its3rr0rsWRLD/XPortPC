@@ -368,6 +368,10 @@ const Region* region_named(const wchar_t* name) {
     if (file.find('.') == std::string::npos) file += ".dll";
     for (const auto& region : regions) {
         if (has_path ? _wcsicmp(region.path.c_str(), text.c_str()) == 0 : region.name == file) return &region;
+    }
+    return nullptr;
+}
+
 // ---------------------------------------------------------------- dynamic loads (see the header comment)
 SRWLOCK dynamic_lock = SRWLOCK_INIT;
 std::set<std::string> dynamic_logged;
