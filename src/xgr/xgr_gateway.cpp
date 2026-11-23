@@ -569,7 +569,7 @@ HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
         } else {
             // Not in the table: a logging fallback object, so the title's next call is a logged failure code
             // (E_NOTIMPL, or the class's own) and not a null interface it may dereference or stall on.
-            const char* why = klass ? "unlisted IID of a known class" : known ? "IID of another class" : "unknown CLSID";
+            const char* why = !klass ? "unknown CLSID" : known ? "IID of another class" : "unlisted IID of a known class";
             *out = singleton(clsid, iid, nullptr);
             emit_once("xgr-fallback", label(clsid, iid),
                       format("clsid=%s iid=%s %s: slots log and answer 0x%08lx caller=%s", guid_text(clsid).c_str(),
