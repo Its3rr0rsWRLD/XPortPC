@@ -3,6 +3,7 @@
 // Everything here is constant-initialized (no dynamic initializers, no thread_local), so the DLL
 // keeps an empty TLS template and loads the same through LoadLibrary and pe_map.
 #include "d3d12_xs_wrap.h"
+#include "common/x2w_redact.h"
 #include "d3d12_xs_api.h"
 #include "d3d12_xs_pipeline.h"
 
@@ -160,7 +161,7 @@ void emit(const X2WGfxEvent& event)
                            : event.kind == X2W_GFX_EVENT_NOTE    ? "note"
                            : event.kind == X2W_GFX_EVENT_REFUSED ? "refused"
                                                                  : "unimplemented";
-        std::fprintf(stderr, "[x2w] %s %s %s\n", verb, event.symbol, event.detail);
+        std::fprintf(stderr, "%s\n", x2w_redact::apply(std::string("[x2w] ") + verb + " " + (event.symbol ? event.symbol : "") + " " + (event.detail ? event.detail : "")).c_str());
         std::fflush(stderr);
     }
     ReleaseSRWLockShared(&g_lock);

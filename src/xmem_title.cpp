@@ -37,6 +37,7 @@
 //   https://learn.microsoft.com/en-us/windows/win32/memory/large-page-support
 //   https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getwritewatch
 #include "xmem_title.h"
+#include "common/x2w_redact.h"
 
 #include "era_heap.h"
 #include "era_title_gpu.h"
@@ -149,7 +150,7 @@ void log_line(const char* kind, const char* format, ...)
     if (g_log_sink) {
         g_log_sink(line, g_log_context);
     } else if (!informational(kind) || verbose()) {
-        std::fprintf(stderr, "[x2w] %s\n", line);
+        std::fprintf(stderr, "[x2w] %s\n", x2w_redact::apply(line).c_str());
         std::fflush(stderr);
     }
     ReleaseSRWLockShared(&g_log_lock);

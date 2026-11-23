@@ -1,5 +1,6 @@
 // x2w_gdk.dll support: logging of unimplemented paths, forwarding to a PC runtime DLL, title identity.
 #include "gdk_internal.h"
+#include "../common/x2w_redact.h"
 
 #include <atomic>
 #include <cstdarg>
@@ -162,7 +163,7 @@ bool emit(const char* kind, const char* symbol, const char* detail, bool count)
     context = state.sink_context;
     ReleaseSRWLockExclusive(&state.lock);
     if (count) g_unimplemented.fetch_add(1);
-    std::fprintf(stderr, "[x2w] %s %s %s\n", kind, sym.c_str(), det.c_str());
+    std::fprintf(stderr, "[x2w] %s\n", x2w_redact::apply(std::string(kind) + " " + sym + " " + det).c_str());
     std::fflush(stderr);
     if (LaunchLog fn = launch_log()) fn(kind, sym.c_str(), det.c_str());
     if (sink) sink(kind, sym.c_str(), det.c_str(), context);

@@ -26,6 +26,7 @@
 //   xgr-summary NAME slot N calls C                           (at UninitializeApiImpl and process detach)
 // X2W_XGR_CALLS=0 turns the per-call lines off in ours mode; trace and record log them by default.
 #include <windows.h>
+#include "../common/x2w_redact.h"
 #include <intrin.h>
 
 #include <cstdarg>
@@ -123,7 +124,7 @@ std::string format(const char* fmt, ...)
 
 void emit(const char* kind, const std::string& symbol, const std::string& detail)
 {
-    std::fprintf(stderr, "[x2w] %s %s %s\n", kind, symbol.c_str(), detail.c_str());
+    std::fprintf(stderr, "[x2w] %s\n", x2w_redact::apply(std::string(kind) + " " + symbol + " " + detail).c_str());
     std::fflush(stderr);
     if (LaunchLog fn = launch_log()) fn(kind, symbol.c_str(), detail.c_str());
 }

@@ -4,6 +4,8 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include "../common/x2w_redact.h"
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -52,7 +54,7 @@ void emit(const std::string& body) {
         std::lock_guard<std::mutex> lock(g_mutex);
         sink = g_sink;
     }
-    const std::string line = "[x2w] " + hide_dir(body);
+    const std::string line = "[x2w] " + x2w_redact::apply(hide_dir(body));
     if (sink) {
         sink(line.c_str());
         return;

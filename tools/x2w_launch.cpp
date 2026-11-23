@@ -76,6 +76,7 @@
 // name read from inside the image. Package and imported DLL names are unchanged. --show-program-name restores the real
 // file name, for the launcher's own tests.
 #include <windows.h>
+#include "../src/common/x2w_redact.h"
 #include <tlhelp32.h>
 
 #include <cctype>
@@ -236,6 +237,7 @@ std::string scrub_program_dir(std::string text) {
 
 std::string scrub_program_name(std::string text) {
     text = scrub_program_dir(std::move(text));
+    if (!show_program_name) text = x2w_redact::hide_paths(text, real_program_name, kHiddenProgram);
     if (show_program_name || real_program_name.empty()) return text;
     const std::string folded = lower(text);
     std::string out;
@@ -1538,6 +1540,7 @@ int wmain(int argc, wchar_t** argv) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--show-program-name") {
             show_program_name = true;
+            SetEnvironmentVariableW(L"X2W_SHOW_PROGRAM_NAME", L"1");
         } else if (argument == L"--continue-breakpoints") {
             breakpoint_mode = 1;
         } else if (argument == L"--stop-on-breakpoints") {
