@@ -383,27 +383,56 @@ def lower_with_layout(instructions, user_sgprs, vs_out_cntl=None):
     st = Lowering(dict(entry_scalar), {reg: ("uint", name) for reg, name in ENTRY_VGPRS[stage].items()}, [PREAMBLE],
                   {}, (), 0 if has_constants else None, {})
     st.constant_limit = CONSTANT_BYTES
-    reasons = ENTRY_VGPR_REASONS[stage]
-    unwritten = set(reasons)
-    instance = next(reg for reg, name in ENTRY_VGPRS[stage].items() if name == "iid")
-    uses_instance = False
     exports = {}
     ended = False
 
-    for i, line in enumerate(program):
+    def before(i, line):
         if ended:
             raise ValueError(f"Instruction follows program end: {line}")
+
+    def special(i, line):
+        nonlocal ended
+        if line.startswith("exp "):
+            _export(i, line, st, exports, vectors)
+        elif line == "s_endpgm":
+            _check_positions(exports, vectors)
+            ended = True
+        else:
+            return False
+        return True
+
+    uses_instance = run_body(st, program, tables, stage, special, before=before)
+    if not ended:
+        raise ValueError("Missing s_endpgm")
+    # CF-2a lane gate: every lane active (ex "true") and not in whole-quad mode.
+    if st.ex != "true" or st.wqm or st.exported or st.flat_attrs or st.quad_position or st.samples:
+        raise ValueError("A pixel-stage operation reached the vertex lowering")
+    layout = _layout(exports, vectors, stage, uses_instance)
+    uses_vsharps = any(len(entry) == 2 for _, entries in tables.values() for entry in entries.values())
+    return _assemble(st, exports, vectors, root, has_constants, uses_vsharps, uses_instance), layout
+
+
+def run_body(st, program, tables, stage, special, entry_vgprs=None, reasons=None, before=None):
+    """Lower each line of a vertex-stage body into st. special(i, line) handles a line itself (an export, the end of
+    the program, or a line of another stage's contract, tools/geometry_aot.py) and returns True, else False. Returns
+    whether the instance id was read. entry_vgprs and reasons default to the stage's ENTRY_VGPRS and
+    ENTRY_VGPR_REASONS. before(i, line), if given, runs first for each line."""
+    reasons = ENTRY_VGPR_REASONS[stage] if reasons is None else reasons
+    entry_vgprs = ENTRY_VGPRS[stage] if entry_vgprs is None else entry_vgprs
+    unwritten = set(reasons)
+    instance = next((reg for reg, name in entry_vgprs.items() if name == "iid"), None)
+    uses_instance = False
+    for i, line in enumerate(program):
+        if before is not None:
+            before(i, line)
         reads = _vector_reads(line)
         for register in sorted(reads & unwritten):
             raise ValueError(f"Refused {line!r}: {reasons[register]}")
         if instance in reads and st.vector.get(instance) == ("uint", "iid"):
             uses_instance = True
         try:
-            if line.startswith("exp "):
-                _export(i, line, st, exports, vectors)
-            elif line == "s_endpgm":
-                _check_positions(exports, vectors)
-                ended = True
+            if special(i, line):
+                pass
             elif re.match(r"s_load_dword", line):
                 _descriptor_load(line, st, tables)
             elif (m := re.match(r"s_buffer_load_dword\w* [^,]+, s\[(\d+):(\d+)\]", line)) and \
@@ -438,14 +467,7 @@ def lower_with_layout(instructions, user_sgprs, vs_out_cntl=None):
         except KeyError as error:
             raise ValueError(f"Read of an unset register {error} in {line!r}") from None
         unwritten -= set(st.vector)
-    if not ended:
-        raise ValueError("Missing s_endpgm")
-    # CF-2a lane gate: every lane active (ex "true") and not in whole-quad mode.
-    if st.ex != "true" or st.wqm or st.exported or st.flat_attrs or st.quad_position or st.samples:
-        raise ValueError("A pixel-stage operation reached the vertex lowering")
-    layout = _layout(exports, vectors, stage, uses_instance)
-    uses_vsharps = any(len(entry) == 2 for _, entries in tables.values() for entry in entries.values())
-    return _assemble(st, exports, vectors, root, has_constants, uses_vsharps, uses_instance), layout
+    return uses_instance
 
 
 def lower(instructions, user_sgprs, vs_out_cntl=None):
@@ -613,6 +635,17 @@ def _assemble(st, exports, vectors, root, uses_params, uses_vsharps, uses_instan
     inputs = "uint vid : SV_VertexID" + (", uint iid : SV_InstanceID" if uses_instance else "")
     entry = "\n".join([HELPERS, "struct VertexOutput {", *members, "};", f"VertexOutput main({inputs}) {{"])
     lines[lines.index(PREAMBLE)] = entry
+    head = declarations(st, root, uses_params, uses_vsharps)
+    # Each output word is stored through asfloat: a bit cast, so the draw check sees whether a NaN payload survives.
+    stores = ["    VertexOutput vertex_out;"]
+    stores.extend(f"    vertex_out.{name} = asfloat({variable});"
+                  for name, (variable, _, _) in sorted(exports.items()))
+    return "\n".join([*head, *lines, *stores, "    return vertex_out;", "}", ""])
+
+
+def declarations(st, root, uses_params, uses_vsharps):
+    """The bindings and helpers a lowered vertex-stage body needs, before its entry point: b0 constants, b4 V# words,
+    b2 base vertex and start instance, b3 push words, title memory and the SALU helpers it used."""
     head = []
     if uses_params:
         # uint4, not float4: constant and V# words are raw data (see docs/experiments.md).
@@ -631,11 +664,7 @@ def _assemble(st, exports, vectors, root, uses_params, uses_vsharps, uses_instan
     if st.uses_memory:
         head.extend([TITLE_LOOKUP.read_text(encoding="utf-8"), TITLE_DECLARATIONS, MEMORY_HELPERS])
     head.extend(body for name, body in SALU_HELPERS.items() if name in st.helpers)
-    # Each output word is stored through asfloat: a bit cast, so the draw check sees whether a NaN payload survives.
-    stores = ["    VertexOutput vertex_out;"]
-    stores.extend(f"    vertex_out.{name} = asfloat({variable});"
-                  for name, (variable, _, _) in sorted(exports.items()))
-    return "\n".join([*head, *lines, *stores, "    return vertex_out;", "}", ""])
+    return head
 
 
 def main():
