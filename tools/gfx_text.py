@@ -37,7 +37,7 @@ VERIFIED = frozenset({
 })
 # Added for the compute program of runtime rung R5 (tests/runtime/r5_cs.s), compared by tests/runtime/r5_programs_check.py.
 VERIFIED = VERIFIED | frozenset({
-    "buffer_load_dwordx4", "buffer_store_dwordx2", "buffer_store_dwordx4", "s_lshl_b32", "s_movk_i32",
+    "buffer_load_dwordx4", "buffer_store_dwordx2", "ds_bpermute_b32", "buffer_store_dwordx4", "s_lshl_b32", "s_movk_i32",
     "s_barrier", "v_add_f32_e32", "v_add_nc_u32_e32", "v_subrev_f32_e32",
 })
 # 64-bit scalar operations whose operands disasm_rdna2 prints as their low 32-bit register.
