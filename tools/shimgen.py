@@ -262,7 +262,8 @@ def imports_from_run_log(text):
     chosen = OrderedDict()
     for line in text.splitlines():
         match = re.match(r"^dynamic-resolve (\S+?)!(\S+) -> (\S+)", line)
-        if match and match.group(3) in ("shim", "missing"):
+        # "unknown-0x..." names a handle no module owns: there is no DLL to generate.
+        if match and match.group(3) in ("shim", "missing") and not match.group(1).startswith("unknown-"):
             chosen.setdefault(match.group(1).lower(), []).append(match.group(2))
     return chosen
 

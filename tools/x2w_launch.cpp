@@ -91,11 +91,13 @@ namespace {
 using Resolver = void*(__cdecl*)(const char* dll, const char* name, std::uint32_t ordinal);
 using MapImage = void* (*)(const wchar_t*, Resolver, std::uint32_t*, char*, std::size_t);
 using MapExport = void* (*)(void*, const char*);
+using MapExportResolved = void* (*)(void*, const char*, Resolver);
 using RunObserver = void(__cdecl*)(int event, std::uint32_t index, void* address);
 using MapRunTraced = int (*)(void*, std::uint32_t*, RunObserver);
 
 MapImage map_image;
 MapExport map_export;
+MapExportResolved map_export_resolved;
 MapRunTraced map_run;
 std::vector<std::wstring> shim_dirs;
 std::wstring package_dir;
@@ -136,6 +138,8 @@ HANDLE log_file = INVALID_HANDLE_VALUE;
 volatile long armed;         // set once the program starts running, so the launcher's own threads are ignored
 volatile long last_stub;     // index + 1 of the stub most recently called, 0 for none
 volatile long tls_done, entry_reached, first_thread, first_title_thread, first_d3d12, first_exception, crashed;
+volatile long summary_written;  // a final summary line was written (exit, crash, timeout, terminate, process-exit)
+volatile long provisional_written;
 DWORD watchdog_id;
 std::map<std::string, unsigned> route_counts;
 
@@ -265,12 +269,34 @@ void log_cpu_traps() {
     log_line("%s", line);
 }
 
-void log_summary(const char* how) {
-    log_cpu_traps();
+void log_flush() {
+    if (log_file != INVALID_HANDLE_VALUE) FlushFileBuffers(log_file);
+}
+
+void write_summary(const char* how) {
     log_line("summary %s: tls-callbacks=%s entry=%s first-thread=%s d3d12-call=%s crash=%s last-stub=%s", how,
              tls_done ? "done" : "not-done", entry_reached ? "reached" : "not-reached",
              first_thread ? "yes" : "no", first_d3d12 ? "yes" : "no", crashed ? "yes" : "no",
              last_stub_name().c_str());
+    log_flush();
+}
+
+// The final summary, written once however the run ends: the entry point returning ("exit"), the program
+// calling ExitProcess ("exit") or TerminateProcess on itself ("terminate"), an unhandled exception ("crash"),
+// --timeout ("timeout"), or, as a last resort, the launcher's own process-detach callback ("process-exit").
+void log_summary(const char* how) {
+    if (InterlockedExchange(&summary_written, 1) != 0) return;
+    log_cpu_traps();
+    write_summary(how);
+}
+
+// A provisional summary at the first error exception: a fault the process cannot survive may end it with
+// no other line (an exception while the loader starts a thread runs no unhandled-exception filter, and
+// __fastfail runs no handler at all), so the log still ends with a summary. A later final summary follows
+// it when the process goes on.
+void log_provisional_summary() {
+    if (summary_written || InterlockedExchange(&provisional_written, 1) != 0) return;
+    write_summary("first-fault");
 }
 
 void d3d12_milestone(const std::string& dll, const std::string& symbol, const char* route) {
@@ -702,6 +728,7 @@ HMODULE windows_twin(const std::string& name) {
 }
 
 std::string shim_name_of(HMODULE module) {
+    if (!module) return {};  // a shim that failed to load is recorded with a null handle
     AcquireSRWLockShared(&dynamic_lock);
     auto it = shim_names.find(module);
     std::string name = it == shim_names.end() ? std::string() : it->second;
@@ -712,6 +739,16 @@ std::string shim_name_of(HMODULE module) {
     return name;
 }
 
+void* map_package(const std::string& key);
+void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal);
+void* crash_hook(const std::string& dll, const char* name);
+
+// True for a load request naming a file in the program's folder: a bare name, or a path whose folder is it.
+bool package_request(const std::wstring& request) {
+    if (request.find_first_of(L"\\/") == std::wstring::npos) return true;
+    return _wcsicmp(directory_of(request).c_str(), package_dir.c_str()) == 0;
+}
+
 HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
     if (!request) return LoadLibraryExW(request, file, flags);
     const std::string name = dll_file_name(request);
@@ -720,6 +757,22 @@ HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
             log_dynamic_once("dynamic-load " + name + " -> " +
                              (name == kXgrName && xgr_gateway_on() ? "gateway (" + xgr_mode + ")" : std::string("shim")));
             return shim;
+        }
+        // An image pe_map already mapped (the program or a package DLL) is returned as Windows returns a loaded
+        // module; a DLL in the program's folder is mapped like a static import of it, so the program never gets
+        // a second copy from the Windows loader's search.
+        if (const Region* region = region_named(request)) {
+            log_dynamic_once("dynamic-load " + name + " -> mapped");
+            return reinterpret_cast<HMODULE>(region->base);
+        }
+        // A load restricted to System32 never reaches the program's folder, under Windows or here.
+        const bool system_only = (flags & LOAD_LIBRARY_SEARCH_SYSTEM32) &&
+                                 !(flags & (LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
+        if (!system_only && package_request(request) && is_file(package_dir + L"\\" + widen(name))) {
+            if (void* base = map_package(name)) {
+                log_dynamic_once("dynamic-load " + name + " -> package");
+                return static_cast<HMODULE>(base);
+            }
         }
     }
     HMODULE module = LoadLibraryExW(request, file, flags);
@@ -735,6 +788,22 @@ HMODULE WINAPI hook_LoadLibraryExA(LPCSTR request, HANDLE file, DWORD flags) {
 }
 HMODULE WINAPI hook_LoadLibraryA(LPCSTR request) { return hook_LoadLibraryExA(request, nullptr, 0); }
 
+// An api-ms-win-core-* API set name is answered with its host module (kernelbase, kernel32 or ntdll, which
+// every process has loaded). Windows' GetModuleHandle does not resolve API set names on every build, and a C
+// runtime that asks for one and gets null would look its functions up in no module.
+HMODULE api_set_host(LPCWSTR request) {
+    const std::string name = dll_file_name(request);
+    if (name.rfind("api-ms-win-core-", 0) != 0) return nullptr;
+    HMODULE host = LoadLibraryExW(request, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (host) {
+        wchar_t path[MAX_PATH];
+        const DWORD length = GetModuleFileNameW(host, path, MAX_PATH);
+        log_dynamic_once("dynamic-handle " + name + " -> " +
+                         (length ? lower(narrow(file_of(std::wstring(path, length)))) : std::string("loader")));
+    }
+    return host;
+}
+
 HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
     if (request) {
         const std::string name = dll_file_name(request);
@@ -744,7 +813,15 @@ HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
         ReleaseSRWLockShared(&dynamic_lock);
         if (shim) return shim;
     }
-    return keep_host_identity ? GetModuleHandleW(request) : identity_GetModuleHandleW(request);
+    HMODULE module = keep_host_identity ? GetModuleHandleW(request) : identity_GetModuleHandleW(request);
+    if (!module && request) {
+        const DWORD error = GetLastError();
+        if (HMODULE host = api_set_host(request)) return host;
+        // A module nothing has loaded is null, as from Windows; the line names what the program asked for.
+        log_dynamic_once("dynamic-handle " + dll_file_name(request) + " -> none");
+        SetLastError(error);
+    }
+    return module;
 }
 HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
     if (!request) return keep_host_identity ? GetModuleHandleA(request) : identity_GetModuleHandleA(request);
@@ -753,36 +830,67 @@ HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
 
 void* hook_for(const std::string& dll, const char* name);
 
+// The name a run log line gives a module handle: the shim's DLL name, a mapped image's file name (a null
+// handle is the program, as Windows' GetProcAddress takes it), the Windows loader's file name, or
+// "unknown-0x<handle>" for a handle none of them knows, so the line still says which handle was asked.
+std::string module_label(HMODULE module, const std::string& shim, const Region* region) {
+    if (!shim.empty()) return shim;
+    if (region) return region->name;
+    wchar_t path[MAX_PATH];
+    const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
+    if (length) return lower(narrow(file_of(std::wstring(path, length))));
+    char text[40];
+    std::snprintf(text, sizeof text, "unknown-0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(module)));
+    return text;
+}
+
+// GetProcAddress for every import of it in the program and its package DLLs, and for dynamic lookups of
+// itself. Only a handle a shim owns is answered from the shim (with the Windows twin as fallback). A mapped
+// image (the program, a null handle, or a package DLL) is answered from its export table, forwarders
+// included. Any other handle goes to Windows' GetProcAddress unchanged; the launcher's own hooks then replace
+// the hooked loader, identity, crash and system-layer functions.
 FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
     const bool by_ordinal = (reinterpret_cast<std::uintptr_t>(name) >> 16) == 0;
     const std::string symbol = by_ordinal ? "#" + std::to_string(reinterpret_cast<std::uintptr_t>(name))
                                           : std::string(name ? name : "(null)");
     const std::string shim = shim_name_of(module);
-    FARPROC address = GetProcAddress(module, name);
-    const bool gateway = shim == kXgrName && xgr_gateway_on();
-    const char* route = address ? (gateway ? "gateway" : "shim") : "missing";
-    if (!shim.empty() && !address && !gateway) {
-        // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
-        // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
-        // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
-        if (HMODULE windows = windows_twin(shim))
-            if ((address = GetProcAddress(windows, name))) route = "windows-fallback";
-    }
-    const DWORD error = GetLastError();
-    std::string dll = shim;
-    if (dll.empty()) {
-        wchar_t path[MAX_PATH];
-        const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
-        dll = length ? lower(narrow(file_of(std::wstring(path, length)))) : "?";
-        // A dynamic lookup of a hooked loader function gets the hook too.
-        if (address && !by_ordinal) {
-            if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
-            else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
-            else if (void* sys = sys_hook(dll, name)) address = reinterpret_cast<FARPROC>(sys);
+    const Region* region = nullptr;
+    if (shim.empty()) region = module ? region_of(module) : (keep_host_identity ? nullptr : (regions.empty() ? nullptr : &regions[0]));
+    FARPROC address = nullptr;
+    const char* route = "missing";
+    DWORD error = ERROR_SUCCESS;
+    if (!shim.empty()) {
+        address = GetProcAddress(module, name);
+        const bool gateway = shim == kXgrName && xgr_gateway_on();
+        route = address ? (gateway ? "gateway" : "shim") : "missing";
+        if (!address && !gateway) {
+            // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
+            // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
+            // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
+            if (HMODULE windows = windows_twin(shim))
+                if ((address = GetProcAddress(windows, name))) route = "windows-fallback";
         }
+        error = GetLastError();
+    } else if (region) {
+        if (!by_ordinal && name)
+            address = reinterpret_cast<FARPROC>(map_export_resolved ? map_export_resolved(reinterpret_cast<void*>(region->base), name, resolve)
+                                                                    : map_export(reinterpret_cast<void*>(region->base), name));
+        route = address ? "mapped" : "mapped-missing";
+        error = address ? ERROR_SUCCESS : ERROR_PROC_NOT_FOUND;
+    } else {
+        address = GetProcAddress(module, name);
+        error = GetLastError();
+        route = address ? "windows" : "missing";
     }
-    log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
-                     (!shim.empty() ? route : (address ? "windows" : "missing")));
+    const std::string dll = module_label(module, shim, region);
+    // A dynamic lookup of a hooked function in a Windows DLL gets the hook too.
+    if (shim.empty() && !region && address && !by_ordinal) {
+        if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
+        else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
+        else if (void* crash = crash_hook(dll, name)) address = reinterpret_cast<FARPROC>(crash);
+        else if (void* sys = sys_hook(dll, name)) address = reinterpret_cast<FARPROC>(sys);
+    }
+    log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " + route);
     SetLastError(error);
     return address;
 }
@@ -805,6 +913,88 @@ void* hook_for(const std::string& dll, const char* name) {
     return nullptr;
 }
 
+// Maps <program folder>\KEY with pe_map once (a static import or a dynamic load of it) and records its
+// region, or returns null. The package lock is the dynamic lock's sibling: mapping runs DllMain, which may
+// load more DLLs, so it is not held across map_image; the mapping set stops import cycles.
+SRWLOCK package_lock = SRWLOCK_INIT;
+void* map_package(const std::string& key) {
+    const std::wstring local = package_dir + L"\\" + widen(key);
+    AcquireSRWLockExclusive(&package_lock);
+    void* base = package_images[key];
+    const bool start = !base && !mapping.count(key);
+    if (start) mapping.insert(key);
+    ReleaseSRWLockExclusive(&package_lock);
+    if (!start) return base;
+    std::uint32_t status = 0;
+    char detail[256] = {};
+    base = map_image(local.c_str(), resolve, &status, detail, sizeof detail);
+    AcquireSRWLockExclusive(&package_lock);
+    mapping.erase(key);
+    if (base) {
+        package_images[key] = base;
+        regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base), local});
+    }
+    ReleaseSRWLockExclusive(&package_lock);
+    if (!base) {
+        std::fprintf(stderr, "[x2w] cannot map %s: status %u %s\n", key.c_str(), status, detail);
+        log_line("package-map-failed %s status %u %s", key.c_str(), status, detail);
+    }
+    return base;
+}
+
+// ---------------------------------------------------------------- ends of the run the log must see
+// With a run log, the program's SetUnhandledExceptionFilter, ExitProcess and TerminateProcess (kernel32,
+// kernelbase and their API sets) bind to these. The launcher's own filter stays installed: the program's
+// filter is kept and called after the crash line and summary are written, with its answer returned.
+// ExitProcess and TerminateProcess of this process write the exit line and summary first.
+LPTOP_LEVEL_EXCEPTION_FILTER volatile title_filter;
+LONG WINAPI unhandled(EXCEPTION_POINTERS* info);
+
+LPTOP_LEVEL_EXCEPTION_FILTER WINAPI hook_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER filter) {
+    if (filter == unhandled) return title_filter;
+    log_dynamic_once("unhandled-filter program filter kept behind the launcher's");
+    return reinterpret_cast<LPTOP_LEVEL_EXCEPTION_FILTER>(
+        InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&title_filter), reinterpret_cast<void*>(filter)));
+}
+
+void log_exit(UINT code, const char* how) {
+    if (summary_written) return;
+    long calls = 0;
+    unsigned missing = 0;
+    for (const Stub* stub : stubs) {
+        calls += stub->calls;
+        missing += stub->missing;
+    }
+    log_line("exit code 0x%x (%u); stubs %zu (missing %u), stub calls %ld", code, code, stubs.size(), missing, calls);
+    log_summary(how);
+}
+
+void WINAPI hook_ExitProcess(UINT code) {
+    log_exit(code, "exit");
+    ExitProcess(code);
+}
+
+bool is_this_process(HANDLE process) {
+    return process == GetCurrentProcess() || (process && GetProcessId(process) == GetCurrentProcessId());
+}
+
+BOOL WINAPI hook_TerminateProcess(HANDLE process, UINT code) {
+    if (is_this_process(process)) log_exit(code, "terminate");
+    return TerminateProcess(process, code);
+}
+
+void* crash_hook(const std::string& dll, const char* name) {
+    if (log_file == INVALID_HANDLE_VALUE || !name) return nullptr;
+    const bool base = dll == "kernel32.dll" || dll == "kernelbase.dll";
+    if (std::strcmp(name, "SetUnhandledExceptionFilter") == 0 &&
+        (base || dll.rfind("api-ms-win-core-errorhandling-", 0) == 0))
+        return reinterpret_cast<void*>(&hook_SetUnhandledExceptionFilter);
+    if (!base && dll.rfind("api-ms-win-core-processthreads-", 0) != 0) return nullptr;
+    if (std::strcmp(name, "ExitProcess") == 0) return reinterpret_cast<void*>(&hook_ExitProcess);
+    if (std::strcmp(name, "TerminateProcess") == 0) return reinterpret_cast<void*>(&hook_TerminateProcess);
+    return nullptr;
+}
+
 void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) {
     const std::string key = lower(dll);
     const std::string symbol = name ? std::string(name) : "#" + std::to_string(ordinal);
@@ -821,20 +1011,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
     }
     const std::wstring local = package_dir + L"\\" + widen(key);
     if (is_file(local)) {
-        void*& base = package_images[key];
-        if (!base && !mapping.count(key)) {
-            mapping.insert(key);
-            std::uint32_t status = 0;
-            char detail[256] = {};
-            base = map_image(local.c_str(), resolve, &status, detail, sizeof detail);
-            mapping.erase(key);
-            if (!base) {
-                std::fprintf(stderr, "[x2w] cannot map %s: status %u %s\n", key.c_str(), status, detail);
-                log_line("package-map-failed %s status %u %s", key.c_str(), status, detail);
-            } else {
-                regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base), local});
-            }
-        }
+        void* base = map_package(key);
         if (base && name)
             if (void* address = map_export(base, name)) return report(key, symbol, "package", "package", address);
         return report(key, symbol, "stub (package)", "stub", make_stub(key, symbol, false));
@@ -846,6 +1023,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
     if (HMODULE module = LoadLibraryA(dll)) {
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
             if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
+            if (void* hook = crash_hook(key, name)) return report(key, symbol, "windows (x2w crash hook)", "windows", hook);
             if (void* hook = sys_hook(key, name)) return report(key, symbol, "windows (x2w sys hook)", "windows", hook);
             return report(key, symbol, "windows", "windows", address);
         }
@@ -875,11 +1053,29 @@ void __cdecl observe_run(int event, std::uint32_t index, void* address) {
     }
 }
 
+// The current thread's description (SetThreadDescription), letters, digits, '_', '.' and '-' only, or empty.
+using GetDescription = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+GetDescription get_description;
+std::string thread_name() {
+    if (!get_description) return {};
+    PWSTR text = nullptr;
+    std::string out;
+    if (SUCCEEDED(get_description(GetCurrentThread(), &text)) && text) {
+        for (const wchar_t* c = text; *c && out.size() < 48; ++c)
+            out += (std::iswalnum(*c) && *c < 0x80) || *c == L'_' || *c == L'.' || *c == L'-' ? static_cast<char>(*c) : '_';
+        LocalFree(text);
+    }
+    return out;
+}
+
 void exception_text(const EXCEPTION_RECORD* record, char* out, std::size_t capacity) {
     char where[160];
     describe(record->ExceptionAddress, where, sizeof where);
-    int used = std::snprintf(out, capacity, "exception 0x%08lx at %s thread %s", record->ExceptionCode, where,
-                             GetCurrentThreadId() == watchdog_id ? "watchdog" : "program");
+    const std::string name = thread_name();
+    const DWORD self = GetCurrentThreadId();
+    int used = std::snprintf(out, capacity, "exception 0x%08lx at %s thread %s%s%s", record->ExceptionCode, where,
+                             self == watchdog_id ? "watchdog" : "program", name.empty() ? "" : " thread-name ",
+                             name.c_str());
     // Access violations and in-page errors carry the access kind and the address that was touched.
     if ((record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || record->ExceptionCode == EXCEPTION_IN_PAGE_ERROR)
         && record->NumberParameters >= 2 && used > 0 && static_cast<std::size_t>(used) < capacity) {
@@ -934,13 +1130,12 @@ std::string thrown_type(const EXCEPTION_RECORD* record) {
     return out.empty() ? "unknown_name" : out;
 }
 
-// The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
-// runtime the first is the title's own _CxxThrowException and the second the throwing function.
-std::string throw_site(const CONTEXT* start) {
+// The first LIMIT frames in mapped images, unwinding from START, joined by " from ", or empty.
+std::string mapped_frames(const CONTEXT* start, int limit) {
     CONTEXT context = *start;
     std::string out;
     int found = 0;
-    for (int depth = 0; depth < 32 && context.Rip && found < 2; ++depth) {
+    for (int depth = 0; depth < 48 && context.Rip && found < limit; ++depth) {
         if (region_at(context.Rip)) {
             char where[160];
             describe(reinterpret_cast<void*>(context.Rip), where, sizeof where);
@@ -958,7 +1153,14 @@ std::string throw_site(const CONTEXT* start) {
             context.Rsp += 8;
         }
     }
-    if (found) return out;
+    return out;
+}
+
+// The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
+// runtime the first is the title's own _CxxThrowException and the second the throwing function.
+std::string throw_site(const CONTEXT* start) {
+    std::string out = mapped_frames(start, 2);
+    if (!out.empty()) return out;
     char where[160];
     describe(reinterpret_cast<void*>(start->Rip), where, sizeof where);  // no mapped frame found
     return where;
@@ -1004,14 +1206,40 @@ LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
 // The first error-severity exception the program raises, whether or not it handles it. Codes with the
 // customer bit are the program's own and are not logged as such; C++ exceptions (0xe06d7363) get their own
 // "cpp-throw TYPE at SITE" lines, once per distinct line and at most 16.
+// " callers A from B from C" for a fault outside the mapped images (in a Windows DLL, a shim or the
+// launcher): the first three frames in mapped images that led there, or nothing.
+std::string caller_chain(const EXCEPTION_POINTERS* info) {
+    if (region_at(reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress))) return {};
+    const std::string frames = mapped_frames(info->ContextRecord, 3);
+    return frames.empty() ? std::string() : " callers " + frames;
+}
+
+// Error exceptions after the first are logged too, once per code and site and at most kFirstChanceLines in all.
+constexpr long kFirstChanceLines = 8;
+volatile long first_chance_lines;
+std::set<std::string> first_chance_seen;
+SRWLOCK first_chance_lock = SRWLOCK_INIT;
+
 LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     if (armed && code == cpp_exception) log_cpp_throw(info);
-    if (armed && (code & 0xc0000000u) == 0xc0000000u && !(code & 0x20000000u)
-        && InterlockedExchange(&first_exception, 1) == 0) {
-        char text[512];
-        exception_text(info->ExceptionRecord, text, sizeof text);
-        log_line("first-chance %s last-stub %s", text, last_stub_name().c_str());
+    if (armed && (code & 0xc0000000u) == 0xc0000000u && !(code & 0x20000000u) && first_chance_lines < kFirstChanceLines) {
+        char site[200];
+        describe(info->ExceptionRecord->ExceptionAddress, site, sizeof site);
+        char key[240];
+        std::snprintf(key, sizeof key, "%08lx %s", code, site);
+        AcquireSRWLockExclusive(&first_chance_lock);
+        const bool fresh = first_chance_seen.size() < static_cast<std::size_t>(kFirstChanceLines) &&
+                           first_chance_seen.insert(key).second;
+        ReleaseSRWLockExclusive(&first_chance_lock);
+        if (fresh) {
+            InterlockedIncrement(&first_chance_lines);
+            InterlockedExchange(&first_exception, 1);
+            char text[512];
+            exception_text(info->ExceptionRecord, text, sizeof text);
+            log_line("first-chance %s last-stub %s%s", text, last_stub_name().c_str(), caller_chain(info).c_str());
+            log_provisional_summary();
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -1023,9 +1251,11 @@ LONG WINAPI unhandled(EXCEPTION_POINTERS* info) {
     if (InterlockedExchange(&crashed, 1) == 0) {
         char text[512];
         exception_text(info->ExceptionRecord, text, sizeof text);
-        log_line("crash %s last-stub %s", text, last_stub_name().c_str());
+        log_line("crash %s last-stub %s%s", text, last_stub_name().c_str(), caller_chain(info).c_str());
         log_summary("crash");
     }
+    // The program's own filter (hook_SetUnhandledExceptionFilter) runs after the log is written.
+    if (LPTOP_LEVEL_EXCEPTION_FILTER filter = title_filter) return filter(info);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -1118,6 +1348,12 @@ QueryThread query_thread;
 
 // The launcher's own TLS callback sees every thread that starts in the process while the program runs.
 void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
+    // Process exit by a path no hook saw (ExitProcess from a Windows DLL, the C runtime's exit): the last summary.
+    if (reason == DLL_PROCESS_DETACH && armed && log_file != INVALID_HANDLE_VALUE && !summary_written) {
+        DWORD code = STILL_ACTIVE;
+        if (GetExitCodeProcess(GetCurrentProcess(), &code) && code != STILL_ACTIVE) log_exit(code, "exit");
+        else log_summary("process-exit");
+    }
     if (slot0_index) {
         if (reason == DLL_THREAD_ATTACH) slot0_alias(current_tls_vector(), GetCurrentThreadId());
         if (reason == DLL_THREAD_DETACH) slot0_restore(current_tls_vector(), GetCurrentThreadId());
@@ -1136,8 +1372,14 @@ void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
         log_line("milestone first-program-thread start %s", where);
 }
 
+HANDLE watchdog_ready;
+
+// The watchdog starts before anything is mapped and the launcher waits until it runs, so the loader's thread
+// attach for it is over before pe_map has an image to notify: no TLS callback or DllMain of the program or a
+// package DLL ever runs on it. (Created later, it raced the program's own process attach.)
 DWORD WINAPI watchdog(void* seconds) {
     const auto limit = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(seconds));
+    SetEvent(watchdog_ready);
     Sleep(limit * 1000);
     log_line("timeout still running after %lu s", limit);
     log_summary("timeout");
@@ -1219,6 +1461,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         query_thread = reinterpret_cast<QueryThread>(
             GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+        get_description = reinterpret_cast<GetDescription>(
+            GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "GetThreadDescription"));
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
@@ -1242,6 +1486,7 @@ int wmain(int argc, wchar_t** argv) {
     if (pe_map) {
         map_image = reinterpret_cast<MapImage>(GetProcAddress(pe_map, "pe_map_image"));
         map_export = reinterpret_cast<MapExport>(GetProcAddress(pe_map, "pe_map_export"));
+        map_export_resolved = reinterpret_cast<MapExportResolved>(GetProcAddress(pe_map, "pe_map_export_resolved"));
         map_run = reinterpret_cast<MapRunTraced>(GetProcAddress(pe_map, "pe_map_run_traced"));
     }
     if (!map_image || !map_export || !map_run) {
@@ -1308,6 +1553,20 @@ int wmain(int argc, wchar_t** argv) {
             init(title_dir.c_str(), title_name.c_str(), config.empty() ? nullptr : config.c_str());
         }
     }
+    // Regions are appended by dynamic loads while other threads read them: no reallocation after this.
+    regions.reserve(1024);
+    if (log_file != INVALID_HANDLE_VALUE && timeout) {
+        // Suspended until its ID is known, so the thread callback can tell it from the program's threads; the
+        // launcher then waits until it runs, before mapping anything (see watchdog).
+        watchdog_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE thread = CreateThread(nullptr, 0, watchdog, reinterpret_cast<void*>(static_cast<std::uintptr_t>(timeout)),
+                                     CREATE_SUSPENDED, &watchdog_id);
+        if (thread) {
+            ResumeThread(thread);
+            if (watchdog_ready) WaitForSingleObject(watchdog_ready, 10000);
+            CloseHandle(thread);
+        }
+    }
     std::uint32_t status = 0;
     char detail[512] = {};
     void* base = map_image(full, resolve, &status, detail, sizeof detail);
@@ -1319,8 +1578,6 @@ int wmain(int argc, wchar_t** argv) {
     regions.insert(regions.begin(),
                    Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full});
     slot0_start(base);
-    unsigned missing_stubs = 0;
-    for (const Stub* stub : stubs) missing_stubs += stub->missing;
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
     log_line("imports shim=%u package=%u windows=%u stub=%u missing=%u", route_counts["shim"],
              route_counts["package"], route_counts["windows"], route_counts["stub"], route_counts["missing"]);
@@ -1328,15 +1585,6 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "[x2w] --force-cpu-traps: no usable x2w_cpu_trap_sites export\n");
         log_line("error no usable x2w_cpu_trap_sites export");
         return 2;
-    }
-    if (log_file != INVALID_HANDLE_VALUE && timeout) {
-        // Suspended until its ID is known, so the thread callback can tell it from the program's threads.
-        HANDLE thread = CreateThread(nullptr, 0, watchdog, reinterpret_cast<void*>(static_cast<std::uintptr_t>(timeout)),
-                                     CREATE_SUSPENDED, &watchdog_id);
-        if (thread) {
-            ResumeThread(thread);
-            CloseHandle(thread);
-        }
     }
     std::fflush(stderr);
     std::uint32_t exit_code = 0;
@@ -1353,8 +1601,6 @@ int wmain(int argc, wchar_t** argv) {
     long calls = 0;
     for (const Stub* stub : stubs) calls += stub->calls;
     std::fprintf(stderr, "[x2w] exit code %u; %zu stubs, %ld stub calls\n", exit_code, stubs.size(), calls);
-    log_line("exit code 0x%x (%u); stubs %zu (missing %u), stub calls %ld", exit_code, exit_code, stubs.size(),
-             missing_stubs, calls);
-    log_summary("exit");
+    log_exit(exit_code, "exit");
     return static_cast<int>(exit_code);
 }

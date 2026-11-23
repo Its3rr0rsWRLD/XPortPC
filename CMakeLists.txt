@@ -3357,6 +3357,23 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "${CMAKE_SOURCE_DIR}/tests/native/sys_title_check.py" "$<TARGET_FILE:x2w_launch>"
             "$<TARGET_FILE:x2w_sys_title>" "$<TARGET_FILE:gdeflate_pack>" "${x2w_shim_dir}")
         set_tests_properties(native_launch_sys PROPERTIES TIMEOUT 180)
+        # Dynamic module lookups from a mapped title and a mapped package DLL (GetModuleHandleW + GetProcAddress
+        # of kernel32's condition-variable functions, as a C++ runtime does), and every ending of the run log:
+        # a handled fault inside Windows, ExitProcess, and a crash with the program's own filter
+        # (tests/native/resolve_check.py).
+        add_library(x2w_resolve_pkg SHARED tests/native/resolve_pkg.cpp)
+        target_compile_options(x2w_resolve_pkg PRIVATE /GS- /Zl)
+        target_link_options(x2w_resolve_pkg PRIVATE /ENTRY:resolve_pkg_main /NODEFAULTLIB /DYNAMICBASE /INCREMENTAL:NO)
+        target_link_libraries(x2w_resolve_pkg PRIVATE kernel32)
+        add_executable(x2w_resolve_title tests/native/resolve_title.cpp)
+        target_compile_options(x2w_resolve_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_resolve_title PRIVATE /ENTRY:resolve_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+            /INCREMENTAL:NO)
+        target_link_libraries(x2w_resolve_title PRIVATE kernel32 x2w_resolve_pkg)
+        add_test(NAME native_launch_resolve COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/resolve_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_resolve_title>" "$<TARGET_FILE:x2w_resolve_pkg>" "${x2w_shim_dir}")
+        set_tests_properties(native_launch_resolve PROPERTIES TIMEOUT 180)
         foreach(rung1_def IN ITEMS xmem missing)
             set(rung1_${rung1_def}_lib "${CMAKE_CURRENT_BINARY_DIR}/rung1_${rung1_def}.lib")
             add_custom_command(OUTPUT "${rung1_${rung1_def}_lib}"

@@ -25,9 +25,10 @@ from report_check import allowed_names  # noqa: E402
 NAME = r"[A-Za-z0-9_.\-]+"
 SYMBOL = r"[A-Za-z0-9_.\-]+![A-Za-z0-9_#@?$]+"
 WHERE = r"(?:[a-z0-9_.\-]+\+0x[0-9a-f]+|0x[0-9a-f]+)"
-EXCEPTION = (rf"exception 0x[0-9a-f]{{8}} at {WHERE} thread (?:program|watchdog)"
+EXCEPTION = (rf"exception 0x[0-9a-f]{{8}} at {WHERE} thread (?:program|watchdog)(?: thread-name {NAME})?"
              rf"(?: (?:reading|writing|executing|accessing) {WHERE})?")
 LAST = rf"(?:{SYMBOL}|none)"
+CALLERS = rf"(?: callers {WHERE}(?: from {WHERE}){{0,2}})?"
 FEATURES = r"(?:none|[a-z0-9.\-]+(?:,[a-z0-9.\-]+)*)"
 MNEMONIC = r"[a-z0-9\-]+"
 GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
@@ -38,18 +39,19 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"milestone first-program-thread start {WHERE}",
            rf"milestone first-d3d12-call {SYMBOL} \((?:bound|stub|missing)\)",
            rf"first-call (?:stub|missing) {SYMBOL}",
-           rf"first-chance {EXCEPTION} last-stub {LAST}", rf"crash {EXCEPTION} last-stub {LAST}",
+           rf"first-chance {EXCEPTION} last-stub {LAST}{CALLERS}", rf"crash {EXCEPTION} last-stub {LAST}{CALLERS}",
            r"exit code 0x[0-9a-f]+ \(\d+\); stubs \d+ \(missing \d+\), stub calls \d+",
            r"timeout still running after \d+ s",
-           rf"dynamic-load {NAME} -> (?:shim|loader|failed|gateway \((?:ours|trace|record)\))", r"xgr (?:ours|trace|record)", r"tls-slot0 index \d+ threads \d+",
+           rf"dynamic-load {NAME} -> (?:shim|loader|failed|mapped|package|gateway \((?:ours|trace|record)\))",
+           rf"dynamic-handle {NAME} -> {NAME}", r"unhandled-filter program filter kept behind the launcher's", r"xgr (?:ours|trace|record)", r"tls-slot0 index \d+ threads \d+",
            r"shim-xgr-[a-z\-]+ \S+ .*",
            rf"cpp-throw [A-Za-z0-9_.?@$]+ at {WHERE}(?: from {WHERE})?",
-           rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|gateway|windows-fallback|missing|windows)",
+           rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|gateway|windows-fallback|missing|windows|mapped|mapped-missing)",
            rf"shim-(?:unimplemented|note|forward) {SYMBOL} .*",
            rf"cpu-host-missing emulated={FEATURES} unhandled={FEATURES} silent={FEATURES}",
            rf"cpu-trap first {MNEMONIC} at {WHERE}", rf"cpu-unhandled {MNEMONIC} at {WHERE}",
            rf"cpu-traps total=\d+(?: {MNEMONIC}=\d+)*", r"cpu-trap-forced sites \d+",
-           rf"summary (?:exit|crash|timeout): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
+           rf"summary (?:exit|crash|timeout|terminate|process-exit|first-fault): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
            rf"first-thread=(?:yes|no) d3d12-call=(?:yes|no) crash=(?:yes|no) last-stub={LAST}"]
 
 
