@@ -334,6 +334,11 @@ bool reserve()
     expect(sys && in_window(sys, w[1]) && describe(sys).gpu_visible == 0 && query(sys).tail[0] == 0,
            "non-GPU page-backed memory is carved in the system window");
     XMemFree(sys, word(8, 1, 0));
+    // A physical-page mapping at a fresh address is carved from the system window's placeholders.
+    ULONG_PTR page = 0, count = 1;
+    void* mapped = XMemAllocatePhysicalPages(MEM_64K_PAGES, &count, &page) ? XMemMapPhysicalPages(nullptr, 1, &page) : nullptr;
+    expect(mapped && in_window(mapped, w[1]) && describe(mapped).backing == X2W_XMEM_BACKING_PHYSICAL,
+           "a physical mapping in the system window");
     // An arena too.
     void* tiny = XMemAlloc(4096, word(1, 0, 0));
     expect(tiny && in_window(tiny, w[0]) && describe(tiny).backing == X2W_XMEM_BACKING_ARENA, "an arena in the window");

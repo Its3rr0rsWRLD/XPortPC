@@ -565,8 +565,9 @@ void* commit_at(void* address, std::size_t bytes, ULONG extra, std::uint64_t ali
     return va2(GetCurrentProcess(), address, bytes, type, PAGE_READWRITE, count ? parameters : nullptr, count);
 }
 
-// Carves [start, start + bytes) out of a free placeholder piece and commits it. Caller holds the lock.
-void* carve(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignment, bool large, bool write_watch)
+// Splits a free placeholder piece so that [start, start + bytes) is one placeholder, marks it used and returns start,
+// or 0. Caller holds the lock.
+std::uintptr_t take_placeholder(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignment)
 {
     auto& pieces = s.pieces[w];
     for (auto it = pieces.begin(); it != pieces.end(); ++it) {
@@ -578,7 +579,7 @@ void* carve(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignmen
         if (start > begin) {
             if (!VirtualFree(reinterpret_cast<void*>(begin), start - begin, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
                 log_once("fallback", "placeholder split failed (error %lu)", GetLastError());
-                return nullptr;
+                return 0;
             }
             it->second.bytes = static_cast<std::size_t>(start - begin);
             it = pieces.emplace(start, Piece{static_cast<std::size_t>(end - start), true}).first;
@@ -586,18 +587,26 @@ void* carve(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignmen
         if (start + bytes < end) {
             if (!VirtualFree(reinterpret_cast<void*>(start), bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
                 log_once("fallback", "placeholder split failed (error %lu)", GetLastError());
-                return nullptr;
+                return 0;
             }
             it->second.bytes = bytes;
             pieces.emplace(start + bytes, Piece{static_cast<std::size_t>(end - start - bytes), true});
         }
-        void* p = commit_at(reinterpret_cast<void*>(start), bytes, MEM_REPLACE_PLACEHOLDER, 0, nullptr, large, false,
-                            write_watch);
-        if (!p) return nullptr;  // the placeholder stays free (split, which is harmless)
         it->second.free = false;
-        return p;
+        return static_cast<std::uintptr_t>(start);
     }
-    return nullptr;
+    return 0;
+}
+
+// Carves [start, start + bytes) out of a free placeholder piece and commits it. Caller holds the lock.
+void* carve(State& s, std::uint32_t w, std::size_t bytes, std::uint64_t alignment, bool large, bool write_watch)
+{
+    const std::uintptr_t start = take_placeholder(s, w, bytes, alignment);
+    if (!start) return nullptr;
+    void* p = commit_at(reinterpret_cast<void*>(start), bytes, MEM_REPLACE_PLACEHOLDER, 0, nullptr, large, false,
+                        write_watch);
+    if (!p) s.pieces[w][start].free = true;  // still a placeholder (split, which is harmless)
+    return p;
 }
 
 void coalesce(std::map<std::uintptr_t, Piece>& pieces, std::map<std::uintptr_t, Piece>::iterator it)
@@ -1149,7 +1158,12 @@ std::map<std::uintptr_t, Mapping>::iterator mapping_for(State& s, std::uintptr_t
         MEM_ADDRESS_REQUIREMENTS requirements{};
         MEM_EXTENDED_PARAMETER parameter{};
         const auto& w = s.config.windows[X2W_XMEM_WINDOW_SYSTEM];
-        if (window_enabled(s, X2W_XMEM_WINDOW_SYSTEM)) {
+        if (window_enabled(s, X2W_XMEM_WINDOW_SYSTEM) && s.config.window_mode == X2W_XMEM_WINDOWS_RESERVE) {
+            // Already a placeholder of the reserved window; it stays in use for the mapping's lifetime.
+            p = reinterpret_cast<void*>(take_placeholder(s, X2W_XMEM_WINDOW_SYSTEM, static_cast<std::size_t>(bytes),
+                                                         physical_page));
+        }
+        if (!p && window_enabled(s, X2W_XMEM_WINDOW_SYSTEM)) {
             requirements.LowestStartingAddress = reinterpret_cast<PVOID>(w.begin);
             requirements.HighestEndingAddress = reinterpret_cast<PVOID>(w.end - 1);
             parameter.Type = MemExtendedParameterAddressRequirements;

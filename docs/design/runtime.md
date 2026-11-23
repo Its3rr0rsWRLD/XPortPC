@@ -209,15 +209,25 @@ The console has one address space: a graphics allocation's CPU pointer is also i
 store those addresses in memory that shaders read. Desktop GPUs have their own address space and, on discrete parts,
 their own memory.
 
-What exists:
+What exists (the title memory layer, `src/xmem_title.h`; details and measurements in
+[experiments.md](../experiments.md#title-memory-layer)):
 
-- `XMemAlloc` graphics types get their own `VirtualAlloc` region (`era_heap`), registered as GPU memory
-  (`era_query`) and tracked by `era_title_gpu`.
-- Once a device is attached (`X2WTitleGpuAttach`), each region gets a desktop alias without copies:
-  `OpenExistingHeapFromAddress` plus one placed buffer (`era_gpu_alias`). CPU writes are seen by the GPU and GPU writes
-  by the CPU once the GPU work completes.
-- `era_title_va` maps title ranges to desktop GPU addresses. `X2WTitleGpuTranslate` / `X2WTitleGpuLocate` serve API
-  calls; `X2WTitleGpuGetShaderView` packs the sorted ranges that `TitleLookup` searches in shaders.
+- `XMemAlloc`/`XMemFree` go through replaceable routines (`XMemSetAllocationHooks`, `XMemAllocDefault`,
+  `XMemFreeDefault`) and read the ERA attribute word: heap memory from the CRT (`era_heap`); every other defined
+  memory type page-backed with its page size (4 KB, 64 KB, 4 MB) and alignment, placed in a graphics or system
+  address window (`VirtualAlloc2` address requirements, or placeholders reserved over the windows when titles need
+  fixed ranges), optionally on large pages and with `MEM_WRITE_WATCH`. Title physical pages
+  (`XMemAllocatePhysicalPages` / `XMemMapPhysicalPages`) are views of a pagefile section in 64 KiB placeholders.
+- GPU-visible allocations are registered with `era_title_gpu` (and `era_query`). By default they are carved from a
+  few committed arenas, each one backing; a backing (arena, standalone allocation, adopted hook memory or the
+  physical pool) gets one desktop alias once a device is attached (`X2WTitleGpuAttach`):
+  `OpenExistingHeapFromAddress` or `OpenExistingHeapFromFileMapping` plus one placed buffer (`era_gpu_alias`). CPU
+  writes are seen by the GPU and GPU writes by the CPU once the GPU work completes. Opening the heap locks the whole
+  backing in memory (measured).
+- `era_title_va` maps each allocation's range to desktop GPU addresses. `X2WTitleGpuTranslate` / `X2WTitleGpuLocate`
+  serve API calls; `X2WTitleGpuGetShaderView` packs the sorted ranges that `TitleLookup` searches in shaders, each
+  with its slot and its offset in the slot's buffer, so any number of allocations needs at most one slot per
+  backing (the converter has eight).
 
 **Recommended first approach: alias everything in system memory.** Every buffer the title creates in its memory is a
 view of the alias, every title GPU address passed to an API call goes through `X2WTitleGpuTranslate`, every address a
@@ -236,8 +246,9 @@ Textures cannot alias: desktop textures have opaque layouts, and the console lay
 
 **After R5, performance:** promote hot buffers to VRAM. The candidates are buffers only the GPU writes (UAV targets) or
 the CPU writes rarely (static vertex/index data). Each keeps a system-memory alias for CPU access. CPU writes are tracked
-per 4 KiB page, by `MEM_WRITE_WATCH` (`GetWriteWatch`, set when `era_heap` allocates; whether
-`OpenExistingHeapFromAddress` accepts such memory must be measured) or by guard pages and a vectored handler. Dirty
+per 4 KiB page, by `MEM_WRITE_WATCH` (`X2W_XMEM_WRITE_WATCH=1` and `X2WXMemCollectWrites`;
+`OpenExistingHeapFromAddress` accepts such memory, measured on WARP and an RTX 4070 Ti) or by guard pages and a
+vectored handler. Dirty
 pages are copied to VRAM before each submit. GPU-written ranges the CPU reads (query results, readbacks) stay
 aliased.
 
