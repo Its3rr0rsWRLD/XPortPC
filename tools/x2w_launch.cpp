@@ -282,28 +282,41 @@ std::string scrub_program_name(std::string text) {
     return out;
 }
 
+// The whole line is formatted, scrubbed, and only then cut to the old caps (2047 / 4094 bytes): cutting first could
+// leave a path or program name too short for the scrub to recognize (a prefix of it would be printed).
+std::string format_line(const char* format, va_list args) {
+    char small[1024];
+    va_list copy;
+    va_copy(copy, args);
+    const int length = std::vsnprintf(small, sizeof small, format, copy);
+    va_end(copy);
+    if (length < 0) return {};
+    if (length < static_cast<int>(sizeof small)) return std::string(small, static_cast<std::size_t>(length));
+    std::string text(static_cast<std::size_t>(length) + 1, '\0');
+    std::vsnprintf(text.data(), text.size(), format, args);
+    text.resize(static_cast<std::size_t>(length));
+    return text;
+}
+
 int err_printf(const char* format, ...) {
-    char line[2048];
     va_list args;
     va_start(args, format);
-    int length = std::vsnprintf(line, sizeof line, format, args);
+    std::string text = format_line(format, args);
     va_end(args);
-    if (length < 0) return length;
-    if (length >= static_cast<int>(sizeof line)) length = static_cast<int>(sizeof line) - 1;
-    const std::string text = scrub_program_name(std::string(line, static_cast<std::size_t>(length)));
+    text = scrub_program_name(std::move(text));
+    if (text.size() > 2047) text.resize(2047);
     return static_cast<int>(std::fwrite(text.data(), 1, text.size(), stderr));
 }
 
 void log_line(const char* format, ...) {
     if (log_file == INVALID_HANDLE_VALUE) return;
-    char line[4096];  // stall lines carry every other pending call
     va_list args;
     va_start(args, format);
-    int length = std::vsnprintf(line, sizeof line - 1, format, args);
+    std::string text = format_line(format, args);  // stall lines carry every other pending call
     va_end(args);
-    if (length < 0) return;
-    if (length > static_cast<int>(sizeof line) - 2) length = static_cast<int>(sizeof line) - 2;
-    const std::string text = scrub_program_name(std::string(line, static_cast<std::size_t>(length))) + "\n";
+    text = scrub_program_name(std::move(text));
+    if (text.size() > 4094) text.resize(4094);
+    text += "\n";
     DWORD written = 0;
     // The file is opened for appending only, so lines from different threads never overwrite each other.
     WriteFile(log_file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);

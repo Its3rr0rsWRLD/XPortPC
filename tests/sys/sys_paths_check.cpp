@@ -1,6 +1,7 @@
 #include "check.h"
 #include "sys_hooks.h"
 #include "sys_paths.h"
+#include "../../src/common/x2w_redact.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -56,6 +57,20 @@ F hook(const char* name) { return reinterpret_cast<F>(X2WSysHookLookup("kernel32
 
 int main() {
     chk::capture();
+
+    // ---- redaction (x2w_redact.h): UNC paths and an account-name leaf are hidden; device names stay ----------
+    {
+        char user[256] = {};
+        const DWORD had = GetEnvironmentVariableA("USERNAME", user, sizeof user);
+        SetEnvironmentVariableA("USERNAME", "SomeUser");
+        CHECK(x2w_redact::hide_paths("open \\\\srv\\share\\dir\\a.bin (5)", "", "") == std::string("open <path>\\a.bin (5)"));
+        CHECK(x2w_redact::hide_paths("at \\\\?\\UNC\\srv\\s\\b.txt", "", "") == std::string("at <path>\\b.txt"));
+        CHECK(x2w_redact::hide_paths("at \\\\?\\C:\\x\\c.txt", "", "") == std::string("at <path>\\c.txt"));
+        CHECK(x2w_redact::hide_paths("pipe \\\\.\\pipe\\x2w", "", "") == std::string("pipe \\\\.\\pipe\\x2w"));
+        CHECK(x2w_redact::hide_paths("home C:\\Users\\someuser", "", "") == std::string("home <path>"));
+        CHECK(x2w_redact::hide_paths("file C:\\Users\\someuser\\d.txt", "", "") == std::string("file <path>\\d.txt"));
+        SetEnvironmentVariableA("USERNAME", had && had < sizeof user ? user : nullptr);
+    }
 
     // ---- pure remapping -------------------------------------------------------------------------------
     {

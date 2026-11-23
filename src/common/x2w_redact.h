@@ -54,9 +54,14 @@ inline std::string hide_paths(const std::string& text, const std::string& progra
     std::string out;
     std::size_t at = 0;
     while (at < text.size()) {
-        const bool start = at + 2 < text.size() && std::isalpha(static_cast<unsigned char>(text[at])) &&
+        const bool drive = at + 2 < text.size() && std::isalpha(static_cast<unsigned char>(text[at])) &&
                            text[at + 1] == ':' && (text[at + 2] == '\\' || text[at + 2] == '/') &&
                            (at == 0 || !std::isalnum(static_cast<unsigned char>(text[at - 1])));
+        // UNC paths: \\server\share\..., \\?\UNC\..., \\?\C:\... (device names such as \\.\pipe\x stay)
+        const bool unc = at + 2 < text.size() && text[at] == '\\' && text[at + 1] == '\\' &&
+                         (std::isalnum(static_cast<unsigned char>(text[at + 2])) || text[at + 2] == '?') &&
+                         (at == 0 || (text[at - 1] != '\\' && !std::isalnum(static_cast<unsigned char>(text[at - 1]))));
+        const bool start = drive || unc;
         if (!start) { out += text[at++]; continue; }
         std::size_t end = text.size();
         for (const char* stop : stops) {
@@ -70,6 +75,9 @@ inline std::string hide_paths(const std::string& text, const std::string& progra
         std::string folded = leaf;
         for (char& c : folded) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (!program_lower.empty() && folded == program_lower) leaf = program_shown;
+        // A folder path's leaf can be the account name (C:\\Users\\<name>): never shown.
+        const std::string user = lower(env("USERNAME"));
+        if (!user.empty() && folded == user) leaf.clear();
         if (out.size() >= 4 && out.compare(out.size() - 4, 4, "\\\\?\\") == 0) out.resize(out.size() - 4);
         out += leaf.empty() ? "<path>" : "<path>\\" + leaf;
         at = end;
