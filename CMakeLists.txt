@@ -3415,6 +3415,18 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "${CMAKE_SOURCE_DIR}/tests/native/sys_title_check.py" "$<TARGET_FILE:x2w_launch>"
             "$<TARGET_FILE:x2w_sys_title>" "$<TARGET_FILE:gdeflate_pack>" "${x2w_shim_dir}")
         set_tests_properties(native_launch_sys PROPERTIES TIMEOUT 180)
+        # Synchronous ReadFile/WriteFile on an overlapped handle (x2w_sys) and the launcher's stall detector: a title
+        # blocked in a pipe ReadFile for 3.5 s gets one "stalled thread" line (tests/native/stall_check.py).
+        add_executable(x2w_stall_title tests/native/stall_title.cpp)
+        add_dependencies(x2w_stall_title x2w_shims)
+        target_compile_options(x2w_stall_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_stall_title PRIVATE /ENTRY:stall_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+            /INCREMENTAL:NO)
+        target_link_libraries(x2w_stall_title PRIVATE kernel32)
+        add_test(NAME native_launch_stall COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/stall_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_stall_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_launch_stall PROPERTIES TIMEOUT 180)
         # A title importing gameinput.dll!GameInputCreate gets the GameInput v0 facade from the shims directory
         # (src/sys/sys_gameinput_v0.h, tests/native/gameinput_check.py); fastfail and Windows-thread crash endings.
         set(x2w_gameinput_imports "${CMAKE_CURRENT_BINARY_DIR}/gameinput_title_imports.lib")

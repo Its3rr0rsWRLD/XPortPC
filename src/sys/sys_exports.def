@@ -3,6 +3,7 @@ EXPORTS
     X2WSysInit
     X2WSysHookLookup
     X2WSysShutdown
+    X2WSysDescribeHandle
     X2wGameInputCreate
     X2wGameInputCreateV0
     X2wGameInputBackend

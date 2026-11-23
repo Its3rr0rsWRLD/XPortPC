@@ -536,6 +536,7 @@ HRESULT run_requests(Queue* q, Op* ops, size_t n) {
     HANDLE done = nullptr;
     if (parallel) {
         done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        tag_handle(done, "x2w_sys directstorage batch-done event");
         for (auto& j : jobs) {
             j.left = &left;
             j.done = done;
@@ -546,6 +547,7 @@ HRESULT run_requests(Queue* q, Op* ops, size_t n) {
         if (!(parallel && poolable(ops[i]))) note(execute(q, ops[i]));
     if (parallel) {
         WaitForSingleObject(done, INFINITE);
+        tag_handle(done, nullptr);
         CloseHandle(done);
         for (auto& j : jobs) note(j.hr);
     }
@@ -674,6 +676,7 @@ void release_obj(Obj* o) {
         q->worker.join();
         destroy_gpu(q->gpu);
         if (q->device) q->device->Release();
+        tag_handle(q->error_event, nullptr);
         CloseHandle(q->error_event);
         delete q;
         break;
@@ -742,6 +745,7 @@ HRESULT create_queue(Abi abi, const uint8_t* d, const GUID* riid, void** ppv) {
         q->capacity = 1024;
     }
     q->error_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    tag_handle(q->error_event, "x2w_sys directstorage queue error event");
     ++g_live;
     q->worker = std::thread([q] { worker(q); });
     log("directstorage: queue created (%s abi, capacity %u, priority %d, source %s, name \"%s\"%s)", abi == Abi::pc ? "pc" : "console",

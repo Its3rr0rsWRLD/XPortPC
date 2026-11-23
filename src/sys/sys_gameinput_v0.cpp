@@ -518,6 +518,7 @@ HRESULT STDMETHODCALLTYPE open_wait_handle(Object*, HANDLE* handle) {
     GI_LOG("OpenWaitHandle", "out=%p", static_cast<void*>(handle));
     if (!handle) return E_POINTER;
     *handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // never signalled: there is no background work
+    tag_handle(*handle, "x2w_sys gameinput v0 event (never signalled)");
     return *handle ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 

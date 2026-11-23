@@ -89,13 +89,69 @@ int main() {
     CHECK(h != INVALID_HANDLE_VALUE);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     CHECK(GetFileAttributesA((lad + "\\XPortPC\\Game\\persist\\slot0\\save.dat").c_str()) != INVALID_FILE_ATTRIBUTES);
+
+    // ReadFile/WriteFile with lpOverlapped null on a FILE_FLAG_OVERLAPPED handle behave as on a synchronous handle
+    // (sys_paths.cpp, sync_io_on_async), and every open is logged with its flags and file type.
+    {
+        using ReadFn = BOOL(WINAPI*)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+        using WriteFn = BOOL(WINAPI*)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+        using CloseFn = BOOL(WINAPI*)(HANDLE);
+        auto read = reinterpret_cast<ReadFn>(X2WSysHookLookup("kernel32.dll", "ReadFile"));
+        auto write = reinterpret_cast<WriteFn>(X2WSysHookLookup("kernel32.dll", "WriteFile"));
+        auto close = reinterpret_cast<CloseFn>(X2WSysHookLookup("kernel32.dll", "CloseHandle"));
+        CHECK(read && write && close);
+        const std::string data = root + "\\overlapped.bin";
+        put_file(data, "0123456789");
+        const std::wstring wdata(data.begin(), data.end());
+        HANDLE f = create(wdata.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                          FILE_FLAG_OVERLAPPED, nullptr);
+        CHECK(f != INVALID_HANDLE_VALUE);
+        CHECK_EQ(chk::count("file-open <path>\\overlapped.bin -> handle 0x"), 1);
+        CHECK_EQ(chk::count("access=0xc0000000 share=0x1 disp=OPEN_EXISTING flags=(OVERLAPPED) type=disk"), 1);
+        char buffer[8] = {};
+        DWORD done = 0;
+        // Windows itself refuses this call on an overlapped disk handle (no file position).
+        CHECK(!ReadFile(f, buffer, 4, &done, nullptr) && GetLastError() == ERROR_INVALID_PARAMETER);
+        CHECK(read(f, buffer, 4, &done, nullptr) && done == 4 && std::string(buffer, 4) == "0123");
+        CHECK(read(f, buffer, 4, &done, nullptr) && done == 4 && std::string(buffer, 4) == "4567");
+        CHECK(read(f, buffer, 4, &done, nullptr) && done == 2 && std::string(buffer, 2) == "89");
+        done = 7;
+        CHECK(read(f, buffer, 4, &done, nullptr) && done == 0);
+        CHECK(write(f, "ab", 2, &done, nullptr) && done == 2);
+        CHECK_EQ(chk::count("sync-read-on-async-handle handle 0x"), 4);
+        CHECK_EQ(chk::count("sync-write-on-async-handle handle 0x"), 1);
+        CHECK(close(f));
+        HANDLE again = CreateFileA(data.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(again != INVALID_HANDLE_VALUE);
+        char all[16] = {};
+        CHECK(ReadFile(again, all, sizeof all, &done, nullptr) && done == 12 && std::string(all, 12) == "0123456789ab");
+        // The handle value was dropped from the table at CloseHandle: a synchronous handle is passed straight on.
+        CHECK(read(again, all, 4, &done, nullptr) && done == 0);
+        CHECK_EQ(chk::count("sync-read-on-async-handle handle 0x"), 4);
+        CloseHandle(again);
+        // A synchronous handle with lpOverlapped null is not touched; device names are logged as given.
+        HANDLE nul = create(L"NUL", GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(nul != INVALID_HANDLE_VALUE);
+        CHECK(write(nul, "x", 1, &done, nullptr) && done == 1);
+        CHECK_EQ(chk::count("sync-write-on-async-handle handle 0x"), 1);
+        CHECK_EQ(chk::count("file-open NUL -> handle 0x"), 1);
+        CHECK_EQ(chk::count("type=char"), 1);
+        char described[256] = {};
+        CHECK_EQ(X2WSysDescribeHandle(nul, described, sizeof described), 1);
+        CHECK(std::string(described) == "opened-as NUL flags=() type-at-open=char");
+        CHECK(close(nul));
+        CHECK_EQ(X2WSysDescribeHandle(nul, described, sizeof described), 0);
+        HANDLE missing = create(L"P:\\nope\\missing.bin", GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        CHECK(missing == INVALID_HANDLE_VALUE);
+        CHECK_EQ(chk::count("file-open <path>\\missing.bin -> failed error 3"), 1);
+    }
     auto sysinfo = reinterpret_cast<void(WINAPI*)(LPSYSTEM_INFO)>(X2WSysHookLookup("kernel32.dll", "GetSystemInfo"));
     SYSTEM_INFO si{};
     sysinfo(&si);
     CHECK_EQ(si.dwNumberOfProcessors, 8u);
 
     X2WSysShutdown();
-    CHECK_EQ(chk::count("paths: 1 remapped calls") + chk::count("paths: 2 remapped calls"), 1);
+    CHECK_EQ(chk::count("paths: 2 remapped calls") + chk::count("paths: 3 remapped calls"), 1);
     CHECK(chk::count("audio: formats seen") == 1 && chk::count("directstorage: fallback") == 1);
 
     // A user rule that moves T: elsewhere keeps its folder out of the cleaner.

@@ -48,6 +48,11 @@ std::string hide_dir(const std::string& text) {
     return result;
 }
 
+}  // namespace
+
+std::string redact_line(const std::string& body) { return x2w_redact::apply(hide_dir(body)); }
+
+namespace {
 void emit(const std::string& body) {
     LogSink sink;
     {
@@ -160,4 +165,20 @@ uint64_t mul_div_u64(uint64_t a, uint64_t b, uint64_t c) {
     return q * b + (r * b) / c;
 }
 
+}  // namespace x2w_sys
+
+namespace x2w_sys {
+void tag_handle(void* handle, const char* who) {
+    using TagFn = void(__cdecl*)(void*, const char*);
+    // x2w_launch exports this (tools/x2w_launch.cpp, "stall detector"). GetModuleHandle(nullptr) is the title once
+    // the launcher has set the PEB's image base to it, so the launcher is also looked up by name.
+    static const TagFn fn = [] {
+        auto found = reinterpret_cast<TagFn>(GetProcAddress(GetModuleHandleW(nullptr), "x2w_launch_tag_handle"));
+        if (!found)
+            if (HMODULE launcher = GetModuleHandleW(L"x2w_launch.exe"))
+                found = reinterpret_cast<TagFn>(GetProcAddress(launcher, "x2w_launch_tag_handle"));
+        return found;
+    }();
+    if (fn && handle) fn(handle, who);
+}
 }  // namespace x2w_sys

@@ -25,6 +25,10 @@ void log(const char* fmt, ...) X2W_SYS_PRINTF(1, 2);
 // Prints only the first time `key` is seen since reset_log_once(). Returns true when it printed.
 bool log_once(const std::string& key, const char* fmt, ...) X2W_SYS_PRINTF(2, 3);
 void reset_log_once();
+// The text as a log line would show it (title folder as <game>, host paths as <path>\leaf), without the prefix.
+std::string redact_line(const std::string& body);
+// Tells x2w_launch (when it runs the title) that this module created the handle, for its stall lines. No-op otherwise.
+void tag_handle(void* handle, const char* who);
 
 std::string get_env(const char* name);
 std::wstring widen(const std::string& utf8);

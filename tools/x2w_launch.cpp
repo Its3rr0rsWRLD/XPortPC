@@ -85,6 +85,9 @@
 // call in a per-thread 64-entry ring (name, caller, first four integer arguments, RAX on return). A crash, a
 // first-chance line and the first breakpoint lines are followed by that thread's last 32 calls; a crash also by the
 // main thread's. Lines: "trace-calls on", "recent-calls thread ...", "recent N: ..." (see "recent-calls trace" below).
+// With --log and --timeout the watchdog also scans those rings once a second: a call pending for more than 2 s gets one
+// "stalled thread TID(main|program) in dll!NAME(...) for Ns caller=..." line, with the handle's type, name and mode
+// for file calls and the object type (and the shim that made it) for waits (see "stall detector" below).
 //
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
@@ -819,6 +822,266 @@ void trace_dump_main() {
     for (long i = 0; i < used && !ring; ++i)
         if (trace_pool[i].tid == trace_main_tid) ring = &trace_pool[i];
     trace_dump(ring, "main");
+}
+
+// ---------------------------------------------------------------- stall detector
+// With --log and --timeout the watchdog scans every thread's recent-calls ring once a second. A thread whose newest
+// call has been pending for more than 2 s (the same call seen pending in scans at least 2 s apart) is logged once:
+// "stalled thread TID(main|program) in dll!NAME(a1,a2,a3,a4) for Ns caller=module+RVA", then for file calls
+// (ReadFile, WriteFile, ReadFileEx, GetOverlappedResult, DeviceIoControl, ...) " handle 0x.. handle-type T name N
+// overlapped-handle=yes|no", and for waits (WaitForSingleObject(Ex), WaitForMultipleObjects(Ex), ...) per handle
+// " handle 0x.. object-type TYPE" plus " created-by WHO" for an event a shim tagged (x2w_launch_tag_handle) and the
+// file fields for a File object. What x2w_sys's file hooks know of the handle follows as " opened-as NAME flags=(...)
+// type-at-open=T" (X2WSysDescribeHandle). GetFileType, NtQueryInformationFile(FileModeInformation) and the name
+// queries can block on a synchronous handle another thread is reading, so they run on a helper thread made without
+// loader notifications and are waited for 500 ms; a query still running shows "busy". At most 64 stall lines.
+using SysDescribe = int(__stdcall*)(void* handle, char* out, unsigned capacity);
+SysDescribe sys_describe;
+struct StallSeen {
+    std::uint64_t seq;
+    ULONGLONG since;
+    bool logged;
+};
+StallSeen* stall_seen;  // one per trace ring, allocated with the pool
+long stall_lines;
+constexpr long kStallLines = 64;
+constexpr ULONGLONG kStallMs = 2000;
+
+// Handles the shims created (x2w_launch_tag_handle), for the stall lines.
+struct HandleTag {
+    void* handle;
+    char who[72];
+};
+constexpr int kHandleTags = 1024;
+HandleTag handle_tags[kHandleTags];
+SRWLOCK handle_tag_lock = SRWLOCK_INIT;
+
+bool handle_tag(void* handle, char* out, std::size_t capacity) {
+    bool found = false;
+    AcquireSRWLockShared(&handle_tag_lock);
+    for (const auto& tag : handle_tags)
+        if (tag.handle == handle) {
+            std::snprintf(out, capacity, "%s", tag.who);
+            found = true;
+            break;
+        }
+    ReleaseSRWLockShared(&handle_tag_lock);
+    return found;
+}
+
+struct NtText {  // UNICODE_STRING
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR Buffer;
+};
+struct HandleQuery {
+    HANDLE handle;
+    volatile long refs;
+    volatile long stage;  // 1: type, 2: mode, 3: name
+    DWORD type;
+    LONG mode_status;
+    ULONG mode;
+    DWORD name_length;  // in wide characters, 0 when no name was found
+    wchar_t name[520];
+};
+using NtQueryInformationFileFn = LONG(NTAPI*)(HANDLE, void*, void*, ULONG, ULONG);
+using NtQueryObjectFn = LONG(NTAPI*)(HANDLE, ULONG, void*, ULONG, ULONG*);
+using NtCreateThreadExFn = LONG(NTAPI*)(HANDLE*, ACCESS_MASK, void*, HANDLE, void*, void*, ULONG, SIZE_T, SIZE_T,
+                                        SIZE_T, void*);
+NtQueryInformationFileFn nt_query_file;
+NtQueryObjectFn nt_query_object;
+NtCreateThreadExFn nt_create_thread;
+
+void handle_query_release(HandleQuery* query) {
+    if (InterlockedDecrement(&query->refs) == 0) HeapFree(GetProcessHeap(), 0, query);
+}
+
+DWORD WINAPI handle_query_thread(void* parameter) {
+    auto* query = static_cast<HandleQuery*>(parameter);
+    query->type = GetFileType(query->handle);
+    query->stage = 1;
+    ULONG_PTR iosb[2] = {};
+    query->mode_status = nt_query_file ? nt_query_file(query->handle, iosb, &query->mode, sizeof query->mode, 16)
+                                       : -1;  // FileModeInformation
+    query->stage = 2;
+    DWORD length = GetFinalPathNameByHandleW(query->handle, query->name, 512, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length == 0 || length >= 512) {
+        // Pipes and devices have no DOS path: the object name (\Device\NamedPipe\x).
+        alignas(8) std::uint8_t buffer[1100];
+        ULONG got = 0;
+        length = 0;
+        if (nt_query_object && nt_query_object(query->handle, 1 /* ObjectNameInformation */, buffer, sizeof buffer, &got) >= 0) {
+            const auto* text = reinterpret_cast<const NtText*>(buffer);
+            length = text->Buffer ? text->Length / 2 : 0;
+            if (length > 511) length = 511;
+            if (length) std::memcpy(query->name, text->Buffer, length * 2);
+        }
+    }
+    query->name_length = length;
+    query->stage = 3;
+    handle_query_release(query);
+    return 0;
+}
+
+std::string object_type(HANDLE handle) {
+    if (!nt_query_object) return "unknown";
+    alignas(8) std::uint8_t buffer[512];
+    ULONG got = 0;
+    if (nt_query_object(handle, 2 /* ObjectTypeInformation */, buffer, sizeof buffer, &got) < 0) return "invalid";
+    const auto* text = reinterpret_cast<const NtText*>(buffer);
+    std::string out;
+    for (USHORT i = 0; text->Buffer && i < text->Length / 2 && out.size() < 32; ++i)
+        out += std::iswalnum(text->Buffer[i]) && text->Buffer[i] < 0x80 ? static_cast<char>(text->Buffer[i]) : '_';
+    return out.empty() ? "unknown" : out;
+}
+
+// " handle-type T name N overlapped-handle=yes|no" for a file handle, from the helper thread.
+std::string file_fields(HANDLE handle) {
+    auto* query = static_cast<HandleQuery*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HandleQuery)));
+    if (!query) return " handle-type unknown name unknown overlapped-handle=unknown";
+    query->handle = handle;
+    query->refs = 2;
+    HANDLE thread = nullptr;
+    // THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH: no DllMain, TLS callback or pe_map notification runs on it.
+    if (!nt_create_thread || nt_create_thread(&thread, THREAD_ALL_ACCESS, nullptr, GetCurrentProcess(),
+                                              reinterpret_cast<void*>(&handle_query_thread), query, 0x2, 0, 0, 0,
+                                              nullptr) < 0) {
+        thread = nullptr;
+        query->refs = 1;
+    }
+    if (thread) {
+        WaitForSingleObject(thread, 500);
+        CloseHandle(thread);
+    }
+    const long stage = query->stage;
+    std::string out = " handle-type ";
+    if (stage >= 1) {
+        const DWORD type = query->type & ~FILE_TYPE_REMOTE;
+        out += type == FILE_TYPE_DISK ? "disk" : type == FILE_TYPE_PIPE ? "pipe" : type == FILE_TYPE_CHAR ? "char"
+             : (query->type & FILE_TYPE_REMOTE) ? "remote" : "unknown";
+    } else {
+        out += "busy";
+    }
+    out += " name ";
+    if (stage >= 3 && query->name_length) {
+        std::wstring name(query->name, query->name_length);
+        if (name.compare(0, 4, L"\\\\?\\") == 0) name = name.substr(4);
+        const bool dos = name.size() > 2 && name[1] == L':';
+        const auto cut = name.find_last_of(L"\\/");
+        std::string shown;
+        for (wchar_t c : dos && cut != std::wstring::npos ? name.substr(cut + 1) : name)
+            shown += c > 0x20 && c < 0x7f ? static_cast<char>(c) : '_';
+        out += dos ? "<path>\\" + shown : shown;
+    } else {
+        out += stage >= 3 ? "unknown" : "busy";
+    }
+    out += " overlapped-handle=";
+    if (stage >= 2) out += query->mode_status < 0 ? "unknown" : (query->mode & 0x30) ? "no" : "yes";
+    else out += "busy";
+    handle_query_release(query);
+    return out;
+}
+
+std::string handle_fields(HANDLE handle, bool file_call) {
+    char text[64];
+    std::snprintf(text, sizeof text, " handle 0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(handle)));
+    std::string out = text;
+    const std::string type = object_type(handle);
+    if (!file_call) out += " object-type " + type;
+    char who[80];
+    if (handle_tag(handle, who, sizeof who)) out += std::string(" created-by ") + who;
+    if (file_call || type == "File") out += file_fields(handle);
+    char opened[400];
+    if (sys_describe && sys_describe(handle, opened, sizeof opened)) out += std::string(" ") + opened;
+    return out;
+}
+
+bool stall_file_call(const char* symbol) {
+    static const char* const names[] = {"ReadFile", "WriteFile", "ReadFileEx", "WriteFileEx", "ReadFileScatter",
+                                        "WriteFileGather", "GetOverlappedResult", "GetOverlappedResultEx",
+                                        "DeviceIoControl", "NtReadFile", "NtWriteFile", "NtDeviceIoControlFile",
+                                        "NtFsControlFile", "FlushFileBuffers", "ConnectNamedPipe", "PeekNamedPipe",
+                                        "TransactNamedPipe", "LockFile", "LockFileEx", "CancelSynchronousIo"};
+    for (const char* name : names)
+        if (std::strcmp(symbol, name) == 0) return true;
+    return false;
+}
+
+void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const std::uint64_t* args, ULONGLONG ms) {
+    if (InterlockedIncrement(&stall_lines) > kStallLines) {
+        if (stall_lines == kStallLines + 1) log_line("stalled-threads more are not logged");
+        return;
+    }
+    char where[160];
+    describe(reinterpret_cast<const void*>(caller), where, sizeof where);
+    const char* bang = std::strchr(desc->name, '!');
+    const char* symbol = bang ? bang + 1 : desc->name;
+    std::string extra;
+    if (stall_file_call(symbol)) {
+        extra = handle_fields(reinterpret_cast<HANDLE>(args[0]), true);
+    } else if (!std::strcmp(symbol, "WaitForSingleObject") || !std::strcmp(symbol, "WaitForSingleObjectEx")
+               || !std::strcmp(symbol, "NtWaitForSingleObject") || !std::strcmp(symbol, "ZwWaitForSingleObject")) {
+        extra = handle_fields(reinterpret_cast<HANDLE>(args[0]), false);
+    } else if (!std::strcmp(symbol, "SignalObjectAndWait")) {
+        extra = handle_fields(reinterpret_cast<HANDLE>(args[1]), false);
+    } else if (!std::strcmp(symbol, "WaitForMultipleObjects") || !std::strcmp(symbol, "WaitForMultipleObjectsEx")
+               || !std::strcmp(symbol, "MsgWaitForMultipleObjects") || !std::strcmp(symbol, "MsgWaitForMultipleObjectsEx")
+               || !std::strcmp(symbol, "NtWaitForMultipleObjects")) {
+        const std::uint64_t count = args[0] < 4 ? args[0] : 4;
+        HANDLE handles[4] = {};
+        SIZE_T got = 0;
+        if (count && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(args[1]), handles,
+                                       count * sizeof(HANDLE), &got) && got == count * sizeof(HANDLE))
+            for (std::uint64_t i = 0; i < count; ++i) extra += handle_fields(handles[i], false);
+        if (args[0] > 4) extra += " more-handles " + std::to_string(args[0] - 4);
+    }
+    log_line("stalled thread %lu(%s) in %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus caller=%s%s", tid,
+             tid == trace_main_tid ? "main" : "program", desc->name, static_cast<unsigned long long>(args[0]),
+             static_cast<unsigned long long>(args[1]), static_cast<unsigned long long>(args[2]),
+             static_cast<unsigned long long>(args[3]), static_cast<unsigned long long>(ms / 1000), where,
+             extra.c_str());
+}
+
+// One scan of every ring (the watchdog, once a second).
+void stall_scan() {
+    if (!trace_body || !stall_seen) return;
+    const long used = trace_pool_used < kTraceRings ? trace_pool_used : kTraceRings;
+    const ULONGLONG now = GetTickCount64();
+    for (long i = 0; i < used; ++i) {
+        const TraceRing& ring = trace_pool[i];
+        StallSeen& seen = stall_seen[i];
+        const std::uint64_t count = ring.count;
+        if (!count || !ring.tid) continue;
+        const TraceEntry& entry = ring.entries[(count - 1) % kTraceRing];
+        const std::uint64_t seq = entry.seq;
+        if (seq != count) {  // returned, or being written
+            seen.seq = 0;
+            continue;
+        }
+        const TraceDesc* desc = entry.desc;
+        const std::uint64_t caller = entry.caller;
+        std::uint64_t args[4];
+        for (int a = 0; a < 4; ++a) args[a] = entry.args[a];
+        if (entry.seq != seq || !desc) continue;
+        if (seen.seq != seq) {
+            seen.seq = seq;
+            seen.since = now;
+            seen.logged = false;
+            continue;
+        }
+        if (seen.logged || now - seen.since < kStallMs) continue;
+        seen.logged = true;
+        stall_report(ring.tid, desc, caller, args, now - seen.since);
+    }
+}
+
+void stall_init() {
+    stall_seen = static_cast<StallSeen*>(
+        VirtualAlloc(nullptr, sizeof(StallSeen) * kTraceRings, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    nt_query_file = reinterpret_cast<NtQueryInformationFileFn>(GetProcAddress(ntdll, "NtQueryInformationFile"));
+    nt_query_object = reinterpret_cast<NtQueryObjectFn>(GetProcAddress(ntdll, "NtQueryObject"));
+    nt_create_thread = reinterpret_cast<NtCreateThreadExFn>(GetProcAddress(ntdll, "NtCreateThreadEx"));
 }
 
 void* report(const std::string& dll, const std::string& symbol, const char* route, const char* kind, void* address) {
@@ -2562,7 +2825,12 @@ DWORD WINAPI watchdog(void* seconds) {
     const auto limit = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(seconds));
     set_phase(PHASE_WATCHDOG);
     SetEvent(watchdog_ready);
-    Sleep(limit * 1000);
+    // Once a second: the stall detector (see "stall detector").
+    const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(limit) * 1000;
+    for (ULONGLONG now = GetTickCount64(); now < end; now = GetTickCount64()) {
+        Sleep(static_cast<DWORD>(end - now < 1000 ? end - now : 1000));
+        stall_scan();
+    }
     log_line("timeout still running after %lu s", limit);
     log_summary("timeout");
     err_printf( "[x2w] timeout after %lu s\n", limit);
@@ -2581,6 +2849,29 @@ extern "C" __declspec(dllexport) void __cdecl x2w_launch_log_shim(const char* ki
 // The xgr gateway (and any shim) calls this at its own milestones: the heap guard validates the process heap there.
 extern "C" __declspec(dllexport) void __cdecl x2w_launch_heap_milestone(const char* name) {
     heap_milestone(name ? name : "shim");
+}
+
+// Shims tag the handles they create (an event a title may wait on), so a stall line can name its creator; who null
+// drops the tag (the shim is closing the handle). Later tags of a reused handle value replace earlier ones.
+extern "C" __declspec(dllexport) void __cdecl x2w_launch_tag_handle(void* handle, const char* who) {
+    if (!handle) return;
+    AcquireSRWLockExclusive(&handle_tag_lock);
+    HandleTag* slot = nullptr;
+    for (auto& tag : handle_tags)
+        if (tag.handle == handle) { slot = &tag; break; }
+    if (!slot && who)
+        for (auto& tag : handle_tags)
+            if (!tag.handle) { slot = &tag; break; }
+    if (slot) {
+        if (who) {
+            slot->handle = handle;
+            std::snprintf(slot->who, sizeof slot->who, "%s", who);
+            for (char& c : slot->who) if (c == ' ') c = '_';
+        } else {
+            slot->handle = nullptr;
+        }
+    }
+    ReleaseSRWLockExclusive(&handle_tag_lock);
 }
 
 #pragma section(".CRT$XLB", long, read)
@@ -2728,6 +3019,7 @@ int wmain(int argc, wchar_t** argv) {
     // Before any import is bound: every routed import gets its recent-calls thunk.
     if (trace_calls) {
         trace_calls = trace_init();
+        if (trace_calls) stall_init();
         log_line(trace_calls ? "trace-calls on" : "trace-calls unavailable");
     }
     {
@@ -2766,6 +3058,7 @@ int wmain(int argc, wchar_t** argv) {
         const auto init = sys_module ? reinterpret_cast<SysInit>(GetProcAddress(sys_module, "X2WSysInit")) : nullptr;
         sys_lookup = sys_module ? reinterpret_cast<SysLookup>(GetProcAddress(sys_module, "X2WSysHookLookup")) : nullptr;
         sys_shutdown = sys_module ? reinterpret_cast<SysShutdown>(GetProcAddress(sys_module, "X2WSysShutdown")) : nullptr;
+        sys_describe = sys_module ? reinterpret_cast<SysDescribe>(GetProcAddress(sys_module, "X2WSysDescribeHandle")) : nullptr;
         if (!init || !sys_lookup || !sys_shutdown) {
             sys_lookup = nullptr;
             sys_shutdown = nullptr;

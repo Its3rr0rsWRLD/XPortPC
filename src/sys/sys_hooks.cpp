@@ -154,3 +154,15 @@ X2W_SYS_API void __stdcall X2WSysShutdown(void) {
                  static_cast<unsigned long long>(d.requests), static_cast<unsigned long long>(d.bytes_read),
                  static_cast<unsigned long long>(d.failed));
 }
+
+X2W_SYS_API int __stdcall X2WSysDescribeHandle(void* handle, char* out, unsigned capacity) {
+    std::string text;
+    if (!x2w_sys::paths::describe_handle(handle, &text)) return 0;
+    if (out && capacity) {
+        const std::string shown = x2w_sys::redact_line(text);
+        const size_t n = shown.size() < capacity - 1 ? shown.size() : capacity - 1;
+        std::memcpy(out, shown.data(), n);
+        out[n] = '\0';
+    }
+    return 1;
+}

@@ -14,6 +14,20 @@
 
 namespace {
 
+// Tells x2w_launch that this shim created the handle, for its stall lines (tools/x2w_launch.cpp, "stall detector").
+void tag_handle(void* handle, const char* who)
+{
+    using TagFn = void(__cdecl*)(void*, const char*);
+    static const TagFn fn = [] {
+        auto found = reinterpret_cast<TagFn>(GetProcAddress(GetModuleHandleW(nullptr), "x2w_launch_tag_handle"));
+        if (!found)
+            if (HMODULE launcher = GetModuleHandleW(L"x2w_launch.exe"))
+                found = reinterpret_cast<TagFn>(GetProcAddress(launcher, "x2w_launch_tag_handle"));
+        return found;
+    }();
+    if (fn && handle) fn(handle, who);  // who null: the handle is being closed
+}
+
 constexpr uint32_t block_signature = 0x31534158;  // "XAS1"
 
 struct AsyncState {
@@ -62,7 +76,10 @@ void release(AsyncState* state)
     const bool last = --state->refs == 0;
     ReleaseSRWLockExclusive(&g_lock);
     if (!last) return;
-    if (state->done) CloseHandle(state->done);
+    if (state->done) {
+        tag_handle(state->done, nullptr);
+        CloseHandle(state->done);
+    }
     if (state->queue) x2w_impl_XTaskQueueCloseHandle(state->queue);
     delete state;
 }
@@ -253,6 +270,7 @@ HRESULT begin(XAsyncBlock* asyncBlock, void* context, const void* identity, cons
     state->name = identityName ? identityName : "";
     state->queue = queue;
     state->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    tag_handle(state->done, "x2w_gdk XAsync done event");
     AcquireSRWLockExclusive(&g_lock);
     memset(asyncBlock->internal, 0, sizeof asyncBlock->internal);
     in->state = state;

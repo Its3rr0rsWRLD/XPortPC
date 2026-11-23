@@ -66,6 +66,8 @@ Map& global_map();
 Stats& global_stats();
 void apply_config_line(const std::string& key, const std::string& value);
 void log_summary();
+// For a handle the title opened through the hooks and has not closed: "opened-as NAME flags=(...) type-at-open=T".
+bool describe_handle(void* handle, std::string* out);
 
 // Hook table for sys_hooks.cpp: (symbol, replacement) pairs, kernel32 signatures.
 struct HookEntry {

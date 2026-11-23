@@ -5,11 +5,15 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <intrin.h>
+
+#include <cstdio>
 
 #include <algorithm>
 #include <atomic>
 #include <cwctype>
 #include <mutex>
+#include <unordered_map>
 
 namespace x2w_sys::paths {
 namespace {
@@ -213,12 +217,210 @@ bool creates(DWORD disposition) {
            disposition == TRUNCATE_EXISTING;
 }
 
+// ---- open log and the handle table ----------------------------------------------------------------------
+// The first kMaxOpenLogs opens through the hooks are logged ("file-open NAME -> handle 0x.. access= share= disp=
+// flags=(...) type=disk|pipe|char|remote|unknown"); every handle the title opened is kept with its flags until
+// CloseHandle, so ReadFile/WriteFile can tell an overlapped (asynchronous) handle cheaply.
+struct OpenInfo {
+    DWORD flags = 0;
+    DWORD type = FILE_TYPE_UNKNOWN;
+    std::string name;  // as logged
+};
+SRWLOCK g_handles_lock = SRWLOCK_INIT;
+std::unordered_map<HANDLE, OpenInfo>* g_handles;  // never freed: hooks may run during process exit
+std::atomic<long> g_handle_count{0};
+std::atomic<unsigned> g_opens_logged{0};
+std::atomic<unsigned> g_sync_async_logged{0};
+constexpr unsigned kMaxOpenLogs = 400, kMaxSyncAsyncLogs = 32;
+
+// The name a log line shows: device names (\\.\pipe\x, CONIN$, NUL) verbatim, drive paths whole (the log
+// redaction turns them into <path>\leaf), any other path with folders as <path>\leaf.
+std::string shown_name(const std::wstring& path) {
+    if (path.compare(0, 4, L"\\\\.\\") == 0) return narrow(path);
+    std::wstring p = path;
+    if (p.compare(0, 4, L"\\\\?\\") == 0) p = p.substr(4);
+    if (is_drive_form(p)) return narrow(path);
+    const size_t cut = p.find_last_of(L"\\/");
+    if (cut == std::wstring::npos) return narrow(p);
+    return "<path>\\" + narrow(p.substr(cut + 1));
+}
+
+const char* type_name(DWORD type) {
+    switch (type & ~FILE_TYPE_REMOTE) {
+        case FILE_TYPE_DISK: return "disk";
+        case FILE_TYPE_PIPE: return "pipe";
+        case FILE_TYPE_CHAR: return "char";
+        default: return (type & FILE_TYPE_REMOTE) ? "remote" : "unknown";
+    }
+}
+
+const char* disp_name(DWORD disp) {
+    switch (disp) {
+        case CREATE_NEW: return "CREATE_NEW";
+        case CREATE_ALWAYS: return "CREATE_ALWAYS";
+        case OPEN_EXISTING: return "OPEN_EXISTING";
+        case OPEN_ALWAYS: return "OPEN_ALWAYS";
+        case TRUNCATE_EXISTING: return "TRUNCATE_EXISTING";
+        default: return "?";
+    }
+}
+
+std::string flag_text(DWORD flags) {
+    static const struct { DWORD bit; const char* name; } kFlags[] = {
+        {FILE_FLAG_WRITE_THROUGH, "WRITE_THROUGH"}, {FILE_FLAG_OVERLAPPED, "OVERLAPPED"},
+        {FILE_FLAG_NO_BUFFERING, "NO_BUFFERING"}, {FILE_FLAG_RANDOM_ACCESS, "RANDOM_ACCESS"},
+        {FILE_FLAG_SEQUENTIAL_SCAN, "SEQUENTIAL_SCAN"}, {FILE_FLAG_DELETE_ON_CLOSE, "DELETE_ON_CLOSE"},
+        {FILE_FLAG_BACKUP_SEMANTICS, "BACKUP_SEMANTICS"}, {FILE_FLAG_POSIX_SEMANTICS, "POSIX_SEMANTICS"},
+        {FILE_FLAG_OPEN_REPARSE_POINT, "OPEN_REPARSE_POINT"}, {FILE_FLAG_OPEN_NO_RECALL, "OPEN_NO_RECALL"}};
+    std::string out;
+    DWORD rest = flags;
+    for (const auto& f : kFlags)
+        if (flags & f.bit) {
+            if (!out.empty()) out += '|';
+            out += f.name;
+            rest &= ~f.bit;
+        }
+    if (rest) {
+        char hex[16];
+        std::snprintf(hex, sizeof hex, "0x%lx", static_cast<unsigned long>(rest));
+        if (!out.empty()) out += '|';
+        out += hex;
+    }
+    return "(" + out + ")";
+}
+
+void after_open(const std::wstring& path, HANDLE h, DWORD access, DWORD share, DWORD disp, DWORD flags) {
+    const DWORD error = GetLastError();
+    const bool ok = h != INVALID_HANDLE_VALUE && h != nullptr;
+    OpenInfo info;
+    info.flags = flags;
+    info.name = shown_name(path);
+    if (ok) {
+        info.type = GetFileType(h);
+        AcquireSRWLockExclusive(&g_handles_lock);
+        if (!g_handles) g_handles = new std::unordered_map<HANDLE, OpenInfo>;
+        (*g_handles)[h] = info;
+        g_handle_count.store(static_cast<long>(g_handles->size()), std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&g_handles_lock);
+    }
+    if (g_opens_logged.fetch_add(1, std::memory_order_relaxed) < kMaxOpenLogs) {
+        char result[48];
+        if (ok) std::snprintf(result, sizeof result, "handle 0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
+        else std::snprintf(result, sizeof result, "failed error %lu", error);
+        log("file-open %s -> %s access=0x%lx share=0x%lx disp=%s flags=%s type=%s", info.name.c_str(), result,
+            static_cast<unsigned long>(access), static_cast<unsigned long>(share), disp_name(disp),
+            flag_text(flags).c_str(), ok ? type_name(info.type) : "none");
+    }
+    SetLastError(error);
+}
+
+bool find_open(HANDLE h, OpenInfo* out) {
+    if (g_handle_count.load(std::memory_order_relaxed) == 0) return false;
+    AcquireSRWLockShared(&g_handles_lock);
+    bool found = false;
+    if (g_handles) {
+        const auto it = g_handles->find(h);
+        if (it != g_handles->end()) {
+            found = true;
+            if (out) *out = it->second;
+        }
+    }
+    ReleaseSRWLockShared(&g_handles_lock);
+    return found;
+}
+
+using NtQueryInformationFileFn = LONG(NTAPI*)(HANDLE, void*, void*, ULONG, ULONG);
+
+// FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT clear in FileModeInformation: an asynchronous handle.
+bool handle_is_async(HANDLE h) {
+    static const auto query = reinterpret_cast<NtQueryInformationFileFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
+    if (!query) return true;
+    ULONG_PTR iosb[2] = {};
+    ULONG mode = 0;
+    if (query(h, iosb, &mode, sizeof mode, 16 /* FileModeInformation */) < 0) return true;
+    return (mode & (0x10 | 0x20)) == 0;
+}
+
+// ReadFile/WriteFile with lpOverlapped null on a handle opened with FILE_FLAG_OVERLAPPED. Windows then has no file
+// position to use (a disk file fails with ERROR_INVALID_PARAMETER) and waits on the file handle itself, which is how a
+// console-style title that expects such a call to block can hang or fail. Issued here with a private OVERLAPPED and
+// event at the handle's file pointer (disk files; the pointer is moved past the bytes done) and waited for.
+BOOL sync_io_on_async(HANDLE h, const OpenInfo& info, void* buffer, DWORD size, LPDWORD done_out, bool write,
+                      void* caller) {
+    if (g_sync_async_logged.fetch_add(1, std::memory_order_relaxed) < kMaxSyncAsyncLogs)
+        log("sync-%s-on-async-handle handle 0x%llx name %s type %s size 0x%lx caller=0x%llx (issued with a private "
+            "OVERLAPPED and waited for)", write ? "write" : "read",
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)), info.name.c_str(), type_name(info.type),
+            static_cast<unsigned long>(size), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(caller)));
+    OVERLAPPED o{};
+    o.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!o.hEvent) return FALSE;
+    const bool disk = (info.type & ~FILE_TYPE_REMOTE) == FILE_TYPE_DISK;
+    LARGE_INTEGER pos{};
+    if (disk) {
+        const LARGE_INTEGER zero{};
+        if (SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) {
+            o.Offset = pos.LowPart;
+            o.OffsetHigh = static_cast<DWORD>(pos.HighPart);
+        }
+    }
+    BOOL ok = write ? WriteFile(h, buffer, size, nullptr, &o) : ReadFile(h, buffer, size, nullptr, &o);
+    DWORD done = 0;
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (ok || error == ERROR_IO_PENDING) {
+        ok = GetOverlappedResult(h, &o, &done, TRUE);
+        error = ok ? ERROR_SUCCESS : GetLastError();
+    }
+    if (!ok && !write && error == ERROR_HANDLE_EOF) {  // a synchronous read at the end returns TRUE with 0 bytes
+        ok = TRUE;
+        error = ERROR_SUCCESS;
+    }
+    if (disk && ok) {
+        pos.QuadPart += done;
+        SetFilePointerEx(h, pos, nullptr, FILE_BEGIN);
+    }
+    CloseHandle(o.hEvent);
+    if (done_out) *done_out = done;
+    SetLastError(error);
+    return ok;
+}
+
+BOOL WINAPI h_ReadFile(HANDLE h, LPVOID buffer, DWORD size, LPDWORD done, LPOVERLAPPED ov) {
+    OpenInfo info;
+    if (!ov && find_open(h, &info) && (info.flags & FILE_FLAG_OVERLAPPED) && handle_is_async(h))
+        return sync_io_on_async(h, info, buffer, size, done, false, _ReturnAddress());
+    return ReadFile(h, buffer, size, done, ov);
+}
+
+BOOL WINAPI h_WriteFile(HANDLE h, LPCVOID buffer, DWORD size, LPDWORD done, LPOVERLAPPED ov) {
+    OpenInfo info;
+    if (!ov && find_open(h, &info) && (info.flags & FILE_FLAG_OVERLAPPED) && handle_is_async(h))
+        return sync_io_on_async(h, info, const_cast<void*>(buffer), size, done, true, _ReturnAddress());
+    return WriteFile(h, buffer, size, done, ov);
+}
+
+BOOL WINAPI h_CloseHandle(HANDLE h) {
+    if (g_handle_count.load(std::memory_order_relaxed) != 0) {
+        AcquireSRWLockExclusive(&g_handles_lock);
+        if (g_handles && g_handles->erase(h))
+            g_handle_count.store(static_cast<long>(g_handles->size()), std::memory_order_relaxed);
+        ReleaseSRWLockExclusive(&g_handles_lock);
+    }
+    return CloseHandle(h);
+}
+
 HANDLE WINAPI h_CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags,
                             HANDLE tmpl) {
     Prepared p;
     const bool write = (access & kWriteAccess) != 0 || creates(disp) || (flags & FILE_FLAG_DELETE_ON_CLOSE);
-    if (!prepare(name, write, write && (creates(disp) || (access & kWriteAccess)), p)) return INVALID_HANDLE_VALUE;
-    return CreateFileW(use(p, name), access, share, sa, disp, flags, tmpl);
+    if (!prepare(name, write, write && (creates(disp) || (access & kWriteAccess)), p)) {
+        after_open(name ? name : L"", INVALID_HANDLE_VALUE, access, share, disp, flags);
+        return INVALID_HANDLE_VALUE;
+    }
+    HANDLE h = CreateFileW(use(p, name), access, share, sa, disp, flags, tmpl);
+    after_open(use(p, name) ? use(p, name) : L"", h, access, share, disp, flags);
+    return h;
 }
 
 HANDLE WINAPI h_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags,
@@ -231,8 +433,14 @@ HANDLE WINAPI h_CreateFile2(LPCWSTR name, DWORD access, DWORD share, DWORD disp,
                             LPCREATEFILE2_EXTENDED_PARAMETERS params) {
     Prepared p;
     const bool write = (access & kWriteAccess) != 0 || creates(disp);
-    if (!prepare(name, write, write, p)) return INVALID_HANDLE_VALUE;
-    return CreateFile2(use(p, name), access, share, disp, params);
+    const DWORD flags = params ? params->dwFileFlags | params->dwFileAttributes | params->dwSecurityQosFlags : 0;
+    if (!prepare(name, write, write, p)) {
+        after_open(name ? name : L"", INVALID_HANDLE_VALUE, access, share, disp, flags);
+        return INVALID_HANDLE_VALUE;
+    }
+    HANDLE h = CreateFile2(use(p, name), access, share, disp, params);
+    after_open(use(p, name) ? use(p, name) : L"", h, access, share, disp, flags);
+    return h;
 }
 
 HANDLE WINAPI h_FindFirstFileW(LPCWSTR name, LPWIN32_FIND_DATAW data) {
@@ -315,6 +523,9 @@ const HookEntry kHooks[] = {
     {"CreateFileW", reinterpret_cast<void*>(&h_CreateFileW)},
     {"CreateFileA", reinterpret_cast<void*>(&h_CreateFileA)},
     {"CreateFile2", reinterpret_cast<void*>(&h_CreateFile2)},
+    {"ReadFile", reinterpret_cast<void*>(&h_ReadFile)},
+    {"WriteFile", reinterpret_cast<void*>(&h_WriteFile)},
+    {"CloseHandle", reinterpret_cast<void*>(&h_CloseHandle)},
     {"FindFirstFileW", reinterpret_cast<void*>(&h_FindFirstFileW)},
     {"FindFirstFileExW", reinterpret_cast<void*>(&h_FindFirstFileExW)},
     {"GetFileAttributesW", reinterpret_cast<void*>(&h_GetFileAttributesW)},
@@ -331,6 +542,13 @@ const HookEntry kHooks[] = {
 };
 
 }  // namespace
+
+bool describe_handle(void* handle, std::string* out) {
+    OpenInfo info;
+    if (!find_open(static_cast<HANDLE>(handle), &info)) return false;
+    if (out) *out = "opened-as " + info.name + " flags=" + flag_text(info.flags) + " type-at-open=" + type_name(info.type);
+    return true;
+}
 
 Map& global_map() { return g_map; }
 Stats& global_stats() { return g_stats; }

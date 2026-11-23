@@ -19,3 +19,6 @@
 X2W_SYS_API int __stdcall X2WSysInit(const char* title_dir, const char* title_name, const char* config_path);
 X2W_SYS_API void* __stdcall X2WSysHookLookup(const char* dll, const char* symbol);
 X2W_SYS_API void __stdcall X2WSysShutdown(void);
+// What the file hooks know of a handle the title opened (and has not closed): writes "opened-as NAME flags=(...)
+// type-at-open=T" (log-redacted) and returns 1, else returns 0. Calls nothing that can block (x2w_launch's stall lines).
+X2W_SYS_API int __stdcall X2WSysDescribeHandle(void* handle, char* out, unsigned capacity);
