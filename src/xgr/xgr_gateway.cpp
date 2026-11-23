@@ -456,6 +456,16 @@ extern "C" uintptr_t xgr_slot_leave(Object* self, unsigned /*slot*/, uintptr_t r
     return result;
 }
 
+// A logging object for the gateway-local functions that must hand a title an object (xgr_extra.cpp).
+void* xgr_fallback_object(const char* what) noexcept
+{
+    static const GUID net = {0x37e56907, 0x2f10, 0x41e8, {0xb7, 0x2f, 0x36, 0xed, 0xb1, 0x85, 0x33, 0x1a}};
+    static const GUID iid = {0x5e3a0c13, 0x0b0b, 0x4c1d, {0x9a, 0x7e, 0x11, 0x22, 0x33, 0x44, 0x55, 0x68}};
+    Object* object = singleton(net, iid, nullptr);
+    object->name = what;
+    return object;
+}
+
 // ---------------------------------------------------------------- the six exports
 namespace {
 struct InitializeOptions {  // the fourth argument of InitializeApiImplEx2 (shape from the prior-art notes)

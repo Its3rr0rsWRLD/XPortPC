@@ -32,7 +32,8 @@ def main(title, gateway):
         "IID of another class logged": r"xgr-fallback XUser\{bf2346b2-[0-9a-f-]+\} .*IID of another class: slots log and answer 0x89245106",
         "unknown slot 15 logged with index and four args": r"xgr-unknown-slot \{[0-9a-f-]+\}\{[0-9a-f-]+\} slot 15 args 0x[0-9a-f]+ 0x7ffffffffffffffc 0x40 0x[0-9a-f]+ -> 0x80004001",
         "XUser unknown slot answers no-default-user": r"xgr-unknown-slot IXUserImpl slot 40 args .* -> 0x89245106",
-        "networking assumption logged": r"xgr-assume XNetworking slot 15 taken to be XNetworkingQueryPreferredLocalUdpMultiplayerPort",
+        "networking assumption logged": r"xgr-assume XNetworking slot 15 taken to be XNetworkingSlot15Object",
+        "slot 15 out-parameter logged before and after": r"xgr-slot15-before 0x[0-9a-f]+[^\n]*\n(.*\n)*.*xgr-slot15-after 0x[0-9a-f]+",
         "networking slot 8 (not served) logged": r"xgr-unknown-slot IXNetworkingImpl_bf2346b2 slot 8 args",
     }
     for what, pattern in expected.items():

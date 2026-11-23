@@ -114,10 +114,14 @@ void networking()
 {
     void* net = query(clsid_networking, iid_networking);
     if (!net) return;
-    // Slot 15 with the arguments the title used: one real pointer, then two leftover registers.
-    uint16_t port = 0;
-    CHECK_HR(call<HRESULT>(net, 15, &port, static_cast<uintptr_t>(0x7ffffffffffffffcull), static_cast<uintptr_t>(0x40)), S_OK);
-    CHECK(port == 3074);
+    // Slot 15 with the arguments the title used: arg1 is an out-parameter that receives an object.
+    void* made[8] = {};
+    CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(made), static_cast<uintptr_t>(0x7ffffffffffffffcull), static_cast<uintptr_t>(0x40)), S_OK);
+    CHECK(made[0] != nullptr);
+    if (made[0]) {
+        CHECK_HR(call<HRESULT>(made[0], 3), notimpl);  // a logging object: its slots fail, never fault
+        CHECK_HR(call<HRESULT>(made[0], 56), notimpl);
+    }
     CHECK_HR(call<HRESULT>(net, 15, static_cast<void*>(nullptr)), E_POINTER);
 
     struct Hint {

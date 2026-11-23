@@ -460,7 +460,9 @@ evidence = "trace: args (request handle, the security information from slot 10),
 # since the Query/QueryAsync/AsyncResult trio is not adjacent in a vtable that puts Verify at 14).
 # A title's first networking call was slot 15 with one pointer argument (the other two argument registers hold
 # leftovers: 0x7ffffffffffffffc, 0x40): the first function after Verify that takes a single pointer is
-# XNetworkingQueryPreferredLocalUdpMultiplayerPort(uint16_t*), followed by its Async and AsyncResult siblings.
+# XNetworkingQueryPreferredLocalUdpMultiplayerPort(uint16_t*) - but a later owner run showed the title then reads
+# null+0x38 (a lock in an object it expected from this call) with arg1 a stack address, so slot 15 is served as an
+# out-parameter that receives a logging object (XNetworkingSlot15Object); 16 and 17 keep the port-query guess.
 # 18-20 (QueryConfigurationSetting, SetConfigurationSetting, QueryStatistics, order unknown) stay unmapped: they
 # answer E_NOTIMPL, which their documentation lists for a platform that does not support the setting or statistic.
 # Each assumption is logged once at the first call ("xgr-assume"), so a wrong guess shows up in the run log.
@@ -507,11 +509,11 @@ params = "XTaskQueueRegistrationToken token, bool wait"
 
 [[classes.interfaces.slots]]
 index = 15
-function = "XNetworkingQueryPreferredLocalUdpMultiplayerPort"
-evidence = "assumed (see above): a title's first networking call, one pointer argument, right after Verify"
+function = "XNetworkingSlot15Object"
+evidence = "trace: a title's first networking call: (stack address, 0x7ffffffffffffffc, 0x40); it then dereferenced null+0x38 (a lock in an object it expected), so the stack address is taken to be an out-parameter for an object pointer; we write a logging fallback object there"
 impl = "xgr"
 returns = "HRESULT"
-params = "uint16_t* preferredLocalUdpMultiplayerPort"
+params = "void** outObject"
 
 [[classes.interfaces.slots]]
 index = 16
