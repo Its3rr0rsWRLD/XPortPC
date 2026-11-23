@@ -1,7 +1,7 @@
 # End-to-end translation of the corpus pixel shaders (tools/corpus_translate.py; inputs
 # tests/corpus/isa/pixel, sources and licenses tests/corpus/README.md). all_covered is the site's measure
 # (every form covered by a test); translated means lower() accepted the whole program and produced HLSL.
-# Pixel: shaders 250; translated 189; all_covered 238; all_covered_translated 188.
+# Pixel: shaders 250; translated 189; all_covered 239; all_covered_translated 189.
 # Refusal reasons, most shaders first: shaders (all_covered shaders), kind, place, reason.
 # Reason 8 (8)	refused	mimg.sample	Unsupported texture coordinate
 # Reason 5 (4)	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant
@@ -259,7 +259,7 @@ vksamples__shader_object__material_scene.frag.s	1	translated
 vksamples__shader_object__material_texture.frag.s	1	translated				
 vksamples__shader_object__post_process_brighten.frag.s	1	translated				
 vksamples__shader_object__post_process_color_cycle.frag.s	1	translated				
-vksamples__shader_object__post_process_edge_detection.frag.s	0	translated				
+vksamples__shader_object__post_process_edge_detection.frag.s	1	translated				
 vksamples__shader_object__post_process_grayscale.frag.s	1	translated				
 vksamples__shader_object__post_process_invert.frag.s	1	translated				
 vksamples__shader_object__post_process_quantize.frag.s	1	translated				

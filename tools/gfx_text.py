@@ -34,12 +34,17 @@ VERIFIED = frozenset({
     "image_sample", "s_and_b64", "s_buffer_load_dword", "s_buffer_load_dwordx2", "s_buffer_load_dwordx4",
     "s_load_dwordx8", "s_mov_b64", "s_movk_i32", "s_wqm_b64", "v_add_f32_e32", "v_add_nc_u32_e32",
     "v_interp_p1_f32_e32", "v_interp_p2_f32_e32", "v_mul_f32_e32",
+    # Rung R4b (tests/runtime/r4b_programs_check.py): MUBUF loads and stores, whose text disasm_rdna2 already prints
+    # as LLVM does.
+    "buffer_load_dword", "buffer_load_dwordx2", "buffer_load_dwordx4", "buffer_store_dword", "buffer_store_format_x",
 })
 # Added for the compute program of runtime rung R5 (tests/runtime/r5_cs.s), compared by tests/runtime/r5_programs_check.py.
 VERIFIED = VERIFIED | frozenset({
     "buffer_load_dwordx4", "buffer_store_dwordx2", "ds_bpermute_b32", "buffer_store_dwordx4", "s_lshl_b32", "s_movk_i32",
     "s_barrier", "v_add_f32_e32", "v_add_nc_u32_e32", "v_subrev_f32_e32",
 })
+# Added for the programs of R6 descriptors (tests/runtime/r6_*.s), compared by tests/runtime/r6_programs_check.py.
+VERIFIED = VERIFIED | frozenset({"image_load", "image_sample_lz", "v_cvt_f32_u32_e32"})
 # 64-bit scalar operations whose operands disasm_rdna2 prints as their low 32-bit register.
 PAIR_OPERANDS = frozenset({"s_and_b64", "s_mov_b64", "s_wqm_b64"})
 

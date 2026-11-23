@@ -142,7 +142,7 @@ add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
-target_link_libraries(d3d12_xs_shim PRIVATE d3d12 dxgi dxguid delayimp)
+target_link_libraries(d3d12_xs_shim PRIVATE x2w_gfx10_descriptors d3d12 dxgi dxguid delayimp)
 target_link_options(d3d12_xs_shim PRIVATE /DELAYLOAD:dxgi.dll)
 
 # Runtime ladder R2 (docs/design/runtime.md, section 6): a console-style program that imports device
@@ -192,6 +192,18 @@ target_link_libraries(gfx10_detile_check PRIVATE x2w_gfx10_detile)
 add_test(NAME gfx10_detile_roundtrip COMMAND gfx10_detile_check)
 set_tests_properties(gfx10_detile_roundtrip PROPERTIES TIMEOUT 300)
 
+# GFX10.3 hardware descriptor words (src/gfx10_descriptors.h): T#, S# and V# decoding and the desktop texture, SRV
+# and sampler that match them, for descriptors a title writes into descriptor memory itself. No D3D12 dependency;
+# tests/gfx10_descriptors_fields_check.py compares its field table with Mesa's register database on Linux.
+add_library(x2w_gfx10_descriptors STATIC src/gfx10_descriptors.cpp)
+target_include_directories(x2w_gfx10_descriptors PUBLIC src)
+target_compile_features(x2w_gfx10_descriptors PUBLIC cxx_std_17)
+target_link_libraries(x2w_gfx10_descriptors PUBLIC x2w_gfx10_detile)
+add_executable(gfx10_descriptors_check tests/gfx10_descriptors_check.cpp)
+target_link_libraries(gfx10_descriptors_check PRIVATE x2w_gfx10_descriptors)
+add_test(NAME gfx10_descriptors_decode COMMAND gfx10_descriptors_check)
+set_tests_properties(gfx10_descriptors_decode PROPERTIES TIMEOUT 60)
+
 # Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
 # r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3. Modes tiled/wrong_swizzle
 # create its textures from GFX10.3 tiled bytes in title memory through the detiler.
@@ -209,6 +221,21 @@ target_link_libraries(r4_detile_upload PRIVATE d3d12_xs_shim xmem_shim x2w_gfx10
 foreach(adapter IN ITEMS warp hardware)
     add_test(NAME runtime_r4_detile_upload_${adapter} COMMAND r4_detile_upload ${adapter})
     set_tests_properties(runtime_r4_detile_upload_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+endforeach()
+# Runtime ladder R4b: vertex fetch through buffer V#s from a descriptor table, pixel constant slots 2 and 3, and a
+# pixel store through a UAV's V# (tests/runtime/r4b_scene.cpp, r4b_*.s, r4b_programs.h).
+add_executable(r4b_scene tests/runtime/r4b_scene.cpp)
+target_include_directories(r4b_scene PRIVATE src)
+target_compile_features(r4b_scene PRIVATE cxx_std_17)
+target_link_libraries(r4b_scene PRIVATE d3d12_xs_shim xmem_shim x2w_gfx10_detile dxgi dxguid user32)
+
+# Runtime ladder R6: descriptors written as hardware words (tests/runtime/r6_rawdesc_scene.cpp: graphics, inline
+# samplers; r6_rawdesc_compute.cpp: compute tables), programs in r6_programs.h (tests/runtime/r6_*.s).
+foreach(r6_program IN ITEMS r6_rawdesc_scene r6_rawdesc_compute)
+    add_executable(${r6_program} tests/runtime/${r6_program}.cpp)
+    target_include_directories(${r6_program} PRIVATE src)
+    target_compile_features(${r6_program} PRIVATE cxx_std_17)
+    target_link_libraries(${r6_program} PRIVATE d3d12_xs_shim xmem_shim x2w_gfx10_detile dxgi dxguid user32)
 endforeach()
 
 # Runtime ladder R5: a 600-frame loop in which a compute program (tests/runtime/r5_cs.s, r5_programs.h) on a compute
@@ -2826,6 +2853,27 @@ if(EXISTS "${INTAKE_PYTHON}")
             endif()
         endforeach()
     endforeach()
+    # Runtime ladder R4b (tests/runtime/r4b_scene.cpp): cold first (empties the cache), then warm and the controls.
+    add_test(NAME runtime_r4b_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r4b_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r4b_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r4b_cache_${adapter}")
+        foreach(mode IN ITEMS cold warm wrong_reference missing_view wrong_format)
+            set(r4b_name runtime_r4b_${mode}_${adapter})
+            if(mode STREQUAL "cold" OR mode STREQUAL "warm")
+                set(r4b_name runtime_r4b_scene_${mode}_${adapter})
+            endif()
+            add_test(NAME ${r4b_name} COMMAND r4b_scene ${adapter} ${mode})
+            set_tests_properties(${r4b_name} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+                ENVIRONMENT "${r4b_environment}" RUN_SERIAL TRUE)
+            if(mode STREQUAL "cold")
+                set_tests_properties(${r4b_name} PROPERTIES FIXTURES_SETUP r4b_cache_${adapter})
+            else()
+                set_tests_properties(${r4b_name} PROPERTIES FIXTURES_REQUIRED r4b_cache_${adapter})
+            endif()
+        endforeach()
+    endforeach()
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
@@ -2849,6 +2897,29 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME runtime_r5_refused_warp COMMAND r5_frames warp refused)
     set_tests_properties(runtime_r5_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_refused")
+    # Runtime ladder R6 (tests/runtime/r6_rawdesc_*.cpp): descriptors the title writes as hardware words into its
+    # descriptor heaps (T#, S#, V#, decoded by src/gfx10_descriptors.h), inline samplers, compute tables, the frame
+    # words in the shim's upload ring.
+    add_test(NAME runtime_r6_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r6_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r6_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r6_cache_${adapter}")
+        foreach(mode IN ITEMS raw tiled wrong_swizzle wrong_dst_sel rewrite)
+            add_test(NAME runtime_r6_rawdesc_${mode}_${adapter} COMMAND r6_rawdesc_scene ${adapter} ${mode})
+            set_tests_properties(runtime_r6_rawdesc_${mode}_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+                ENVIRONMENT "${r6_environment}" RUN_SERIAL TRUE)
+        endforeach()
+        foreach(mode IN ITEMS compute wrong_dst_sel rewrite)
+            set(r6_name runtime_r6_rawdesc_compute_${adapter})
+            if(NOT mode STREQUAL "compute")
+                set(r6_name runtime_r6_rawdesc_compute_${mode}_${adapter})
+            endif()
+            add_test(NAME ${r6_name} COMMAND r6_rawdesc_compute ${adapter} ${mode})
+            set_tests_properties(${r6_name} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 ENVIRONMENT "${r6_environment}"
+                RUN_SERIAL TRUE)
+        endforeach()
+    endforeach()
     # The shim's translation paths (translator service, per-process fallback, ahead of time through
     # tools/precompile_cache.py) write byte-identical cache files (tests/runtime/xl_check.py), and their throughput on
     # the R3 programs and 200 draw-check programs (tests/runtime/xl_bench.py; serial: it measures time).

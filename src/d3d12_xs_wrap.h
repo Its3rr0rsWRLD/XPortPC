@@ -63,6 +63,8 @@ std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, s
 void log_refused(const char* symbol, const char* detail, bool draw);
 void count_shader(bool cached);
 void count_texture_miss();
+// Hardware descriptor words resolved (reads), desktop textures filled from them (uploads), samplers created.
+void count_raw(unsigned reads, unsigned uploads, unsigned samplers);
 void count_object(int delta);
 void count_device();
 void count_present();

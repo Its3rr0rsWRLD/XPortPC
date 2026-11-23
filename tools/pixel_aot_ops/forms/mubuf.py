@@ -1,5 +1,5 @@
 """MUBUF: buffer loads through a runtime V#: whole dwords, bytes and halves (with sign or zero extension and the d16
-forms), and the typed buffer_load_format_x..xyzw for the 32-bit integer formats."""
+forms), and the typed buffer_load_format_x..xyzw (every gfx10 format, hlsl.buffer_load_format)."""
 import re
 
 from ..dispatch import form
@@ -112,8 +112,8 @@ def buffer_load_sub(st, i, m):
 
 @form(r"buffer_load_format_(x|xy|xyz|xyzw) (v\d+|v\[\d+:\d+\]), " + OPERANDS)
 def buffer_load_format(st, i, m):
-    # Typed loads: the format comes from the V# (word 3 bits 12 to 18) and only the 32_UINT and 32_SINT formats are
-    # exact (see hlsl.MEMORY_HELPERS); any other V# format reads zero. The d16 variants are not lowered.
+    # Typed loads: the format comes from the V# (word 3 bits 12 to 18) and is decoded at run time (see
+    # hlsl.buffer_load_format); an invalid format reads zero. The d16 variants are not lowered.
     comps, dst_token, addr_token, rsrc_token, soffset_token, modifiers = m.groups()
     dsts = vgprs(dst_token, len(comps))
     rsrc, soffset, voffset, inst_offset, vindex, _ = buffer_operands(st, i, addr_token, rsrc_token, soffset_token, modifiers)

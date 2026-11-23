@@ -1,7 +1,7 @@
 #pragma once
 
 // Pipeline translation, root signatures and draw-time bindings of the d3d12_xs.dll graphics shim (runtime rungs R3
-// and R4, docs/design/runtime.md section 3).
+// to R6, docs/design/runtime.md section 3).
 //
 // Root signatures. Every root signature created through the shim is the title's description (console-only flag bits
 // and DENY_*_ROOT_ACCESS flags dropped) with the converter's parameters appended (ConverterParam). The converter's
@@ -21,17 +21,31 @@
 // Compute (R5). create_compute_pipeline translates a compute container the same way (tools/pso_translate.py --stage
 // compute, tools/compute_aot.py's lowering); bind_for_dispatch supplies the same converter parameters through the
 // compute root arguments before a Dispatch. The compute translation reads and writes title memory through the UAV
-// half of the title-memory table.
+// half of the title-memory table. Descriptor tables (R6): a buffer V# the program loads from a table is copied
+// from the table's memory into its frame words (the program applies the V#'s range check itself), T#s and the S#
+// are bound as for a draw.
 //
-// Draws. bind_for_draw supplies the converter parameters before a draw of a translated pipeline: the push words
-// from the recorded root arguments (title GPU addresses as the title passed them: the shader looks them up with
-// TitleLookup), the title-memory view of xmem.dll (X2WTitleGpuGetShaderView) as a shader-visible heap the shim
-// owns, a ranges buffer and their count, the base vertex and start instance, and the descriptors the shader reads
-// from title descriptor tables: textures and samplers copied into blocks of the shim's shader-visible heaps (one
-// block per distinct set of descriptor contents), constant buffers as root CBVs at the aliases of their title
-// addresses, each over the window the translation declares (256 bytes, or the larger window of a program that reads
-// past its first 16 uint4: the fifth field of a constants line in the bindings sidecar). A table read that finds no view of the expected kind is a TextureLookup miss: counted, logged once,
-// and bound to a null SRV, a point sampler or a zero buffer, so the shader reads zero.
+// Draws. bind_for_draw supplies the converter parameters before a draw of a translated pipeline: the frame words
+// (FrameWords: the push words from the recorded root arguments, title GPU addresses as the title passed them since
+// the shader looks them up with TitleLookup; the range count; the base vertex and start instance; the buffer V#s of
+// both stages) in a slice of the shim's upload ring, the title-memory view of xmem.dll (X2WTitleGpuGetShaderView) as
+// a shader-visible heap the shim owns and a ranges buffer, and the descriptors the shader reads from title descriptor
+// tables: textures and samplers copied into blocks of the shim's shader-visible heaps (one block per distinct set of
+// descriptor contents), constant buffers as root CBVs at the aliases of their title addresses, each over the window
+// the translation declares (256 bytes, or the larger window of a program that reads past its first 16 uint4: the
+// sixth field of a constants line in the bindings sidecar), and buffer V#s as descriptor words in the frame words
+// (the V# each API-written buffer view was encoded with, d3d12_xs_descriptors.h, or the title's own V# words). Hardware
+// words the title wrote into a table itself (R6) are decoded (src/gfx10_descriptors.h): a T# becomes a desktop
+// texture the shim fills from the title's texture memory (detiled, src/gfx10_detile.h) and caches by the words and a
+// hash of the bytes, an S# a cached desktop sampler, a constant-buffer V# a root CBV at its base address. A table read
+// that finds no view of the expected kind, or words that do not decode, is a TextureLookup miss: counted, logged
+// once, and bound to a null SRV, a point sampler, a zero buffer or a zero V# (num_records 0), so the shader reads zero
+// and stores nothing. A typed access through a buffer view whose format the converter does not lower exactly skips
+// the draw (logged): typed loads need a view format with a gfx10 buffer format, typed stores R32_UINT or R32_SINT.
+//
+// Title memory is one table of the xmem.dll view: 8 raw SRVs, the miss counter UAV and the same 8 ranges as raw UAVs.
+// A pipeline whose pixel program stores to title memory (pso_translate.py "memory rw") reads and writes it through the
+// UAVs in both stages; every other pipeline reads the SRVs.
 //
 // Configuration (environment, until the launcher passes it): X2W_PYTHON (default python.exe), X2W_TOOLS (the
 // tools directory; default <directory of d3d12_xs.dll>\tools), X2W_DXC (default dxc.exe), X2W_LLVM_LIB (optional
@@ -40,32 +54,52 @@
 
 #include <d3d12.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace d3d12_xs {
 namespace pipeline {
 
-// Converter root parameters, appended after the title's parameters in this order (46 DWORDs in all).
+// Converter root parameters, appended after the title's parameters in this order (17 DWORDs in all).
 enum ConverterParam : unsigned {
-    param_range_count = 0,       // root constants b1 space1000: title_range_count
-    param_ranges = 1,            // root SRV t2 space1000: StructuredBuffer<TitleRange> title_ranges
-    param_memory = 2,            // table: SRV t0..t7 space1001 title_memory[8], UAV u0 space1000 x2w_lookup_misses,
-                                 // UAV u0..u7 space1001 (compute: RWByteAddressBuffer title_memory[8]) of the same ranges
-    param_push_words = 3,        // root constants b3 space1000: uint4 push_words[8] (both stages)
-    param_vertex_root = 4,       // root constants b2 space1000 (vertex): base_vertex, start_instance
-    param_vertex_constants = 5,  // root CBV b0 space1000 (vertex): the constant buffer of a descriptor table
-    param_pixel_constants = 6,   // root CBVs b0, b1 space1003 (pixel): constant slots 0 and 1 (two parameters)
-    param_textures = 8,          // table (pixel): SRV t0..t8 space1002, texture slots (t2 unused)
-    param_samplers = 9,          // table (pixel): samplers s0..s3 space1002
+    param_ranges = 0,            // root SRV t2 space1000: StructuredBuffer<TitleRange> title_ranges (2 DWORDs)
+    param_memory = 1,            // table: SRV t0..t7 space1001 title_memory[8], UAV u0 space1000 x2w_lookup_misses,
+                                 // UAV u0..u7 space1001 of the same ranges (writable title_memory[8]: compute and
+                                 // storing pipelines)
+    param_frame = 2,             // root CBV b3 space1000: the frame words of the draw or dispatch (FrameWords), a
+                                 // slice of the shim's upload ring (2 DWORDs; was 32 + 1 + 2 root constants and a
+                                 // root CBV of buffer V# words)
+    param_vertex_constants = 3,  // root CBV b0 space1000 (vertex): the constant buffer of a descriptor table
+    param_pixel_constants = 4,   // root CBVs b0..b3 space1003 (pixel): constant slots 0 to 3 (four parameters)
+    param_textures = 8,          // table: SRV t0..t8 space1002, texture slots (t2 unused); pixel and compute
+    param_samplers = 9,          // table: samplers s0..s3 space1002; pixel and compute
     converter_params = 10
 };
-constexpr unsigned push_word_count = 32;
+constexpr unsigned converter_root_dwords = 17;
+constexpr unsigned push_word_count = 32;  // root-word bindings of one pipeline
+constexpr unsigned buffer_word_count = 128;   // vertex V#s at words 0..63, pixel V#s at 64..127
+constexpr unsigned pixel_buffer_words = 64;
+// The frame words (tools/pso_translate.py FRAME_WORDS): 64 words (push words; a compute program's params, with the
+// buffer V#s it reads from descriptor tables copied in at the top), then the title range count, the base vertex and
+// the start instance; from byte 512 the buffer V#s of the vertex and pixel stages (vsharp_words, 128 words). One
+// 1024-byte slice (CBV alignment 256) per draw or dispatch.
+constexpr unsigned frame_word_count = 64;
+struct FrameWords {
+    std::uint32_t words[frame_word_count];
+    std::uint32_t range_count;
+    std::uint32_t base_vertex;
+    std::uint32_t start_instance;
+    std::uint32_t reserved[61];
+    std::uint32_t buffer_words[buffer_word_count];  // byte 512: uint4 vsharp_words[32] (packoffset c32)
+};
+constexpr unsigned frame_slice = 1024;
+static_assert(sizeof(FrameWords) <= frame_slice && offsetof(FrameWords, buffer_words) == 512, "frame words slice");
 constexpr unsigned title_memory_slots = 8;
 constexpr unsigned memory_block = 2 * title_memory_slots + 1;  // the SRVs, the miss counter UAV, the UAVs (R5)
 constexpr unsigned texture_table = 9;
 constexpr unsigned sampler_table = 4;
-constexpr unsigned pixel_constant_slots = 2;
+constexpr unsigned pixel_constant_slots = 4;
 constexpr unsigned max_title_params = 64;
 constexpr unsigned max_table_refs = 24;
 
@@ -81,15 +115,21 @@ struct PushSource {
     std::uint8_t word;
 };
 
-// A descriptor a translated shader reads from a title descriptor table (tools/pso_translate.py --bindings).
-enum class RefKind : std::uint8_t { texture = 0, sampler = 1, constants = 2 };
+// A descriptor a translated shader reads from a title descriptor table (tools/pso_translate.py --bindings), or an
+// inline sampler (S# words set by s_mov in the program, decoded at pipeline creation).
+enum class RefKind : std::uint8_t { texture = 0, sampler = 1, constants = 2, buffer = 3, inline_sampler = 4 };
+constexpr std::uint8_t ref_typed = 1;   // buffer: a typed access (buffer_load_format, buffer_store_format)
+constexpr std::uint8_t ref_stored = 2;  // buffer: stored to
 struct TableRef {
     std::uint8_t stage;      // X2WShaderStage
     RefKind kind;
-    std::uint8_t slot;       // converter slot: texture slot 0..7, sampler slot 0..3, constant slot
+    std::uint8_t slot;       // converter slot: texture slot 0..7, sampler slot 0..3, constant slot; buffer: the first
+                             // of its four buffer words (vertex 0..60, pixel 64..124; compute: frame words)
     std::uint8_t parameter;  // the table's root parameter in the title's root signature
     std::uint32_t offset;    // byte offset in the table
+    std::uint8_t flags;      // buffer: ref_typed, ref_stored
     std::uint32_t window;    // constants: bytes of title memory the root CBV covers (256, or the sidecar's window)
+    std::uint32_t words[4];  // inline_sampler: the S# words
 };
 
 struct PsoInfo {
@@ -98,6 +138,7 @@ struct PsoInfo {
     PushSource push[push_word_count];
     std::uint32_t ref_count;
     TableRef refs[max_table_refs];
+    std::uint32_t writes_memory;  // title memory is bound as UAVs (a stage stores to it)
 };
 
 // Draw arguments the console stage receives in user SGPRs (vertex_aot roles base_vertex, start_instance).
@@ -129,6 +170,10 @@ class TitleViews;
 // rewritten only once no list holds it and the GPU has finished with it.
 struct BlockUse {
     std::vector<std::uint32_t> blocks;  // kind << 24 | index
+    // The frame-word ring chunk this recording writes its draws' and dispatches' frame words into, and how many of
+    // its slices it has used (R6).
+    int frame_chunk = -1;
+    std::uint32_t frame_used = 0;
 };
 void release_blocks(TitleViews* views, BlockUse& use);
 void submitted_blocks(TitleViews* views, ID3D12CommandQueue* queue, BlockUse* const* uses, unsigned count);
@@ -182,6 +227,10 @@ void set_compute_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& r
 // Title GPU address -> desktop GPU address through xmem.dll (X2WTitleGpuTranslate), or the address unchanged when
 // it is not title memory (a desktop resource's address) or xmem.dll is not loaded.
 std::uint64_t translate_address(std::uint64_t address, std::uint64_t bytes);
+
+// The reverse, for buffer views: the title GPU address of [offset, offset + bytes) of `resource`, when that range of
+// its desktop GPU addresses lies in one title-memory alias (X2WTitleGpuGetShaderView); 0 otherwise.
+std::uint64_t title_address_of(ID3D12Resource* resource, std::uint64_t offset, std::uint64_t bytes);
 
 }  // namespace pipeline
 }  // namespace d3d12_xs

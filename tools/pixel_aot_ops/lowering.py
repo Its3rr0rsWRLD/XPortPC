@@ -40,7 +40,8 @@ class Lowering:
         self.constant_buffers = {}  # descriptor key of a constant-buffer V# -> its word tag "cbv<k>" (bindings.py)
         self.samplers = None  # HLSL sampler name -> its four tracked words; None: the one sampler st.sampler, "samp"
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
-        self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
+        self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in vsharp_array
+        self.vsharp_array = "params"  # the uint4 array that holds the buffer V# words (bindings.PixelBindings.buffer_words)
         self.constant_limit = 256  # bytes of b0 a scalar buffer load may read; the vertex stage raises it (vertex_aot.py)
         # Per constant array (params, params1..3): the window of a slot a binding description gives a size
         # (PixelBindings.constant_sizes), in place of constant_limit, and one past the highest word a load has read,
@@ -94,6 +95,9 @@ class Lowering:
         # Stage hooks (docs/design/compute-stage.md): the stage being lowered, and the high word a descriptor-list
         # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).
         self.stage = "pixel"
+        # tbuffer_load_format may name any gfx10 format (the vertex stage, whose typed draws check them all); otherwise
+        # only the two the pixel draws check (forms/mtbuf.py).
+        self.all_buffer_formats = False
         self.descriptor_high = 0
         # CF-2c: each VOPC compare's relation without the EXEC mask, the line count when it was written and the lane bit
         # it ran under, by the name of its bool (cmp<i>); s_cbranch_vccz/vccnz on a uniform compare branches on it
@@ -315,6 +319,7 @@ def described_state(b):
                        if (dim := b.dimension(k)) != "2d"}
     st.descriptor_words = True
     st.descriptor_high = b.descriptor_high
+    st.vsharp_array = b.buffer_words
     st.constant_buffers = {key: binding_names.constant_tag(k) for key, k in b.constant_buffers.items()}
     st.sampler_offsets = {key: binding_names.sampler_tag(k) for k, key in b.samplers.items() if isinstance(key, int)}
     st.samplers = {binding_names.sampler_name(k): tuple((binding_names.sampler_tag(k), j) for j in range(4))
