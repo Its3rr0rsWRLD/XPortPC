@@ -23,7 +23,7 @@ evidence = "GUID loaded by the XThreading thunks (lea rcx before QueryApiImpl) i
 [[classes.interfaces]]
 name = "IXThreadingImpl"
 iid = "073b7dcb-1fcf-4030-94be-e3c9eb623428"
-evidence = "thunks load only this GUID (lea rcx) before QueryApiImpl; the IID is taken to be the same GUID (CLSID == first IID), to be confirmed by a trace (job xgrgate-544d7903)"
+evidence = "thunks load only this GUID (lea rcx) before QueryApiImpl; the IID is taken to be the same GUID (CLSID == first IID); trace queries confirm IID == CLSID (job xgrgate-755802ed-r2) (job xgrgate-544d7903)"
 
 [[classes.interfaces.slots]]
 index = 3
@@ -329,3 +329,57 @@ evidence = "thunk XUserGetGamertag loads the XUser CLSID (lea rcx) and this IID 
 index = 3
 function = "XUserGetGamertag"
 evidence = "static: thunk XUserGetGamertag in GameSaveCombo: mov rax,[rax+0x18], CFG call"
+
+# Queried by the samples' libHttpClient.dll (Microsoft's GDK build, beside the exe); seen in trace runs
+# (job xgrgate-755802ed-r2). Function names from the call order in libHttpClient's MIT source
+# (Source/HTTP/WinHttp/winhttp_provider.cpp: XGameRuntimeIsFeatureAvailable(XNetworking), then
+# XNetworkingQuerySecurityInformationForUrlAsync/ResultSize/Result; winhttp_connection.cpp:
+# XNetworkingVerifyServerCertificate) matched with the traced slots and their arguments.
+
+[[classes]]
+name = "XGameRuntimeFeature"
+clsid = "8836fe87-edb9-4fe3-8dad-05f0d2cd5b40"
+evidence = "trace: QueryApiImpl from libhttpclient.dll in AsynchronousProgramming and GameSaveCombo (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces]]
+name = "IXGameRuntimeFeatureImpl"
+iid = "8836fe87-edb9-4fe3-8dad-05f0d2cd5b40"
+evidence = "trace: queried with IID == CLSID (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XGameRuntimeIsFeatureAvailable"
+evidence = "trace: slot 3 called with 0xa (XGameRuntimeFeature::XNetworking) and a bool result (low byte 1) by libhttpclient.dll, then the XNetworking class is queried; libHttpClient winhttp_provider.cpp makes exactly that call first"
+impl = "xgr"
+returns = "bool"
+params = "uint32_t feature"
+
+[[classes]]
+name = "XNetworking"
+clsid = "37e56907-2f10-41e8-b72f-36edb185331a"
+evidence = "trace: QueryApiImpl from libhttpclient.dll after XGameRuntimeIsFeatureAvailable(XNetworking) returned true (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces]]
+name = "IXNetworkingImpl_bf2346b2"
+iid = "bf2346b2-39af-4658-b5ea-44713c7e83b3"
+evidence = "trace: the IID libhttpclient.dll asks for (job xgrgate-755802ed-r2). The gateway reports XNetworking as unavailable, so libHttpClient does not query it; the slots are recorded, not implemented"
+
+[[classes.interfaces.slots]]
+index = 8
+function = "XNetworkingQuerySecurityInformationForUrlAsync"
+evidence = "trace: args (url string, async block on the stack), first of the three calls per request"
+
+[[classes.interfaces.slots]]
+index = 9
+function = "XNetworkingQuerySecurityInformationForUrlAsyncResultSize"
+evidence = "trace: args (the same async block, pointer to a size) after slot 8"
+
+[[classes.interfaces.slots]]
+index = 10
+function = "XNetworkingQuerySecurityInformationForUrlAsyncResult"
+evidence = "trace: args (async block, size 0x18, buffer, ...) after slot 9"
+
+[[classes.interfaces.slots]]
+index = 14
+function = "XNetworkingVerifyServerCertificate"
+evidence = "trace: args (request handle, the security information from slot 10), called per connection"

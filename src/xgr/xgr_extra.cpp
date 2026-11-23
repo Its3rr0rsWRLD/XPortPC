@@ -15,6 +15,10 @@
 // time-sensitive, so it succeeds.
 HRESULT xgr_impl_XThreadAssertNotTimeSensitive(void) noexcept { return S_OK; }
 
+// https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameruntimefeature/functions/xgameruntimeisfeatureavailable
+// No optional runtime feature is offered (libHttpClient then uses plain WinHTTP instead of XNetworking).
+bool xgr_impl_XGameRuntimeIsFeatureAvailable(uint32_t /*feature*/) noexcept { return false; }
+
 // https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgame/functions/xgamegetxboxtitleid
 // The title ID of the running game: the <TitleId> of the MicrosoftGame.config in the title's folder
 // (X2W_TITLE_DIR, set by x2w_launch), else 0.

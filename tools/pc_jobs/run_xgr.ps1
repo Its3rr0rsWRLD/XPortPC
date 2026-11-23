@@ -321,6 +321,7 @@ foreach ($name in $Run.Split(",")) {
         }
         $env:X2W_XGR_PEEK = ($peek | Select-Object -First 40) -join ","
         if (-not $env:X2W_XGR_PEEK) { $env:X2W_XGR_PEEK = "0:8" }
+        $env:X2W_XGR_CALLS = "1"  # one xgr-call line per slot and caller, in every mode
         $start = Get-Date
         $p = Start-Process -FilePath $launcher -WorkingDirectory $exe.DirectoryName -WindowStyle Hidden -PassThru `
             -RedirectStandardError $err -RedirectStandardOutput $outFile `
