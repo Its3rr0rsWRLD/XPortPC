@@ -117,8 +117,8 @@ window it is given; a load at a run-time offset declares the whole window, and a
 the window reads 0, as AMD's range check returns past num_records (the compute stage's dynamic constant loads). The
 vertex stage sizes `params` the same way (vertex_aot.py, CONSTANT_BYTES).
 
-The window is the bytes the runtime binds: `tools/pso_translate.py` writes it as a fifth field of the constants line of
-the bindings sidecar when the translation declares more than 16 uint4, and the shim's root CBV covers that many bytes
+The window is the bytes the runtime binds: `tools/pso_translate.py` writes it as a sixth field (after the flags field) of the constants
+line of the bindings sidecar when the translation declares more than 16 uint4, and the shim's root CBV covers that many bytes
 of title memory (`src/d3d12_xs_pipeline.cpp`, TableRef::window; the runtime R4 scene's pixel program reads its tint at
 byte 0x110). The harness binds larger buffers through the case's 'X2WK' section (`tests/pixel_aot_render.cpp`); the
 `pxcb` draw family checks windows of 0x400 and 0x800 bytes, through two slots, and a run-time offset that reads 0 past

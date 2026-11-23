@@ -39,9 +39,9 @@ EXPECTED = {"r4b_vs": [("buffer", 0, 0, 0x00, 0), ("buffer", 4, 0, 0x20, 0)],
             "r4b_ps": [("constants", 0, 0, 0x60, 0), ("constants", 1, 0, 0x80, 0), ("constants", 2, 0, 0xa0, 0),
                        ("constants", 3, 0, 0xc0, 0), ("buffer", 64, 0, 0x40, 3)]}
 REGISTERS = {
-    "r4b_vs": ["cbuffer Descriptors : register(b4, space1000) { uint4 vsharp_words[32]; };",
+    "r4b_vs": ["uint4 vsharp_words[32] : packoffset(c32);",
                "RWByteAddressBuffer title_memory[8] : register(u0, space1001);"],
-    "r4b_ps": ["cbuffer Descriptors : register(b4, space1000) { uint4 vsharp_words[32]; };",
+    "r4b_ps": ["uint4 vsharp_words[32] : packoffset(c32);",
                "RWByteAddressBuffer title_memory[8] : register(u0, space1001);",
                *(f"register(b{k}, space1003)" for k in range(4))],
 }

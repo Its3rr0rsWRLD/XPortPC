@@ -21,7 +21,7 @@ inferred about the table itself. Push words ("inline" in the vertex stage, "push
 numbering shared by both stages of a pipeline.
 
 Buffer V#s read from a table (rung R4b: vertex fetch, buffer loads and stores) become descriptor words the shim fills
-at draw time from the buffer view the title created through the API (b4 space1000, `vsharp_words`: the vertex
+at draw time from the buffer view the title created through the API (`vsharp_words`, b4 placed in the frame words at c32 of b3 space1000: the vertex
 stage's V#s at words 0..60, the pixel stage's at 64..124). The shader decodes base, stride, num_records and format
 from them and reaches title memory through TitleLookup, as for any V#. Each buffer read carries flags for how the
 program uses it: 1 typed (buffer_load_format, buffer_store_format; the shim requires an R32_UINT or R32_SINT view,
@@ -35,20 +35,23 @@ The translated HLSL may declare only the bindings the shim fills at draw time, a
     both stages  b1 title_range_count, t2 title_ranges, t0..t7 space1 title_memory (-> spaces 1000/1001) or, when
                  writable, u0..u7 space1 (-> space1001), b3 push words (b3 space1000), b4 the buffer V# words
                  (b4 space1000), and u0 space1000, the TitleLookup miss counter this script adds
+    (b1, b2, b4 and the push words end up in one constant buffer, the frame words at b3 space1000: frame_words)
     vertex       b0 the constant buffer of a descriptor table (b0 space1000), b2 base vertex and start instance
     pixel        textures t0, t1, t3..t8 (-> space1002, one table), samplers s0..s3 (-> space1002), constant slots 0
                  to 3 (-> b0..b3 space1003), the push-word slot (-> b3 space1000, the vertex stage's push words)
     compute      u0..u7 space1 title_memory, read-write (-> space1001, the UAV half of the title-memory table); its
-                 constant words (params, b0) are the 32 push words (-> b3 space1000), and a program that reads a
-                 word past them is refused; descriptor tables are not read by compute translations yet
+                 constant words (params, b0) are the 64 frame words (-> b3 space1000), and a program that reads a
+                 word past them is refused; from descriptor tables (R6) buffer V#s (frame words), T#s (t0, t1 ->
+                 space1002) and one S# (s0 -> space1002)
 Any other declaration (storage images) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
-"x2w-bindings 3": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word> <set> <byte offset>
-<flags>", for a constant buffer whose window is larger than 256 bytes (PixelBindings.constant_sizes: the program
-reads past its first 16 uint4) a sixth field, the window's bytes, which the root CBV must cover, and the line
-"memory rw" when the program writes title memory ("memory ro" when it only reads it). The shim caches it beside the
-DXIL.
+"x2w-bindings 3": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word (compute: frame
+word)> <set> <byte offset> <flags>", for a constant buffer whose window is larger than 256 bytes
+(PixelBindings.constant_sizes: the program reads past its first 16 uint4) a sixth field, the window's bytes, which
+the root CBV must cover; "inline_sampler <slot> <w0> <w1> <w2> <w3>" for a sampler whose S# words the program sets
+with s_mov (the shim decodes them); and the line "memory rw" when the program writes title memory ("memory ro" when
+it only reads it). The shim caches it beside the DXIL.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
@@ -78,6 +81,17 @@ TEXTURE_SPACE = 1002
 PIXEL_CONSTANT_SPACE = 1003
 PIXEL_CONSTANT_SLOTS = 4  # params, params1..params3 -> b0..b3 in space 1003
 PUSH_WORDS = 32
+# The frame words: one 1024-byte slice per draw or dispatch of the shim's upload ring, bound as the root CBV
+# b3 space1000 (src/d3d12_xs_pipeline.h, FrameWords): 64 words (the push words; the compute stage's params, buffer
+# V#s copied from descriptor tables at the top), then the title range count, the base vertex and the start instance,
+# and from byte 512 (c32) the vertex and pixel stages' buffer V# words (vsharp_words).
+FRAME_WORDS = 64
+VSHARP_OFFSET = 32  # uint4 index of vsharp_words in the frame words
+FRAME_CBUFFER = re.compile(r"cbuffer (\w+) : register\(b3, space1000\) \{ uint4 (\w+)\[(\d+)\]; \};\n?")
+RANGE_COUNT_CBUFFER = re.compile(r"cbuffer \w+ : register\(b1, space1000\) \{ uint title_range_count; \};\n?")
+VERTEX_ROOT_CBUFFER = re.compile(
+    r"cbuffer \w+ : register\(b2, space1000\) \{ uint base_vertex; uint start_instance; \};\n?")
+VSHARP_CBUFFER = re.compile(r"cbuffer \w+ : register\(b4, space1000\) \{ uint4 vsharp_words\[(\d+)\]; \};\n?")
 # The bindings both stages may declare, as (register, converter space).
 BOUND = {("b1", 0), ("t2", 0), ("t0", 1), ("u0", 1), ("b3", 0)}
 VERTEX_BOUND = BOUND | {("b0", 0), ("b2", 0), ("b4", 0)}
@@ -178,23 +192,52 @@ def buffer_flags(source, first_word):
 
 def lower_compute(instructions, roles):
     """Rung R5: tools/compute_aot.py's lowering, without its offline root signature, its constant words moved onto
-    the push words."""
+    the frame words. Descriptor tables (R6 descriptors): buffer V#s the program loads from a table become frame words the
+    shim copies from the table's memory at dispatch time (compute_aot's buffer_descriptors), the T#s it reads
+    become texture slots 0 and 1 and its S# sampler slot 0 of the shim's texture and sampler tables."""
     import compute_aot
+    from pixel_aot_ops.bindings import SET_STRIDE
     numthreads = roles.get("numthreads")
     if not isinstance(numthreads, list) or len(numthreads) != 3:
         raise ValueError("the compute entry contract has no workgroup size")
+    sgprs = dict(roles.get("sgprs", {}))
+    tables = _table_sets(sgprs)
+    options, refs = {}, []
+    if tables:
+        derived, keys = derived_tables(instructions, tables)
+        if derived.constant_buffers:
+            raise ValueError("a constant-buffer V# (s_buffer_load) read from a descriptor table in a compute program "
+                             "is not bound by the runtime yet (its words would be the frame words)")
+        if derived.storage_images:
+            raise ValueError("a storage image read from a descriptor table in a compute program is not bound by the "
+                             "runtime yet")
+        if any(not isinstance(source, int) for source in derived.samplers.values()):
+            raise ValueError("an inline sampler in a compute program is not bound by the runtime yet")
+        if len(derived.samplers) > 1 or len(derived.textures) > 2:
+            raise ValueError("more than two T#s or one S# in a compute program (compute_aot binds tex, tex1 and samp)")
+        options["buffer_descriptors"] = {keys[k]: word for k, word in derived.buffers.items()}
+        options["textures"] = {keys[k]: slot for k, slot in derived.textures.items()}
+        if derived.samplers:
+            options["sampler"] = keys[next(iter(derived.samplers.values()))]
+        options["descriptor_high"] = derived.descriptor_high
+        for key, word in sorted(options["buffer_descriptors"].items()):
+            refs.append(("buffer", word, key // SET_STRIDE, key % SET_STRIDE, 0))
+        for key, slot in sorted(options["textures"].items()):
+            refs.append(("texture", slot, key // SET_STRIDE, key % SET_STRIDE, 0))
+        if "sampler" in options:
+            refs.append(("sampler", 0, options["sampler"] // SET_STRIDE, options["sampler"] % SET_STRIDE, 0))
     source = compute_aot.lower_compute(instructions, numthreads=tuple(numthreads), wave=roles.get("wave"),
-                                       sgprs=dict(roles.get("sgprs", {})), local_ids=roles.get("local_ids", 3))
+                                       sgprs=sgprs, local_ids=roles.get("local_ids", 3), **options)
     source, embedded = re.subn(r'^\[RootSignature\("[^"]*"\)\]\n', "", source, flags=re.M)
     constants = "cbuffer Constants : register(b0) { uint4 params[16]; };"
     if embedded != 1 or source.count(constants) != 1:
         raise ValueError("compute_aot output without its root signature or constant window")
     reads = re.findall(r"\bparams\[([^\]]*)\]", source.replace(constants, ""))
-    if any(not re.fullmatch(r"\d+", index) or int(index) >= PUSH_WORDS // 4 for index in reads):
-        raise ValueError("the program reads a constant word past the 32 push words (a descriptor-set or constant-buffer "
-                         "window is not bound by the runtime yet)")
-    source = source.replace(constants, f"cbuffer PushWords : register(b3) {{ uint4 params[{PUSH_WORDS // 4}]; }};")
-    return source, {"numthreads": numthreads}, []
+    if any(not re.fullmatch(r"\d+", index) or int(index) >= FRAME_WORDS // 4 for index in reads):
+        raise ValueError(f"the program reads a constant word past the {FRAME_WORDS} frame words or at a run-time "
+                         "index (a constant-buffer window is not bound by the runtime yet)")
+    source = source.replace(constants, f"cbuffer PushWords : register(b3) {{ uint4 params[{FRAME_WORDS // 4}]; }};")
+    return source, {"numthreads": numthreads}, refs
 
 
 def lower(stage, instructions, roles):
@@ -248,13 +291,11 @@ def lower(stage, instructions, roles):
         derived, keys = derived_tables(lines, tables)
         if derived.storage_images:
             raise ValueError("storage images read from a descriptor table are not bound by the runtime yet")
-        if any(not isinstance(source, int) for source in derived.samplers.values()):
-            raise ValueError("an inline (immutable) sampler set by s_mov needs its S# words decoded, which the runtime "
-                             "does not do yet")
         if len(derived.buffers) > BUFFER_VSHARPS:
             raise ValueError(f"more than {BUFFER_VSHARPS} buffer V#s in one stage; the runtime passes {BUFFER_VSHARPS}")
         textures = {keys[k]: slot for k, slot in derived.textures.items()}
-        samplers = {slot: keys[k] for slot, k in derived.samplers.items()}
+        # An inline (immutable) sampler keeps its four S# words; the shim decodes them at pipeline creation.
+        samplers = {slot: keys[k] if isinstance(k, int) else k for slot, k in derived.samplers.items()}
         constants = {keys[k]: slot for k, slot in derived.constant_buffers.items()}
         buffers = {shim: 4 * n for n, shim in enumerate(sorted(keys[k] for k in derived.buffers))}
         high = derived.descriptor_high
@@ -278,7 +319,9 @@ def lower(stage, instructions, roles):
                                 **({"descriptor_high": high} if high is not None else {}))
     description.check()
     refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(textures.items())]
-    refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for slot, key in sorted(samplers.items())]
+    refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE, 0)
+             for slot, key in sorted(samplers.items()) if isinstance(key, int)]
+    refs += [("inline_sampler", slot, *key) for slot, key in sorted(samplers.items()) if not isinstance(key, int)]
     refs += [("constants", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(constants.items())]
     source = lower_pixel(lines, bindings=description)
     flags = buffer_flags(source, PIXEL_BUFFER_WORDS)
@@ -339,7 +382,7 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
         kind, number, space = m[1], int(m[2]), int(m[3] or 0)
         if space >= 1000:
             return m[0]  # already placed (a cbuffer above, the miss counter)
-        if stage == "pixel" and space == 0 and (kind == "t" and number != 2 or kind == "s"):
+        if stage in ("pixel", "compute") and space == 0 and (kind == "t" and number != 2 or kind == "s"):
             return f"register({kind}{number}, space{TEXTURE_SPACE})"
         allowed = {"vertex": VERTEX_BOUND, "compute": COMPUTE_BOUND}.get(stage, BOUND)
         if (f"{kind}{number}", space) not in allowed:
@@ -350,7 +393,38 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
     if LOOKUP_CALL in source:
         end = source.index("#endif", source.index("#define TITLE_VA_LOOKUP_HLSLI")) + len("#endif")
         source = source[:end] + "\n" + MISS_COUNTER + source[end:].replace(LOOKUP_CALL, "Counted" + LOOKUP_CALL)
-    return source
+    return frame_words(source)
+
+
+def frame_words(source):
+    """The push words, the title range count, the base vertex and start instance and the buffer V# words as one
+    constant buffer, the frame words the shim writes into its upload ring per draw or dispatch (b3 space1000,
+    FRAME_WORDS; vsharp_words at c32, VSHARP_OFFSET)."""
+    members = []
+    push = FRAME_CBUFFER.search(source)
+    if push and int(push[3]) > FRAME_WORDS // 4:
+        raise ValueError(f"the translation declares more than {FRAME_WORDS} frame words")
+    members.append(f"uint4 {push[2] if push else 'x2w_frame_words'}[{FRAME_WORDS // 4}] : packoffset(c0);")
+    count = RANGE_COUNT_CBUFFER.search(source)
+    if count:
+        members.append(f"uint title_range_count : packoffset(c{FRAME_WORDS // 4}.x);")
+    bases = VERTEX_ROOT_CBUFFER.search(source)
+    if bases:
+        members.append(f"uint base_vertex : packoffset(c{FRAME_WORDS // 4}.y);")
+        members.append(f"uint start_instance : packoffset(c{FRAME_WORDS // 4}.z);")
+    vsharps = VSHARP_CBUFFER.search(source)
+    if vsharps:
+        if int(vsharps[1]) != 2 * BUFFER_VSHARPS:
+            raise ValueError("the buffer V# words are declared with a size the frame words do not hold")
+        members.append(f"uint4 vsharp_words[{2 * BUFFER_VSHARPS}] : packoffset(c{VSHARP_OFFSET});")
+    if not (push or count or bases or vsharps):
+        return source
+    for pattern in (FRAME_CBUFFER, RANGE_COUNT_CBUFFER, VERTEX_ROOT_CBUFFER, VSHARP_CBUFFER):
+        source = pattern.sub("", source, count=1)
+    for register in ("b1", "b2", "b3", "b4"):
+        if f"register({register}, space1000)" in source:
+            raise ValueError(f"the translation declares {register} space1000 in a form the frame words do not hold")
+    return "cbuffer X2WFrame : register(b3, space1000) { " + " ".join(members) + " };\n" + source
 
 
 def writable_memory(source, roles):
