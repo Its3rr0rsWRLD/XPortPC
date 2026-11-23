@@ -1772,7 +1772,7 @@ std::string throw_site(const CONTEXT* start) {
 
 void log_cpp_throw(EXCEPTION_POINTERS* info) {
     InterlockedIncrement(&cpp_throws);
-    const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord);
+    const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord) + caller_chain(info);
     AcquireSRWLockExclusive(&cpp_lock);
     const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
     ReleaseSRWLockExclusive(&cpp_lock);
