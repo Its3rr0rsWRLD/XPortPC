@@ -162,11 +162,15 @@ def check_throw(launcher, title):
     where = rf"{re.escape(name)}\+0x([0-9a-f]+)"
     throws = []
     for line in lines:
-        match = re.fullmatch(rf"cpp-throw (\S+) at {where} from {where}", line)
+        # The line may end with the caller chain (" callers A from B from C"), which makes otherwise equal lines
+        # distinct (the same throw reached from two call sites); those count once here.
+        match = re.fullmatch(rf"cpp-throw (\S+) at {where} from {where}(?: callers {where}(?: from {where}){{0,2}})?", line)
         if line.startswith("cpp-throw") and not match:
             raise AssertionError(f"cpp-throw line without two title frames: {line!r}")
         if match:
-            throws.append((match[1], int(match[2], 16), int(match[3], 16)))
+            throw = (match[1], int(match[2], 16), int(match[3], 16))
+            if throw not in throws or " callers " not in line:
+                throws.append(throw)
     if len(set(throws)) != len(throws):
         raise AssertionError("a cpp-throw line is repeated:\n" + "\n".join(lines))
     # Every throw statement goes through the title's _CxxThrowException, the site of the first throw. The
