@@ -233,8 +233,8 @@ build. The NGG build gives the same numbers with V-1 shaders moving to V-2.
   the bytes after `s_endpgm`), `image_sample_lz` (explicit LOD, legal in a VS), uniform branches through CF-1 and
   divergent ones through CF-2 in the vertex stage.
 - **Later, not planned as a card:** NGG culling (recognize the culling region and prove that dropping it leaves
-  render targets unchanged on the test meshes), LS/ES-merged vertex shaders with tessellation and geometry, and an IA
-  input layout as an optimization.
+  render targets unchanged on the test meshes), LS/ES-merged vertex shaders with tessellation and geometry
+  ([stages.md](stages.md): card G-1 lowers NGG ES+GS waves), and an IA input layout as an optimization.
 
 ## Reproduction
 ```bash
