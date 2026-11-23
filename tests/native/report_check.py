@@ -284,9 +284,14 @@ class SyntheticReport(unittest.TestCase):
         self.assertEqual((facts["relocations"]["present"], facts["relocations"]["blocks"],
                           facts["relocations"]["entries"]), (True, 1, 5))
         self.assertTrue(all(check["ok"] for check in report["pe_map_preflight"]), report["pe_map_preflight"])
+        # pe_map maps implicit TLS data, so a 16-byte template passes; a DLL fails the EXE check.
         self.title.write_bytes(build_pe(TITLE_IMPORTS, tls_template=16))
+        report = self.run_tool()
+        self.assertEqual(report["pe"]["tls"]["template_bytes"], 16)
+        self.assertTrue(all(check["ok"] for check in report["pe_map_preflight"]), report["pe_map_preflight"])
+        self.title.write_bytes(build_pe(TITLE_IMPORTS, dll=True))
         failed = [c["check"] for c in self.run_tool()["pe_map_preflight"] if not c["ok"]]
-        self.assertEqual(failed, ["empty TLS data template"])
+        self.assertEqual(failed, ["an EXE, not a DLL"])
 
     def test_report_holds_names_and_counts_only(self):
         self.run_tool()

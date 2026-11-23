@@ -1,0 +1,5 @@
+// RCDATA resource 1 that identity_title.cpp finds through FindResourceW(NULL) and its own base.
+1 RCDATA
+BEGIN
+    "x2w-identity-resource"
+END
