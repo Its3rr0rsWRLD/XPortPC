@@ -156,6 +156,9 @@ class PixelBindings:
         four words s_mov puts in the sampler registers (an immutable sampler RADV inlines)}.
     constant_buffers: {key of a constant-buffer V#: constant slot 0..3}. push_constants: the constant slot that holds
         the push words, or None. buffers: {key of a buffer V#: index of its first word in params (slot 0)}.
+    buffer_words: where the buffer V# words are: "params" (constant slot 0's words 0..63, the harness contract) or
+        "vsharp_words" (a descriptor-words buffer of its own, b5 in the converter's registers, words 0..127; the
+        graphics shim's contract, tools/pso_translate.py), which needs no constant slot 0.
     storage_images: {key of a storage-image T#: (slot 0..3, format)} (forms/image_writes.py).
     descriptor_high: the high word the program completes a descriptor-set pointer with.
     dimensions: {texture slot: "2d", "2d_array", "cube" or "3d", or the T#'s eight words when they are known, whose
@@ -173,6 +176,7 @@ class PixelBindings:
     buffers: dict = field(default_factory=dict)
     storage_images: dict = field(default_factory=dict)
     descriptor_high: int = RADV_DESCRIPTOR_HIGH
+    buffer_words: str = "params"
     dimensions: dict = field(default_factory=dict)
     constant_sizes: dict = field(default_factory=dict)
     ps_input_ena: int = PERSP_CENTER
@@ -220,10 +224,18 @@ class PixelBindings:
         if any(not valid_key(k, 16) for k in self.constant_buffers) or any(s not in range(CONSTANT_SLOTS) for s in cslots) \
                 or len(set(cslots)) != len(cslots):
             raise ValueError("Invalid constant-buffer key or slot (0 to 3, each once)")
-        if self.buffers and 0 not in cslots:
+        if self.buffer_words not in ("params", "vsharp_words"):
+            raise ValueError("Invalid buffer descriptor words array")
+        own = self.buffer_words == "vsharp_words"
+        if self.buffers and 0 not in cslots and not own:
             raise ValueError("Buffer descriptors need constant slot 0")
-        if any(not valid_key(k, 16) or not isinstance(w, int) or not 0 <= w <= 60 for k, w in self.buffers.items()):
+        if any(not valid_key(k, 16) or not isinstance(w, int) or not 0 <= w <= (124 if own else 60)
+               for k, w in self.buffers.items()):
             raise ValueError("Invalid buffer descriptor offset or constant word")
+        if own:
+            words = sorted(self.buffers.values())
+            if any(b < a + 4 for a, b in zip(words, words[1:])):
+                raise ValueError("Invalid buffer descriptor offset or constant word")
         images = [e[0] if isinstance(e, tuple) and len(e) == 2 else None for e in self.storage_images.values()]
         if any(not valid_key(k, 32) for k in self.storage_images) or any(s not in range(4) for s in images) \
                 or len(set(images)) != len(images):
@@ -241,7 +253,7 @@ class PixelBindings:
                 or self.ps_input_ena & ~addr or not self.ps_input_ena & 0x7f:
             raise ValueError("SPI_PS_INPUT_ENA needs a barycentric input (bits 0 to 6) and its bits set in "
                              "SPI_PS_INPUT_ADDR (16 bits each)")
-        if self.push_constants == 0 and self.buffers:
+        if self.push_constants == 0 and self.buffers and not own:
             pushed = {int(r[5:]) for r in roles if r.startswith("push:")}
             if any(w <= u < w + 4 for u in pushed for w in self.buffers.values()):
                 raise ValueError("A push-constant word overlaps the words of a buffer V#")
@@ -259,7 +271,8 @@ class PixelBindings:
         if self.push_constants is not None:
             s = self.push_constants
             out.append(f"push constants: {constant_array(s)} (b{0 if s == 0 else s + 1})")
-        out += [f"{describe_key(k)}: buffer V# in params words {w}..{w + 3}" for k, w in sorted(self.buffers.items())]
+        out += [f"{describe_key(k)}: buffer V# in {self.buffer_words} words {w}..{w + 3}"
+                for k, w in sorted(self.buffers.items())]
         out += [f"{describe_key(k)}: storage image {e[0]} ({e[1]})" for k, e in sorted(self.storage_images.items())]
         out += [f"{constant_array(s)}: {size} bytes" for s, size in sorted(self.constant_sizes.items())]
         if self.ps_input_ena != PERSP_CENTER or self.ps_input_addr not in (None, PERSP_CENTER):
@@ -287,4 +300,6 @@ def declarations(b):
     for k in sorted(cslots):
         lines.append("cbuffer Constants : register(b0) { uint4 params[16]; };" if k == 0 else
                      f"cbuffer Constants{k} : register(b{k + 1}) {{ uint4 {constant_array(k)}[16]; }};")
+    if b.buffers and b.buffer_words == "vsharp_words":
+        lines.append("cbuffer Descriptors : register(b5) { uint4 vsharp_words[32]; };")
     return lines, sampled

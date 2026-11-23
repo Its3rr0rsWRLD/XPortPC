@@ -515,13 +515,19 @@ public:
         if (args_) args_->clear();
         real_->SetGraphicsRootSignature(root);
     }
+    // As SetGraphicsRootDescriptorTable (R6): a table of a title compute root signature is recorded for
+    // bind_for_dispatch.
     void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE base) override
     {
         X2W_USE();
+        if (compute_.has_root && index < compute_.root.title_params &&
+            compute_.root.types[index] == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            compute_.record_address(index, base.ptr);
+            return;
+        }
         if (descriptors::is_title_handle(base.ptr)) {
             log_refused("d3d12_xs!ID3D12GraphicsCommandList::SetComputeRootDescriptorTable",
-                        "a compute table in a title heap is not translated (console compute comes with R5); not set",
-                        true);
+                        "a title-heap table for a root signature not created through the shim; not set", true);
             return;
         }
         real_->SetComputeRootDescriptorTable(index, base);

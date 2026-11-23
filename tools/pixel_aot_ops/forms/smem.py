@@ -93,7 +93,7 @@ def compute_descriptor_load(st, i, m):
             words.append((constants[cbv], (at - cbv) // 4))
         elif vsharp is not None:
             word = st.vsharp_words[vsharp] + (at - vsharp) // 4
-            words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+            words.append(("uint", f"{st.vsharp_array}[{word // 4}].{'xyzw'[word % 4]}"))
         else:
             raise ValueError("Descriptor table word is not a tracked descriptor")
     for n, value in zip(dst, words):
@@ -194,7 +194,7 @@ def scalar_load(st, i, m):
             if entry is None:
                 raise ValueError("Descriptor table word is not a tracked descriptor")
             word = st.vsharp_words[entry] + (at - entry) // 4
-            words.append(("uint", f"params[{word // 4}].{'xyzw'[word % 4]}"))
+            words.append(("uint", f"{st.vsharp_array}[{word // 4}].{'xyzw'[word % 4]}"))
     for n, value in zip(dst, words):
         if n in st.pending:
             raise ValueError("Write overlaps an outstanding scalar load")

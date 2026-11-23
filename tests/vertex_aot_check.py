@@ -153,6 +153,93 @@ INLINE_FLOAT = {"0.5": 0x3f000000, "1.0": 0x3f800000, "2.0": 0x40000000, "4.0": 
 
 # --- a model of the console for the forms the V-1 programs use ---------------------------------------------------------
 
+# --- typed fetch (gfx10 unified buffer formats) ------------------------------------------------------------------------
+
+_K6 = ["UNORM", "SNORM", "USCALED", "SSCALED", "UINT", "SINT"]
+_K7 = _K6 + ["FLOAT"]
+# LLVM AMDGPU::UfmtGFX10 names of formats 1..77 (BUF_FMT_<name>); written out independently of tools/.
+UFMT_NAMES = ([f"8_{k}" for k in _K6] + [f"16_{k}" for k in _K7] + [f"8_8_{k}" for k in _K6]
+              + ["32_UINT", "32_SINT", "32_FLOAT"] + [f"16_16_{k}" for k in _K7] + [f"10_11_11_{k}" for k in _K7]
+              + [f"11_11_10_{k}" for k in _K7] + [f"10_10_10_2_{k}" for k in _K6] + [f"2_10_10_10_{k}" for k in _K6]
+              + [f"8_8_8_8_{k}" for k in _K6] + ["32_32_UINT", "32_32_SINT", "32_32_FLOAT"]
+              + [f"16_16_16_16_{k}" for k in _K7] + ["32_32_32_UINT", "32_32_32_SINT", "32_32_32_FLOAT",
+                                                    "32_32_32_32_UINT", "32_32_32_32_SINT", "32_32_32_32_FLOAT"])
+assert len(UFMT_NAMES) == 77
+
+
+def ufmt_layout(fmt, flaws=()):
+    """(component widths x..w, numeric kind) of a gfx10 format read off its name, or None for INVALID and numbers past
+    77. AMD names list components from the most significant bits, so x is the last field of the name (Mesa
+    radv_formats.c gives R10G10B10A2 the format 2_10_10_10 and B10G11R11_UFLOAT 10_11_11); kinds are 0 UNORM, 1 SNORM,
+    2 USCALED, 3 SSCALED, 4 UINT, 5 SINT, 6 FLOAT. The wrong reference "reversed_components" reads the name from x."""
+    if not 1 <= fmt <= 77:
+        return None
+    *fields, kind = UFMT_NAMES[fmt - 1].split("_")
+    widths = [int(w) for w in (fields if "reversed_components" in flaws else reversed(fields))]
+    return widths + [0] * (4 - len(widths)), _K7.index(kind)
+
+
+def small_float(bits, exponent_bits, mantissa_bits, signed, flaws=()):
+    """The binary32 encoding of a float with the given fields: exact (every such value is a binary32 value); Inf and
+    NaN keep their mantissa, shifted to the top."""
+    sign = (bits >> (exponent_bits + mantissa_bits)) & 1 if signed else 0
+    e = (bits >> mantissa_bits) & ((1 << exponent_bits) - 1)
+    m = bits & ((1 << mantissa_bits) - 1)
+    if e == (1 << exponent_bits) - 1:
+        return sign << 31 | 0x7f800000 | m << (23 - mantissa_bits)
+    bias = (1 << (exponent_bits - 1)) - 1
+    if e == 0 and "small_float_flush" in flaws:
+        value = Fraction(0)
+    elif e == 0:
+        value = Fraction(m, 1 << mantissa_bits) * Fraction(1, 1 << (bias - 1))
+    else:
+        value = (1 + Fraction(m, 1 << mantissa_bits)) * Fraction(2) ** (e - bias)
+    return round_f32(-value if sign else value, negative_zero=bool(sign))
+
+
+def typed_component(value, width, kind, flaws=()):
+    """One component of a typed load as a 32-bit word: Vulkan's conversions (UNORM c / (2^n - 1), SNORM
+    max(c / (2^(n-1) - 1), -1)) rounded to nearest even, scaled as exact floats, integers zero- or sign-extended."""
+    top = 1 << (width - 1)
+    signed = value - (1 << width) if value & top else value
+    def rounded(fraction):
+        bits = round_f32(fraction)
+        if "norm_truncate" in flaws and abs(f32_fraction(bits)) > abs(fraction):
+            bits -= 1  # a wrong reference: toward zero (one step down in magnitude)
+        return bits
+    if kind == 0:
+        return rounded(Fraction(value, (1 << width) - 1))
+    if kind == 1:
+        if signed == -top and "snorm_unclamped" not in flaws:
+            return 0xbf800000
+        return rounded(Fraction(signed, top - 1))
+    if kind == 2:
+        return round_f32(Fraction(value))
+    if kind == 3:
+        return round_f32(Fraction(signed))
+    if kind == 4:
+        return value
+    if kind == 5:
+        return signed & M32
+    if width == 32:
+        return value
+    return small_float(value, 5, width - 6 if width == 16 else width - 5, width == 16, flaws)
+
+
+def typed_element(fmt, data, flaws=()):
+    """The four raw components (missing ones 0, 0, 0 and 1 or 1.0) of an element of format `fmt` read as the integer
+    `data` (little endian)."""
+    widths, kind = ufmt_layout(fmt, flaws)
+    floats = kind not in (4, 5)
+    out = [0, 0, 0, 0x3f800000 if floats != ("w_default_swapped" in flaws) else 1]
+    shift = 0
+    for c in range(4):
+        if widths[c]:
+            out[c] = typed_component((data >> shift) & ((1 << widths[c]) - 1), widths[c], kind, flaws)
+        shift += widths[c]
+    return out
+
+
 class Memory:
     """Title memory: (begin, bytes, slot) ranges. A dword read outside every range is a miss and reads 0, as in
     the shader's TitleLookup."""
@@ -165,6 +252,9 @@ class Memory:
             if begin <= address and address + 4 <= begin + len(data) and address % 4 == 0:
                 return int.from_bytes(data[address - begin:address - begin + 4], "little")
         return 0
+
+    def byte(self, address):
+        return (self.word(address & ~3) >> (8 * (address & 3))) & 0xff
 
     def section(self):
         return titlemem.section([(begin, begin + len(data), slot) for slot, (begin, data) in enumerate(self.ranges)],
@@ -286,6 +376,8 @@ class Model:
                     values = [0 if offset // 4 + j >= 64 else x for j, x in enumerate(values)]
                 for n, value in zip(span(ops[0]), values):
                     s[n] = value
+            elif name.startswith(("buffer_load_format", "tbuffer_load_format")):
+                self.typed_fetch(name, ops, v, s, span)
             elif name.startswith("buffer_load_dword"):
                 self.fetch(ops, v, s, span)
             elif name.startswith("global_load_dword"):
@@ -398,6 +490,42 @@ class Model:
                 ok = offset < records
             step = 0 if "nostride" in self.flaws else stride * index
             v[n] = self.memory.word((base + step + offset) % (1 << 64)) if ok else 0
+
+    def typed_fetch(self, name, ops, v, s, span):
+        """buffer_load_format_* (format from V# word 3 bits 12..18) and tbuffer_load_format_* (format from the
+        instruction) idxen: the element whose first byte passes the range rule of `fetch`, converted (typed_element),
+        placed by DST_SEL; an out-of-range element or an invalid format reads 0 in every channel."""
+        rsrc = [s[n] for n in span(ops[2])]
+        modifiers = ops[-1].split()[1:]
+        inst = next((int(m[7:]) for m in modifiers if m.startswith("offset:")), 0)
+        assert "idxen" in modifiers and "offen" not in modifiers
+        index = v[int(ops[1][1:])]
+        if name.startswith("tbuffer"):
+            fmt_name = next(m for m in modifiers if m.startswith("format:"))[len("format:["):-1]
+            fmt = UFMT_NAMES.index(fmt_name[len("BUF_FMT_"):]) + 1
+        else:
+            fmt = (rsrc[3] >> 12) & 0x7f
+        if "format_ignored" in self.flaws:
+            fmt = 77
+        base = rsrc[0] | (rsrc[1] & 0xffff) << 32
+        stride, records, select = (rsrc[1] >> 16) & 0x3fff, rsrc[2], (rsrc[3] >> 28) & 3
+        ok = {0: index < records and inst < stride, 1: index < records, 2: records != 0, 3: inst < records}[select]
+        layout = ufmt_layout(fmt)
+        dsts = span(ops[0])
+        if not ok or layout is None:
+            for n in dsts:
+                v[n] = 0
+            return
+        address = base + stride * index + inst
+        size = sum(layout[0]) // 8
+        data = sum(self.memory.byte((address + k) % (1 << 64)) << (8 * k) for k in range(size))
+        raw = typed_element(fmt, data, self.flaws)
+        floats = layout[1] not in (4, 5)
+        one = 0x3f800000 if floats != ("w_default_swapped" in self.flaws) else 1
+        selects = [4, 5, 6, 7] if "no_dst_sel" in self.flaws else [(rsrc[3] >> (3 * c)) & 7 for c in range(4)]
+        out = [one if sel == 1 else raw[sel - 4] if sel >= 4 else 0 for sel in selects]
+        for n, word in zip(dsts, out):
+            v[n] = word
 
     def export_word(self, word):
         nan = (word >> 23) & 0xff == 0xff and word & 0x7fffff
@@ -607,11 +735,12 @@ def compile_vs(compiler, source, directory, name):
 
 
 def run_sets(directory, compiler, renderer, backend, name, program, roles, sets, flaws, extra=None, body=None,
-             vs_out_cntl=None):
+             vs_out_cntl=None, once=False):
     """Draw every set with its reference, then each wrong reference, which must be reported as a mismatch.
     A set is (constants, memory, record ids or (indices,), base vertex[, extras]), extras a dict with any of
     descriptors, push, instances, start_instance. `body` is the program the model runs when `program` is an NGG
-    program (the vertex body inside its frame)."""
+    program (the vertex body inside its frame). `once`: each wrong reference is drawn only on the first set where it
+    differs (families with many sets)."""
     source, layout = lower(program, roles, vs_out_cntl)
     stage = layout["stage"]
     body = program if body is None else body
@@ -639,6 +768,8 @@ def run_sets(directory, compiler, renderer, backend, name, program, roles, sets,
             sys.stderr.write(result.stderr)
             raise AssertionError(f"{name}: the draw differs from the reference (base vertex {base:#x}, {len(records)} records)")
         for flaw in separated:
+            if once and separated[flaw]:
+                continue
             wrong, _ = outputs(model(flaw), body, layout, records, base, instances, start)
             if wrong == expected:
                 continue
@@ -747,6 +878,84 @@ def draw_nan(directory, compiler, renderer, backend):
         sets.append((words, memory, count, base))
     flaws = [{"canonical_nan"}, {"quiet_nan"}, {"flush_denormal"}, {"base_ignored"}]
     return run_sets(directory, compiler, renderer, backend, "nan", NAN, NAN_ROLES, sets, flaws)
+
+
+# --- typed fetch ------------------------------------------------------------------------------------------------------
+
+TYPED = [
+    *PROLOGUE,
+    "s_load_dwordx16 s[8:23], s[2:3], null",
+    "v_add_nc_u32_e32 v0, s0, v0",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen",
+    "buffer_load_format_xyzw v[8:11], v0, s[12:15], 0 idxen offset:4",
+    "buffer_load_format_xy v[12:13], v0, s[16:19], 0 idxen",
+    "tbuffer_load_format_xyzw v[14:17], v0, s[20:23], 0 format:[BUF_FMT_2_10_10_10_SNORM] idxen",
+    "tbuffer_load_format_xyz v[18:20], v0, s[20:23], 0 format:[BUF_FMT_10_11_11_FLOAT] idxen offset:4",
+    "tbuffer_load_format_x v21, v0, s[20:23], 0 format:[BUF_FMT_16_FLOAT] idxen offset:8",
+    "s_waitcnt vmcnt(0)",
+    "exp pos0 v4, v5, v6, v7 done vm",
+    "exp param0 v8, v9, v10, v11",
+    "exp param1 v12, v13, v14, v15",
+    "exp param2 v16, v17, v18, v19",
+    "exp param3 v20, v21, v20, v21",
+    "s_endpgm",
+]
+TYPED_ROLES = {2: ("descriptors", HIGH, {0: ("vsharp", 8), 16: ("vsharp", 12), 32: ("vsharp", 16),
+                                         48: ("vsharp", 20)}), 3: ("base_vertex",)}
+TYPED_BASE = HIGH_BASE + 0x40
+# Element bit patterns that reach the edges of every conversion: zero, all ones, the most negative SNORM value, its
+# neighbour, half and small-float subnormals, infinities and NaNs, rounding ties.
+TYPED_SPECIALS = [0x00000000, 0xffffffff, 0x80008000, 0x81818181, 0x7fff7fff, 0x00010001, 0x7c00fc00, 0x7e017c01,
+                  0x3c00bc00, 0x03ff8001, 0x40000000, 0xc0000001, 0x0000ffff, 0xaaaa5555, 0x7f800001, 0x00800080]
+
+
+def typed_memory(seed):
+    """Title memory for the typed family: the specials, then a fixed pseudo-random byte sequence."""
+    state, data = seed, bytearray(words_bytes(TYPED_SPECIALS))
+    while len(data) < 0x400:
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        data.append(state >> 16 & 0xff)
+    return Memory([(HIGH_BASE, bytes(data))])
+
+
+def typed_sharp(base, stride, records, select, fmt, sel=4 | 5 << 3 | 6 << 6 | 7 << 9):
+    return [base & M32, (base >> 32) | stride << 16, records, 1 << 24 | select << 28 | fmt << 12 | sel]
+
+
+def typed_sets():
+    """One set per pair of formats: V# 1 (xyzw, offset 4, a DST_SEL swizzle with the 0 and 1 selects in some sets) and
+    V# 2 (xy). Together they name every gfx10 format; strides are odd multiples of 2 where the element allows, so
+    four-byte elements are read unaligned; num_records cuts the last record of V# 1 in some sets. V# 0 (positions)
+    is 32_32_32_32_FLOAT and V# 3 is read by the tbuffer loads in their instruction formats."""
+    sets, formats = [], list(range(1, 78))
+    swizzles = [4 | 5 << 3 | 6 << 6 | 7 << 9, 7 | 6 << 3 | 5 << 6 | 4 << 9, 5 | 0 << 3 | 1 << 6 | 4 << 9]
+    for n in range(0, len(formats), 2):
+        a, b = formats[n], formats[(n + 1) % len(formats)]
+        size_a = sum(ufmt_layout(a)[0]) // 8
+        size_b = sum(ufmt_layout(b)[0]) // 8
+        stride_a = size_a + 4 + (2 if n % 4 else 0)
+        stride_b = size_b + (2 if size_b >= 4 and n % 4 == 2 else 0)
+        words = [0] * 64
+        words[8:12] = typed_sharp(TYPED_BASE, 16, 8, 0, 77)
+        words[12:16] = typed_sharp(TYPED_BASE + 0x80 + n, stride_a, 4 if n % 6 == 0 else 8, 0, a,
+                                   swizzles[(n // 2) % 3])
+        words[16:20] = typed_sharp(TYPED_BASE + 0x100 + 3 * n, stride_b, 8, 1, b)
+        words[20:24] = typed_sharp(TYPED_BASE + 0x1c0, 12, 8, 0, 0)
+        sets.append((words, typed_memory(90 + n), 5, n % 3))
+    return sets
+
+
+TYPED_FLAWS = [{"norm_truncate"}, {"snorm_unclamped"}, {"reversed_components"}, {"w_default_swapped"}, {"no_dst_sel"},
+               {"format_ignored"}, {"small_float_flush"}, {"base_ignored"}]
+
+
+def draw_typed(directory, compiler, renderer, backend):
+    """Typed vertex fetch: buffer_load_format_* through V#s of every gfx10 unified format (component layout, UNORM,
+    SNORM, scaled, integer and 16-, 11- and 10-bit float conversion, the missing-component fill, DST_SEL, range rules)
+    and tbuffer_load_format_* in instruction formats, against the Python conversions above."""
+    return run_sets(directory, compiler, renderer, backend, "typed", TYPED, TYPED_ROLES, typed_sets(), TYPED_FLAWS,
+                    once=True)
 
 
 # --- cards V-2 and V-3 -------------------------------------------------------------------------------------------------
@@ -1082,13 +1291,13 @@ def draw_carry(directory, compiler, renderer, backend):
 
 DRAW_FAMILIES = {"fetch": draw_fetch, "matrix": draw_matrix, "vertex_id": draw_vertex_id, "nan": draw_nan,
                  "ngg": draw_ngg, "instance": draw_instance, "distance": draw_distance, "trig": draw_trig,
-                 "carry": draw_carry, "wide": draw_wide, "dynamic": draw_dynamic}
+                 "carry": draw_carry, "wide": draw_wide, "dynamic": draw_dynamic, "typed": draw_typed}
 PROGRAMS = ((FETCH, FETCH_ROLES, None), (MATRIX, MATRIX_ROLES, None), (VERTEX_ID, VERTEX_ID_ROLES, None),
             (NAN, NAN_ROLES, None), (NGG_FETCH, ngg_roles(FETCH_ROLES), None),
             (NGG_MATRIX, ngg_roles(MATRIX_ROLES), None), (NGG_VERTEX_ID, ngg_roles(VERTEX_ID_ROLES), None),
             (INSTANCE, INSTANCE_ROLES, None), (NGG_INSTANCE, ngg_roles(INSTANCE_ROLES), None),
             (DISTANCE, DISTANCE_ROLES, DISTANCE_CNTL), (TRIG, TRIG_ROLES, None), (CARRY, CARRY_ROLES, None),
-            (WIDE, WIDE_ROLES, None), (DYNAMIC, DYNAMIC_ROLES, None))
+            (WIDE, WIDE_ROLES, None), (DYNAMIC, DYNAMIC_ROLES, None), (TYPED, TYPED_ROLES, None))
 
 
 # --- controls (no DXC, no GPU) -----------------------------------------------------------------------------------------
@@ -1165,8 +1374,14 @@ def check_refusals():
         (body("v_mov_b32_e32 v20, v2"), FETCH_ROLES, "entry VGPR v2"),
         (body("exp pos1 v4, off, off, off done"), FETCH_ROLES, "PA_CL_VS_OUT_CNTL"),
         (body("v_mul_f32_e32 v20, v3, v4"), FETCH_ROLES, None),  # v3 holds the instance id now: accepted below
-        (body("buffer_load_format_xyzw v[20:23], v0, s[8:11], 0 idxen"), FETCH_ROLES, "typed vertex fetch"),
-        (body("tbuffer_load_format_x v20, v0, s[8:11], 0 format:[BUF_FMT_32_FLOAT] idxen"), FETCH_ROLES, "typed"),
+        # Typed fetch translates (family typed); its d16 forms, a missing or invalid tbuffer format and typed stores do not.
+        (body("buffer_load_format_d16_xyzw v[20:21], v0, s[8:11], 0 idxen"), FETCH_ROLES, "d16 typed vertex fetch"),
+        (body("tbuffer_load_format_d16_x v20, v0, s[8:11], 0 format:[BUF_FMT_16_FLOAT] idxen"), FETCH_ROLES, "d16"),
+        (body("tbuffer_load_format_x v20, v0, s[8:11], 0 idxen"), FETCH_ROLES, "format: field"),
+        (body("tbuffer_load_format_x v20, v0, s[8:11], 0 format:[BUF_FMT_INVALID] idxen"), FETCH_ROLES, "not lowered"),
+        (body("tbuffer_load_format_x v20, v0, s[8:11], 0 format:78 idxen"), FETCH_ROLES, "not lowered"),
+        (body("tbuffer_store_format_x v4, v0, s[8:11], 0 format:[BUF_FMT_32_UINT] idxen"), FETCH_ROLES, "side effects"),
+        (body("buffer_store_format_x v4, v0, s[8:11], 0 idxen"), FETCH_ROLES, "side effects"),
         (body("flat_load_dword v20, v[4:5]"), FETCH_ROLES, "flat and scratch"),
         (body("global_store_dword v[4:5], v6, off"), FETCH_ROLES, "side effects"),
         ([*base], {**FETCH_ROLES, 5: ("inline",)}, "push-constant word"),
@@ -1314,9 +1529,9 @@ def check_v3_refusals():
     # The instance index before the start instance is added, read through a pending scalar load.
     k = INSTANCE.index("s_waitcnt lgkmcnt(0)")
     must_refuse(INSTANCE[:k] + ["v_mov_b32_e32 v30, s20"] + INSTANCE[k:], INSTANCE_ROLES, "unset")
-    # A typed fetch stays refused until a corpus build exercises it.
-    must_refuse(INSTANCE[:k + 1] + ["buffer_load_format_x v30, v0, s[12:15], 0 idxen"] + INSTANCE[k + 1:],
-                INSTANCE_ROLES, "typed vertex fetch")
+    # A typed fetch translates since family typed; its d16 form does not.
+    must_refuse(INSTANCE[:k + 1] + ["buffer_load_format_d16_x v30, v0, s[12:15], 0 idxen"] + INSTANCE[k + 1:],
+                INSTANCE_ROLES, "d16 typed vertex fetch")
 
 
 def check_v4_controls():
@@ -1412,8 +1627,43 @@ def check_dynamic_controls():
                  for line in DYNAMIC], DYNAMIC_ROLES, "immediate")
 
 
+def check_typed_controls():
+    """Typed fetch: the reference conversions against values worked out by hand, every wrong reference differing from
+    the right one on some set, and the translation's use of the run-time and instruction formats."""
+    f = lambda name: UFMT_NAMES.index(name) + 1  # noqa: E731
+    hand = [
+        ("8_UNORM", 0xff, [0x3f800000, 0, 0, 0x3f800000]), ("8_UNORM", 0x80, [0x3f008081, 0, 0, 0x3f800000]),
+        ("8_SNORM", 0x80, [0xbf800000, 0, 0, 0x3f800000]), ("8_SNORM", 0x81, [0xbf800000, 0, 0, 0x3f800000]),
+        ("8_SNORM", 0x7f, [0x3f800000, 0, 0, 0x3f800000]), ("8_USCALED", 0xff, [0x437f0000, 0, 0, 0x3f800000]),
+        ("8_SSCALED", 0xff, [0xbf800000, 0, 0, 0x3f800000]), ("8_UINT", 0xff, [0xff, 0, 0, 1]),
+        ("8_SINT", 0xff, [M32, 0, 0, 1]), ("16_FLOAT", 0x3c00, [0x3f800000, 0, 0, 0x3f800000]),
+        ("16_FLOAT", 0x0001, [0x33800000, 0, 0, 0x3f800000]), ("16_FLOAT", 0xfc01, [0xff802000, 0, 0, 0x3f800000]),
+        ("16_16_UNORM", 0xffff0001, [0x37800080, 0x3f800000, 0, 0x3f800000]),
+        ("10_11_11_FLOAT", 0x3c0 | 0x3c0 << 11 | 0x1e0 << 22, [0x3f800000] * 4),
+        ("11_11_10_FLOAT", 0x1 | 0x3c0 << 10 | 0x7c1 << 21, [0x36000000, 0x3f800000, 0x7f820000, 0x3f800000]),
+        ("2_10_10_10_UINT", 1 | 2 << 10 | 3 << 20 | 3 << 30, [1, 2, 3, 3]),
+        ("10_10_10_2_UINT", 1 | 2 << 2 | 3 << 12 | 0x3ff << 22, [1, 2, 3, 0x3ff]),
+        ("2_10_10_10_SNORM", 0x200 | 0x1ff << 10 | 2 << 30, [0xbf800000, 0x3f800000, 0, 0xbf800000]),
+        ("8_8_8_8_UINT", 0x04030201, [1, 2, 3, 4]), ("32_32_FLOAT", 0x3f800000_7fc00001, [0x7fc00001, 0x3f800000, 0, 0x3f800000]),
+    ]
+    for name, data, want in hand:
+        got = typed_element(f(name), data)
+        assert got == want, (name, hex(data), [hex(x) for x in got])
+    sets = typed_sets()
+    assert {(w[15] >> 12) & 0x7f for w, *_ in sets} | {(w[19] >> 12) & 0x7f for w, *_ in sets} == set(range(1, 78))
+    layout = lower(TYPED, TYPED_ROLES)[1]
+    for flaw in TYPED_FLAWS:
+        assert any(outputs(Model(TYPED_ROLES, c, m, flaw), TYPED, layout, range(n), b)
+                   != outputs(Model(TYPED_ROLES, c, m), TYPED, layout, range(n), b) for c, m, n, b in sets), flaw
+    source = lower(TYPED, TYPED_ROLES)[0]
+    assert source.count(">> 12u) & 0x7fu);") == 3 and ", 51u);" in source and ", 36u);" in source \
+        and ", 13u);" in source, "typed loads do not pass the V# or instruction format"
+    print(f"vertex_aot typed controls ok: {len(hand)} hand values, {len(sets)} sets, {len(TYPED_FLAWS)} wrong references")
+
+
 def check_controls():
     check_reference_arithmetic()
+    check_typed_controls()
     check_translation_shape()
     check_refusals()
     check_v4_controls()

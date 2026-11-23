@@ -57,6 +57,9 @@ std::atomic<std::uint32_t> g_shaders_cached;
 std::atomic<std::uint32_t> g_pipelines_refused;
 std::atomic<std::uint32_t> g_draws_refused;
 std::atomic<std::uint64_t> g_texture_misses;
+std::atomic<std::uint64_t> g_raw_reads;
+std::atomic<std::uint32_t> g_raw_uploads;
+std::atomic<std::uint32_t> g_raw_samplers;
 
 using Thunk = std::uintptr_t(STDMETHODCALLTYPE*)(void*, std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
@@ -239,6 +242,12 @@ void log_refused(const char* symbol, const char* detail, bool draw)
 }
 
 void count_texture_miss() { g_texture_misses.fetch_add(1); }
+void count_raw(unsigned reads, unsigned uploads, unsigned samplers)
+{
+    if (reads) g_raw_reads.fetch_add(reads);
+    if (uploads) g_raw_uploads.fetch_add(uploads);
+    if (samplers) g_raw_samplers.fetch_add(samplers);
+}
 
 void count_shader(bool cached) { (cached ? g_shaders_cached : g_shaders_translated).fetch_add(1); }
 
@@ -315,5 +324,8 @@ extern "C" X2W_GFX_API BOOL WINAPI X2WGfxGetCounters(X2WGfxCounters* counters)
     counters->draws_refused = g_draws_refused.load();
     counters->title_lookup_misses = pipeline::title_lookup_misses();
     counters->texture_lookup_misses = g_texture_misses.load();
+    counters->raw_descriptor_reads = g_raw_reads.load();
+    counters->raw_texture_uploads = g_raw_uploads.load();
+    counters->raw_samplers_created = g_raw_samplers.load();
     return TRUE;
 }
