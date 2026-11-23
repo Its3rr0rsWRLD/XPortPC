@@ -3,9 +3,9 @@
 // GetProcAddress. Run through x2w_launch --shims DIR, the launcher's loader hooks must route the load to the
 // generated xgameruntime.dll shim (tools/shimgen.py --all-specs) and log each load and resolve.
 // The exit code has one bit per check; 0x1ff when all pass. It holds no title code or data.
-#include <windows.h>
-
+// Runtime checks off before windows.h, so its inline functions do not pull in the CRT's _RTC_* hooks.
 #pragma runtime_checks("", off)
+#include <windows.h>
 
 namespace {
 enum class Mode : unsigned { Manual = 0 };
@@ -21,7 +21,7 @@ using LoadEx = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 volatile LONG ran;
 void CALLBACK callback(void* context, bool canceled)
 {
-    if (!canceled) InterlockedAdd(&ran, static_cast<LONG>(reinterpret_cast<ULONG_PTR>(context)));
+    if (!canceled) InterlockedExchangeAdd(&ran, static_cast<LONG>(reinterpret_cast<ULONG_PTR>(context)));
 }
 }  // namespace
 
