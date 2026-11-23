@@ -88,7 +88,9 @@ def pack_tokens(st, i, dst, tokens, clamp):
     if clamp:
         raise ValueError("clamp on v_cvt_pkrtz_f16_f32_e64 is refused: its hardware behaviour is unverified "
                          "(LLVM issue 60591 reports it is ignored on GFX10.3)")
-    if st.sample_pending or dst in st.sample_dest:
+    # Only the sources and the destination must be settled, as for the e32 form: an unrelated load may still be in
+    # flight (fp_operand refuses a source register that is a load destination).
+    if dst in st.sample_dest:
         raise ValueError("Unsupported pack operand")
     pair = []
     for n, token in enumerate(tokens):

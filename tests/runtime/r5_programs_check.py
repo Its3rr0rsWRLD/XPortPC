@@ -32,7 +32,7 @@ FORMS = [
     "v_add_f32_e32 v4, v4, v6", "v_add_f32_e32 v10, s6, v4", "v_subrev_f32_e32 v8, s6, v4",
     "buffer_load_dwordx4 v[4:7], v2, s[8:11], 0 offen", "buffer_load_dwordx4 v[4:7], v2, s[8:11], 0 offen offset:16",
     "buffer_store_dwordx4 v[4:7], v2, s[8:11], 0 offen", "buffer_store_dwordx2 v[8:9], v3, s[12:15], 0 offen offset:80",
-    "s_mov_b32 s11, 0x30000000", "s_barrier", "s_waitcnt vmcnt(0)",
+    "s_mov_b32 s11, 0x30000000", "s_barrier", "ds_bpermute_b32 v20, v2, v1", "s_waitcnt vmcnt(0)",
 ]
 
 
@@ -75,7 +75,7 @@ def check(assembler=None, objcopy=None):
             source = pso_translate.place_in_runtime_spaces(source, "compute", layout)
             assert refs == [], refs
         except ValueError as error:
-            if name != "r5_refused_cs" or "A color export belongs to the pixel stage" not in str(error):
+            if name != "r5_refused_cs" or "a cross-lane permutation is refused" not in str(error):
                 raise
             print(f"{name}: refused as expected: {error}")
             continue

@@ -153,6 +153,9 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
 HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                 void** out);
 
+// Starts the first translator service in the background (at device creation), unless X2W_TRANSLATE says otherwise.
+void prestart_translator();
+
 // The records attached at creation, or false for an object the shim did not create this way.
 bool root_info(ID3D12RootSignature* root, RootInfo* info);
 bool pso_info(ID3D12PipelineState* state, PsoInfo* info);

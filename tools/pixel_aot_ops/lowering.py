@@ -309,7 +309,8 @@ def finish(st, instructions, samples=None):
     integer_export = st.integer_export
     # A program whose entire body is s_endpgm exports nothing and reads nothing: an empty void main, the same
     # signature as a program whose only export is exp null (forms/exp.py), without the texture sample that one has.
-    empty = [line.strip() for line in instructions] == ["s_endpgm"]
+    # A label on the single block (RADV's "BB0:") does not make it a program with a body.
+    empty = [line.strip() for line in instructions if not line.strip().endswith(":")] == ["s_endpgm"]
     if empty:
         st.lines.append("    return;")
         st.layout, st.signature, st.exported = (), ("void", None), True

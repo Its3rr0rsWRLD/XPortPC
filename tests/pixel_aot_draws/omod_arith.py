@@ -219,12 +219,12 @@ def controls(directory):
     assert "ftz32((mad32(" in source and "* 2.0f" in source, source
     source = translate(program("sub", False)).split("float4 main", 1)[1]
     assert "ftz32(((asfloat(params[0].w) - asfloat(params[1].x)) * 2.0f))" in source, source
-    # Refused neighbours: an e32 spelling takes no omod, an unknown factor, omod before clamp, the rounding forms,
+    # Refused neighbours: an e32 spelling takes no omod, an unknown factor, omod before clamp, fract (the exact rounding forms take it: family pxblk),
     # a missing operand, and a VOP3-only form in its e32 spelling.
     for line in ("v_add_f32_e32 v12, s44, v13 mul:2", "v_mul_f32_e32 v12, s44, v13 div:2", "v_mac_f32_e32 v12, s44, v13 mul:4",
                  "v_add_f32_e64 v12, s44, s45 mul:3", "v_sub_f32_e64 v12, s44, s45 div:4", "v_add_f32_e64 v12, s44, s45 mul:2 clamp",
-                 "v_mad_f32 v12, s44, s45, v13 div:2 clamp", "v_ceil_f32_e64 v12, s44 mul:2", "v_trunc_f32_e64 v12, s44 div:2",
-                 "v_fract_f32_e64 v12, s44 mul:4", "v_floor_f32_e64 v12, s44 clamp mul:2", "v_add_f32_e64 v12, s44 mul:2",
+                 "v_mad_f32 v12, s44, s45, v13 div:2 clamp", "v_fract_f32_e64 v12, s44 div:2",
+                 "v_fract_f32_e64 v12, s44 mul:4", "v_fract_f32_e64 v12, s44 clamp mul:2", "v_add_f32_e64 v12, s44 mul:2",
                  "v_fma_f32_e32 v12, s44, s45, v13 mul:2", "v_mad_f32 v12, s44, s45 mul:2"):
         must_reject(translate, with_constants([line]))
 

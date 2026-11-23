@@ -1,5 +1,5 @@
-; R5 refusal control: r5_cs.s with a colour export after the state load, which tools/compute_aot.py refuses (an
-; export belongs to the pixel stage). Until compute card C-6 landed this was an s_barrier, which now translates.
+; R5 refusal control: r5_cs.s with a ds_bpermute_b32 after the state load, a cross-lane permutation that
+; tools/compute_aot.py refuses (no card).
 s_mov_b32 s8, s2
 s_mov_b32 s9, s3
 s_movk_i32 s10, 0x80
@@ -14,7 +14,7 @@ v_lshlrev_b32_e32 v2, 4, v1
 buffer_load_dwordx4 v[4:7], v2, s[8:11], 0 offen
 v_lshlrev_b32_e32 v3, 7, v1
 s_waitcnt vmcnt(0)
-exp mrt0 v4, v5, v6, v7 done vm
+ds_bpermute_b32 v20, v2, v1
 v_add_f32_e32 v4, v4, v6
 v_add_f32_e32 v5, v5, v7
 buffer_store_dwordx4 v[4:7], v2, s[8:11], 0 offen

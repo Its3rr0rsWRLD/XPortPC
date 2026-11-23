@@ -5,15 +5,18 @@
 #include "d3d12_xs_pipeline.h"
 #include "d3d12_xs_api.h"
 #include "d3d12_xs_descriptors.h"
+#include "d3d12_xs_translator.h"
 #include "d3d12_xs_wrap.h"
 #include "era_title_gpu_api.h"
 
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <map>
 #include <new>
 #include <string>
@@ -197,9 +200,14 @@ bool make_directories(const std::wstring& path)
     }
 }
 
+enum class Mode { service, process, defer };
+
 struct Config {
     std::wstring python, tools, dxc, llvm, cache;  // cache: the title's directory
     std::uint8_t fingerprint[32];
+    Mode mode = Mode::service;
+    unsigned services = 1;  // most translator services at once
+    bool keep_hlsl = false;
 };
 Config* g_config;
 INIT_ONCE g_config_once = INIT_ONCE_STATIC_INIT;
@@ -249,6 +257,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
     std::wstring root = env(L"X2W_CACHE_DIR");
     if (root.empty()) root = env(L"LOCALAPPDATA") + L"\\XPortPC\\cache";
     config->cache = root + L"\\" + title_name();
+    const std::wstring pycache = root + L"\\pycache";
     for (std::wstring* path : {&config->python, &config->tools, &config->dxc, &config->llvm, &config->cache})
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
@@ -271,6 +280,22 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
     sha.update_text(narrow(config->dxc));
     sha.update_text(narrow(config->llvm));
     sha.finish(config->fingerprint);
+    const std::wstring mode = env(L"X2W_TRANSLATE");
+    config->mode = mode == L"process" ? Mode::process : mode == L"defer" ? Mode::defer : Mode::service;
+    const DWORD cores = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    config->services = cores > 2 ? (cores - 1 < 8 ? cores - 1 : 8) : 1;
+    const std::wstring services = env(L"X2W_TRANSLATOR_SERVICES");
+    if (!services.empty()) config->services = static_cast<unsigned>(wcstoul(services.c_str(), nullptr, 10));
+    config->keep_hlsl = env(L"X2W_KEEP_HLSL") == L"1";
+    translator::Settings settings;
+    settings.python = config->python;
+    settings.tools = config->tools;
+    settings.dxc = config->dxc;
+    settings.llvm = config->llvm;
+    settings.scratch = config->cache;
+    settings.pycache = pycache;
+    settings.max_services = config->mode == Mode::service ? config->services : 0;
+    translator::configure(settings);
     g_config = config;
     return TRUE;
 }
@@ -386,6 +411,7 @@ int run_translator(const Config& c, const char* stage, const std::wstring& base,
                            widen(stage) + L" --code \"" + code + L"\" --roles \"" + roles_path + L"\" --dxc \"" +
                            c.dxc + L"\" --output \"" + output + L"\" --bindings \"" + bindings + L"\"";
     if (!c.llvm.empty()) command += L" --llvm \"" + c.llvm + L"\"";
+    if (c.keep_hlsl) command += L" --hlsl \"" + base + L".hlsl\"";
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
     HANDLE log_file = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -444,60 +470,223 @@ const char* stage_name(std::uint32_t stage)
     return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : stage == X2W_SHADER_STAGE_COMPUTE ? "compute" : "pixel";
 }
 
-// The DXIL of one console shader and its descriptor-table reads (pso_translate.py --bindings): from the cache, or
-// translated and cached. Returns false with `why` set.
-bool translated_shader(const Program& program, const std::string& roles, std::vector<std::uint8_t>& dxil,
-                       std::string& bindings, std::string& key_text, std::string& why)
+// --- the pipeline manifest (tools/pso_cache.py) -----------------------------------------------------------------
+
+SRWLOCK g_manifest_lock = SRWLOCK_INIT;
+std::vector<std::string>* g_manifest;  // input ids already in manifest.txt, sorted
+bool g_wrote_config;
+
+std::string utf8(const std::wstring& text)
 {
-    const Config* c = config();
-    if (!c) {
-        why = "out of memory";
-        return false;
+    if (text.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(n > 0 ? n : 0, '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), &out[0], n, nullptr, nullptr);
+    return out;
+}
+
+std::string json_string(const std::string& text)
+{
+    std::string out = "\"";
+    for (char ch : text) {
+        if (ch == '"' || ch == '\\') out += '\\';
+        if (static_cast<unsigned char>(ch) < 0x20) continue;
+        out += ch;
     }
+    return out + "\"";
+}
+
+bool append_file(const std::wstring& path, const std::string& text)
+{
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool good = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) && written == text.size();
+    CloseHandle(file);
+    return good;
+}
+
+// Records a console shader in the title's manifest (once per input) with its inputs, so tools/precompile_cache.py
+// can translate it ahead of the next launch. Best effort: a failure here never fails the pipeline.
+void record(const Config& c, const Program& program, const std::string& roles)
+{
     Sha256 sha;
-    sha.update(c->fingerprint, 32);
+    sha.update_text("x2w-pso-input-1");
     sha.update_u32(program.stage);
     sha.update_text(roles);
     sha.update_u32(program.code_bytes);
     sha.update(program.code, program.code_bytes);
+    std::uint8_t digest[32];
+    sha.finish(digest);
+    const std::string id = hex(digest, 32);
+    AcquireSRWLockExclusive(&g_manifest_lock);
+    if (!g_manifest) {
+        g_manifest = new (std::nothrow) std::vector<std::string>();
+        std::vector<std::uint8_t> text;
+        if (g_manifest && read_file(c.cache + L"\\manifest.txt", text)) {
+            std::size_t at = 0;
+            while (at + 64 <= text.size()) {
+                g_manifest->emplace_back(reinterpret_cast<const char*>(text.data() + at), 64);
+                while (at < text.size() && text[at] != '\n') ++at;
+                ++at;
+            }
+            std::sort(g_manifest->begin(), g_manifest->end());
+        }
+    }
+    if (!g_manifest) {
+        ReleaseSRWLockExclusive(&g_manifest_lock);
+        return;
+    }
+    const auto at = std::lower_bound(g_manifest->begin(), g_manifest->end(), id);
+    if ((at == g_manifest->end() || *at != id) && make_directories(c.cache + L"\\inputs")) {
+        if (!g_wrote_config) {
+            const std::string text = "{\"tools\": " + json_string(utf8(c.tools)) + ", \"dxc\": " +
+                                       json_string(utf8(c.dxc)) + ", \"llvm\": " + json_string(utf8(c.llvm)) +
+                                       ", \"fingerprint\": \"" + hex(c.fingerprint, 32) + "\"}\n";
+            g_wrote_config = write_file(c.cache + L"\\translator.json", text.data(), text.size());
+        }
+        const std::wstring base = c.cache + L"\\inputs\\" + widen(id);
+        if (write_file(base + L".code", program.code, program.code_bytes) &&
+            write_file(base + L".roles.json", roles.data(), roles.size()) &&
+            append_file(c.cache + L"\\manifest.txt", id + " " + stage_name(program.stage) + "\n")) {
+            g_manifest->insert(at, id);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_manifest_lock);
+}
+
+// --- translation of a pipeline's shaders ------------------------------------------------------------------------
+
+// One console shader of a pipeline: its entry contract, key, and DXIL and descriptor-table reads
+// (pso_translate.py --bindings) once found or translated.
+struct Shader {
+    const Program* program = nullptr;
+    std::string roles, key, why, bindings;
+    std::vector<std::uint8_t> dxil;
+    bool found = false;
+};
+
+// The key, the cache lookup and the manifest record.
+void look_up(const Config& c, Shader& s)
+{
+    Sha256 sha;
+    sha.update(c.fingerprint, 32);
+    sha.update_u32(s.program->stage);
+    sha.update_text(s.roles);
+    sha.update_u32(s.program->code_bytes);
+    sha.update(s.program->code, s.program->code_bytes);
     std::uint8_t key[32];
     sha.finish(key);
-    key_text = hex(key, 32);
-    const std::wstring final_path = c->cache + L"\\" + widen(key_text) + L".dxil";
-    const std::wstring final_bind = c->cache + L"\\" + widen(key_text) + L".bind";
-    std::vector<std::uint8_t> text;
+    s.key = hex(key, 32);
+    record(c, *s.program, s.roles);
     // The sidecar is stored first, so a DXIL file in the cache always has its bindings.
-    if (read_file(final_bind, text) && read_file(final_path, dxil)) {
-        bindings.assign(text.begin(), text.end());
+    std::vector<std::uint8_t> text;
+    if (read_file(c.cache + L"\\" + widen(s.key) + L".bind", text) &&
+        read_file(c.cache + L"\\" + widen(s.key) + L".dxil", s.dxil)) {
+        s.bindings.assign(text.begin(), text.end());
+        s.found = true;
         count_shader(true);
-        return true;
     }
-    if (!make_directories(c->cache)) {
-        why = "cannot create the cache directory " + narrow(c->cache);
+}
+
+// Moves <base>.bind, <base>.dxil (and its HLSL) to the shader's cache files, sidecar first, and reads them back.
+bool store(const Config& c, Shader& s, const std::wstring& base)
+{
+    const std::wstring final_base = c.cache + L"\\" + widen(s.key);
+    if (c.keep_hlsl) MoveFileExW((base + L".hlsl").c_str(), (final_base + L".hlsl").c_str(), MOVEFILE_REPLACE_EXISTING);
+    std::vector<std::uint8_t> text;
+    if (!MoveFileExW((base + L".bind").c_str(), (final_base + L".bind").c_str(), MOVEFILE_REPLACE_EXISTING) ||
+        !MoveFileExW((base + L".dxil").c_str(), (final_base + L".dxil").c_str(), MOVEFILE_REPLACE_EXISTING) ||
+        !read_file(final_base + L".dxil", s.dxil) || !read_file(final_base + L".bind", text)) {
+        DeleteFileW((base + L".dxil").c_str());
+        DeleteFileW((base + L".bind").c_str());
+        s.why = "cannot store the translation in the cache";
         return false;
     }
-    wchar_t unique[64];
-    std::swprintf(unique, 64, L".%lu.%lu", GetCurrentProcessId(), GetCurrentThreadId());
-    const std::wstring base = c->cache + L"\\" + widen(key_text) + unique;
-    const int result = run_translator(*c, stage_name(program.stage), base, program, roles, why);
-    const std::wstring produced = base + L".dxil", produced_bind = base + L".bind";
-    if (result != 0) {
-        DeleteFileW(produced.c_str());
-        DeleteFileW(produced_bind.c_str());
-        if (result == 2) why = "translator failure: " + why;
-        return false;
-    }
-    if (!MoveFileExW(produced_bind.c_str(), final_bind.c_str(), MOVEFILE_REPLACE_EXISTING) ||
-        !MoveFileExW(produced.c_str(), final_path.c_str(), MOVEFILE_REPLACE_EXISTING) || !read_file(final_path, dxil) ||
-        !read_file(final_bind, text)) {
-        DeleteFileW(produced.c_str());
-        DeleteFileW(produced_bind.c_str());
-        why = "cannot store the translation in the cache";
-        return false;
-    }
-    bindings.assign(text.begin(), text.end());
+    s.bindings.assign(text.begin(), text.end());
     count_shader(false);
     return true;
+}
+
+std::wstring unique_base(const Config& c, const Shader& s, unsigned index)
+{
+    wchar_t unique[64];
+    std::swprintf(unique, 64, L".%lu.%lu.%u", GetCurrentProcessId(), GetCurrentThreadId(), index);
+    return c.cache + L"\\" + widen(s.key) + unique;
+}
+
+// Translates the shaders not found in the cache, in order: through the translator services all at once, else (or
+// for a shader the services could not take) one tools/pso_translate.py process each. As when they were translated
+// one after another, the shaders after the first that fails are not stored. Returns the index of the first failure
+// with its `why` set, or `count`.
+std::size_t translate_misses(const Config& c, Shader* shaders, std::size_t count)
+{
+    std::vector<std::size_t> misses;
+    for (std::size_t i = 0; i < count; ++i)
+        if (!shaders[i].found) misses.push_back(i);
+    if (misses.empty()) return count;
+    if (c.mode == Mode::defer) {
+        shaders[misses[0]].why = "deferred to tools/precompile_cache.py (X2W_TRANSLATE=defer); the shader is recorded";
+        return misses[0];
+    }
+    if (!make_directories(c.cache)) {
+        shaders[misses[0]].why = "cannot create the cache directory " + narrow(c.cache);
+        return misses[0];
+    }
+    std::vector<translator::Request> requests(misses.size());
+    std::vector<translator::Result> results(misses.size());
+    if (c.mode == Mode::service) {
+        for (std::size_t m = 0; m < misses.size(); ++m) {
+            const Shader& s = shaders[misses[m]];
+            requests[m].stage = s.program->stage;
+            requests[m].code = s.program->code;
+            requests[m].code_bytes = s.program->code_bytes;
+            requests[m].roles = s.roles;
+            requests[m].want_hlsl = c.keep_hlsl;
+        }
+        translator::translate(requests.data(), results.data(), requests.size());
+    } else {
+        for (auto& r : results) r.message = "X2W_TRANSLATE=process";
+    }
+    static LONG noted_service, noted_fallback;
+    for (std::size_t m = 0; m < misses.size(); ++m) {
+        Shader& s = shaders[misses[m]];
+        translator::Result& r = results[m];
+        const std::wstring base = unique_base(c, s, static_cast<unsigned>(m));
+        const std::wstring produced = base + L".dxil";
+        int status = r.status;
+        if (status == translator::unavailable) {
+            if (c.mode == Mode::service && !InterlockedExchange(&noted_fallback, 1)) {
+                log_note(create_graphics, ("translator service unavailable (" + r.message +
+                                           "); translating with one tools/pso_translate.py process per shader").c_str(),
+                         nullptr);
+            }
+            status = run_translator(c, stage_name(s.program->stage), base, *s.program, s.roles, s.why);
+        } else if (status == translator::translated) {
+            if (!InterlockedExchange(&noted_service, 1))
+                log_note(create_graphics, "shaders translated by the translator service (tools/pso_service.py)", nullptr);
+            if (c.keep_hlsl) write_file(base + L".hlsl", r.hlsl.data(), r.hlsl.size());
+            if (!write_file(base + L".bind", r.bindings.data(), r.bindings.size()) ||
+                !write_file(produced, r.dxil.data(), r.dxil.size())) {
+                DeleteFileW(produced.c_str());
+                DeleteFileW((base + L".bind").c_str());
+                s.why = "cannot write the translation in the cache directory";
+                return misses[m];
+            }
+        } else {
+            s.why = r.message;
+        }
+        if (status != translator::translated) {
+            DeleteFileW(produced.c_str());
+            DeleteFileW((base + L".bind").c_str());
+            if (c.keep_hlsl) DeleteFileW((base + L".hlsl").c_str());
+            if (status != translator::refused) s.why = "translator failure: " + s.why;
+            return misses[m];
+        }
+        if (!store(c, s, base)) return misses[m];
+    }
+    return count;
 }
 
 void refuse(const char* stage, const std::string& key, const std::string& why)
@@ -850,41 +1039,53 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     }
     ps_roles += "}}";
 
-    // The vertex program first (a refusal there translates nothing else), then the pixel program. When the pixel
-    // program stores to title memory and the vertex program reads it through SRVs ("memory ro"), the vertex program is
-    // translated again to read it through the same UAVs (role "title_memory": "rw"), so one draw never sees title
-    // memory as both; vertex programs never store (tools/vertex_aot.py refuses it).
-    std::vector<std::uint8_t> vs_dxil, ps_dxil;
-    std::string key, vs_bind, ps_bind;
-    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
-        refuse("vertex", key, why);
+    // The pipeline's missing shaders translate together; the first that fails is reported, as when they were
+    // translated one after another. When the pixel program stores to title memory and the vertex program reads it
+    // through SRVs ("memory ro"), the vertex program is translated again to read it through the same UAVs (role
+    // "title_memory": "rw"), so one draw never sees title memory as both; vertex programs never store
+    // (tools/vertex_aot.py refuses it).
+    const Config* c = config();
+    if (!c) {
+        refuse("vertex", "", "out of memory");
         return E_NOTIMPL;
     }
-    std::string vs_key = key;
-    if (desc->PS.BytecodeLength) {
-        if (!translated_shader(ps, ps_roles, ps_dxil, ps_bind, key, why)) {
-            refuse("pixel", key, why);
-            return E_NOTIMPL;
-        }
-        if (const char* problem = add_refs(ps_bind, X2W_SHADER_STAGE_PIXEL, tables[1], info)) {
-            refuse("pixel", key, problem);
+    Shader shaders[2];
+    shaders[0].program = &vs;
+    shaders[0].roles = vs_roles;
+    shaders[1].program = &ps;
+    shaders[1].roles = ps_roles;
+    const std::size_t count = desc->PS.BytecodeLength ? 2 : 1;
+    for (std::size_t i = 0; i < count; ++i) look_up(*c, shaders[i]);
+    const std::size_t failed = translate_misses(*c, shaders, count);
+    if (failed < count) {
+        refuse(failed ? "pixel" : "vertex", shaders[failed].key, shaders[failed].why);
+        return E_NOTIMPL;
+    }
+    if (count == 2) {
+        if (const char* problem = add_refs(shaders[1].bindings, X2W_SHADER_STAGE_PIXEL, tables[1], info)) {
+            refuse("pixel", shaders[1].key, problem);
             return E_NOTIMPL;
         }
     }
-    if (info.writes_memory && vs_bind.find("\nmemory ro\n") != std::string::npos) {
-        vs_roles.insert(vs_roles.size() - 1, ", \"title_memory\": \"rw\"");
-        if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, vs_key, why)) {
-            refuse("vertex", vs_key, why);
+    if (info.writes_memory && shaders[0].bindings.find("\nmemory ro\n") != std::string::npos) {
+        Shader again;
+        again.program = &vs;
+        again.roles = vs_roles;
+        again.roles.insert(again.roles.size() - 1, ", \"title_memory\": \"rw\"");
+        look_up(*c, again);
+        if (translate_misses(*c, &again, 1) == 0) {
+            refuse("vertex", again.key, again.why);
             return E_NOTIMPL;
         }
+        shaders[0] = std::move(again);
     }
-    if (const char* problem = add_refs(vs_bind, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
-        refuse("vertex", vs_key, problem);
+    if (const char* problem = add_refs(shaders[0].bindings, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
+        refuse("vertex", shaders[0].key, problem);
         return E_NOTIMPL;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
-    copy.VS = {vs_dxil.data(), vs_dxil.size()};
-    if (desc->PS.BytecodeLength) copy.PS = {ps_dxil.data(), ps_dxil.size()};
+    copy.VS = {shaders[0].dxil.data(), shaders[0].dxil.size()};
+    if (desc->PS.BytecodeLength) copy.PS = {shaders[1].dxil.data(), shaders[1].dxil.size()};
     // Vertex data is read through title memory, not the input assembler.
     copy.InputLayout = {nullptr, 0};
     ComPtr<ID3D12PipelineState> state;
@@ -970,10 +1171,16 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
                   cs.compute.local_ids);
     roles += tail;
 
-    std::vector<std::uint8_t> dxil;
-    std::string key;
-    std::string bindings;
-    if (!translated_shader(cs, roles, dxil, bindings, key, why)) return refuse_cs(key, why);
+    const Config* c = config();
+    if (!c) return refuse_cs("", "out of memory");
+    Shader shader;
+    shader.program = &cs;
+    shader.roles = roles;
+    look_up(*c, shader);
+    if (translate_misses(*c, &shader, 1) == 0) return refuse_cs(shader.key, shader.why);
+    const std::string& key = shader.key;
+    const std::vector<std::uint8_t>& dxil = shader.dxil;
+    const std::string& bindings = shader.bindings;
     // Compute programs read and write title memory through the UAV half of the title-memory table (the same alias
     // UAVs a storing pixel program uses); their bindings may say so, and must name no descriptor-table read.
     if (bindings != "x2w-bindings 2\n" && bindings != "x2w-bindings 2\nmemory rw\n" &&
@@ -999,6 +1206,21 @@ bool compute_pso_info(ID3D12PipelineState* state, PsoInfo* info)
     UINT size = sizeof(*info);
     return state && SUCCEEDED(state->GetPrivateData(pso_info_guid, &size, info)) && size == sizeof(*info) &&
            info->magic == compute_pso_magic;
+}
+
+void prestart_translator()
+{
+    // Off the device-creation path: the configuration hashes the converter's sources.
+    TrySubmitThreadpoolCallback(
+        [](PTP_CALLBACK_INSTANCE, void*) {
+            const Config* c = config();
+            // Only where the converter is installed: a desktop program on the shim without one starts nothing.
+            if (c && c->mode == Mode::service &&
+                GetFileAttributesW((c->tools + L"\\pso_service.py").c_str()) != INVALID_FILE_ATTRIBUTES) {
+                translator::prestart();
+            }
+        },
+        nullptr, nullptr);
 }
 
 // --- title memory and descriptors at draw time ------------------------------------------------------------------
