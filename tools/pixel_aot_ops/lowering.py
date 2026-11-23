@@ -58,6 +58,15 @@ class Lowering:
         # arithmetic on it (valu_f32.arithmetic). Each name is unique, so the set only grows; True marks a value that
         # depends on the interpolated coordinate. An implicit-LOD sample may read only these.
         self.quad_values = {"uv.x": True, "uv.y": True}
+        # Values defined on the helper lanes by any whole-quad VALU operation on quad values (not only affine ones):
+        # a cube sample's face coordinates (forms/mimg.py) may read them; see docs/design/pixel-bindings.md.
+        self.quad_defined = set()
+        # Binary32 values that are integers (or NaN, which no form below produces from these): results of v_rndne,
+        # v_floor, v_ceil, v_trunc and v_cvt_f32_{i32,u32}, integral immediates and copies of them. An array slice
+        # must be one (forms/mimg.py). cube_faces: v_cubeid results and copies, the face of a cube sample.
+        self.integral = set()
+        self.cube_faces = set()
+        self.texture_dims = {}  # HLSL texture name -> "2d_array", "cube" or "3d" (bindings.PixelBindings); absent: 2D
         self.samples = 0  # samples taken on the path so far
         # VGPR -> (issue number, kind) of the outstanding sample or vector memory load that writes it. vmcnt(N) completes
         # all but the newest N of them (from R0Y00/Xbox2Windows#176 by descent81); vmcnt(0) completes all.
@@ -99,6 +108,13 @@ class Lowering:
         # VGPR and instruction index. The packed pair is not masked (it is no word); the export it feeds must run under
         # a bit that implies each of them, so that a lane that exports holds the new pair.
         self.pack_ex = {}
+        # C-6 (forms/lds.py, compute stage): the LDS allocation in bytes (0: none), the workgroup size, the LDS
+        # accesses since the last s_barrier on this path (joined by control_flow.program) and the name of each LDS
+        # read word with the address it was read at (roots of the uniformity lattice when the address is uniform).
+        self.lds_size = 0
+        self.numthreads = (1, 1, 1)
+        self.lds_epoch = frozenset()
+        self.lds_reads = {}
 
     @property
     def sample_pending(self):
@@ -191,6 +207,8 @@ def described_state(b):
     st = Lowering(scalar, {"v0": "bary_i", "v1": "bary_j"}, [*head, preamble],
                   {key: binding_names.texture_name(k) for key, k in b.textures.items()}, (), None, dict(b.buffers))
     st.preamble = preamble
+    st.texture_dims = {binding_names.texture_name(k): dim for k in b.textures.values()
+                       if (dim := b.dimension(k)) != "2d"}
     st.descriptor_words = True
     st.descriptor_high = b.descriptor_high
     st.constant_buffers = {key: binding_names.constant_tag(k) for key, k in b.constant_buffers.items()}

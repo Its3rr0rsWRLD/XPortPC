@@ -89,11 +89,46 @@ target_include_directories(xmem_gpu_cross_dll_check PRIVATE src)
 add_test(NAME xmem_gpu_cross_dll_warp COMMAND xmem_gpu_cross_dll_check "$<TARGET_FILE:xmem_gpu_client>")
 set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 
-# Desktop d3d12_xs.dll for the package DLLs' two named d3d12_xs root-signature imports.
-add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_shim.def)
+# Desktop d3d12_xs.dll, the graphics shim: the package DLLs' two named root-signature imports, and
+# device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
+# DXGI is delay-loaded: only the shim's present path needs it.
+add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
-target_link_libraries(d3d12_xs_shim PRIVATE d3d12)
+target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
+target_link_libraries(d3d12_xs_shim PRIVATE d3d12 dxgi dxguid delayimp)
+target_link_options(d3d12_xs_shim PRIVATE /DELAYLOAD:dxgi.dll)
+
+# Runtime ladder R2 (docs/design/runtime.md, section 6): a console-style program that imports device
+# creation from d3d12_xs.dll (no desktop d3d12.lib), clears, reads back and presents 3 frames.
+add_executable(r2_clear tests/runtime/r2_clear.cpp)
+target_include_directories(r2_clear PRIVATE src)
+target_compile_features(r2_clear PRIVATE cxx_std_17)
+target_link_libraries(r2_clear PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME runtime_r2_clear_${adapter} COMMAND r2_clear ${adapter} clear)
+    add_test(NAME runtime_r2_wrong_color_${adapter} COMMAND r2_clear ${adapter} wrong_color)
+    set_tests_properties(runtime_r2_clear_${adapter} runtime_r2_wrong_color_${adapter} PROPERTIES
+        TIMEOUT 60 SKIP_RETURN_CODE 77)
+endforeach()
+add_test(NAME runtime_r2_unknown_entries_warp COMMAND r2_clear warp unknown_entries)
+set_tests_properties(runtime_r2_unknown_entries_warp PROPERTIES TIMEOUT 60)
+
+# Runtime ladder R3: a triangle from llvm-mc-assembled gfx1013 programs (tests/runtime/r3_*.s, r3_programs.h), which
+# the shim translates at pipeline creation (src/d3d12_xs_pipeline.h) by running tools/pso_translate.py (Python + DXC)
+# and caches per adapter test under the build tree. The cold test empties the cache; warm and the control run after it.
+add_executable(r3_triangle tests/runtime/r3_triangle.cpp)
+target_include_directories(r3_triangle PRIVATE src)
+target_compile_features(r3_triangle PRIVATE cxx_std_17)
+target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+
+# Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
+# r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3.
+add_executable(r4_scene tests/runtime/r4_scene.cpp)
+target_include_directories(r4_scene PRIVATE src)
+target_compile_features(r4_scene PRIVATE cxx_std_17)
+target_link_libraries(r4_scene PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
@@ -2629,6 +2664,47 @@ if(EXISTS "${INTAKE_PYTHON}")
     file(GLOB pixel_aot_family_modules CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_draws/*.py")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py"
         ${pixel_aot_family_modules})
+    # Runtime ladder R3 (tests/runtime/r3_triangle.cpp): the translator runs out of process from the shim.
+    add_test(NAME runtime_r3_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r3_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r3_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_${adapter}")
+        add_test(NAME runtime_r3_triangle_cold_${adapter} COMMAND r3_triangle ${adapter} cold)
+        add_test(NAME runtime_r3_triangle_warm_${adapter} COMMAND r3_triangle ${adapter} warm)
+        add_test(NAME runtime_r3_wrong_reference_${adapter} COMMAND r3_triangle ${adapter} wrong_reference)
+        set_tests_properties(runtime_r3_triangle_cold_${adapter} PROPERTIES FIXTURES_SETUP r3_cache_${adapter})
+        set_tests_properties(runtime_r3_triangle_warm_${adapter} runtime_r3_wrong_reference_${adapter} PROPERTIES
+            FIXTURES_REQUIRED r3_cache_${adapter})
+        set_tests_properties(runtime_r3_triangle_cold_${adapter} runtime_r3_triangle_warm_${adapter}
+            runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+            ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    # Runtime ladder R4 (tests/runtime/r4_scene.cpp): cold run first (empties the cache), then warm and the controls.
+    add_test(NAME runtime_r4_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r4_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r4_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r4_cache_${adapter}")
+        set(r4_after_cold)
+        foreach(mode IN ITEMS cold warm wrong_reference missing_view missing_memory)
+            set(r4_name runtime_r4_scene_${mode}_${adapter})
+            if(mode STREQUAL "wrong_reference" OR mode MATCHES "^missing_")
+                set(r4_name runtime_r4_${mode}_${adapter})
+            endif()
+            add_test(NAME ${r4_name} COMMAND r4_scene ${adapter} ${mode})
+            set_tests_properties(${r4_name} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 ENVIRONMENT "${r4_environment}"
+                RUN_SERIAL TRUE)
+            if(mode STREQUAL "cold")
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_SETUP r4_cache_${adapter})
+            else()
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_REQUIRED r4_cache_${adapter})
+            endif()
+        endforeach()
+    endforeach()
+    add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
+    set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600
@@ -2918,6 +2994,19 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "$<TARGET_FILE:x2w_${title_check}_title>")
         set_tests_properties(native_launch_${title_check} PROPERTIES TIMEOUT 120)
     endforeach()
+
+    # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
+    # each one and compares with software references, naturally and with --force-cpu-traps.
+    add_executable(x2w_cpu_trap_title tests/native/cpu_trap_title.cpp tests/native/cpu_trap_ops.asm)
+    target_compile_options(x2w_cpu_trap_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_cpu_trap_title PRIVATE /ENTRY:cpu_trap_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO /EXPORT:x2w_cpu_trap_sites,DATA)
+    set_target_properties(x2w_cpu_trap_title PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(x2w_cpu_trap_title PRIVATE kernel32)
+    add_test(NAME native_cpu_traps COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/cpu_trap_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_cpu_trap_title>")
+    set_tests_properties(native_cpu_traps PROPERTIES TIMEOUT 120)
 
     # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
     # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a

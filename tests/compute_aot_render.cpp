@@ -1,4 +1,5 @@
-// --check-compute-case <shader.cso> <case>: dispatch a compute shader translated by tools/compute_aot.py and compare
+// --check-compute-case <shader.cso> <case>, or --check-compute-batch <shader.cso> <case>... (one device, each case
+// reported as "case=N status=pass|mismatch|error", as --check-pixel-batch does): dispatch a compute shader translated by tools/compute_aot.py and compare
 // title memory, read back after the dispatch, with a CPU reference (docs/design/compute-stage.md, "Testing
 // bit-exactly"). Mirrors the title-memory setup of pixel_aot_render.cpp, with the slots bound as raw UAVs so that the
 // shader can store into them. The root signature is the one the HLSL embeds (compute_aot.COMPUTE_ROOT):
@@ -359,7 +360,7 @@ void check_translated_compute(ID3D12Device* device, const char* shaderPath, cons
                 std::memcpy(&want, expected.data() + at, 4);
                 if (want != got) {
                     std::fprintf(stderr, "compute_mismatch slot=%u byte=%zu expected=%08x actual=%08x\n", i, at, want, got);
-                    throw std::runtime_error("Title memory after the translated dispatch differs from the CPU reference");
+                    throw ComputeMismatch("Title memory after the translated dispatch differs from the CPU reference");
                 }
             }
         }
@@ -375,7 +376,7 @@ void check_translated_compute(ID3D12Device* device, const char* shaderPath, cons
                 if (want != got) {
                     std::fprintf(stderr, "compute_mismatch image=%u x=%u y=%u expected=%08x actual=%08x\n", image.slot,
                                  static_cast<UINT>(at / image.texel_bytes()), y, want, got);
-                    throw std::runtime_error("A storage image after the translated dispatch differs from the CPU reference");
+                    throw ComputeMismatch("A storage image after the translated dispatch differs from the CPU reference");
                 }
             }
         }

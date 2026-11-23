@@ -142,6 +142,12 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
 
 - **Buffers (V#):** already handled. The converted shader decodes base and range from the V# words and loads through
   `TitleLookup` (`src/title_va_lookup.hlsli`) from the title GPU address. No desktop descriptor per buffer is needed.
+- **As built in R4:** the translator resolves every descriptor load to (descriptor table, byte offset) at
+  translation time, since the converter already tracks descriptor loads by key, and the shim resolves that to the
+  slot of the title heap the table points into at draw time. This is a CPU-side TextureLookup: no T# search on the
+  GPU and no SM 6.6 heap indexing, and it is exact for descriptors written through the API. The plan below (T# words
+  in title memory, a GPU search) is kept for titles that write or copy descriptor words themselves, which R4 does not
+  handle (their reads are misses).
 - **Textures and storage images (T#):** a desktop SRV/UAV is needed. The shim creates it when the title creates the
   view through the API and records `(title address of the image, format, dims) -> heap index` in a sorted table, the
   same shape as `TitleRange`. A new `TextureLookup` helper finds the index from the T# words; the shader then uses
@@ -236,8 +242,12 @@ Title CPU code runs natively, so most threading is just Windows. Differences to 
   shim remaps affinity masks and thread ideal processors onto the host's cores (modulo the host count, keeping
   distinct threads on distinct cores where possible) and logs each remap.
 - **CPU features.** The console CPU is Zen 2. Instructions a host CPU lacks (for example AMD-only ones on an Intel host,
-  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler records the RVA and the instruction's
-  mnemonic (not its bytes) for the report. This is where the CPU lifters can fit (below).
+  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler in `x2w_launch`
+  (`tools/x2w_cpu_trap.h`) performs a fixed set on the faulting thread's CONTEXT and resumes after the instruction:
+  SHA-NI, CLZERO, RDPID, MONITORX/MWAITX (as a pause), SSE4a, RDPRU (MPERF and APERF read the TSC) and CLWB (as
+  CLFLUSH). For anything else it records the module+RVA and the instruction's mnemonic (not its bytes) and lets the
+  title crash. The run log lists the Zen 2 features the host lacks at startup and a count per trapped instruction at
+  the end, since each trap costs an exception round trip. This is where the CPU lifters can fit (below).
 - **Timers.** QPC frequency, GPU timestamp frequency and refresh rate differ; titles read them through APIs, which we
   answer with the host's values. Hard-coded assumptions show up as wrong pacing and are logged, not patched.
 - **CPU-GPU synchronization.** Fences map 1:1. A title that polls memory the GPU writes works under aliasing (section
@@ -274,6 +284,22 @@ it imports our shim DLLs by their console-facing names and runs only under `x2w_
 Today: the launcher test (`launch_check.py`) already starts and exits a source-built program with import lines on
 stderr, so R1 is mostly there. Missing for R1: the JSON report, argument and caller logging in stubs, and the
 first-unimplemented-call line. Furthest rung today: none.
+
+R2 program: `tests/runtime/r2_clear.cpp` over the graphics shim skeleton in `d3d12_xs.dll` (work item 2; tests and
+wrapped interfaces in [experiments.md](../experiments.md#graphics-shim-skeleton-runtime-rung-r2)). It runs directly,
+not under `x2w_launch`, until `pe_map` maps implicit TLS.
+
+R4 program: `tests/runtime/r4_scene.cpp`, over title descriptor heaps (`src/d3d12_xs_descriptors.h`) and draw-time
+descriptor resolution (design choices and tests in
+[experiments.md](../experiments.md#title-descriptor-heaps-textures-constants-and-depth-runtime-rung-r4)). Its exit
+criteria pass on WARP and hardware except "textures created from tiled bytes": the console's texture upload path is
+not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
+
+R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
+`src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
+[experiments.md](../experiments.md#pipeline-time-translation-runtime-rung-r3)). Its shaders come in a console
+bytecode container that our own tests define (`X2WShaderContainer`, `src/d3d12_xs_api.h`): the container real titles
+use is not public and is learned from owner logs, then parsed by the same single function.
 
 ## 7. Game report
 
