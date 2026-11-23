@@ -1,4 +1,4 @@
-// Runtime rung R6: a compute dispatch whose descriptor tables are in title heaps and hold hardware words the title
+// R6 descriptors: a compute dispatch whose descriptor tables are in title heaps and hold hardware words the title
 // wrote itself (docs/design/runtime.md, "Descriptors written as hardware words").
 //
 // tests/runtime/r6_cs.s, one lane per texel of an 8x8 texture, reads from its CBV/SRV/UAV table a T# (at 0x00) and

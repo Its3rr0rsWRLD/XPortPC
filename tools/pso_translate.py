@@ -139,7 +139,7 @@ def derived_tables(program, tables):
 
 def lower_compute(instructions, roles):
     """Rung R5: tools/compute_aot.py's lowering, without its offline root signature, its constant words moved onto
-    the frame words. Descriptor tables (rung R6): buffer V#s the program loads from a table become frame words the
+    the frame words. Descriptor tables (R6 descriptors): buffer V#s the program loads from a table become frame words the
     shim copies from the table's memory at dispatch time (compute_aot's buffer_descriptors), the T#s it reads
     become texture slots 0 and 1 and its S# sampler slot 0 of the shim's texture and sampler tables."""
     import compute_aot

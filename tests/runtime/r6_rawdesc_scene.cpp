@@ -1,4 +1,4 @@
-// Runtime rung R6 (docs/design/runtime.md, "Descriptors written as hardware words"): the R4 scene with its
+// R6 descriptor work, toward rung R6 (docs/design/runtime.md, "Descriptors written as hardware words"): the R4 scene with its
 // descriptors written by the title straight into descriptor-heap memory as hardware words, as console titles do.
 //
 // A console-style program, as r4_scene.cpp: device, root signature, heaps and pipelines from d3d12_xs.dll, memory

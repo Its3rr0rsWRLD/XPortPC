@@ -1,6 +1,6 @@
 #pragma once
 
-// Hardware descriptor words as a console title writes them into descriptor memory (runtime rung R6), for
+// Hardware descriptor words as a console title writes them into descriptor memory (R6 descriptors), for
 // tests/runtime/r6_rawdesc_*.cpp. The bit positions are those of Mesa's gfx10-rsrc.json (GFX10.3 layouts), the way
 // Mesa's ac_build_gfx10_texture_descriptor, ac_set_mutable_tex_desc_fields, ac_build_sampler_descriptor and
 // ac_build_buffer_descriptor fill them (MIT). Written out here, field by field, rather than taken from the shim's

@@ -2915,7 +2915,7 @@ Frame time, from a diagnostic run of the same code (`r5_frames`, debug layer on,
 
 Pipeline creation: cold 0.60 s for compute and 1.0 to 1.9 s for vertex + pixel; warm 15 to 31 ms for compute and 2 to 10 ms for graphics. WARP's maximum (about 0.2 to 0.3 s, one frame per run) and its heavier p99 tail are single stalls of the software rasterizer. Churn costs about 0.6 to 0.8 ms per frame on top of warm: an `XMemAlloc` (`OpenExistingHeapFromAddress` plus a placed buffer), a free and new view descriptors every frame.
 
-Not covered yet: compute descriptor tables in title heaps, LDS and barriers in the runtime path (C-6), global stores (C-5). The converter parameters still take 46 of 64 root DWORDs, 32 of them push words; a per-draw upload ring for push words would free most of that.
+Not covered yet: LDS and barriers in the runtime path (C-6), global stores (C-5). Compute descriptor tables in title heaps and the per-draw upload ring for push words came with the R6 descriptor work below (13 of 64 root DWORDs).
 
 #### GFX10/GFX10.3 texture detiling
 
@@ -2934,6 +2934,65 @@ PC results at detile tip `6d2a655e` (RTX 4070 Ti and WARP): `gfx10_detile_roundt
 ```bash
 python3 -B tests/gfx10_addr_oracle_check.py            # or --quick, or --tarball PATH
 ```
+
+#### Descriptors written as hardware words (R6 descriptors)
+
+Console titles write T#, S# and V# words straight into descriptor memory, or `memcpy` them between slots. Until now
+such words were TextureLookup misses. `d3d12_xs.dll` now resolves a descriptor-table read from the words in the
+heap's title memory at draw and dispatch time ([runtime.md](design/runtime.md), section 3, Descriptors;
+`src/gfx10_descriptors.h`, `src/d3d12_xs_descriptors.h`, `src/d3d12_xs_pipeline.h`).
+
+- **Decoding.** `src/gfx10_descriptors.cpp` reads every field through one table of (register, field, bits) taken from
+  Mesa 26.2.6's register database (`src/amd/registers/gfx10-rsrc.json`, GFX10.3 `_gfx103` words; enumerations from
+  `gfx6.json`; MIT). The word layouts follow Mesa's `ac_build_gfx10_texture_descriptor`,
+  `ac_set_mutable_tex_desc_fields` (word 0 holds address bits 39:8 with the surface's pipe/bank XOR ORed into its low
+  bits), `ac_build_sampler_descriptor` and `ac_build_buffer_descriptor`. AMD's RDNA 2 ISA document's descriptor tables
+  were not read here. `PlanTexture`, `PlanSampler` and `PlanConstantBuffer` map the fields to a desktop texture and
+  Texture2D SRV, a `D3D12_SAMPLER_DESC` and a constant-buffer range, or refuse with a reason (runtime.md lists the
+  fields mapped, refused and not modelled).
+- **Markers.** API writes also write marker words into title memory: a reserved descriptor type that names the slot
+  and its generation. A title's `memcpy` of an API-written descriptor therefore still resolves to the view. Non-marker,
+  non-zero words are decoded. All-zero words are no descriptor, as before.
+- **Textures.** A decoded T# is cached by its eight words and a 64-bit hash of its texture bytes. Those bytes are read
+  on the CPU at the base address, over addrlib's surface size, which must lie in one title allocation. On a cache
+  miss the shim creates a `DEFAULT` texture and detiles the bytes into its copyable footprints (`x2w_gfx10_detile`;
+  `X2W_GB_ADDR_CONFIG`, `X2W_GFX10_RB_PLUS`; the default is 16 pipes, 16 packers, GFX10.3). It copies them on its own
+  copy queue, waits, and creates the SRV with the T#'s `DST_SEL`, level range and `MIN_LOD`. Entries (1024) are
+  recycled with the descriptor-block fences. Decoded samplers are cached by their desktop description (1024).
+- **Inline samplers.** `tools/pso_translate.py` no longer refuses an S# set by `s_mov`. The sidecar gains
+  `inline_sampler <slot> <w0..w3>`, and the shim decodes it when the pipeline is created.
+- **Compute tables.** Compute containers may bind `X2W_SHADER_BINDING_TABLE`. The translator lowers a table's buffer
+  V#s with `compute_aot`'s `buffer_descriptors` (frame words 60 down), its T#s as `tex`/`tex1` and its S# as `samp`
+  (space 1002). `bind_for_dispatch` copies the V# words from the table's memory into the frame words, so the program
+  applies the V#'s range check itself, and binds the textures and sampler as a draw does. Refused: constant-buffer
+  V#s and storage images read from a table, and inline samplers in compute. `SetComputeRootDescriptorTable` records
+  title tables.
+- **Frame words.** The push words, the range count (was `b1`) and the base vertex and start instance (was `b2`) are
+  now one constant buffer at `b3 space1000` (`pso_translate.frame_words`). It holds 64 words plus 3, in a 512-byte
+  slice per draw or dispatch of a 16 MiB upload ring the shim owns (256 chunks of 64 KiB). A recording holds its
+  chunk, and chunks are recycled with the block fences. The converter parameters now take 13 root DWORDs (root SRV
+  ranges 2, memory table 1, frame CBV 2, vertex CBV 2, two pixel CBVs 4, texture and sampler tables 1 each), down
+  from 46. The texture and sampler tables are visible to all stages.
+- **Counters.** `X2WGfxCounters` gains `raw_descriptor_reads`, `raw_texture_uploads` and `raw_samplers_created`.
+- **gfx_text.py** verifies `image_load`, `image_sample_lz`, `v_cvt_f32_u32_e32`.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `gfx10_descriptors_decode` | `tests/gfx10_descriptors_check.cpp`, CPU. T#, S# and V# words written field by field. Checks the decoded fields, the XOR extraction for 64 KiB and 4 KiB `_X` modes, linear addresses, 14-bit widths, 5_6_5 and BC7 plans, sampler filters, address modes, LOD fixed point, anisotropy, border types and `MIP_FILTER_NONE`, and V# ranges. 8 T#, 7 S# and 2 V# refusals each give their reason. The field table must have no overlaps and no unknown names. `tests/gfx10_descriptors_fields_check.py` (Linux/macOS, pinned tarball) compares the 65 fields, 58 format numbers and 35 enumeration values with Mesa: 0 mismatches. A mutated field (`SW_MODE` bits 20-23) fails it. |
+| `runtime_r6_programs` | `tests/runtime/r6_programs_check.py check`. `r6_programs.h` (llvm-mc 15) decodes to `r6_ps_inline.s` and `r6_cs.s`. They translate and report their reads (inline sampler words; compute buffer at frame word 60, texture and sampler slot 0) and bind only the frame words, texture and sampler spaces and title memory. A constant-buffer V# and a storage image read from a compute table are refused. With llvm-mc, bytes and text match for the programs and 9 forms. |
+| `runtime_r6_rawdesc_raw_*` | `tests/runtime/r6_rawdesc_scene.cpp`, the R4 programs plus an inline-sampler pixel program, three draws, two 64x64 frames. The title writes 4 V#s, 3 T#s and 2 S#s into heap memory. Draw 1 mixes in an API CBV and a `memcpy` of another API CBV's 32 bytes. Draw 1's T# has `DST_SEL` (Z, X, 1, W), and draws 1 and 2 sample u in 0..2 through WRAP and the inline MIRROR. Textures are `SW_LINEAR` in title memory, texture 0 with 4 mips. Every pixel must equal the CPU reference. Also required: 10 raw reads per frame, 2 textures uploaded, 3 samplers, no TextureLookup or TitleLookup miss, no refusal, no debug-layer error. |
+| `runtime_r6_rawdesc_tiled_*` | As raw. Texture 0 is `SW_64KB_R_X` with XOR 0x8b and its mip 0 in the tail; texture 1 is `SW_4KB_S_X` with XOR 0x6. Both are given only by their T# words. |
+| `runtime_r6_rawdesc_wrong_swizzle_*` | Control: as tiled, but texture 0's T# says `SW_64KB_S_X`. Both frames must differ. |
+| `runtime_r6_rawdesc_wrong_dst_sel_*` | Control: as raw, compared with the reference that ignores `DST_SEL`. Exactly the pixels where the two references differ must mismatch. |
+| `runtime_r6_rawdesc_rewrite_*` | Between frames the title rewrites draw 0's T# `DST_SEL`, texture 1's bytes (same T#) and the WRAP S# (to CLAMP). Frame 1 must equal the new reference and differ from the old one in exactly the pixels where the two references differ. 4 textures uploaded: the cache keys on both the words and the bytes. |
+| `runtime_r6_rawdesc_compute_*` | `tests/runtime/r6_rawdesc_compute.cpp`, `r6_cs.s` (8x8 lanes). Raw T# (32_32_32_32_FLOAT, `SW_4KB_S_X`, XOR 0x5, `DST_SEL` (Y, X, Z, 1)), raw S# (u WRAP) and raw output V# (`num_records` 2016). `image_load` and `image_sample_lz` at u + 1 are compared word for word with the CPU reference. The last lane's out-of-range stores must leave the sentinel. 3 raw reads, 1 texture and 1 sampler. |
+| `runtime_r6_rawdesc_compute_wrong_dst_sel_*` | Control: compared with the identity-`DST_SEL` reference. Exactly the differing words must mismatch. |
+| `runtime_r6_rawdesc_compute_rewrite_*` | After dispatch 0 the title rewrites the V# (a second output, full range), `DST_SEL` and the S# (CLAMP). Dispatch 1's output must equal the new reference, dispatch 0's output must be unchanged, and dispatch 1's output must differ from the old reference in exactly the differing words. |
+
+Not covered: T# types other than 2D, cube and array textures, storage images (UAVs) from raw T#s, buffer V#s in vertex
+and pixel programs (still refused by the translator), constant-buffer V#s in compute programs, and texture writes
+made between recording and submission. The texture hash and the synchronous upload on a cache miss cost CPU time per
+draw that has not been measured.
 
 ### Attribute words at xmem call sites
 

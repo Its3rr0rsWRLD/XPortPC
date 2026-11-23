@@ -17,7 +17,7 @@
 // time (tools/pso_translate.py) to (table root parameter, byte offset), and the shim resolves that at draw time
 // (resolve): the words in title memory decide. A marker resolves to the slot it names (if that slot still holds
 // the same generation); any other non-zero words are hardware words (a T#, S# or V# the title wrote itself, runtime
-// rung R6), which d3d12_xs_pipeline.cpp decodes (src/gfx10_descriptors.h); all-zero words are no descriptor.
+// R6 descriptors), which d3d12_xs_pipeline.cpp decodes (src/gfx10_descriptors.h); all-zero words are no descriptor.
 //
 // All functions take the registry lock; the records are read only through the functions below.
 

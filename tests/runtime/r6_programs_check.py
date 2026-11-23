@@ -1,4 +1,4 @@
-"""The gfx1013 programs of runtime rung R6 (tests/runtime/r6_*.s): hardware descriptor words in title heaps.
+"""The gfx1013 programs of R6 descriptors (tests/runtime/r6_*.s): hardware descriptor words in title heaps.
 
     r6_programs_check.py check [<llvm-mc> <llvm-objcopy>]
     r6_programs_check.py header <llvm-mc> <llvm-objcopy> <r6_programs.h>

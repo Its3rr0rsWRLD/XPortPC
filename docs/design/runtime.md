@@ -145,19 +145,46 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
 - **As built in R4:** the translator resolves every descriptor load to (descriptor table, byte offset) at
   translation time, since the converter already tracks descriptor loads by key, and the shim resolves that to the
   slot of the title heap the table points into at draw time. This is a CPU-side TextureLookup: no T# search on the
-  GPU and no SM 6.6 heap indexing, and it is exact for descriptors written through the API. The plan below (T# words
-  in title memory, a GPU search) is kept for titles that write or copy descriptor words themselves, which R4 does not
-  handle (their reads are misses).
-- **Textures and storage images (T#):** a desktop SRV/UAV is needed. The shim creates it when the title creates the
-  view through the API and records `(title address of the image, format, dims) -> heap index` in a sorted table, the
-  same shape as `TitleRange`. A new `TextureLookup` helper finds the index from the T# words; the shader then uses
-  SM 6.6 `ResourceDescriptorHeap[index]`. A T# with no recorded view is a lookup miss: sample returns zero and the
-  miss is counted.
-- **Samplers (S#):** decoded to `D3D12_SAMPLER_DESC` on the CPU when written through the API, cached, and indexed
-  through `SamplerDescriptorHeap` the same way.
-- **API-written descriptors** (`Create*View` into a console heap): the shim writes the hardware words the console
-  shader expects into the title-visible heap memory **and** the desktop descriptor into the shadow heap. Writing
-  hardware words needs their bit layout, which the public RDNA ISA documents.
+  GPU and no SM 6.6 heap indexing.
+- **Descriptors written as hardware words (R6, built).** Consoles expose descriptor memory directly, so titles write
+  T#, S# and V# words into heap memory themselves, or copy them with `memcpy`. The shim lets the words in title memory
+  decide, at draw and dispatch time, on the CPU (`src/d3d12_xs_descriptors.h`, `src/gfx10_descriptors.h`):
+  - An API write (`Create*View`, `CreateSampler`) still creates the desktop descriptor in the shadow heap, and now also
+    writes *marker words* into the slot's title memory: a reserved descriptor type (T# `TYPE` 4, V# `TYPE` 1) naming
+    the slot and its generation. A `memcpy` of the 32 bytes copies a reference to that view; a later rewrite of the
+    source slot makes the copy a miss. `CopyDescriptors*` copies the bytes too (an API view gets its own marker).
+  - Any other non-zero words are hardware words and are decoded with the GFX10.3 field layouts of Mesa's register
+    database (`src/amd/registers/gfx10-rsrc.json`, `gfx6.json`; MIT), as Mesa's `ac_descriptors.c` builds them. A
+    T# becomes a desktop 2D texture: base address (word 0 holds address bits 39:8 with the pipe/bank XOR ORed into
+    the low bits, `ac_set_mutable_tex_desc_fields`; taken out for the `_X`/`_T` swizzle modes by block size),
+    `FORMAT` (58 formats with a DXGI equivalent, including BC1-BC7 and the B5G6R5-style ones with their channel
+    order), width/height, `MAX_MIP` + 1 levels in the resource and `BASE_LEVEL`..`LAST_LEVEL` in the SRV, `MIN_LOD`
+    as `ResourceMinLODClamp`, `SW_MODE` and the XOR for the detiler (`x2w_gfx10_detile`, section 4), and `DST_SEL`
+    as the SRV's component mapping. The title's bytes (from the base address, addrlib's surface size, read on the
+    CPU at the title address, which is the memory the TitleLookup alias maps) are hashed; textures are cached by
+    the T# words and that hash, created and filled on a shim copy queue (synchronously, on a cache miss), and
+    recycled with the descriptor blocks' fences (1024 entries). An S# becomes a cached desktop sampler (address
+    modes, min/mag/mip filters, anisotropy, min/max reduction, LOD range and bias, border type, comparison function).
+    A constant-buffer V# becomes a root CBV at the alias of its base address, after a check that `num_records` (times
+    the stride) lies in one title allocation. A compute buffer V# is copied into the dispatch's frame words, where
+    the translated program applies its range check itself.
+  - Refused with a reason and counted as a TextureLookup miss: T# types other than 2D, DCC compression, array slices,
+    a custom linear pitch, formats without a DXGI equivalent; S# half-border clamps, border colours from the table,
+    unnormalized coordinates, degamma overrides, a secondary LOD bias; V# swizzling or `ADD_TID`.
+  - Not modelled (accepted): `BC_SWIZZLE`, `TRUNC_COORD`, anisotropy thresholds and biases, `PERF_*` hints,
+    `MIP_POINT_PRECLAMP`; `MIP_FILTER_NONE` is point between levels with the LOD clamped to `MIN_LOD`. The texture is
+    read when the draw is recorded, not when the GPU executes it; a title that writes texture memory between
+    recording and submission is not seen. Constant reads past a V#'s `num_records` read the alias, not zero.
+- **Inline samplers (R6, built):** an S# a program builds with `s_mov` is reported by the translator with its words
+  and decoded when the pipeline is created (a sampler without a desktop equivalent refuses the pipeline); draws bind
+  the cached desktop sampler in its slot.
+- **Compute tables (R6, built):** compute containers may bind descriptor tables; T#s, an S# and buffer V#s are bound
+  as above, constant-buffer V#s and storage images read from a table are refused.
+- **Root signature budget (R6):** the push words, the TitleLookup range count and the base vertex and start instance
+  are one constant buffer, the *frame words* (64 words and 3 more, `FrameWords`), written per draw or dispatch into a
+  512-byte slice of the shim's upload ring (256 chunks of 64 KiB, recycled with the same fences as the descriptor
+  blocks) and bound as one root CBV. The converter parameters take 13 of the 64 root DWORDs (they took 46), leaving
+  51 for the title's own.
 
 ### Pipelines and shaders
 
