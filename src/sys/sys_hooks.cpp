@@ -3,6 +3,7 @@
 #include "sys_audio.h"
 #include "sys_common.h"
 #include "sys_dstorage.h"
+#include "sys_gdeflate.h"
 #include "sys_gameinput.h"
 #include "sys_paths.h"
 #include "sys_threads.h"
@@ -15,6 +16,12 @@
 #include <sstream>
 
 namespace {
+
+// Hook groups answer X2WSysHookLookup only when they have something to do: path hooks when at least one rule is
+// active (the G:/T:/D: defaults count), threading/topology/timing hooks only when the config has a threads.* or
+// timing.* key. Without them the title's calls go straight to Windows.
+bool g_paths_on = false;
+bool g_threads_on = false;
 
 std::string lower_ascii(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -100,6 +107,9 @@ X2W_SYS_API int __stdcall X2WSysInit(const char* title_dir, const char* title_na
         if (e.key == "paths.clean_temp") clean_temp = e.value != "off" && e.value != "0";
     }
     if (defaults && !ctx.title_dir.empty()) map.add_default_rules();
+    g_threads_on = false;
+    for (const auto& e : entries)
+        if (e.key.rfind("threads.", 0) == 0 || e.key.rfind("timing.", 0) == 0) g_threads_on = true;
     for (const auto& e : entries) {
         paths::apply_config_line(e.key, e.value);
         threads::apply_config_line(e.key, e.value);
@@ -110,24 +120,29 @@ X2W_SYS_API int __stdcall X2WSysInit(const char* title_dir, const char* title_na
     for (size_t i = 0; i < map.size(); ++i)
         log("paths: rule %s -> %s%s%s", narrow(map.rule(i).from).c_str(), narrow(map.rule(i).to).c_str(),
             map.rule(i).read_only ? " [ro]" : "", map.rule(i).mkdir ? " [mkdir]" : "");
+    g_paths_on = map.size() > 0;
     if (clean_temp) clean_temp_folder();
-    threads::init_from_host();
+    ds::register_decompressor(ds::kGDeflate, &ds::gdeflate_decompress);
+    if (g_threads_on) threads::init_from_host();
+    else log("sys: threading, topology and timing hooks are off (no threads.* or timing.* config)");
     return 0;
 }
 
 X2W_SYS_API void* __stdcall X2WSysHookLookup(const char* dll, const char* symbol) {
     if (!dll || !symbol || !win32_dll(dll)) return nullptr;
     size_t n = 0;
-    for (const auto* h = x2w_sys::paths::hooks(&n); n--; ++h)
-        if (std::strcmp(h->symbol, symbol) == 0) return h->replacement;
-    for (const auto* h = x2w_sys::threads::hooks(&n); n--; ++h)
-        if (std::strcmp(h->symbol, symbol) == 0) return h->replacement;
+    if (g_paths_on)
+        for (const auto* h = x2w_sys::paths::hooks(&n); n--; ++h)
+            if (std::strcmp(h->symbol, symbol) == 0) return h->replacement;
+    if (g_threads_on)
+        for (const auto* h = x2w_sys::threads::hooks(&n); n--; ++h)
+            if (std::strcmp(h->symbol, symbol) == 0) return h->replacement;
     return nullptr;
 }
 
 X2W_SYS_API void __stdcall X2WSysShutdown(void) {
     x2w_sys::paths::log_summary();
-    x2w_sys::threads::log_summary();
+    if (g_threads_on) x2w_sys::threads::log_summary();
     const auto& a = x2w_sys::audio::stats();
     x2w_sys::log("audio: formats seen: %llu PCM, %llu ADPCM, %llu float, %llu XMA, %llu rejected",
                  static_cast<unsigned long long>(a.pcm), static_cast<unsigned long long>(a.adpcm),

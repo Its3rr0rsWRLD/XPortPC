@@ -10,3 +10,4 @@ EXPORTS
     X2wXAudio2Create
     X2wXAudio2CheckFormat
     X2wDStorageGetFactory
+    X2wDStorageFallbackRead

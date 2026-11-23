@@ -10,10 +10,10 @@
 // Fallback. With no dstorage.dll, X2wDStorageGetFactory returns X2W_E_DSTORAGE_FALLBACK and the gateway uses the
 // Queue below: plain ReadFile on a worker thread, memory or title-address destinations (a resolver turns a title
 // address into a host pointer; GPU resources go through the graphics wrappers' staging memory), and a pluggable
-// decompressor per compression format. GDeflate CPU decoding is NOT built in: the public reference implementation
-// is Apache-2.0 on top of a libdeflate fork, which this MIT repository does not vendor. register_decompressor()
-// takes any implementation; until one is registered, a GDeflate request completes with an unsupported-format
-// error, logged once.
+// decompressor per compression format. GDeflate decoding is Microsoft's public reference decoder
+// (Apache-2.0, over NVIDIA's libdeflate fork) vendored in third_party/gdeflate; X2WSysInit registers it for format 1
+// (sys_gdeflate.h). Without X2WSysInit (the library alone) nothing is registered: register_decompressor() takes any
+// implementation, and a request for an unregistered format completes with an unsupported-format error, logged once.
 #pragma once
 
 #include <condition_variable>
@@ -103,4 +103,7 @@ void apply_config_line(const std::string& key, const std::string& value);
 extern "C" {
 // Console-facing entry, same signature as the public DStorageGetFactory(REFIID, void**).
 HRESULT WINAPI X2wDStorageGetFactory(REFIID iid, void** out);
+// Synchronous fallback read (optionally GDeflate-decoded) into host memory; path goes through the path map.
+HRESULT WINAPI X2wDStorageFallbackRead(const wchar_t* path, uint64_t offset, uint32_t size, uint32_t compression,
+                                       uint32_t uncompressed_size, void* dest);
 }

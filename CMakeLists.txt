@@ -3318,9 +3318,21 @@ if(TARGET pe_map AND TARGET xmem_shim)
         add_custom_target(x2w_shims ALL
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${x2w_shim_dir}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:xmem_shim>" "$<TARGET_FILE:d3d12_xs_shim>"
-                "${x2w_shim_dir}"
-            DEPENDS xmem_shim d3d12_xs_shim VERBATIM)
+                "$<TARGET_FILE:x2w_sys>" "${x2w_shim_dir}"
+            DEPENDS xmem_shim d3d12_xs_shim x2w_sys VERBATIM)
         add_dependencies(x2w_launch x2w_shims)
+        # Source-built title for the system layer under x2w_launch: G:\ paths and DirectStorage-fallback reads of
+        # a GDeflate file (tests/native/sys_title_check.py). It imports x2w_sys.dll's flat DirectStorage entries.
+        add_executable(x2w_sys_title tests/native/sys_title.cpp)
+        add_dependencies(x2w_sys_title x2w_shims)
+        target_compile_options(x2w_sys_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_sys_title PRIVATE /ENTRY:sys_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+            /INCREMENTAL:NO)
+        target_link_libraries(x2w_sys_title PRIVATE kernel32 x2w_sys)
+        add_test(NAME native_launch_sys COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/sys_title_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_sys_title>" "$<TARGET_FILE:gdeflate_pack>" "${x2w_shim_dir}")
+        set_tests_properties(native_launch_sys PROPERTIES TIMEOUT 180)
         foreach(rung1_def IN ITEMS xmem missing)
             set(rung1_${rung1_def}_lib "${CMAKE_CURRENT_BINARY_DIR}/rung1_${rung1_def}.lib")
             add_custom_command(OUTPUT "${rung1_${rung1_def}_lib}"

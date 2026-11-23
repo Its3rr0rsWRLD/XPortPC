@@ -89,7 +89,7 @@ Result run_request(const Request& r) {
         if (!decoder) {
             ++g_stats.unsupported;
             log_once("ds:codec:" + std::to_string(r.compression),
-                     "directstorage: compression format %u has no decoder registered (GDeflate CPU decode is not built in)",
+                     "directstorage: compression format %u has no decoder registered (X2WSysInit registers GDeflate, format 1)",
                      r.compression);
             return fail(X2W_E_DS_UNSUPPORTED_COMPRESSION);
         }
@@ -220,5 +220,21 @@ HRESULT WINAPI X2wDStorageGetFactory(REFIID iid, void** out) {
     if (fn) return fn(iid, out);
     x2w_sys::log_once("ds:factory", "directstorage: DStorageGetFactory has no runtime to forward to; returning the fallback status");
     return x2w_sys::ds::X2W_E_DSTORAGE_FALLBACK;
+}
+
+// One synchronous fallback read into host memory: the flat entry a gateway (or a stand-in for one) uses without
+// the C++ Queue. compression is a DSTORAGE_COMPRESSION_FORMAT value; size is the stored byte count and
+// uncompressed_size the decoded count (ignored when compression is 0). Returns S_OK or the request's failure.
+HRESULT WINAPI X2wDStorageFallbackRead(const wchar_t* path, uint64_t offset, uint32_t size, uint32_t compression,
+                                       uint32_t uncompressed_size, void* dest) {
+    if (!path || !dest) return E_POINTER;
+    x2w_sys::ds::Request r;
+    r.path = path;
+    r.offset = offset;
+    r.size = size;
+    r.compression = compression;
+    r.uncompressed_size = uncompressed_size;
+    r.dest_memory = dest;
+    return x2w_sys::ds::run_request(r).hr;
 }
 }

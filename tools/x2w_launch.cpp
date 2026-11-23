@@ -1,7 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
-//                   [--xmem NAME=VALUE]... program.exe
+//                   [--xmem NAME=VALUE]... [--sys-config FILE] program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -52,6 +52,19 @@
 // x2w_cpu_trap_sites (a null-terminated array of code addresses) with UD2 and keeps the original bytes in a
 // side table, so the handler's path runs on every host, whether or not the CPU has the instruction.
 //
+// System layer. x2w_sys.dll (src/sys, docs/design/system-libs.md) is loaded from a --shims directory (CMake copies
+// it into shims/), else from the launcher's shims\ or own folder. X2WSysInit(title folder, title name, config) runs
+// before any import is bound and X2WSysShutdown at exit (summary lines on stderr). The config is --sys-config FILE,
+// else %X2W_SYS_CONFIG%, else <title folder>\x2w-sys.cfg. Without a config only the documented path rules are active
+// (G: to the title folder, T: and D: under %LOCALAPPDATA%\XPortPC\<title>); threading, topology and timing hooks
+// stay off until the config has a threads.* or timing.* key. Without x2w_sys.dll the title runs with no system layer
+// (an error if --sys-config was given). Precedence for an import that would go to Windows (kernel32, kernelbase,
+// api-ms-win-core-*), first match wins: (1) the title-identity answers (GetModuleHandle*, GetModuleFileName*), (2) the
+// loader hooks above (LoadLibrary*, GetProcAddress; they also carry the identity answers for GetModuleHandleA/W),
+// (3) X2WSysHookLookup, (4) Windows itself. A shim directory or package DLL of the same name still outranks all
+// of these. GetProcAddress on a Windows DLL applies the same order. Sys-hooked imports log as
+// "windows (x2w sys hook)" and count as windows in the run log.
+//
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
 // leaves them naming the launcher, for comparison.
@@ -92,6 +105,12 @@ std::map<std::string, HMODULE> shim_modules;
 // src/xgr/xgr_gateway.cpp) in that mode, with no fallback to Windows' DLL.
 std::string xgr_mode = "shim";
 std::wstring launcher_dir;
+// The system layer (x2w_sys.dll): hook lookup for Win32 imports, see the header comment.
+using SysInit = int(__stdcall*)(const char* title_dir, const char* title_name, const char* config);
+using SysLookup = void*(__stdcall*)(const char* dll, const char* symbol);
+using SysShutdown = void(__stdcall*)();
+SysLookup sys_lookup;
+SysShutdown sys_shutdown;
 constexpr const char* kXgrName = "xgameruntime.dll";
 constexpr const wchar_t* kXgrGateway = L"x2w_xgr.dll";
 std::map<std::string, void*> package_images;
@@ -551,6 +570,11 @@ void* identity_hook(const std::string& dll, const char* name) {
     return nullptr;
 }
 
+// The system layer's replacement for dll!name (kernel32, kernelbase, api-ms-win-core-*), or null.
+void* sys_hook(const std::string& dll, const char* name) {
+    return sys_lookup && name ? sys_lookup(dll.c_str(), name) : nullptr;
+}
+
 // PEB->ImageBaseAddress (gs:[0x60] + 0x10). While it holds the title's base, Windows functions that take a
 // null module (FindResource, LoadString, the default stack size of new threads) use the title's image. The
 // launcher no longer asks Windows for its own module after this point.
@@ -754,6 +778,7 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
         if (address && !by_ordinal) {
             if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
             else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
+            else if (void* sys = sys_hook(dll, name)) address = reinterpret_cast<FARPROC>(sys);
         }
     }
     log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
@@ -821,6 +846,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
     if (HMODULE module = LoadLibraryA(dll)) {
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
             if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
+            if (void* hook = sys_hook(key, name)) return report(key, symbol, "windows (x2w sys hook)", "windows", hook);
             return report(key, symbol, "windows", "windows", address);
         }
         return report(key, symbol, "stub (not in windows)", "stub", make_stub(key, symbol, false));
@@ -1135,7 +1161,7 @@ extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch
 
 int wmain(int argc, wchar_t** argv) {
     std::vector<std::pair<std::wstring, std::wstring>> xmem_settings;
-    std::wstring program, log_path;
+    std::wstring program, log_path, sys_config;
     unsigned long timeout = 0;
     bool usage = false, force_cpu_traps = false;
     for (int i = 1; i < argc; ++i) {
@@ -1152,6 +1178,8 @@ int wmain(int argc, wchar_t** argv) {
             force_cpu_traps = true;
         } else if (argument == L"--xgr" && i + 1 < argc) {
             xgr_mode = lower(narrow(argv[++i]));
+        } else if (argument == L"--sys-config" && i + 1 < argc) {
+            sys_config = argv[++i];
         } else if (argument == L"--xmem" && i + 1 < argc) {
             const std::wstring setting = argv[++i];
             const auto equals = setting.find(L'=');
@@ -1175,7 +1203,7 @@ int wmain(int argc, wchar_t** argv) {
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... program.exe\n");
+                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -1237,6 +1265,49 @@ int wmain(int argc, wchar_t** argv) {
             SetEnvironmentVariableW(L"X2W_TITLE_DIR", package_dir.c_str());
     }
     log_host_features();
+    // The system layer, before any import is bound.
+    struct SysGuard {
+        ~SysGuard() {
+            if (sys_shutdown) sys_shutdown();
+        }
+    } sys_guard;
+    {
+        std::wstring config_full;
+        if (!sys_config.empty()) {
+            wchar_t config_path[MAX_PATH];
+            if (!GetFullPathNameW(sys_config.c_str(), MAX_PATH, config_path, nullptr) || !is_file(config_path)) {
+                std::fprintf(stderr, "[x2w] --sys-config: cannot read %ls\n", sys_config.c_str());
+                return 2;
+            }
+            config_full = config_path;
+        }
+        std::vector<std::wstring> directories = shim_dirs;
+        directories.push_back(launcher_dir + L"\\shims");
+        directories.push_back(launcher_dir);
+        HMODULE sys_module = nullptr;
+        for (const auto& directory : directories) {
+            const std::wstring path = directory + L"\\x2w_sys.dll";
+            if (is_file(path) && (sys_module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH))) break;
+        }
+        const auto init = sys_module ? reinterpret_cast<SysInit>(GetProcAddress(sys_module, "X2WSysInit")) : nullptr;
+        sys_lookup = sys_module ? reinterpret_cast<SysLookup>(GetProcAddress(sys_module, "X2WSysHookLookup")) : nullptr;
+        sys_shutdown = sys_module ? reinterpret_cast<SysShutdown>(GetProcAddress(sys_module, "X2WSysShutdown")) : nullptr;
+        if (!init || !sys_lookup || !sys_shutdown) {
+            sys_lookup = nullptr;
+            sys_shutdown = nullptr;
+            if (!config_full.empty()) {
+                std::fprintf(stderr, "[x2w] --sys-config needs x2w_sys.dll in a --shims directory\n");
+                return 2;
+            }
+            std::fprintf(stderr, "[x2w] sys: x2w_sys.dll not found; no system layer\n");
+        } else {
+            std::wstring stem = file_of(full);
+            const auto dot = stem.find_last_of(L'.');
+            if (dot != std::wstring::npos) stem = stem.substr(0, dot);
+            const std::string title_dir = narrow(package_dir), title_name = narrow(stem), config = narrow(config_full);
+            init(title_dir.c_str(), title_name.c_str(), config.empty() ? nullptr : config.c_str());
+        }
+    }
     std::uint32_t status = 0;
     char detail[512] = {};
     void* base = map_image(full, resolve, &status, detail, sizeof detail);
