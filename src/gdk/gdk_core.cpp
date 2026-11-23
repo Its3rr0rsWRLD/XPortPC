@@ -133,8 +133,15 @@ using LaunchLog = void(__cdecl*)(const char* kind, const char* symbol, const cha
 LaunchLog launch_log()
 {
     // x2w_launch exports this to put shim events into its run log (tools/x2w_launch.cpp).
-    static LaunchLog fn =
-        reinterpret_cast<LaunchLog>(GetProcAddress(GetModuleHandleW(nullptr), "x2w_launch_log_shim"));
+    // GetModuleHandle(nullptr) is the title once x2w_launch has set the PEB's image base to it, so the
+    // launcher is also looked up by name.
+    static LaunchLog fn = [] {
+        auto found = reinterpret_cast<LaunchLog>(GetProcAddress(GetModuleHandleW(nullptr), "x2w_launch_log_shim"));
+        if (!found)
+            if (HMODULE launcher = GetModuleHandleW(L"x2w_launch.exe"))
+                found = reinterpret_cast<LaunchLog>(GetProcAddress(launcher, "x2w_launch_log_shim"));
+        return found;
+    }();
     return fn;
 }
 
