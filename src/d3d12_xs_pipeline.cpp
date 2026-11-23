@@ -1373,7 +1373,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     bool any_texture = false, any_sampler = false;
     D3D12_GPU_VIRTUAL_ADDRESS constants[1 + pixel_constant_slots] = {};
     bool any_constants[1 + pixel_constant_slots] = {};
-    WordsKey words{};
+    WordsKey vsharps{};
     bool any_words = false;
     for (std::uint32_t r = 0; r < pso.ref_count; ++r) {
         const TableRef& ref = pso.refs[r];
@@ -1432,7 +1432,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
             std::memcpy(&sampler_key[3 * ref.slot], identity, sizeof(identity));
             any_sampler = true;
         } else if (buffer) {
-            if (found.found) std::memcpy(&words[ref.slot], found.vsharp, sizeof(found.vsharp));
+            if (found.found) std::memcpy(&vsharps[ref.slot], found.vsharp, sizeof(found.vsharp));
             any_words = true;
         } else {
             const unsigned at = ref.stage == X2W_SHADER_STAGE_VERTEX ? 0 : 1 + ref.slot;
@@ -1444,7 +1444,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     D3D12_GPU_VIRTUAL_ADDRESS words_at = 0;
     if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, why)) ||
         (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why)) ||
-        (any_words && !views->words_block(words, &words_at, why))) {
+        (any_words && !views->words_block(vsharps, &words_at, why))) {
         log_refused(symbol, ("draw skipped: " + why).c_str(), true);
         return false;
     }
