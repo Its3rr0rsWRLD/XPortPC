@@ -32,6 +32,11 @@ MAX_SLOTS = 256  # XGR_SLOTS in src/xgr/xgr_thunks.asm
 # Return types that are structs: a C++ member function returns them through a hidden pointer passed
 # after `this` (rdx), so the wrapper takes that pointer explicitly and returns it.
 STRUCT_RETURNS = {"XSystemAnalyticsInfo"}
+# Values a class's `fallback` may name: what a slot with no implementation answers (default E_NOTIMPL).
+FALLBACKS = {
+    "E_NOTIMPL": 0x80004001,
+    "E_GAMEUSER_NO_DEFAULT_USER": 0x89245106,  # src/gdk/x2w_gdk_types.h, XUser error codes
+}
 
 
 class TableError(ValueError):
@@ -86,6 +91,11 @@ def load_table(path):
         if not IDENT.match(klass["name"]) or klass["name"] in seen_name:
             raise TableError(f"class name {klass['name']!r} is not a unique identifier")
         seen_name.add(klass["name"])
+        if klass.get("fallback", "E_NOTIMPL") not in FALLBACKS:
+            raise TableError(f"{klass['name']}: fallback must be one of {sorted(FALLBACKS)}")
+        unknown = set(klass) - {"name", "clsid", "evidence", "interfaces", "fallback"}
+        if unknown:
+            raise TableError(f"{klass['name']}: unknown fields {sorted(unknown)}")
         clsid = klass["clsid"].lower()
         guid_initializer(clsid)
         if clsid in seen_clsid:
@@ -198,7 +208,9 @@ def render(classes, specs, source):
         out.append("")
     class_rows, interface_rows, cache = [], [], set()
     for class_index, klass in enumerate(classes):
-        class_rows.append(f'    {{"{klass["name"]}", {guid_initializer(klass["clsid"])}}},')
+        fallback = FALLBACKS[klass.get("fallback", "E_NOTIMPL")]
+        class_rows.append(f'    {{"{klass["name"]}", {guid_initializer(klass["clsid"])}, '
+                          f'static_cast<long>(0x{fallback:08x}u)}},')
         for interface in klass["interfaces"]:
             slots = interface["_slots"]
             count = max([3] + [i + 1 for i in slots])
@@ -217,7 +229,7 @@ def render(classes, specs, source):
             interface_rows.append(f'    {{"{interface["name"]}", {guid_initializer(interface["iid"])}, {class_index}u, '
                                   f"xgr_targets_{interface['name']}, {count}u}},")
     out.append(f"static const XgrClass xgr_classes[{max(1, len(class_rows))}] = {{")
-    out.extend(class_rows or ['    {"(none)", {}},'])
+    out.extend(class_rows or ['    {"(none)", {}, 0},'])
     out.append("};")
     out.append(f"static const unsigned xgr_class_count = {len(class_rows)}u;")
     out.append(f"static const XgrInterface xgr_interfaces[{max(1, len(interface_rows))}] = {{")
@@ -227,12 +239,32 @@ def render(classes, specs, source):
     return "\n".join(out) + "\n"
 
 
+def audit(classes, specs):
+    """Prints, per shimgen family, which flat functions the gateway reaches through a slot. A function with no
+    slot cannot be called by a PC GDK title (its CLSID/IID/slot is not yet learned); the title's query for it
+    gets a logging fallback object (src/xgr/xgr_gateway.cpp), not a crash."""
+    reached = {s.get("function") for k in classes for i in k["interfaces"] for s in i["_slots"].values()}
+    families = {}
+    for name, function in specs.functions.items():
+        families.setdefault(function.family, []).append((name, name in reached))
+    for family in sorted(families):
+        rows = families[family]
+        missing = [n for n, ok in rows if not ok]
+        print(f"xgr_audit {family}: {len(rows) - len(missing)}/{len(rows)} reachable"
+              + (f"; no slot: {', '.join(missing)}" if missing else ""))
+    for klass in classes:
+        for interface in klass["interfaces"]:
+            print(f"xgr_audit interface {interface['name']} ({klass['name']}, fallback "
+                  f"{klass.get('fallback', 'E_NOTIMPL')}): {len(interface['_slots'])} slots mapped")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--table", default=str(ROOT / "tools" / "xgr" / "interfaces.toml"))
     parser.add_argument("--specs", default=str(ROOT / "tools" / "shimgen" / "specs"))
     parser.add_argument("--out")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--audit", action="store_true", help="print which spec functions the gateway reaches")
     args = parser.parse_args(argv)
     try:
         classes = load_table(args.table)
@@ -246,6 +278,9 @@ def main(argv=None):
         s.get("function") in specs.functions and specs.functions[s["function"]].body == "impl"))
     print(f"xgr_gen: {len(classes)} classes, {sum(len(k['interfaces']) for k in classes)} interfaces, "
           f"{len(own)} slots ({named} named, {implemented} implemented)")
+    if args.audit:
+        audit(classes, specs)
+        return 0
     if args.check:
         return 0
     if not args.out:

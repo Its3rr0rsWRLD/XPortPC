@@ -15,6 +15,11 @@
 # and answer E_NOTIMPL through the gateway's logging thunks. impl = "xgr" marks a function x2w_gdk.dll does
 # not have, implemented in src/xgr/xgr_extra.cpp (returns/params give its signature).
 
+# Optional class field: fallback = "NAME" is the HRESULT a slot of this class with no implementation answers
+# (instead of E_NOTIMPL): E_NOTIMPL (default), E_GAMEUSER_NO_DEFAULT_USER (XUser: a title treats it as "no user
+# yet" and shows its sign-in path, where E_NOTIMPL would read as a runtime fault). The same value is what a
+# logging fallback object answers when a known class is queried with an IID this table does not list.
+
 [[classes]]
 name = "XThreading"
 clsid = "073b7dcb-1fcf-4030-94be-e3c9eb623428"
@@ -275,6 +280,7 @@ evidence = "static: thunk XGameSaveSubmitUpdate in GameSaveCombo: mov rax,[rax+0
 name = "XUser"
 clsid = "01acd177-91f9-4763-a38e-ccbb55ce32e0"
 evidence = "GUID loaded by the XUser thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+fallback = "E_GAMEUSER_NO_DEFAULT_USER"
 
 [[classes.interfaces]]
 name = "IXUserImpl"
@@ -295,6 +301,69 @@ evidence = "static: thunk XUserAddAsync in GameSaveCombo: mov rax,[rax+0x38], CF
 index = 8
 function = "XUserAddResult"
 evidence = "static: thunk XUserAddResult in GameSaveCombo: mov rax,[rax+0x40], CFG call"
+
+# Slots below are INFERRED from the public XUser.h declaration order, not traced: the traced slots (4 CloseHandle,
+# 7 AddAsync, 8 AddResult, 16-18 gamer picture) sit exactly where that order puts them (Duplicate, Close, Compare,
+# GetMaxUsers, AddAsync, AddResult, GetId, FindUserById, GetLocalId, FindUserByLocalId, GetIsGuest, GetState, one
+# slot for the earlier GetGamertag signature (15; the component form is IXUserGamertagImpl), the gamer-picture
+# trio, GetAgeGroup, CheckPrivilege). Slots after 20 (privilege/issue resolution UI, token and signature,
+# RegisterForChangeEvent, GetSignOutDeferral) have no position evidence: they answer the class fallback
+# (E_GAMEUSER_NO_DEFAULT_USER) and are logged until a trace names them.
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XUserDuplicateHandle"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 5
+function = "XUserCompare"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 6
+function = "XUserGetMaxUsers"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 9
+function = "XUserGetId"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 10
+function = "XUserFindUserById"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 11
+function = "XUserGetLocalId"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 12
+function = "XUserFindUserByLocalId"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 13
+function = "XUserGetIsGuest"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 14
+function = "XUserGetState"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 19
+function = "XUserGetAgeGroup"
+evidence = "inferred from the public XUser.h order (see above), not traced"
+
+[[classes.interfaces.slots]]
+index = 20
+function = "XUserCheckPrivilege"
+evidence = "inferred from the public XUser.h order (see above), not traced"
 
 [[classes.interfaces.slots]]
 index = 16
@@ -362,7 +431,7 @@ evidence = "trace: QueryApiImpl from libhttpclient.dll after XGameRuntimeIsFeatu
 [[classes.interfaces]]
 name = "IXNetworkingImpl_bf2346b2"
 iid = "bf2346b2-39af-4658-b5ea-44713c7e83b3"
-evidence = "trace: the IID libhttpclient.dll asks for (job xgrgate-755802ed-r2). The gateway reports XNetworking as unavailable, so libHttpClient does not query it; the slots are recorded, not implemented"
+evidence = "trace: the IID libhttpclient.dll asks for (job xgrgate-755802ed-r2). The gateway reports XNetworking as unavailable (XGameRuntimeIsFeatureAvailable), so libHttpClient does not query it; a title that queries it anyway gets the slots below"
 
 [[classes.interfaces.slots]]
 index = 8
@@ -383,3 +452,81 @@ evidence = "trace: args (async block, size 0x18, buffer, ...) after slot 9"
 index = 14
 function = "XNetworkingVerifyServerCertificate"
 evidence = "trace: args (request handle, the security information from slot 10), called per connection"
+
+# Slots 3-7 and 15-17 are INFERENCE, not trace facts. Observed: the security-information trio at 8-10 (header order:
+# Async, ResultSize, Result), and Verify at 14, so 11-13 are the Utf16 trio (same header order) and slots 3-7 are the
+# functions the public XNetworking.h lists before them. In the header those are the connectivity-hint group
+# (Get, Register, Unregister) and the preferred-UDP-port group (Register..Changed, Unregister..Changed beside it,
+# since the Query/QueryAsync/AsyncResult trio is not adjacent in a vtable that puts Verify at 14).
+# A title's first networking call was slot 15 with one pointer argument (the other two argument registers hold
+# leftovers: 0x7ffffffffffffffc, 0x40): the first function after Verify that takes a single pointer is
+# XNetworkingQueryPreferredLocalUdpMultiplayerPort(uint16_t*) - but a later owner run showed the title then reads
+# null+0x38 (a lock in an object it expected from this call) with arg1 a stack address, so slot 15 is served as an
+# out-parameter that receives a logging object (XNetworkingSlot15Object); 16 and 17 keep the port-query guess.
+# 18-20 (QueryConfigurationSetting, SetConfigurationSetting, QueryStatistics, order unknown) stay unmapped: they
+# answer E_NOTIMPL, which their documentation lists for a platform that does not support the setting or statistic.
+# Each assumption is logged once at the first call ("xgr-assume"), so a wrong guess shows up in the run log.
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XNetworkingGetConnectivityHint"
+evidence = "assumed (see above): first function of XNetworking.h"
+impl = "xgr"
+returns = "HRESULT"
+params = "XNetworkingConnectivityHint* connectivityHint"
+
+[[classes.interfaces.slots]]
+index = 4
+function = "XNetworkingRegisterConnectivityHintChanged"
+evidence = "assumed (see above): follows Get in XNetworking.h"
+impl = "xgr"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, void* context, XNetworkingConnectivityHintChangedCallback* callback, XTaskQueueRegistrationToken* token"
+
+[[classes.interfaces.slots]]
+index = 5
+function = "XNetworkingUnregisterConnectivityHintChanged"
+evidence = "assumed (see above): follows Register in XNetworking.h"
+impl = "xgr"
+returns = "bool"
+params = "XTaskQueueRegistrationToken token, bool wait"
+
+[[classes.interfaces.slots]]
+index = 6
+function = "XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged"
+evidence = "assumed (see above): the two slots between the hint group and the security group"
+impl = "xgr"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, void* context, XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* callback, XTaskQueueRegistrationToken* token"
+
+[[classes.interfaces.slots]]
+index = 7
+function = "XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged"
+evidence = "assumed (see above): the two slots between the hint group and the security group"
+impl = "xgr"
+returns = "bool"
+params = "XTaskQueueRegistrationToken token, bool wait"
+
+[[classes.interfaces.slots]]
+index = 15
+function = "XNetworkingSlot15Object"
+evidence = "trace: a title's first networking call: (stack address, 0x7ffffffffffffffc, 0x40); it then dereferenced null+0x38 (a lock in an object it expected), so the stack address is taken to be an out-parameter for an object pointer; we write a logging fallback object there"
+impl = "xgr"
+returns = "HRESULT"
+params = "void** outObject"
+
+[[classes.interfaces.slots]]
+index = 16
+function = "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync"
+evidence = "assumed (see above): sibling of slot 15"
+impl = "xgr"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock"
+
+[[classes.interfaces.slots]]
+index = 17
+function = "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult"
+evidence = "assumed (see above): sibling of slot 15"
+impl = "xgr"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, uint16_t* preferredLocalUdpMultiplayerPort"
