@@ -707,13 +707,194 @@ bool known_iid(Kind k, Abi, const GUID& g) {
 
 
 // ---- GPU destinations ------------------------------------------------------------------------------------------
-struct Gpu {};
-void destroy_gpu(Gpu* g) { delete g; }
-HRESULT gpu_staging(Queue*, Op& op, uint8_t**, uint64_t*) {
-    log_once("dsx:gpu:todo", "directstorage: GPU destination type %u is not implemented yet", op.dest_type);
-    return E_NOTIMPL;
+// One copy queue per DirectStorage queue on its (desktop) device; requests are decoded straight into a persistently
+// mapped upload buffer, copied, and waited for before the next one, so fences and statuses enqueued after them see
+// the data. Resources must be in D3D12_RESOURCE_STATE_COMMON (DirectStorage's own rule), which copy queues promote.
+// Texture data is expected in the GetCopyableFootprints layout of the destination; a tightly packed region (rows of
+// exactly the row size) is also accepted and laid out on the way.
+struct Gpu {
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE event = nullptr;
+    uint64_t value = 0;
+    ID3D12Resource* upload = nullptr;
+    uint64_t upload_size = 0;
+    uint8_t* mapped = nullptr;
+    // The current request's layout.
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp;
+    std::vector<UINT> rows;
+    std::vector<UINT64> row_size;
+    uint64_t total = 0;
+    bool tight = false;
+};
+void destroy_gpu(Gpu* g) {
+    if (!g) return;
+    if (g->upload) g->upload->Release();
+    if (g->list) g->list->Release();
+    if (g->alloc) g->alloc->Release();
+    if (g->queue) g->queue->Release();
+    if (g->fence) g->fence->Release();
+    if (g->event) CloseHandle(g->event);
+    delete g;
 }
-HRESULT run_gpu(Queue*, Op&, const uint8_t*) { return E_NOTIMPL; }
+HRESULT gpu_init(Queue* q) {
+    if (q->gpu) return S_OK;
+    if (!q->device) return E_INVALIDARG;
+    auto* g = new Gpu;
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    HRESULT hr = q->device->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&g->queue));
+    if (SUCCEEDED(hr)) hr = q->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&g->alloc));
+    if (SUCCEEDED(hr)) hr = q->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, g->alloc, nullptr, __uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&g->list));
+    if (SUCCEEDED(hr)) hr = g->list->Close();
+    if (SUCCEEDED(hr)) hr = q->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void**>(&g->fence));
+    g->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (FAILED(hr) || !g->event) {
+        log_once("dsx:gpu:init", "directstorage: copy queue creation failed (%#lx)", static_cast<unsigned long>(hr));
+        destroy_gpu(g);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    q->gpu = g;
+    log("directstorage: copy queue created for GPU destinations");
+    return S_OK;
+}
+HRESULT gpu_upload(Queue* q, uint64_t size) {
+    Gpu* g = q->gpu;
+    if (g->upload_size >= size) return S_OK;
+    if (g->upload) g->upload->Release();
+    g->upload = nullptr;
+    g->mapped = nullptr;
+    g->upload_size = 0;
+    const uint64_t want = std::max<uint64_t>((size + 0xFFFF) & ~0xFFFFull, 1 << 20);
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = want;
+    d.Height = 1;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    HRESULT hr = q->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                    __uuidof(ID3D12Resource), reinterpret_cast<void**>(&g->upload));
+    if (SUCCEEDED(hr)) {
+        D3D12_RANGE none{0, 0};
+        hr = g->upload->Map(0, &none, reinterpret_cast<void**>(&g->mapped));
+    }
+    if (FAILED(hr)) {
+        log_once("dsx:gpu:upload", "directstorage: upload buffer of %llu bytes failed (%#lx)", static_cast<unsigned long long>(want),
+                 static_cast<unsigned long>(hr));
+        return hr;
+    }
+    g->upload_size = want;
+    return S_OK;
+}
+HRESULT gpu_staging(Queue* q, Op& op, uint8_t** out, uint64_t* cap) {
+    HRESULT hr = gpu_init(q);
+    if (FAILED(hr)) return hr;
+    Gpu* g = q->gpu;
+    g->fp.clear();
+    g->rows.clear();
+    g->row_size.clear();
+    g->tight = false;
+    g->total = op.out_size;
+    if (op.dest_type != pc::kDestBuffer) {
+        D3D12_RESOURCE_DESC d = op.res->GetDesc();
+        UINT first = op.sub, count = 1;
+        if (op.dest_type == pc::kDestTextureRegion) {
+            const D3D12_BOX& b = op.box;
+            if (b.right <= b.left || b.bottom <= b.top || b.back <= b.front) return E_INVALIDARG;
+            d.Width = b.right - b.left;
+            d.Height = b.bottom - b.top;
+            d.DepthOrArraySize = static_cast<UINT16>(d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? b.back - b.front : 1);
+            d.MipLevels = 1;
+            d.Alignment = 0;
+            first = 0;
+        } else {
+            const UINT layers = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : d.DepthOrArraySize;
+            const UINT all = d.MipLevels * layers;
+            if (first >= all) return E_INVALIDARG;
+            count = all - first;
+        }
+        g->fp.resize(count);
+        g->rows.resize(count);
+        g->row_size.resize(count);
+        g->total = 0;
+        q->device->GetCopyableFootprints(&d, first, count, 0, g->fp.data(), g->rows.data(), g->row_size.data(), &g->total);
+        if (g->total == UINT64_MAX || !g->total) return E_INVALIDARG;
+        if (op.out_size != g->total) {
+            uint64_t packed = 0;
+            for (UINT i = 0; i < count; ++i) packed += g->row_size[i] * g->rows[i] * g->fp[i].Footprint.Depth;
+            if (count == 1 && op.out_size == packed) {
+                g->tight = true;
+                log_once("dsx:gpu:tight", "directstorage: texture data taken as tightly packed rows (%u bytes; footprint layout %llu)",
+                         op.out_size, static_cast<unsigned long long>(g->total));
+            } else {
+                log_once("dsx:gpu:size", "directstorage: texture request of %u bytes; the destination's footprint layout is %llu",
+                         op.out_size, static_cast<unsigned long long>(g->total));
+                if (op.out_size > g->total) return E_INVALIDARG;
+            }
+        }
+    }
+    // Tightly packed data is decoded at the end of the buffer and laid out at the start.
+    const uint64_t need = g->tight ? g->total + op.out_size : std::max<uint64_t>(g->total, op.out_size);
+    hr = gpu_upload(q, need);
+    if (FAILED(hr)) return hr;
+    *out = g->tight ? g->mapped + ((g->total + 255) & ~255ull) : g->mapped;
+    if (g->tight && ((g->total + 255) & ~255ull) + op.out_size > g->upload_size) return E_OUTOFMEMORY;
+    *cap = op.out_size;
+    return S_OK;
+}
+HRESULT run_gpu(Queue* q, Op& op, const uint8_t* data) {
+    Gpu* g = q->gpu;
+    if (!g) return E_FAIL;
+    if (g->tight) {
+        const auto& f = g->fp[0];
+        const uint64_t rs = g->row_size[0];
+        for (UINT z = 0; z < f.Footprint.Depth; ++z)
+            for (UINT y = 0; y < g->rows[0]; ++y)
+                std::memmove(g->mapped + f.Offset + (static_cast<uint64_t>(z) * g->rows[0] + y) * f.Footprint.RowPitch,
+                             data + (static_cast<uint64_t>(z) * g->rows[0] + y) * rs, rs);
+    }
+    HRESULT hr = g->alloc->Reset();
+    if (SUCCEEDED(hr)) hr = g->list->Reset(g->alloc, nullptr);
+    if (FAILED(hr)) return hr;
+    if (op.dest_type == pc::kDestBuffer) {
+        g->list->CopyBufferRegion(op.res, op.res_offset, g->upload, 0, op.out_size);
+    } else {
+        for (size_t i = 0; i < g->fp.size(); ++i) {
+            D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+            dst.pResource = op.res;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = op.sub + static_cast<UINT>(i);
+            src.pResource = g->upload;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = g->fp[i];
+            if (op.dest_type == pc::kDestTextureRegion)
+                g->list->CopyTextureRegion(&dst, op.box.left, op.box.top, op.box.front, &src, nullptr);
+            else
+                g->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+    }
+    hr = g->list->Close();
+    if (FAILED(hr)) return hr;
+    ID3D12CommandList* lists[] = {g->list};
+    g->queue->ExecuteCommandLists(1, lists);
+    hr = g->queue->Signal(g->fence, ++g->value);
+    if (FAILED(hr)) return hr;
+    if (g->fence->GetCompletedValue() < g->value) {
+        g->fence->SetEventOnCompletion(g->value, g->event);
+        if (WaitForSingleObject(g->event, 30000) != WAIT_OBJECT_0) {
+            log_once("dsx:gpu:timeout", "directstorage: a GPU copy did not complete in 30 s");
+            return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        }
+    }
+    if (g->fence->GetCompletedValue() == UINT64_MAX) return static_cast<HRESULT>(0x887A0005L);  // DXGI_ERROR_DEVICE_REMOVED
+    return S_OK;
+}
 
 // ---- factory -------------------------------------------------------------------------------------------------
 HRESULT create_queue(Abi abi, const uint8_t* d, const GUID* riid, void** ppv) {
