@@ -30,8 +30,8 @@ void* g_tables[kind_count][prefix_slots + vtable_slots];
 INIT_ONCE g_table_once[kind_count] = {INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
                                       INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
                                       INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
-                                      INIT_ONCE_STATIC_INIT};
-static_assert(kind_count == 10, "one INIT_ONCE per wrapper kind");
+                                      INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT};
+static_assert(kind_count == 11, "one INIT_ONCE per wrapper kind");
 std::atomic<bool> g_slot_seen[kind_count][vtable_slots];
 
 struct SeenIid {
@@ -69,14 +69,19 @@ constexpr unsigned max_refused_calls = 256;
 std::uint64_t g_refused_calls[max_refused_calls];
 unsigned g_refused_call_count;
 
-using Thunk = std::uintptr_t(STDMETHODCALLTYPE*)(void*, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+using Thunk = std::uintptr_t(STDMETHODCALLTYPE*)(void*, std::uintptr_t, std::uintptr_t, std::uintptr_t,
+                                                 std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
-// One thunk per slot index. x64 callers clean nothing on return, so a thunk declared with three
-// integer arguments is safe whatever the real method's arguments are; RDX/R8/R9 are logged as found.
+// One thunk per slot index. x64 callers clean nothing on return, so a thunk declared with more integer
+// arguments than the caller passed is safe: RDX/R8/R9 are read from registers and the next three from the
+// caller's outgoing argument area, which is always mapped stack (they are garbage when not passed). All
+// six are logged as found; nothing is dereferenced.
 template <unsigned Slot>
-std::uintptr_t STDMETHODCALLTYPE unknown_slot(void* self, std::uintptr_t a1, std::uintptr_t a2, std::uintptr_t a3)
+std::uintptr_t STDMETHODCALLTYPE unknown_slot(void* self, std::uintptr_t a1, std::uintptr_t a2, std::uintptr_t a3,
+                                              std::uintptr_t s0, std::uintptr_t s1, std::uintptr_t s2)
 {
-    return log_unknown_slot(self, Slot, X2W_RETURN_ADDRESS(), a1, a2, a3);
+    const std::uintptr_t args[6] = {a1, a2, a3, s0, s1, s2};
+    return log_unknown_slot(self, Slot, X2W_RETURN_ADDRESS(), args);
 }
 
 template <unsigned... I>
@@ -181,6 +186,7 @@ const char* interface_name(Kind kind)
     case Kind::fence: return "ID3D12Fence1";
     case Kind::swap_chain: return "IDXGISwapChain3";
     case Kind::descriptor_heap: return "ID3D12DescriptorHeap";
+    case Kind::view_heap: return "ID3D12DescriptorHeap(RTV/DSV)";
     case Kind::resource: return "ID3D12Resource";
     case Kind::heap: return "ID3D12Heap";
     case Kind::command_signature: return "ID3D12CommandSignature";
@@ -319,8 +325,25 @@ void count_raw(unsigned reads, unsigned uploads, unsigned samplers)
 
 void count_shader(bool cached) { (cached ? g_shaders_cached : g_shaders_translated).fetch_add(1); }
 
-std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, std::uintptr_t a1, std::uintptr_t a2,
-                                std::uintptr_t a3)
+const char* kind_tag(Kind kind)
+{
+    switch (kind) {
+    case Kind::device: return "device";
+    case Kind::queue: return "queue";
+    case Kind::allocator: return "allocator";
+    case Kind::list: return "list";
+    case Kind::fence: return "fence";
+    case Kind::swap_chain: return "swap-chain";
+    case Kind::descriptor_heap: return "descriptor-heap";
+    case Kind::view_heap: return "view-heap";
+    case Kind::resource: return "resource";
+    case Kind::heap: return "heap";
+    case Kind::command_signature: return "command-signature";
+    default: return "object";
+    }
+}
+
+std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, const std::uintptr_t (&a)[6])
 {
     g_unknown_slots.fetch_add(1, std::memory_order_relaxed);
     Kind kind = Kind::count;
@@ -329,12 +352,21 @@ std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, s
     if (!wrapper_kind(self, &kind) || slot >= vtable_slots) return static_cast<std::uint32_t>(E_NOTIMPL);
     if (g_slot_seen[static_cast<unsigned>(kind)][slot].exchange(true)) return static_cast<std::uint32_t>(E_NOTIMPL);
 
-    char symbol[160], where[MAX_PATH + 32], detail[MAX_PATH + 192];
+    char symbol[160], where[MAX_PATH + 32], detail[MAX_PATH + 384];
     std::snprintf(symbol, sizeof(symbol), "d3d12_xs!%s::slot%u", interface_name(kind), slot);
     describe_address(caller, where, sizeof(where));
-    std::snprintf(detail, sizeof(detail), "past %u public slots caller=%s args=0x%llx,0x%llx,0x%llx -> E_NOTIMPL",
-                  public_slots(kind), where, static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
-                  static_cast<unsigned long long>(a3));
+    // The tag names the object kind so an owner log can be grepped per kind ("d3d12x-device-unknown-slot 80");
+    // a console-only present or extension lands here with its slot index. rdx..r9 are registers; stack0..2
+    // are the caller's next argument slots, meaningful only when the method takes that many arguments.
+    std::snprintf(detail, sizeof(detail),
+                  "d3d12x-%s-unknown-slot %u args rdx=0x%llx r8=0x%llx r9=0x%llx stack0=0x%llx stack1=0x%llx "
+                  "stack2=0x%llx this=0x%llx past %u public slots caller=%s args=0x%llx,0x%llx,0x%llx -> E_NOTIMPL",
+                  kind_tag(kind), slot, static_cast<unsigned long long>(a[0]), static_cast<unsigned long long>(a[1]),
+                  static_cast<unsigned long long>(a[2]), static_cast<unsigned long long>(a[3]),
+                  static_cast<unsigned long long>(a[4]), static_cast<unsigned long long>(a[5]),
+                  static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(self)), public_slots(kind), where,
+                  static_cast<unsigned long long>(a[0]), static_cast<unsigned long long>(a[1]),
+                  static_cast<unsigned long long>(a[2]));
     X2WGfxEvent event{};
     event.kind = X2W_GFX_EVENT_UNKNOWN_SLOT;
     event.slot = slot;
@@ -343,9 +375,9 @@ std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, s
     event.detail = detail;
     event.caller = caller;
     event.args[0] = reinterpret_cast<std::uintptr_t>(self);
-    event.args[1] = a1;
-    event.args[2] = a2;
-    event.args[3] = a3;
+    event.args[1] = a[0];
+    event.args[2] = a[1];
+    event.args[3] = a[2];
     emit(event);
     // The HRESULT in EAX, zero-extended: a method returning HRESULT sees a failure. A method
     // returning a pointer or a count sees a non-null value, so the logged line is the one to read.
