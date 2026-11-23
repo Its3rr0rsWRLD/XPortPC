@@ -1,6 +1,6 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
-// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity] [--no-heap-guard]
+// Usage: x2w_launch [--shims DIR]... [--log FILE] [--stall-all] [--timeout SECONDS] [--force-cpu-traps] [--host-identity] [--no-heap-guard]
 //                   [--no-trace-calls]
 //                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name]
 //                   [--continue-breakpoints|--stop-on-breakpoints] program.exe
@@ -849,18 +849,30 @@ void trace_dump_main() {
 // file fields for a File object. What x2w_sys's file hooks know of the handle follows as " opened-as NAME flags=(...)
 // type-at-open=T" (X2WSysDescribeHandle). GetFileType, NtQueryInformationFile(FileModeInformation) and the name
 // queries can block on a synchronous handle another thread is reading, so they run on a helper thread made without
-// loader notifications and are waited for 500 ms; a query still running shows "busy". At most 64 stall lines.
+// loader notifications and are waited for 500 ms; a query still running shows "busy". The same helper adds, for file
+// calls, " file-offset N" (SetFilePointerEx FILE_CURRENT) and " file-size N" (GetFileSizeEx), "n/a" for a pipe, and
+// the buffer's " buffer 0xADDR State=.. Protect=0x.. Type=.." (VirtualQuery, which cannot block). Reported: the main
+// thread (any call; its stall is repeated every 10 s as "for Ns (still)", up to 10 times, without counting against the
+// cap) and any thread in a file/IO call. A non-main thread in a wait (INFINITE or 1 s or more) is idle, not stalled, and
+// is neither reported nor listed unless --stall-all. "also-pending" lists at most 8 other
+// pending calls, only the main thread's and file/IO calls. At most 64 other stall lines.
 using SysDescribe = int(__stdcall*)(void* handle, char* out, unsigned capacity);
 SysDescribe sys_describe;
 struct StallSeen {
     std::uint64_t seq;
     ULONGLONG since;
     bool logged;
+    ULONGLONG next_report;  // main thread: when to repeat the line
+    int reports;
 };
 StallSeen* stall_seen;  // one per trace ring, allocated with the pool
 long stall_lines;
 constexpr long kStallLines = 64;
 constexpr ULONGLONG kStallMs = 2000;
+constexpr ULONGLONG kStallRepeatMs = 10000;
+constexpr int kStallRepeats = 10;
+constexpr int kAlsoPending = 8;
+bool stall_all;  // --stall-all: report idle waits of other threads too
 
 // Handles the shims created (x2w_launch_tag_handle), for the stall lines.
 struct HandleTag {
@@ -892,11 +904,15 @@ struct NtText {  // UNICODE_STRING
 struct HandleQuery {
     HANDLE handle;
     volatile long refs;
-    volatile long stage;  // 1: type, 2: mode, 3: name
+    volatile long stage;  // 1: type, 2: mode, 3: name, 4: offset, 5: size
     DWORD type;
     LONG mode_status;
     ULONG mode;
     DWORD name_length;  // in wide characters, 0 when no name was found
+    bool offset_ok;
+    long long offset;
+    bool size_ok;
+    long long size;
     wchar_t name[520];
 };
 using NtQueryInformationFileFn = LONG(NTAPI*)(HANDLE, void*, void*, ULONG, ULONG);
@@ -934,6 +950,14 @@ DWORD WINAPI handle_query_thread(void* parameter) {
     }
     query->name_length = length;
     query->stage = 3;
+    LARGE_INTEGER zero{}, at{};
+    query->offset_ok = SetFilePointerEx(query->handle, zero, &at, FILE_CURRENT) != 0;
+    query->offset = at.QuadPart;
+    query->stage = 4;
+    LARGE_INTEGER size{};
+    query->size_ok = GetFileSizeEx(query->handle, &size) != 0;
+    query->size = size.QuadPart;
+    query->stage = 5;
     handle_query_release(query);
     return 0;
 }
@@ -993,6 +1017,21 @@ std::string file_fields(HANDLE handle) {
     out += " overlapped-handle=";
     if (stage >= 2) out += query->mode_status < 0 ? "unknown" : (query->mode & 0x30) ? "no" : "yes";
     else out += "busy";
+    char number[48];
+    out += " file-offset ";
+    if (stage >= 4 && query->offset_ok) {
+        std::snprintf(number, sizeof number, "%lld", query->offset);
+        out += number;
+    } else {
+        out += stage >= 4 ? "n/a" : "busy";
+    }
+    out += " file-size ";
+    if (stage >= 5 && query->size_ok) {
+        std::snprintf(number, sizeof number, "%lld", query->size);
+        out += number;
+    } else {
+        out += stage >= 5 ? "n/a" : "busy";
+    }
     handle_query_release(query);
     return out;
 }
@@ -1022,9 +1061,68 @@ bool stall_file_call(const char* symbol) {
     return false;
 }
 
+// The call's buffer, for the calls that take one in their first four arguments: "
+// buffer 0xADDR State=COMMIT|RESERVE|FREE Protect=0x.. Type=PRIVATE|MAPPED|IMAGE".
+std::string stall_buffer(const char* symbol, const std::uint64_t* args) {
+    std::uint64_t address;
+    if (!std::strcmp(symbol, "ReadFile") || !std::strcmp(symbol, "WriteFile") || !std::strcmp(symbol, "ReadFileEx")
+        || !std::strcmp(symbol, "WriteFileEx")) address = args[1];
+    else if (!std::strcmp(symbol, "DeviceIoControl")) address = args[2];
+    else return "";
+    char text[160];
+    MEMORY_BASIC_INFORMATION info{};
+    if (!address || !VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof info)) {
+        std::snprintf(text, sizeof text, " buffer 0x%llx unqueryable", static_cast<unsigned long long>(address));
+        return text;
+    }
+    std::snprintf(text, sizeof text, " buffer 0x%llx State=%s Protect=0x%lx Type=%s",
+                  static_cast<unsigned long long>(address),
+                  info.State == MEM_COMMIT ? "COMMIT" : info.State == MEM_RESERVE ? "RESERVE" : "FREE",
+                  static_cast<unsigned long>(info.Protect),
+                  info.Type == MEM_PRIVATE ? "PRIVATE" : info.Type == MEM_MAPPED ? "MAPPED"
+                  : info.Type == MEM_IMAGE ? "IMAGE" : "none");
+    return text;
+}
+
+// Calls a non-main thread makes while idle (waits on events, semaphores, mutexes, condition variables, ports,
+// messages); the timeout argument says how long, when it is one of the first four.
+bool stall_idle_wait(const char* symbol, const std::uint64_t* args) {
+    struct Wait {
+        const char* name;
+        int timeout_arg;  // -1: none or not an immediate value (counts as infinite)
+    };
+    static const Wait waits[] = {{"WaitForSingleObject", 1}, {"WaitForSingleObjectEx", 1},
+                                 {"WaitForMultipleObjects", 3}, {"WaitForMultipleObjectsEx", 3},
+                                 {"MsgWaitForMultipleObjects", 3}, {"MsgWaitForMultipleObjectsEx", 3},
+                                 {"SignalObjectAndWait", 3}, {"NtWaitForSingleObject", -1},
+                                 {"ZwWaitForSingleObject", -1}, {"NtWaitForMultipleObjects", -1},
+                                 {"SleepConditionVariableCS", 2}, {"SleepConditionVariableSRW", 2},
+                                 {"RtlSleepConditionVariableCS", 2}, {"RtlSleepConditionVariableSRW", 2},
+                                 {"WaitOnAddress", 3}, {"RtlWaitOnAddress", -1}, {"NtWaitForAlertByThreadId", -1},
+                                 {"NtWaitForKeyedEvent", -1}, {"NtRemoveIoCompletion", -1},
+                                 {"GetQueuedCompletionStatus", 4}, {"GetQueuedCompletionStatusEx", 5},
+                                 {"GetMessageW", -1}, {"GetMessageA", -1}, {"Sleep", 0}, {"SleepEx", 0}};
+    for (const Wait& wait : waits) {
+        if (std::strcmp(symbol, wait.name) != 0) continue;
+        if (wait.timeout_arg < 0 || wait.timeout_arg > 3) return true;
+        const std::uint32_t ms = static_cast<std::uint32_t>(args[wait.timeout_arg]);
+        return ms == 0xFFFFFFFFu || ms >= 1000;  // any wait of a second or more is a thread idling, not stuck
+    }
+    return false;
+}
+
+// Is this pending call worth a stall line (or an also-pending entry)?
+bool stall_listed(DWORD tid, const TraceDesc* desc, const std::uint64_t* args) {
+    const char* bang = std::strchr(desc->name, '!');
+    const char* symbol = bang ? bang + 1 : desc->name;
+    if (tid == trace_main_tid || stall_all) return true;
+    if (stall_file_call(symbol)) return true;
+    return !stall_idle_wait(symbol, args);
+}
+
 void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const std::uint64_t* args, ULONGLONG ms,
-                  const std::string& others) {
-    if (InterlockedIncrement(&stall_lines) > kStallLines) {
+                  const std::string& others, bool still) {
+    if (tid != trace_main_tid && InterlockedIncrement(&stall_lines) > kStallLines) {
         if (stall_lines == kStallLines + 1) log_line("stalled-threads more are not logged");
         return;
     }
@@ -1034,7 +1132,7 @@ void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const 
     const char* symbol = bang ? bang + 1 : desc->name;
     std::string extra;
     if (stall_file_call(symbol)) {
-        extra = handle_fields(reinterpret_cast<HANDLE>(args[0]), true);
+        extra = handle_fields(reinterpret_cast<HANDLE>(args[0]), true) + stall_buffer(symbol, args);
     } else if (!std::strcmp(symbol, "WaitForSingleObject") || !std::strcmp(symbol, "WaitForSingleObjectEx")
                || !std::strcmp(symbol, "NtWaitForSingleObject") || !std::strcmp(symbol, "ZwWaitForSingleObject")) {
         extra = handle_fields(reinterpret_cast<HANDLE>(args[0]), false);
@@ -1052,10 +1150,10 @@ void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const 
         if (args[0] > 4) extra += " more-handles " + std::to_string(args[0] - 4);
     }
     extra += others;
-    log_line("stalled thread %lu(%s) in %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus caller=%s%s", tid,
+    log_line("stalled thread %lu(%s) in %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus%s caller=%s%s", tid,
              tid == trace_main_tid ? "main" : "program", desc->name, static_cast<unsigned long long>(args[0]),
              static_cast<unsigned long long>(args[1]), static_cast<unsigned long long>(args[2]),
-             static_cast<unsigned long long>(args[3]), static_cast<unsigned long long>(ms / 1000), where,
+             static_cast<unsigned long long>(args[3]), static_cast<unsigned long long>(ms / 1000), still ? " (still)" : "", where,
              extra.c_str());
 }
 
@@ -1068,6 +1166,7 @@ struct PendingCall {
     std::uint64_t args[4];
     ULONGLONG ms;
     bool report;
+    bool still;
 };
 void stall_scan() {
     if (!trace_body || !stall_seen) return;
@@ -1086,7 +1185,7 @@ void stall_scan() {
             seen.seq = 0;
             continue;
         }
-        PendingCall call{ring.tid, entry.desc, entry.caller, {}, 0, false};
+        PendingCall call{ring.tid, entry.desc, entry.caller, {}, 0, false, false};
         for (int a = 0; a < 4; ++a) call.args[a] = entry.args[a];
         if (entry.seq != seq || !call.desc) continue;
         if (seen.seq != seq) {
@@ -1095,17 +1194,32 @@ void stall_scan() {
             seen.logged = false;
         }
         call.ms = now - seen.since;
-        if (!seen.logged && call.ms >= kStallMs) {
-            seen.logged = true;
-            call.report = true;
+        if (seen.seq == seq && call.ms >= kStallMs && stall_listed(call.tid, call.desc, call.args)) {
+            if (!seen.logged) {
+                seen.logged = true;
+                seen.reports = 0;
+                seen.next_report = now + kStallRepeatMs;
+                call.report = true;
+            } else if (call.tid == trace_main_tid && seen.reports < kStallRepeats && now >= seen.next_report) {
+                ++seen.reports;
+                seen.next_report = now + kStallRepeatMs;
+                call.report = true;
+                call.still = true;
+            }
+            if (found < 256) pending[found++] = call;  // main, file/IO and (--stall-all) everything else
         }
-        if (found < 256) pending[found++] = call;
     }
     for (int i = 0; i < found; ++i) {
         if (!pending[i].report) continue;
         std::string others;
+        int listed = 0;
         for (int j = 0; j < found; ++j) {
             if (j == i) continue;
+            if (listed == kAlsoPending) {
+                others += " also-pending-more";
+                break;
+            }
+            ++listed;
             const PendingCall& o = pending[j];
             char text[256];
             std::snprintf(text, sizeof text, " also-pending %lu(%s) %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus", o.tid,
@@ -1119,7 +1233,7 @@ void stall_scan() {
             }
             others += text;
         }
-        stall_report(pending[i].tid, pending[i].desc, pending[i].caller, pending[i].args, pending[i].ms, others);
+        stall_report(pending[i].tid, pending[i].desc, pending[i].caller, pending[i].args, pending[i].ms, others, pending[i].still);
     }
 }
 
@@ -2941,6 +3055,8 @@ int wmain(int argc, wchar_t** argv) {
             log_path = argv[++i];
         } else if (argument == L"--host-identity") {
             keep_host_identity = true;
+        } else if (argument == L"--stall-all") {
+            stall_all = true;
         } else if (argument == L"--timeout" && i + 1 < argc) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--show-program-name") {
@@ -2986,7 +3102,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
-        err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
+        err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--stall-all] [--timeout SECONDS] [--force-cpu-traps] "
                      "[--host-identity] [--no-heap-guard] [--no-trace-calls] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
                      "[--continue-breakpoints|--stop-on-breakpoints] program.exe\n");
         return 2;

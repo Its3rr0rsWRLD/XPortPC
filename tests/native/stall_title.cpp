@@ -4,7 +4,8 @@
 //      one 2-byte read with lpOverlapped null (the hooks issue each with a private OVERLAPPED and wait), then a read
 //      at the end, which returns TRUE with 0 bytes, as a synchronous handle's would;
 //   2. makes an outbound named pipe, opens its client end for reading with CreateFileW (synchronous) and blocks the
-//      main thread in ReadFile on it; a second thread waits X2W_STALL_MS milliseconds (default 6000) on an unset event, then writes 4 bytes,
+//      main thread in ReadFile on it; a second thread waits X2W_STALL_MS milliseconds (default 6000) on an unset event (X2W_STALL_WORKERS=N starts N idle
+//      threads in WaitForSingleObject(INFINITE) on another event, set when the read is done), then writes 4 bytes,
 //      so the launcher's watchdog sees the ReadFile pending for more than 2 s.
 // Exit 0 when every step gave the right result, else 10 + the first wrong step.
 #include <windows.h>
@@ -20,6 +21,22 @@ static DWORD parse_ms()
     DWORD value = 0;
     for (const wchar_t* c = text; *c >= L'0' && *c <= L'9'; ++c) value = value * 10 + static_cast<DWORD>(*c - L'0');
     return value;
+}
+
+static DWORD parse_workers()
+{
+    wchar_t text[16] = {};
+    if (!GetEnvironmentVariableW(L"X2W_STALL_WORKERS", text, 16)) return 0;
+    DWORD value = 0;
+    for (const wchar_t* c = text; *c >= L'0' && *c <= L'9'; ++c) value = value * 10 + static_cast<DWORD>(*c - L'0');
+    return value > 16 ? 16 : value;
+}
+
+// An idle job-system worker: blocked in WaitForSingleObject(INFINITE) on an event until the main thread is done.
+static DWORD WINAPI idle_worker(void* event)
+{
+    WaitForSingleObject(static_cast<HANDLE>(event), INFINITE);
+    return 0;
 }
 
 static DWORD WINAPI writer(void* ms)
@@ -68,11 +85,25 @@ extern "C" DWORD stall_entry(void*)
     if (g_server == INVALID_HANDLE_VALUE) return 19;
     HANDLE client = CreateFileW(pipe, GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (client == INVALID_HANDLE_VALUE) return 20;
+    // Optional idle workers (X2W_STALL_WORKERS): they must not be reported as stalled.
+    const DWORD worker_count = parse_workers();
+    HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE workers[16] = {};
+    for (DWORD i = 0; i < worker_count; ++i) {
+        workers[i] = CreateThread(nullptr, 0, idle_worker, release, 0, nullptr);
+        if (!workers[i]) return 23;
+    }
     HANDLE thread = CreateThread(nullptr, 0, writer, reinterpret_cast<void*>(static_cast<ULONG_PTR>(parse_ms())), 0, nullptr);
     if (!thread) return 21;
     if (!ReadFile(client, buffer, 4, &done, nullptr) || done != 4 || !same(buffer, "pipe", 4)) return 22;
     WaitForSingleObject(thread, 10000);
     CloseHandle(thread);
+    SetEvent(release);
+    for (DWORD i = 0; i < worker_count; ++i) {
+        WaitForSingleObject(workers[i], 10000);
+        CloseHandle(workers[i]);
+    }
+    CloseHandle(release);
     CloseHandle(client);
     CloseHandle(g_server);
     return 0;
