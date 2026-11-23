@@ -1,0 +1,33 @@
+# XGameRuntime initialization. Public docs:
+# https://learn.microsoft.com/en-us/gaming/gdk/_content/gc/reference/system/xgameruntimeinit/xgameruntimeinit_members
+#
+# Spec format (tools/shimgen.py): one file per API family.
+#   family           family name; X2W_FORWARD=<family>,... turns forwarding on for it at run time
+#   forward_dll      PC DLL a forwarded call loads (from X2W_FORWARD_DIR, else System32). Not measured yet:
+#                    docs/design/runtime.md says forwarding is opt-in per title once measured.
+#   forward_anchor   export that must resolve in forward_dll before the family forwards at all
+#   forward_default  forward without X2W_FORWARD (false for every family until measured)
+#   doc_root         prefix for each function's doc page
+#   [[functions]]    name, returns, params (C parameter list), doc (page under doc_root, or a full URL),
+#                    impl (true: hand-written x2w_impl_<name> in src/gdk), out (pointer params a stub zeroes),
+#                    out_buffers ("buffer:sizeParam" pairs a stub zeroes), stub_return (C expression),
+#                    forward (false: never forward this function)
+family = "xgameruntime"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XGameRuntimeInitialize"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameruntimeinit/functions/"
+
+[[functions]]
+name = "XGameRuntimeInitialize"
+returns = "HRESULT"
+params = ""
+doc = "xgameruntimeinitialize"
+impl = true
+
+[[functions]]
+name = "XGameRuntimeUninitialize"
+returns = "void"
+params = ""
+doc = "xgameruntimeuninitialize"
+impl = true

@@ -3019,13 +3019,19 @@ if(TARGET pe_map AND TARGET xmem_shim)
     target_compile_features(x2w_tls_crt_title PRIVATE cxx_std_17)
     set_target_properties(x2w_tls_crt_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
     target_link_options(x2w_tls_crt_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+    # C++ exceptions thrown and caught in a mapped image, and the launcher's cpp-throw run log lines.
+    add_executable(x2w_throw_title tests/native/throw_title.cpp)
+    target_compile_features(x2w_throw_title PRIVATE cxx_std_17)
+    target_compile_options(x2w_throw_title PRIVATE /EHsc)
+    set_target_properties(x2w_throw_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_throw_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
     enable_language(RC)
     add_executable(x2w_identity_title tests/native/identity_title.cpp tests/native/identity_title.rc)
     target_compile_options(x2w_identity_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
     target_link_options(x2w_identity_title PRIVATE /ENTRY:identity_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
         /DYNAMICBASE /INCREMENTAL:NO)
     target_link_libraries(x2w_identity_title PRIVATE kernel32)
-    foreach(title_check IN ITEMS tls tls_crt identity)
+    foreach(title_check IN ITEMS tls tls_crt identity throw)
         string(REPLACE "_" "-" title_mode "${title_check}")
         add_test(NAME native_launch_${title_check} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/native/launch_title_check.py" ${title_mode} "$<TARGET_FILE:x2w_launch>"
@@ -3087,3 +3093,6 @@ if(TARGET pe_map AND TARGET xmem_shim)
     endif()
 endif()
 
+
+# System-library shims: x2w_gdk.dll and the DLLs tools/shimgen.py generates (cmake/x2w_shimgen.cmake).
+include(cmake/x2w_shimgen.cmake)
