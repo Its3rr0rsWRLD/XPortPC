@@ -4,7 +4,7 @@
 //      one 2-byte read with lpOverlapped null (the hooks issue each with a private OVERLAPPED and wait), then a read
 //      at the end, which returns TRUE with 0 bytes, as a synchronous handle's would;
 //   2. makes an outbound named pipe, opens its client end for reading with CreateFileW (synchronous) and blocks the
-//      main thread in ReadFile on it; a second thread waits X2W_STALL_MS milliseconds (default 3500) on an unset event, then writes 4 bytes,
+//      main thread in ReadFile on it; a second thread waits X2W_STALL_MS milliseconds (default 6000) on an unset event, then writes 4 bytes,
 //      so the launcher's watchdog sees the ReadFile pending for more than 2 s.
 // Exit 0 when every step gave the right result, else 10 + the first wrong step.
 #include <windows.h>
@@ -16,7 +16,7 @@ static HANDLE g_server;
 static DWORD parse_ms()
 {
     wchar_t text[16] = {};
-    if (!GetEnvironmentVariableW(L"X2W_STALL_MS", text, 16)) return 3500;
+    if (!GetEnvironmentVariableW(L"X2W_STALL_MS", text, 16)) return 6000;
     DWORD value = 0;
     for (const wchar_t* c = text; *c >= L'0' && *c <= L'9'; ++c) value = value * 10 + static_cast<DWORD>(*c - L'0');
     return value;

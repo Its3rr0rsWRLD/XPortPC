@@ -71,6 +71,8 @@ def main():
     match = re.search(r"-> handle (0x[0-9a-f]+) access=0x80000000 share=0x0 disp=OPEN_EXISTING flags=\(\) type=pipe",
                       pipe[0]) if pipe else None
     expect(match is not None, f"stall: no pipe file-open line with type=pipe: {pipe}")
+    exit_at = next((i for i, l in enumerate(lines) if l.startswith("exit code")), len(lines))
+    expect(any(l.startswith("stalled thread") for l in lines[:exit_at]), "stall: no stalled line before the exit line")
     every = [STALL.fullmatch(l) for l in lines if l.startswith("stalled thread")]
     expect(all(every), "stall: a stalled line outside the pattern")
     stalls = [m for m in every if m and m[3] == "kernel32.dll!ReadFile"]
