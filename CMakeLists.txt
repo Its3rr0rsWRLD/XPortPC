@@ -3366,8 +3366,8 @@ if(TARGET pe_map AND TARGET xmem_shim)
         add_custom_target(x2w_shims ALL
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${x2w_shim_dir}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:xmem_shim>" "$<TARGET_FILE:d3d12_xs_shim>"
-                "$<TARGET_FILE:x2w_sys>" "${x2w_shim_dir}"
-            DEPENDS xmem_shim d3d12_xs_shim x2w_sys VERBATIM)
+                "$<TARGET_FILE:x2w_sys>" "$<TARGET_FILE:x2w_gameinput_shim>" "${x2w_shim_dir}"
+            DEPENDS xmem_shim d3d12_xs_shim x2w_sys x2w_gameinput_shim VERBATIM)
         add_dependencies(x2w_launch x2w_shims)
         # Source-built title for the system layer under x2w_launch: G:\ paths and DirectStorage-fallback reads of
         # a GDeflate file (tests/native/sys_title_check.py). It imports x2w_sys.dll's flat DirectStorage entries.
@@ -3381,6 +3381,24 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "${CMAKE_SOURCE_DIR}/tests/native/sys_title_check.py" "$<TARGET_FILE:x2w_launch>"
             "$<TARGET_FILE:x2w_sys_title>" "$<TARGET_FILE:gdeflate_pack>" "${x2w_shim_dir}")
         set_tests_properties(native_launch_sys PROPERTIES TIMEOUT 180)
+        # A title importing gameinput.dll!GameInputCreate gets the GameInput v0 facade from the shims directory
+        # (src/sys/sys_gameinput_v0.h, tests/native/gameinput_check.py); fastfail and Windows-thread crash endings.
+        set(x2w_gameinput_imports "${CMAKE_CURRENT_BINARY_DIR}/gameinput_title_imports.lib")
+        add_custom_command(OUTPUT "${x2w_gameinput_imports}"
+            COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64 "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/gameinput.def"
+                "/OUT:${x2w_gameinput_imports}"
+            DEPENDS tests/native/gameinput.def VERBATIM)
+        add_custom_target(x2w_gameinput_title_imports DEPENDS "${x2w_gameinput_imports}")
+        add_executable(x2w_gameinput_title tests/native/gameinput_title.cpp)
+        add_dependencies(x2w_gameinput_title x2w_gameinput_title_imports x2w_shims)
+        target_compile_options(x2w_gameinput_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_gameinput_title PRIVATE /ENTRY:gameinput_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+            /DYNAMICBASE /INCREMENTAL:NO)
+        target_link_libraries(x2w_gameinput_title PRIVATE kernel32 "${x2w_gameinput_imports}")
+        add_test(NAME native_launch_gameinput COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/gameinput_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_gameinput_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_launch_gameinput PROPERTIES TIMEOUT 180)
         # The console libraries without desktop equivalents (xcrdapi, chad, xapu, acphal, xg_xs) and the newer xmem
         # names, imported by DLL name and run through x2w_launch (tests/native/console_check.py). The shims come from
         # tools/shimgen/specs via --family-dlls (cmake/x2w_shimgen.cmake); x2w_gdk_shims puts them in shims/.

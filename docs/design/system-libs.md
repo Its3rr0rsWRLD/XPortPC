@@ -34,7 +34,7 @@ All modules log through `x2w_sys::log` (`[x2w] ...` on stderr and the debugger);
 
    | Public API | x2w_sys.dll export |
    |---|---|
-   | `GameInputCreate(IGameInput**)` | `X2wGameInputCreate` |
+   | `GameInputCreate(IGameInput**)` | `X2wGameInputCreate` (PC runtime), `X2wGameInputCreateV0` (console v0 facade, via shims/gameinput.dll) |
    | `XAudio2Create(IXAudio2**, UINT32, XAUDIO2_PROCESSOR)` | `X2wXAudio2Create` |
    | `DStorageGetFactory(REFIID, void**)` | `X2wDStorageGetFactory` |
 
@@ -78,9 +78,18 @@ one group). Priorities pass through (TIME_CRITICAL can be clamped).
 
 ## 3. GameInput
 
-Forwards to `GameInputRedist.dll` or `GameInput.dll` (`GameInputCreate`). Without either, an XInput fallback enumerates
-pads and reports state in GameInput button bits. A COM `IGameInput` facade over the fallback is not written (needs the
-public NuGet header at build time); `X2wGameInputCreate` returns `X2W_E_GAMEINPUT_FALLBACK` (0xA2570001) instead of guessing.
+Console titles. A title built against the GDK's GameInput.h imports `gameinput.dll!GameInputCreate` and calls the v0
+`IGameInput` vtable. The GameInput runtime Windows ships implements a newer interface with different slots, so such a
+title must not reach it: the `gameinput.dll` shim in `shims/` (src/sys/gameinput_shim.cpp, export `GameInputCreate`)
+returns `X2wGameInputCreateV0`'s facade (src/sys/sys_gameinput_v0.h). The facade follows the v0 layout from the public
+reference, answers gamepad readings from XInput (GameInputGamepadState), reports connected pads to device callbacks, and
+logs the first calls of each method ("shim-gameinput METHOD ARGS" in the run log); slots past the known ones log their
+index and arguments and return E_NOTIMPL. `X2W_GAMEINPUT_PADS=off` hides the pads; `X2W_GAMEINPUT_LOG_CALLS=N` sets how
+many calls per method are logged (8). Test: ctest `native_launch_gameinput`.
+
+PC titles. `X2wGameInputCreate` forwards to `GameInputRedist.dll` or `GameInput.dll` (skipping x2w's own shim, and trying
+System32's GameInput.dll by full path). Without either, an XInput fallback enumerates pads and reports state in GameInput
+button bits; `X2wGameInputCreate` then returns `X2W_E_GAMEINPUT_FALLBACK` (0xA2570001).
 
 ## 4. XAudio2
 

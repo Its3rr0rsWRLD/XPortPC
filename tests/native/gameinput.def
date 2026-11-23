@@ -1,0 +1,5 @@
+; Import library for tests/native/gameinput_title.cpp: the title imports gameinput.dll!GameInputCreate, as a
+; console GDK title does.
+LIBRARY gameinput
+EXPORTS
+    GameInputCreate

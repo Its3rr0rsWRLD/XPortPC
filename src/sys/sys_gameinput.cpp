@@ -106,19 +106,30 @@ Backend select_backend(const char* dll_override) {
         if (!first.empty()) candidates.push_back(widen(first));
         candidates.push_back(L"GameInputRedist.dll");
         candidates.push_back(L"GameInput.dll");
+        // By full path too: when x2w's gameinput.dll shim is loaded, the bare name resolves to it.
+        wchar_t system[MAX_PATH];
+        const UINT length = GetSystemDirectoryW(system, MAX_PATH);
+        if (length && length < MAX_PATH) candidates.push_back(std::wstring(system, length) + L"\\GameInput.dll");
         for (const auto& name : candidates) {
+            const std::string shown = narrow(name.substr(name.find_last_of(L"\\/") == std::wstring::npos ? 0 : name.find_last_of(L"\\/") + 1));
             HMODULE m = LoadLibraryExW(name.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (!m) continue;
+            if (GetProcAddress(m, "X2wGameInputIsShim")) {
+                // x2w's own gameinput.dll (a shims directory, already loaded for the title): not a runtime.
+                log("gameinput: %s is the x2w shim, not a runtime; skipped", shown.c_str());
+                FreeLibrary(m);
+                continue;
+            }
             auto fn = reinterpret_cast<HRESULT(WINAPI*)(void**)>(GetProcAddress(m, "GameInputCreate"));
             if (!fn) {
-                log("gameinput: %s loaded but has no GameInputCreate", narrow(name).c_str());
+                log("gameinput: %s loaded but has no GameInputCreate", shown.c_str());
                 FreeLibrary(m);
                 continue;
             }
             g_redist = m;
             g_create = fn;
             g_backend = Backend::Redist;
-            log("gameinput: forwarding to %s", narrow(name).c_str());
+            log("gameinput: forwarding to %s", shown.c_str());
             return g_backend;
         }
         log("gameinput: no GameInput runtime found; using the XInput fallback");

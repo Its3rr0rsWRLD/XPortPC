@@ -13,6 +13,12 @@
 // lists what a program still needs. The program runs on this thread through pe_map_run, and its entry
 // point's return value becomes this process's exit code.
 //
+// Process endings the run log sees, each followed by the final summary: the entry point returning, ExitProcess,
+// TerminateProcess on itself, ntdll's NtTerminateProcess/ZwTerminateProcess/RtlExitUserProcess, RaiseFailFastException
+// ("fastfail" line), an unhandled exception, --timeout, a console close/Ctrl+C ("console-event" line) and process
+// detach. dbghelp!MiniDumpWriteDump (a program's own crash handler) logs the exception it is given and a provisional
+// "summary minidump". Only __fastfail (int 29h) and a kill from outside the process end it with no line.
+//
 // --log FILE writes a run log meant to be pasted into a report. It holds names and addresses only, never
 // bytes of the program: the import route totals, each first call to a stub ("stub" when the DLL exists but
 // lacks the function, "missing" when no route has the DLL), how far startup got (TLS callbacks, entry, the
@@ -78,6 +84,7 @@
 #include <windows.h>
 #include "../src/common/x2w_redact.h"
 #include <tlhelp32.h>
+#include <intrin.h>
 
 #include <cctype>
 #include <cstdarg>
@@ -1051,12 +1058,87 @@ BOOL WINAPI hook_TerminateProcess(HANDLE process, UINT code) {
     return TerminateProcess(process, code);
 }
 
+bool readable(const void* address, std::size_t size);
+void exception_text(const EXCEPTION_RECORD* record, char* out, std::size_t capacity);
+using QueryThread = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+QueryThread query_thread;
+
+// RaiseFailFastException ends the process without running any handler: the line and the final summary first.
+void WINAPI hook_RaiseFailFastException(PEXCEPTION_RECORD record, PCONTEXT context, DWORD flags) {
+    char where[160];
+    describe(record ? record->ExceptionAddress : _ReturnAddress(), where, sizeof where);
+    log_line("fastfail RaiseFailFastException code 0x%08lx at %s flags 0x%lx last-stub %s",
+             record ? record->ExceptionCode : 0ul, where, flags, last_stub_name().c_str());
+    log_summary("fastfail");
+    using Fn = void(WINAPI*)(PEXCEPTION_RECORD, PCONTEXT, DWORD);
+    static const Fn real = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "RaiseFailFastException"));
+    if (real) real(record, context, flags);
+    TerminateProcess(GetCurrentProcess(), record ? record->ExceptionCode : 0xC0000602u /* STATUS_FAIL_FAST_EXCEPTION */);
+}
+
+// ntdll's process-ending calls, for programs (or their runtimes) that skip kernel32.
+using NtTerminate = LONG(NTAPI*)(HANDLE, LONG);
+using RtlExit = void(NTAPI*)(LONG);
+LONG NTAPI hook_NtTerminateProcess(HANDLE process, LONG status) {
+    // A null handle ends every other thread first and is followed by a second call that ends the process.
+    if (process && is_this_process(process)) log_exit(static_cast<UINT>(status), "terminate");
+    static const auto real = reinterpret_cast<NtTerminate>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtTerminateProcess"));
+    return real(process, status);
+}
+void NTAPI hook_RtlExitUserProcess(LONG status) {
+    log_exit(static_cast<UINT>(status), "exit");
+    static const auto real = reinterpret_cast<RtlExit>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlExitUserProcess"));
+    real(status);
+}
+
+std::string caller_chain(const EXCEPTION_POINTERS* info);
+
+// dbghelp!MiniDumpWriteDump: a program's own crash handler. The exception it reports (when it passes one from this
+// process) is logged with its callers, then a provisional summary, since the handler usually ends the process next.
+// The dump itself is written as the program asked.
+using MiniDump = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+BOOL WINAPI hook_MiniDumpWriteDump(HANDLE process, DWORD pid, HANDLE file, int type, void* exception, void* user,
+                                   void* callback) {
+    struct ExceptionInfo {
+        DWORD thread;
+        EXCEPTION_POINTERS* pointers;
+        BOOL client_pointers;
+    };
+    const auto* info = static_cast<const ExceptionInfo*>(exception);
+    std::string what = "no exception";
+    if (info && info->pointers && is_this_process(process) && readable(info->pointers, sizeof(EXCEPTION_POINTERS)) &&
+        readable(info->pointers->ExceptionRecord, sizeof(EXCEPTION_RECORD)) &&
+        readable(info->pointers->ContextRecord, sizeof(CONTEXT))) {
+        char text[512];
+        exception_text(info->pointers->ExceptionRecord, text, sizeof text);
+        what = text + caller_chain(info->pointers);
+    }
+    log_line("minidump requested by the program type 0x%x %s last-stub %s", type, what.c_str(), last_stub_name().c_str());
+    if (!summary_written) write_summary("minidump");
+    static const auto real = [] {
+        HMODULE dbghelp = GetModuleHandleW(L"dbghelp.dll");
+        if (!dbghelp) dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return dbghelp ? reinterpret_cast<MiniDump>(GetProcAddress(dbghelp, "MiniDumpWriteDump")) : nullptr;
+    }();
+    return real ? real(process, pid, file, type, exception, user, callback) : FALSE;
+}
+
 void* crash_hook(const std::string& dll, const char* name) {
     if (log_file == INVALID_HANDLE_VALUE || !name) return nullptr;
+    if (dll == "ntdll.dll") {
+        if (std::strcmp(name, "NtTerminateProcess") == 0 || std::strcmp(name, "ZwTerminateProcess") == 0)
+            return reinterpret_cast<void*>(&hook_NtTerminateProcess);
+        if (std::strcmp(name, "RtlExitUserProcess") == 0) return reinterpret_cast<void*>(&hook_RtlExitUserProcess);
+        return nullptr;
+    }
+    if (dll == "dbghelp.dll" || dll == "dbgcore.dll")
+        return std::strcmp(name, "MiniDumpWriteDump") == 0 ? reinterpret_cast<void*>(&hook_MiniDumpWriteDump) : nullptr;
     const bool base = dll == "kernel32.dll" || dll == "kernelbase.dll";
-    if (std::strcmp(name, "SetUnhandledExceptionFilter") == 0 &&
-        (base || dll.rfind("api-ms-win-core-errorhandling-", 0) == 0))
+    const bool errorhandling = base || dll.rfind("api-ms-win-core-errorhandling-", 0) == 0;
+    if (std::strcmp(name, "SetUnhandledExceptionFilter") == 0 && errorhandling)
         return reinterpret_cast<void*>(&hook_SetUnhandledExceptionFilter);
+    if (std::strcmp(name, "RaiseFailFastException") == 0 && errorhandling)
+        return reinterpret_cast<void*>(&hook_RaiseFailFastException);
     if (!base && dll.rfind("api-ms-win-core-processthreads-", 0) != 0) return nullptr;
     if (std::strcmp(name, "ExitProcess") == 0) return reinterpret_cast<void*>(&hook_ExitProcess);
     if (std::strcmp(name, "TerminateProcess") == 0) return reinterpret_cast<void*>(&hook_TerminateProcess);
@@ -1276,10 +1358,50 @@ LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
 // "cpp-throw TYPE at SITE" lines, once per distinct line and at most 16.
 // " callers A from B from C" for a fault outside the mapped images (in a Windows DLL, a shim or the
 // launcher): the first three frames in mapped images that led there, or nothing.
+// When unwinding finds no mapped frame (a frame without unwind data on the way, or a thread that never ran the
+// program's code), the stack is scanned from RSP for return addresses into mapped images (a value that follows a
+// call instruction): " callers? A B C (stack-scan)". With none of those either: " callers none thread-start X", the
+// thread's start address, which says whose thread it is (a Windows DLL's worker, for example).
+bool follows_call(std::uintptr_t at) {
+    if (!region_at(at) || !region_at(at - 7)) return false;
+    const auto* p = reinterpret_cast<const std::uint8_t*>(at);
+    if (p[-5] == 0xe8) return true;                                    // call rel32
+    if (p[-6] == 0xff && (p[-5] & 0x38) == 0x10) return true;          // call [rip+disp32] / [reg+disp32]
+    if (p[-2] == 0xff && (p[-1] & 0x38) == 0x10) return true;          // call reg / [reg]
+    if (p[-3] == 0xff && (p[-2] & 0x38) == 0x10) return true;          // call [reg+disp8]
+    if (p[-7] == 0xff && (p[-6] & 0x38) == 0x10) return true;          // call [reg+index*s+disp32]
+    return p[-4] == 0xff && (p[-3] & 0x38) == 0x10;                    // call [reg+index*s+disp8]
+}
+
+std::string stack_scan(const CONTEXT* context, int limit) {
+    const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    auto at = static_cast<std::uintptr_t>(context->Rsp) & ~std::uintptr_t{7};
+    const auto top = reinterpret_cast<std::uintptr_t>(tib->StackBase);
+    const std::uintptr_t end = top > at && top - at > 0x10000 ? at + 0x10000 : top;
+    std::string out;
+    int found = 0;
+    for (; at + 8 <= end && found < limit; at += 8) {
+        const auto value = *reinterpret_cast<const std::uintptr_t*>(at);
+        if (!follows_call(value)) continue;
+        char where[160];
+        describe(reinterpret_cast<void*>(value), where, sizeof where);
+        out += (found++ ? " " : "") + std::string(where);
+    }
+    return out;
+}
+
 std::string caller_chain(const EXCEPTION_POINTERS* info) {
     if (region_at(reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress))) return {};
     const std::string frames = mapped_frames(info->ContextRecord, 3);
-    return frames.empty() ? std::string() : " callers " + frames;
+    if (!frames.empty()) return " callers " + frames;
+    if (regions.empty()) return {};
+    const std::string scanned = stack_scan(info->ContextRecord, 3);
+    if (!scanned.empty()) return " callers? " + scanned + " (stack-scan)";
+    void* start = nullptr;
+    if (query_thread) query_thread(GetCurrentThread(), 9 /* ThreadQuerySetWin32StartAddress */, &start, sizeof start, nullptr);
+    char where[160];
+    describe(start, where, sizeof where);
+    return std::string(" callers none thread-start ") + where;
 }
 
 // " regs rax=0x.. ... rsp=0x.." for an exception in a mapped image: register values only, never memory they point at.
@@ -1464,8 +1586,6 @@ bool force_traps(void* base) {
     return true;
 }
 
-using QueryThread = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-QueryThread query_thread;
 
 // The launcher's own TLS callback sees every thread that starts in the process while the program runs.
 void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
@@ -1491,6 +1611,18 @@ void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
     if (!regions.empty() && at >= regions[0].base && at - regions[0].base < regions[0].size
         && InterlockedExchange(&first_title_thread, 1) == 0)
         log_line("milestone first-program-thread start %s", where);
+}
+
+// The console window closed (or Ctrl+C, log-off, shutdown) while the program ran, for example after a hang: the
+// final summary first. Windows ends the process when this returns.
+BOOL WINAPI console_closed(DWORD event) {
+    if (armed && log_file != INVALID_HANDLE_VALUE && !summary_written) {
+        log_line("console-event %lu (%s)", event,
+                 event == CTRL_C_EVENT ? "ctrl-c" : event == CTRL_BREAK_EVENT ? "ctrl-break" : event == CTRL_CLOSE_EVENT ? "close"
+                 : event == CTRL_LOGOFF_EVENT ? "logoff" : "shutdown");
+        log_summary("console-close");
+    }
+    return FALSE;
 }
 
 HANDLE watchdog_ready;
@@ -1596,6 +1728,7 @@ int wmain(int argc, wchar_t** argv) {
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
+        SetConsoleCtrlHandler(console_closed, TRUE);
     }
     // The title memory layer's informational lines (configuration, windows, arenas) belong in a title run's output.
     if (!GetEnvironmentVariableW(L"X2W_XMEM_LOG", nullptr, 0)) SetEnvironmentVariableW(L"X2W_XMEM_LOG", L"1");

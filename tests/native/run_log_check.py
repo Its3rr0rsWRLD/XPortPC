@@ -28,7 +28,9 @@ WHERE = r"(?:[a-z0-9_.\-]+\+0x[0-9a-f]+|0x[0-9a-f]+)"
 EXCEPTION = (rf"exception 0x[0-9a-f]{{8}} at {WHERE} thread (?:program|watchdog)(?: thread-name {NAME})?"
              rf"(?: (?:reading|writing|executing|accessing) {WHERE})?")
 LAST = rf"(?:{SYMBOL}|none)"
-CALLERS = rf"(?: callers {WHERE}(?: from {WHERE}){{0,2}})?"
+# Unwound frames, else a stack scan's candidates, else the thread's start address (tools/x2w_launch.cpp caller_chain).
+CALLERS = (rf"(?: callers {WHERE}(?: from {WHERE}){{0,2}}| callers\? {WHERE}(?: {WHERE}){{0,2}} \(stack-scan\)"
+           rf"| callers none thread-start {WHERE})?")
 # General registers (values only) on a crash, first-chance or breakpoint line for an exception in a mapped image.
 REGS = r"(?: regs(?: (?:r[a-ds]x|r[sd]i|r(?:8|9|1[0-5])|rbp|rsp)=0x[0-9a-f]+){16})?"
 FEATURES = r"(?:none|[a-z0-9.\-]+(?:,[a-z0-9.\-]+)*)"
@@ -52,10 +54,14 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"cpp-throw [A-Za-z0-9_.?@$]+ at {WHERE}(?: from {WHERE})?",
            rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|gateway|windows-fallback|missing|windows|mapped|mapped-missing)",
            rf"shim-(?:unimplemented|note|forward) {SYMBOL} .*",
+           r"shim-gameinput [A-Za-z\-]+(?: [A-Za-z]+\[\d+\])? .*",
+           rf"fastfail RaiseFailFastException code 0x[0-9a-f]{{8}} at {WHERE} flags 0x[0-9a-f]+ last-stub {LAST}",
+           rf"minidump requested by the program type 0x[0-9a-f]+ (?:no exception|{EXCEPTION}{CALLERS}) last-stub {LAST}",
+           r"console-event \d+ \((?:ctrl-c|ctrl-break|close|logoff|shutdown)\)",
            rf"cpu-host-missing emulated={FEATURES} unhandled={FEATURES} silent={FEATURES}",
            rf"cpu-trap first {MNEMONIC} at {WHERE}", rf"cpu-unhandled {MNEMONIC} at {WHERE}",
            rf"cpu-traps total=\d+(?: {MNEMONIC}=\d+)*", r"cpu-trap-forced sites \d+",
-           rf"summary (?:exit|crash|timeout|terminate|process-exit|first-fault): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
+           rf"summary (?:exit|crash|timeout|terminate|process-exit|first-fault|fastfail|minidump|console-close): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
            rf"first-thread=(?:yes|no) d3d12-call=(?:yes|no) crash=(?:yes|no) last-stub={LAST}"]
 
 

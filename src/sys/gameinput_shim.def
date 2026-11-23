@@ -1,0 +1,4 @@
+LIBRARY gameinput
+EXPORTS
+    GameInputCreate
+    X2wGameInputIsShim

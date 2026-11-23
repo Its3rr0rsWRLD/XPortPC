@@ -26,7 +26,7 @@ if(MSVC)
 endif()
 
 set(X2W_SYS_SOURCES
-    src/sys/sys_common.cpp src/sys/sys_paths.cpp src/sys/sys_threads.cpp src/sys/sys_gameinput.cpp
+    src/sys/sys_common.cpp src/sys/sys_paths.cpp src/sys/sys_threads.cpp src/sys/sys_gameinput.cpp src/sys/sys_gameinput_v0.cpp
     src/sys/sys_audio.cpp src/sys/sys_dstorage.cpp src/sys/sys_hooks.cpp src/sys/sys_gdeflate.cpp)
 
 add_library(x2w_sys_obj OBJECT ${X2W_SYS_SOURCES})
@@ -46,6 +46,14 @@ target_include_directories(x2w_sys PUBLIC src/sys)
 target_link_libraries(x2w_sys PRIVATE x2w_gdeflate)
 target_compile_features(x2w_sys PUBLIC cxx_std_20)
 set_target_properties(x2w_sys PROPERTIES OUTPUT_NAME x2w_sys)
+
+# gameinput.dll for console titles (src/sys/gameinput_shim.cpp): GameInputCreate returns x2w_sys's GameInput v0
+# facade. The x2w_shims target copies it into shims/ beside x2w_sys.dll.
+add_library(x2w_gameinput_shim SHARED src/sys/gameinput_shim.cpp src/sys/gameinput_shim.def)
+target_link_libraries(x2w_gameinput_shim PRIVATE x2w_sys)
+# Built in its own folder, so nothing that searches the build folder for Windows' GameInput.dll finds it.
+set_target_properties(x2w_gameinput_shim PROPERTIES OUTPUT_NAME gameinput
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/gameinput_shim")
 
 add_library(x2w_sys_fake_runtime SHARED tests/sys/fake_runtime.cpp)
 

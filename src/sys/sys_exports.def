@@ -4,6 +4,7 @@ EXPORTS
     X2WSysHookLookup
     X2WSysShutdown
     X2wGameInputCreate
+    X2wGameInputCreateV0
     X2wGameInputBackend
     X2wGameInputFallbackEnumerate
     X2wGameInputFallbackRead
