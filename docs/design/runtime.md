@@ -104,6 +104,37 @@ Rules:
 - **Identity answers.** `XSystemGetDeviceType` and similar queries return a Series X value, since titles branch on it.
 - Every own implementation is a static library with a source-built test, like `era_heap` and `era_query` today.
 
+Shim generation (`tools/shimgen.py`, specs in `tools/shimgen/specs/*.toml`, built by `cmake/x2w_shimgen.cmake`).
+The console import DLL names are not public, so shims are generated from a title's measured import list:
+
+```
+python -B tools/x2w_report.py TITLE.exe --out out/x2w-report
+python -B tools/shimgen.py --report out/x2w-report/report.json --out out/shimgen/title
+cmake --preset dev -DX2W_SHIM_REPORT=out/x2w-report/report.json   # builds them into out/build/dev/shims
+```
+
+Each export of a generated DLL is a forwarder (only when `X2W_FORWARD` turns its family on; off by default,
+per the rule above), a call into `x2w_gdk.dll` (the hand-written family modules in `src/gdk`: XGameRuntime,
+XTaskQueue, XAsync, XSystem, XUser, XGameSave, XPackage, XGameUI; one process-wide copy, so handles work
+across DLLs), or a typed stub that zeroes out-params and returns the spec's documented default. Functions
+no spec describes get an untyped stub (0, or `E_NOTIMPL` for `*Async`/`*Result` names). Stubs log their first
+call through `x2w_unimplemented`, which also reaches the run log. Overrides (`--override FILE.toml`,
+`X2W_SHIM_OVERRIDES`) change any function's body or return value per title.
+
+PC GDK builds do not import the Gaming Runtime: `xgameruntime.lib` loads `xgameruntime.dll` and resolves
+names at run time. `x2w_launch` therefore hooks the program's `LoadLibrary*`, `GetModuleHandle*` and
+`GetProcAddress` imports: a load whose name is in a `--shims` directory gets the shim (a generated
+`xgameruntime.dll` with every spec function is always built), and each load and resolve is logged once
+(`dynamic-load`, `dynamic-resolve`). `tools/shimgen.py --run-log` turns those lines into shims.
+
+Measured on the five stand-in GDK samples (Microsoft's public Xbox-GDK-Samples built for PC, 2026-11-22):
+every one loads `xgameruntime.dll` and asks it only for `QueryApiImpl`, `InitializeApiImpl`,
+`InitializeApiImplEx`, `InitializeApiImplEx2`, `XErrorReport` and `UninitializeApiImpl`. The PC runtime's
+boundary is therefore an interface query, not the flat API names, and no public document describes those
+interfaces, so the generated shims cannot serve PC GDK builds; the launcher passes names a shim lacks to the
+Windows DLL of that name (`windows-fallback`) so such programs keep running and their logs stay useful.
+Whether console builds import the flat names is what the first console report will show.
+
 ## 3. Graphics: console D3D12 over desktop D3D12
 
 The console D3D12 surface beyond the public desktop API is **not publicly documented**. What we may use:
@@ -260,11 +291,81 @@ until R5.
 Textures cannot alias: desktop textures have opaque layouts, and the console layout is tiled. So:
 
 - Textures, render targets and depth buffers are desktop `DEFAULT` resources in VRAM.
-- The title's bytes for a texture are converted on upload (detiling; `tools/bc7_tiles.py` holds the first tiling code)
-  and copied in.
+- The title's bytes for a texture are converted on upload (detiling, below) and copied in.
 - CPU writes to texture memory after creation are found by write tracking (below) and re-uploaded before the next
   submit that uses them.
 - A shader that reads texture memory as a buffer (rare) misses in `TitleLookup` and is logged.
+
+### Textures: detiling
+
+The console GPU reads textures in its hardware tiled layouts (swizzle modes). The desktop texture's layout is the
+driver's, so the shim converts the title's bytes to linear rows on upload. The conversion is a port of AMD's addrlib as
+published in Mesa (`src/amd/addrlib`, MIT; Mesa 26.2.6), the library Mesa's RADV and radeonsi use to lay out RDNA2
+textures:
+
+- `src/gfx10_swizzle_pattern.h`: addrlib's GFX10/GFX10.3 swizzle-pattern tables, unchanged (the oracle check below
+  verifies them byte for byte against the pinned file).
+- `src/gfx10_addr.h` / `.cpp`: surface layout (`ComputeLayout`: block size, padding, mip offsets, mip tail placement)
+  and element addressing (`ElementOffset`), ported from `gfx10addrlib.cpp` and `addrlib2.cpp`.
+- `src/gfx10_detile.h` / `.cpp`: the CPU detiler (and the inverse, tiling). No D3D12 types, so it builds and is tested
+  on Linux against addrlib itself. Static library `x2w_gfx10_detile`.
+
+**Entry point.** One call per texture:
+
+```cpp
+bool x2w::gfx10::DetileToFootprints(const Config& config, const Surface& surface,
+                                    const void* tiled, std::size_t tiled_size,      // title bytes from the base
+                                    void* upload, std::size_t upload_size,          // mapped upload buffer
+                                    const Footprint* footprints, std::uint32_t count, // GetCopyableFootprints
+                                    std::string* error);
+```
+
+- `Config`: the GPU's `GB_ADDR_CONFIG` (pipes, packers; pipe interleave must be 256 B) and `rb_plus` (true for
+  GFX10.3/RDNA2, which selects addrlib's RB+ tables; false for GFX10.1).
+- `Surface`: 2D (also arrays and cubes) or 3D; swizzle mode (the hardware `SW_MODE` value, addrlib's
+  `AddrSwizzleMode`); element size 1-16 bytes and element size in pixels (4x4 for BC1-BC7); mip-0 size; array size
+  or depth; mip count; the descriptor's pipe/bank XOR.
+- `footprints`: `D3D12_PLACED_SUBRESOURCE_FOOTPRINT` values (offset, width, height, depth, row pitch) of the desktop
+  texture, one per subresource in D3D12 order (mip + slice * mips). Each must match the subresource's size in pixels;
+  then the call fills every footprint, and the shim issues one `CopyTextureRegion` per subresource (or passes the
+  same data to `UpdateSubresources`).
+- It returns false, with a reason, for a surface addrlib rejects or this port does not cover, `tiled_size` smaller
+  than the surface (addrlib's `surfSize`), a footprint that does not match, or a footprint that does not fit in `upload_size` (sized as
+  `GetCopyableFootprints` sizes it: the last row of a subresource ends at its last element, not at the row pitch).
+  It never reads outside `tiled` or writes outside `upload`.
+
+Modes covered: `SW_LINEAR`, `SW_256B_S/D`, `SW_4KB_S/D`, `SW_4KB_S_X/D_X`, `SW_64KB_S/D`, `SW_64KB_S_T/D_T`,
+`SW_64KB_Z_X/S_X/D_X/R_X`, and on GFX10.3 `SW_VAR_Z_X/R_X`: every mode addrlib has a swizzle pattern for on these
+parts (`SW_4KB_R_X` has none and is refused). 3D surfaces use the thick layouts addrlib uses for 3D S/D modes and the
+thin ones for Z/R. Pipe/bank XOR, mip tails and block-compressed formats are included. Not covered: MSAA, quad-buffer
+stereo, 1D resources, 96-bit linear formats, a linear pitch other than addrlib's 256-byte alignment, and DCC (a
+DCC-compressed texture's bytes are not plain texels; its metadata is not decoded).
+
+Assumptions, to be checked against the owner's logs (call names, argument values, never data):
+
+1. The console GPU follows addrlib's GFX10.3 rules with some `GB_ADDR_CONFIG`. The value is not known; the shader
+   ISA target (gfx1013) does not settle RB+ either way. Both rule sets and every pipe/packer combination addrlib's
+   tables cover are tested, so the choice is a configuration value, not code. Where a title asks the API for a
+   texture's size or alignment, the logged answers constrain the configuration; otherwise it is a per-title setting.
+2. A texture's bytes start at its base address in title memory and span addrlib's `surfSize`, mips smallest-first as
+   addrlib lays them out; array slices are `sliceSize` apart.
+3. The upload calls are not known yet. What the shim needs from them is the `Surface` fields (from the texture's
+   creation parameters or its T# words: format, size, mip count, `SW_MODE`, pipe/bank XOR) and the base address.
+   Today the entry point is called by tests only.
+4. A texture written after creation (by the CPU) is re-detiled whole on the next upload; finer tracking can come later.
+
+Tests:
+
+| Test | Where | What |
+|---|---|---|
+| `tests/gfx10_addr_oracle_check.py` | Linux/macOS | builds addrlib from the pinned Mesa tarball and compares, for 21 configurations (all 17 GFX10.3 pipe/packer combinations addrlib's tables cover, Navi10 at 4/8/16 pipes, Navi14), 2D and 3D, 17 modes, 12 formats (5 element sizes, BC1-BC7), 16 sizes and 1/3/full mips: every surface's layout, 61 million random and corner element addresses (`Addr2ComputeSurfaceAddrFromCoord`), and whole-surface tiling and detiling against `Addr2CopyMemToSurface`/`Addr2CopySurfaceToMem` (663 thousand subresources); a negative control (wrong RB+ setting) must mismatch |
+| `gfx10_detile_roundtrip` | ctest, CPU | tile then detile through D3D12-shaped footprints is the identity; tiled bytes equal an element-by-element `ElementOffset` reference; no two elements share an address; a flipped tiled byte changes exactly one output byte; wrong footprints, short input and unsupported modes are refused |
+| `runtime_r4_scene_tiled_*`, `runtime_r4_wrong_swizzle_*` | ctest, GPU | R4's two textures come from GFX10.3 tiled bytes in title memory (`SW_64KB_R_X` with 4 mips, mip 0 in the tail, and `SW_4KB_S_X`, both with a pipe/bank XOR), detiled into the desktop textures' footprints and sampled: the frame equals the CPU reference bit for bit. Control: texture 0 detiled as `SW_64KB_S_X` must differ |
+| `runtime_r4_detile_upload_*` | ctest, GPU | 11 surfaces (2D, arrays, 3D; R8 to RGBA32, BC1/BC4/BC7; linear, 256 B, 4 KiB and 64 KiB modes) detiled from title memory into `GetCopyableFootprints`, copied in through the shim, read back and compared element for element. Control: a wrong pipe/bank XOR must differ |
+
+Speed: about 2 GB/s for a 4096x4096 RGBA8 mip chain on one CPU core (Linux container); BC7 is faster per byte. A
+compute-shader detiler is not built: the CPU path keeps the entry point the same, and a GPU path can replace its body
+if upload time matters.
 
 **After R5, performance:** promote hot buffers to VRAM. The candidates are buffers only the GPU writes (UAV targets) or
 the CPU writes rarely (static vertex/index data). Each keeps a system-memory alias for CPU access. CPU writes are tracked
@@ -353,8 +454,10 @@ not under `x2w_launch`, until `pe_map` maps implicit TLS.
 R4 program: `tests/runtime/r4_scene.cpp`, over title descriptor heaps (`src/d3d12_xs_descriptors.h`) and draw-time
 descriptor resolution (design choices and tests in
 [experiments.md](../experiments.md#title-descriptor-heaps-textures-constants-and-depth-runtime-rung-r4)). Its exit
-criteria pass on WARP and hardware except "textures created from tiled bytes": the console's texture upload path is
-not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
+criteria pass on WARP and hardware except "textures created from tiled bytes" through the title's own calls: the
+console's texture upload path is not public, so the default scene uploads linear rows. The detiler (section 4,
+"Textures: detiling") is built and tested, and the scene's `tiled` mode creates its textures from tiled bytes through
+it; hooking it to the title's upload calls waits for an owner log that shows them.
 
 R5 program: `tests/runtime/r5_frames.cpp`: a compute queue moves particles in title memory with a translated gfx1013
 compute program (`r5_cs.s`) and the direct queue draws them with the R3 programs, with cross-queue fences, for 600

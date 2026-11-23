@@ -868,14 +868,21 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         const std::string line = text.substr(at + 1, next == std::string::npos ? std::string::npos : next - at - 1);
         at = next;
         char kind[16] = {};
-        unsigned slot = 0, set = 0, offset = 0;
-        if (std::sscanf(line.c_str(), "%15s %u %u %u", kind, &slot, &set, &offset) != 4) return "malformed bindings line";
+        unsigned slot = 0, set = 0, offset = 0, window = 256;
+        char rest = 0;
+        const int fields = std::sscanf(line.c_str(), "%15s %u %u %u %u %c", kind, &slot, &set, &offset, &window, &rest);
+        if (fields != 4 && fields != 5) return "malformed bindings line";
         TableRef ref{};
         ref.stage = static_cast<std::uint8_t>(stage);
         if (!std::strcmp(kind, "texture")) ref.kind = RefKind::texture;
         else if (!std::strcmp(kind, "sampler")) ref.kind = RefKind::sampler;
         else if (!std::strcmp(kind, "constants")) ref.kind = RefKind::constants;
         else return "unknown kind of descriptor in the bindings";
+        // A constant buffer's window (tools/pso_translate.py with_windows): more than 256 bytes, a multiple of 16, at
+        // most a D3D12 constant buffer view (4096 uint4).
+        if (fields == 5 && (ref.kind != RefKind::constants || window <= 256 || window % 16 ||
+                            window > D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16))
+            return "a bindings window that is not a constant buffer's 272 to 65536 bytes";
         const unsigned slots = ref.kind == RefKind::texture   ? 8
                                : ref.kind == RefKind::sampler ? sampler_table
                                : stage == X2W_SHADER_STAGE_VERTEX ? 1
@@ -891,6 +898,7 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         ref.slot = static_cast<std::uint8_t>(slot);
         ref.parameter = static_cast<std::uint8_t>(tables[set]);
         ref.offset = offset;
+        ref.window = window;
         info.refs[info.ref_count++] = ref;
     }
     return nullptr;
@@ -2028,7 +2036,8 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
             any_sampler = true;
         } else {
             const unsigned at = ref.stage == X2W_SHADER_STAGE_VERTEX ? 0 : 1 + ref.slot;
-            constants[at] = found.found ? translate_address(found.cbv_address, 256) : views->zero_buffer();
+            // The zero buffer is 65536 bytes, the largest window.
+            constants[at] = found.found ? translate_address(found.cbv_address, ref.window) : views->zero_buffer();
             any_constants[at] = true;
         }
     }

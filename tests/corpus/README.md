@@ -24,3 +24,17 @@ The copyright of each shader stays with its authors as its source file states (f
 such as Arm Limited and Contributors, Sascha Willems, Mobica Limited, Qualcomm Innovation Center, Google, Holochip,
 Nintendo; for SaschaWillems/Vulkan, Sascha Willems). The license texts are copied unchanged from the commits above.
 Vulkan-Samples has no NOTICE file at that commit. No game files or commercial shaders are included.
+
+## Other stages (`isa/stages/`)
+
+`isa/stages/` holds the 22 tessellation and geometry programs of the same two sources, compiled by the same route
+with NGG on (no `nongg`) and with `--pair-geom` (`tools/shader_corpus_build/build_corpus.py`), so that each geometry
+shader that has no vertex shader of its own is built behind the vertex shader of its directory whose outputs cover
+its inputs: an `<geom>+<vert>.s` file is one merged ES+GS program. The first line names the hardware stage RADV
+compiled each API stage as. `tools/stage_corpus_report.py` surveys them and translates the NGG geometry programs with
+`tools/geometry_aot.py` (docs/design/stages.md). 12 files are `sascha__` (MIT) and 10 `vksamples__` (Apache-2.0), under
+the same licenses and copyright as above.
+
+The pairing and the builder's grouping by file stem leave some programs unlike an application's: the three
+`*.tesc.s` files come from pipelines without a vertex shader (RADV compiled the HS alone), and in the
+`shader_object` pairings only the position reaches a fragment shader, so the geometry shaders export pos0 only.

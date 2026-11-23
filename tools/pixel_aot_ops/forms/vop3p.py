@@ -238,7 +238,13 @@ def fma_mix_source(token, high, select, scalar, vector, pending, sample_pending)
         if negate:
             bits ^= 0x8000
         return f"fm_f16_word({bits:#x}u)"
-    if re.fullmatch(r"0x[0-9a-f]{1,4}", body):
+    if re.fullmatch(r"0x[0-9a-f]{5,8}", body):
+        # The whole 32-bit literal of a binary32 source, as a caller that read it from the instruction's literal dword
+        # writes it (tools/corpus_translate.py restores it from the hex words); it is not a binary16 value.
+        if high:
+            raise ValueError(f"A 32-bit literal is a binary32 source: {token}")
+        word = f"{int(body, 16):#x}u"
+    elif re.fullmatch(r"0x[0-9a-f]{1,4}", body):
         if not high or select:
             raise ValueError(f"A literal source is lowered only as the low binary16 half: {token}")
         word = f"{int(body, 16):#x}u"
@@ -273,8 +279,18 @@ def fma_mix(st, i, m):
     kept = tracked_word(old) if old is not None else None
     if kept is None and st.stage == "compute" and isinstance(old, tuple) and len(old) == 2 and old[0] == "uint":
         kept = old[1]  # the compute stage keeps the half of any integer word (a local id, say)
+    # Half a word: the destination holds an interpolation base (v0, v1 at entry), which is not data, or the other
+    # half of a pair written by the opposite form. The first write leaves the other half undefined (the value is a
+    # ("half", which, word) marker that no reader accepts); the opposite form on the same register completes it.
+    other = "hi" if op == "mixlo_f16" else "lo"
+    half_old = None
     if op != "mix_f32" and old is not None and kept is None:
-        raise ValueError("Unsupported arithmetic destination")
+        if isinstance(old, tuple) and len(old) == 3 and old[0] == "half" and old[1] == other:
+            kept = old[2]
+        elif old in ("bary_i", "bary_j"):
+            half_old = "lo" if op == "mixlo_f16" else "hi"
+        else:
+            raise ValueError("Unsupported arithmetic destination")
     need_fma_mix(st)
     selects = [int(x or 0) for x in (s0, s1, s2)]
     highs = [int(x or 0) for x in (h0, h1, h2)]
@@ -285,11 +301,15 @@ def fma_mix(st, i, m):
     if clamp:
         expression = f"fma_mix_sat({expression}, {'true' if wide else 'false'})"
     if op == "mixlo_f16":
-        keep = f"({kept} & 0xffff0000u)" if old is not None else "0u"
+        keep = f"({kept} & 0xffff0000u)" if kept is not None else "0u"
         expression = f"{keep} | {expression}"
     elif op == "mixhi_f16":
-        keep = f"({kept} & 0xffffu)" if old is not None else "0u"
+        keep = f"({kept} & 0xffffu)" if kept is not None else "0u"
         expression = f"{keep} | ({expression} << 16u)"
+    if half_old:
+        st.lines.append(f"    uint halfw{i} = {expression};")
+        st.vector[dst] = ("half", half_old, f"halfw{i}")
+        return
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = asfloat({expression});")
 

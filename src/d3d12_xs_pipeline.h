@@ -29,7 +29,8 @@
 // owns, a ranges buffer and their count, the base vertex and start instance, and the descriptors the shader reads
 // from title descriptor tables: textures and samplers copied into blocks of the shim's shader-visible heaps (one
 // block per distinct set of descriptor contents), constant buffers as root CBVs at the aliases of their title
-// addresses. A table read that finds no view of the expected kind is a TextureLookup miss: counted, logged once,
+// addresses, each over the window the translation declares (256 bytes, or the larger window of a program that reads
+// past its first 16 uint4: the fifth field of a constants line in the bindings sidecar). A table read that finds no view of the expected kind is a TextureLookup miss: counted, logged once,
 // and bound to a null SRV, a point sampler or a zero buffer, so the shader reads zero.
 //
 // Configuration (environment, until the launcher passes it): X2W_PYTHON (default python.exe), X2W_TOOLS (the
@@ -88,6 +89,7 @@ struct TableRef {
     std::uint8_t slot;       // converter slot: texture slot 0..7, sampler slot 0..3, constant slot
     std::uint8_t parameter;  // the table's root parameter in the title's root signature
     std::uint32_t offset;    // byte offset in the table
+    std::uint32_t window;    // constants: bytes of title memory the root CBV covers (256, or the sidecar's window)
 };
 
 struct PsoInfo {

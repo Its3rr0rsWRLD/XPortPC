@@ -2,12 +2,13 @@
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
 import re
 
-from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, POISON_MESSAGE, find_loops, poisoned_operands, program,
+from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, LANE_GONE, LANE_GONE_MESSAGE, POISON_MESSAGE, LaneOnly,
+                           LaneOnlyWord, covers, find_loops, interpolation_half, lane_view, poisoned_operands, program,
                            split_blocks, word_expr)
 from .dispatch import GUARDS, dispatch
 from .hlsl import (MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS,
                    UNSAMPLED_PREAMBLE)
-from .registers import tracked_word
+from .registers import RAW_WORD_PREFIXES, PackedPair, tracked_word
 from . import bindings as binding_names
 from .bindings import PixelBindings
 from . import forms  # noqa: F401  (registers every form)
@@ -41,7 +42,11 @@ class Lowering:
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.constant_limit = 256  # bytes of b0 a scalar buffer load may read; the vertex stage raises it (vertex_aot.py)
-        self.constant_words = 0  # one past the highest b0 word a load has read: sizes params[] when it exceeds 64
+        # Per constant array (params, params1..3): the window of a slot a binding description gives a size
+        # (PixelBindings.constant_sizes), in place of constant_limit, and one past the highest word a load has read,
+        # which sizes the array's declaration when it exceeds 64.
+        self.constant_limits = {}
+        self.constant_words = {}
         self.uses_memory = False  # emit the title-memory helpers
         self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
         self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order
@@ -97,6 +102,8 @@ class Lowering:
         # CF-2c: HLSL names a VGPR took unmasked because it had no value before (masked_writes); a lane that was
         # inactive holds something else on the console, so they are never wave-uniform.
         self.lane_values = set()
+        # The LaneOnly registers whose value this instruction reads through a view (lane_views): register -> value.
+        self.hidden = {}
         # C-7 (forms/lanes.py): each masked-write name -> (the lane bit it was written under, the new word), and the
         # names of v_readfirstlane_b32 results the compute stage must prove wave-uniform once the text is complete.
         self.masked = {}
@@ -157,35 +164,115 @@ class Lowering:
             self.ex = f"ex{i}"
 
 
+# The interpolated attr0.x and .y in whole-quad mode (forms/vintrp.py): binary32 names that are words through asuint.
+UV_NAMES = ("uv.x", "uv.y")
+
+
+def masked_word(value):
+    """The 32 bits of a VGPR value for a masked select, or None when it is no word."""
+    if isinstance(value, LaneOnly) or type(value) is str and value in UV_NAMES:
+        return f"asuint({value})"
+    if isinstance(value, LaneOnlyWord):
+        return value[1]
+    return word_expr(value)
+
+
 def masked_writes(st, i, ex, before):
     """The masked-write rule for instruction i, run while this lane's EXEC bit was `ex` (not "true"): a VGPR the
     instruction wrote keeps its old value when the lane is inactive, `v = ex ? new : old`. A register with no value
-    before takes the new one (a refinement of an undefined register). Both values must be 32-bit words."""
+    before takes the new one (a refinement of an undefined register). The new value must be a 32-bit word. An old
+    value that is none (a barycentric, a half-done interpolation) has no HLSL expression on the inactive lane: in the
+    pixel stage the register then holds the new value as LaneOnly (control_flow.lane_view), the word on the lanes of
+    `ex` and the old value on the others; a masked write over a LaneOnly value selects over its word and adds `ex` to
+    its bits. v_interp_p1_f32 under `ex` writes a half (interpolation_half) that carries the old value, and its
+    v_interp_p2_f32 under the same bit selects over that old value: the pair is one masked write."""
     for reg, value in list(st.vector.items()):
         if i in st.pack_ex.get(reg, {}):
             continue
         old = before.get(reg)
+        if value == old:
+            continue
+        if interpolation_half(value, ex):
+            continue  # p1: the select is p2's, over the old value the half carries
+        if interpolation_half(old, ex):
+            old = old[5]  # the lanes off in ex never ran p1: they hold the value from before it
         if old is None and value is not None:
             st.lane_values.add(word_expr(value) or str(value))
         if old is None or value == old:
             continue
-        new_word, old_word = word_expr(value), word_expr(old)
-        if new_word is None or old_word is None:
+        new_word, old_word = masked_word(value), masked_word(old)
+        if new_word is None:
             raise ValueError("Masked write of a register that does not hold a 32-bit word")
+        if old_word is None:
+            if st.stage != "pixel" or isinstance(old, PackedPair):
+                raise ValueError("Masked write of a register that does not hold a 32-bit word")
+            # Not a lane value for the uniformity lattice either (CF-2c): an inactive lane holds something else.
+            st.lane_values.add(new_word)
+            st.vector[reg] = LaneOnly(value, {ex}, old) if isinstance(value, str) else LaneOnlyWord(new_word, {ex}, old)
+            continue
         # exw: both sides are raw words that the float readers accept (registers.RAW_WORD_PREFIXES); exv: an integer result.
         # mem_ex: the destination of an outstanding sample (CF-2c), which, like a memory word, waits for vmcnt(0).
-        name = f"{'exw' if tracked_word(value) and tracked_word(old) else 'exv'}{i}_{reg[1:]}"
+        floats = all(tracked_word(v) or isinstance(v, LaneOnly) or (type(v) is str and v in UV_NAMES)
+                     or isinstance(v, LaneOnlyWord) and v[1].startswith(RAW_WORD_PREFIXES) for v in (value, old))
+        name = f"{'exw' if floats else 'exv'}{i}_{reg[1:]}"
         if reg in st.sample_dest:
             name = f"mem_ex{i}_{reg[1:]}"
         st.lines.append(f"    uint {name} = {ex} ? {new_word} : {old_word};")
         st.masked[name] = (ex, new_word)
         st.vector[reg] = ("uint", name)
+        if isinstance(old, (LaneOnly, LaneOnlyWord)):
+            bits = old.bits | {ex}
+            # Once the bits cover every lane (an if-else's two arms), the select is the register's value everywhere.
+            if not covers(st.lines, "true", bits):
+                st.vector[reg] = LaneOnlyWord(name, bits, old.rest)
+
+
+def lane_views(st):
+    """Before an instruction: each LaneOnly register reads as control_flow.lane_view gives it under the lane's current
+    bit. Returns the registers whose value was replaced for the instruction (register -> the LaneOnly value), which
+    restore_views puts back unless the instruction wrote the register."""
+    hidden = {}
+    for reg, value in list(st.vector.items()):
+        view = lane_view(st.lines, st.ex, value)
+        if view is not value:
+            hidden[reg] = (value, view)
+            st.vector[reg] = view
+    st.hidden = {reg: value for reg, (value, _) in hidden.items()}
+    return hidden
+
+
+def restore_views(st, hidden):
+    for reg, (value, view) in hidden.items():
+        if st.vector.get(reg) is view or st.vector.get(reg) == view and type(st.vector.get(reg)) is type(view):
+            st.vector[reg] = value
+    st.hidden = {}
+
+
+def lane_gone_operands(st, line):
+    """The VGPRs an instruction names that hold LANE_GONE."""
+    if LANE_GONE not in st.vector.values():
+        return []
+    names = set(re.findall(r"(?<![\w\[:])v\d+\b", line))
+    for first, last in re.findall(r"v\[(\d+):(\d+)\]", line):
+        names.update(f"v{n}" for n in range(int(first), int(last) + 1))
+    return sorted(name for name in names if st.vector.get(name) == LANE_GONE)
 
 
 def poison_message(st, regs):
     """The refusal of an instruction that reads registers poisoned at a reconvergence point (control_flow.POISON)."""
     kind = JOIN_POISON_MESSAGE if all(st.scalar.get(r) == JOIN_POISON for r in regs) else POISON_MESSAGE
     return f"{kind}: {', '.join(regs)}"
+
+
+# The input words computed from the desktop's system values (bindings.LOWERED_INPUTS). SV_Position in a Direct3D pixel
+# shader is the pixel centre (x + 0.5, y + 0.5), the depth z and the clip-space w, the values the console's POS_X..POS_W
+# VGPRs hold (a program divides by gl_FragCoord.w as a product with POS_W, so POS_W is w and not 1 / w). POS_FIXED_PT
+# is the pixel's integer x in bits 0..15 and y in bits 16..31 (what an a16 image address reads), and FRONT_FACE a
+# binary32 that is positive for a front face (ACO tests it as 0 < v); +1.0 and -1.0 are given, and only the sign is
+# established.
+INPUT_WORDS = {**{f"psin_{c}": f"asuint(frag_position.{c})" for c in "xyzw"},
+               "psin_face": "front_face ? 0x3f800000u : 0xbf800000u",
+               "psin_pixel": "uint(frag_position.x) | (uint(frag_position.y) << 16)"}
 
 
 def described_state(b):
@@ -204,9 +291,26 @@ def described_state(b):
             scalar[reg] = binding_names.pointer_role(role)
     head, sampled = binding_names.declarations(b)
     preamble = PREAMBLE if sampled else UNSAMPLED_PREAMBLE
-    st = Lowering(scalar, {"v0": "bary_i", "v1": "bary_j"}, [*head, preamble],
+    # The input VGPRs (bindings.input_vgprs): the lowered inputs get their tracked values, and the words main computes
+    # from SV_Position and SV_IsFrontFace are declared at its top. An input that is not lowered, or a VGPR whose ADDR
+    # bit gives it no value, stays unset; reading it is refused with what it holds (finish).
+    layout, enabled = binding_names.input_vgprs(b.ps_input_ena, b.ps_input_addr)
+    vector, unlowered, words = {}, {}, []
+    for reg, entry in layout.items():
+        value = binding_names.LOWERED_INPUTS.get(entry) if reg in enabled else None
+        if value is None:
+            unlowered[reg] = entry
+            continue
+        vector[reg] = value
+        if isinstance(value, tuple):
+            words.append(f"    uint {value[1]} = {INPUT_WORDS[value[1]]};")
+    st = Lowering(scalar, vector, [*head, preamble, *words],
                   {key: binding_names.texture_name(k) for key, k in b.textures.items()}, (), None, dict(b.buffers))
     st.preamble = preamble
+    st.unlowered_inputs = unlowered
+    st.quad_position = st.quad_position or any("frag_position" in line for line in words)
+    st.front_face = any("front_face" in line for line in words)
+    st.constant_limits = {binding_names.constant_array(k): size for k, size in b.constant_sizes.items()}
     st.texture_dims = {binding_names.texture_name(k): dim for k in b.textures.values()
                        if (dim := b.dimension(k)) != "2d"}
     st.descriptor_words = True
@@ -320,18 +424,31 @@ def finish(st, instructions, samples=None):
             raise ValueError("Only exports may follow an export that is not done")
         # CF-2c: an instruction that names a scalar register poisoned by a skipped region must overwrite it, not read it.
         poisoned = poisoned_operands(st.scalar, line)
+        hidden = lane_views(st)
+        gone = lane_gone_operands(st, line)
         try:
             for guard in GUARDS:
                 guard(st, i, line)
             if st.ex == "true":
                 dispatch(st, i, line)
             else:
-                ex, before = st.ex, dict(st.vector)
+                # The value before is the register's own, not the view this lane reads (lane_views).
+                ex, before = st.ex, {**st.vector, **st.hidden}
                 dispatch(st, i, line)
+                restore_views(st, hidden)
                 masked_writes(st, i, ex, before)
+            restore_views(st, hidden)
         except ValueError as error:
+            unset = re.fullmatch(r"Read of unset vector register (v\d+)", str(error))
+            if unset and unset[1] in getattr(st, "unlowered_inputs", {}):
+                name, k = st.unlowered_inputs[unset[1]]
+                part = f".{k}" if dict(binding_names.PS_INPUTS)[name] > 1 else ""
+                raise ValueError(f"Read of input VGPR {unset[1]} ({name}{part}), an input that is not lowered or not "
+                                 "loaded") from error
             if poisoned:
                 raise ValueError(poison_message(st, poisoned)) from error
+            if gone:
+                raise ValueError(f"{LANE_GONE_MESSAGE}: {', '.join(gone)}") from error
             raise
         if poisoned and set(poisoned) & set(poisoned_operands(st.scalar, line)):
             raise ValueError(poison_message(st, poisoned))
@@ -389,6 +506,14 @@ def finish(st, instructions, samples=None):
     if (st.attribute_input or st.texcoord4) and 0 not in st.flat_attrs:
         pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
         st.lines[pos] = st.lines[pos].replace("main(float2 uv : TEXCOORD0", "main(float4 uv : TEXCOORD0", 1)
+    if getattr(st, "front_face", False):
+        pos = st.lines.index(next(line for line in st.lines if "main(" in line and ") : SV_Target0 {" in line))
+        st.lines[pos] = st.lines[pos].replace(") : SV_Target0 {", ", bool front_face : SV_IsFrontFace) : SV_Target0 {", 1)
+    for array, words in st.constant_words.items():
+        if words > 64 and array is not None:
+            # The window grows past 16 uint4 only when the program reads past it (PixelBindings.constant_sizes).
+            pos = next(n for n, line in enumerate(st.lines) if line.startswith("cbuffer ") and f" uint4 {array}[16];" in line)
+            st.lines[pos] = st.lines[pos].replace(f" uint4 {array}[16];", f" uint4 {array}[{-(-words // 4)}];")
     if st.signature:
         returns, declaration = st.signature
         pos = st.lines.index(next(line for line in st.lines if "main(" in line and "SV_Target0 {" in line))
