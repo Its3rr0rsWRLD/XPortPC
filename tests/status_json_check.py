@@ -107,7 +107,7 @@ class StatusJson(unittest.TestCase):
         self.assertEqual(corpus["uses_percent"], 25.0)
         self.assertEqual(corpus["blocking_forms"][0], {"form": "v_a_e64", "shaders": 3})
         self.assertEqual(len(corpus["blocking_forms"]), 5)
-        self.assertEqual(data["stages_supported"], ["pixel"])
+        self.assertEqual(data["stages_supported"], ["pixel", "vertex", "compute"])
         self.assertEqual(g["groups"][0], {"name": "SOP1", "covered": 2, "total": 4})
         self.assertEqual({k: data["x64"][k] for k in ("covered", "total")}, {"covered": 5, "total": 20})
         x64 = data["x64"]["forms"]
