@@ -270,9 +270,9 @@ uint small_float_bits(uint v, uint mant, bool signed_value) {
     uint sign = signed_value ? (v >> (5u + mant)) & 1u : 0u;
     uint e = (v >> mant) & 31u;
     uint m = v & ((1u << mant) - 1u);
-    uint out = 0u;
-    if (e == 31u) out = 0x7f800000u | (m << (23u - mant));
-    else if (e != 0u) out = ((e + 112u) << 23) | (m << (23u - mant));
+    uint bits = 0u;
+    if (e == 31u) bits = 0x7f800000u | (m << (23u - mant));
+    else if (e != 0u) bits = ((e + 112u) << 23) | (m << (23u - mant));
     else if (m != 0u) {
         uint shift = 0u;
         [loop] for (uint k = 0u; k < 11u; ++k) {
@@ -280,9 +280,9 @@ uint small_float_bits(uint v, uint mant, bool signed_value) {
             m <<= 1;
             shift += 1u;
         }
-        out = ((113u - shift) << 23) | ((m & ((1u << mant) - 1u)) << (23u - mant));
+        bits = ((113u - shift) << 23) | ((m & ((1u << mant) - 1u)) << (23u - mant));
     }
-    return out | (sign << 31);
+    return bits | (sign << 31);
 }
 uint convert_component(uint v, uint width, uint kind) {
     uint top = width == 32u ? 0u : 1u << (width - 1u);
