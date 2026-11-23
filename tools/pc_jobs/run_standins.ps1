@@ -35,7 +35,7 @@ foreach ($dir in Get-ChildItem -Directory $Samples) {
     $seconds = [math]::Round(((Get-Date) - $start).TotalSeconds, 1)
     # Keep only the launcher's and shims' own lines (names and numbers), never sample output.
     if (Test-Path $err) {
-        Get-Content $err | Where-Object { $_ -like "[x2w]*" } | Where-Object { $_ -notlike "[x2w] import *" } |
+        Get-Content $err | Where-Object { $_.StartsWith("[x2w] ") -and -not $_.StartsWith("[x2w] import ") } |
             Set-Content (Join-Path $target "stderr.txt")
         Remove-Item $err -Force
     }

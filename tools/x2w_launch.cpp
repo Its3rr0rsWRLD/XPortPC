@@ -23,9 +23,10 @@
 // GetProcAddress (from kernel32, kernelbase or the libraryloader API set) bind to hooks here, because PC
 // GDK titles reach the Gaming Runtime only that way (xgameruntime.lib loads xgameruntime.dll and resolves
 // names at run time). A load whose file name is in a --shims directory loads that shim; anything else goes
-// to the Windows loader unchanged. GetProcAddress on a shim answers from the shim's exports and returns
-// null for a name it lacks, as Windows would. Each distinct load and resolve is logged once, as
-// "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|missing|windows", on
+// to the Windows loader unchanged. GetProcAddress on a shim answers from the shim's exports; a name the shim
+// lacks comes from the Windows DLL of that name when one exists ("windows-fallback"), else null, as
+// Windows would. Each distinct load and resolve is logged once, as
+// "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|windows-fallback|missing|windows", on
 // stderr and in the run log; tools/shimgen.py --run-log turns those lines into shims.
 // Shims are loaded with LOAD_WITH_ALTERED_SEARCH_PATH, so DLLs beside a shim (x2w_gdk.dll) resolve.
 // The program's environment gets X2W_TITLE (its file name without extension) and X2W_TITLE_DIR (its
@@ -366,6 +367,32 @@ HMODULE shim_for(const std::string& name) {
     return nullptr;
 }
 
+// The Windows DLL of a shim's name (the loader's search path, then System32), loaded by full path so it is
+// not the shim, or null. Cached.
+HMODULE windows_twin(const std::string& name) {
+    static std::map<std::string, HMODULE> twins;
+    AcquireSRWLockExclusive(&dynamic_lock);
+    auto it = twins.find(name);
+    if (it == twins.end()) {
+        wchar_t found[MAX_PATH];
+        std::wstring path;
+        if (SearchPathW(nullptr, widen(name).c_str(), nullptr, MAX_PATH, found, nullptr)) path = found;
+        bool ours = false;
+        for (const auto& directory : shim_dirs)
+            if (_wcsicmp(directory_of(path).c_str(), directory.c_str()) == 0) ours = true;
+        if (path.empty() || ours) {
+            const UINT length = GetSystemDirectoryW(found, MAX_PATH);
+            path = std::wstring(found, length) + L"\\" + widen(name);
+        }
+        HMODULE module = is_file(path) ? LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH) : nullptr;
+        if (module && GetProcAddress(module, "x2w_shimgen_dll")) module = nullptr;  // our own shim again
+        it = twins.emplace(name, module).first;
+    }
+    HMODULE module = it->second;
+    ReleaseSRWLockExclusive(&dynamic_lock);
+    return module;
+}
+
 std::string shim_name_of(HMODULE module) {
     AcquireSRWLockShared(&dynamic_lock);
     auto it = shim_names.find(module);
@@ -431,6 +458,14 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
                                           : std::string(name ? name : "(null)");
     const std::string shim = shim_name_of(module);
     FARPROC address = GetProcAddress(module, name);
+    const char* route = address ? "shim" : "missing";
+    if (!shim.empty() && !address) {
+        // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
+        // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
+        // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
+        if (HMODULE windows = windows_twin(shim))
+            if ((address = GetProcAddress(windows, name))) route = "windows-fallback";
+    }
     const DWORD error = GetLastError();
     std::string dll = shim;
     if (dll.empty()) {
@@ -442,7 +477,7 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
             if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
     }
     log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
-                     (!shim.empty() ? (address ? "shim" : "missing") : (address ? "windows" : "missing")));
+                     (!shim.empty() ? route : (address ? "windows" : "missing")));
     SetLastError(error);
     return address;
 }
