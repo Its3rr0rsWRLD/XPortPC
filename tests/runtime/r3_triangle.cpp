@@ -607,10 +607,12 @@ int sources_check(bool warp, bool slots_control)
             auto* adopted = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w64k));
             XMemSetAllocationHooks(nullptr, nullptr);
             good = draw_from("adopted", adopted, true) && good;
-            // Control: the correct inputs in a desktop upload buffer, drawn from its own GPU virtual address, which no
-            // title memory range holds. The address is valid for the desktop root views, so only TitleLookup decides:
+            // Control: the correct inputs in a desktop upload buffer, drawn from its desktop GPU virtual address, which
+            // no title memory range holds. The address is valid for the desktop root views, so only TitleLookup decides:
             // every load must miss and no triangle may be drawn. (An unmapped title address must not be used here:
-            // desktop D3D12 reads root CBVs, and WARP faults on one.)
+            // desktop D3D12 reads root CBVs, and WARP faults on one.) A buffer created through the shim has a title
+            // GPU address of its own (its mapped pointer, d3d12_xs_resources.h), which TitleLookup finds; the desktop
+            // address behind it is what that title address translates to.
             D3D12_HEAP_PROPERTIES upload_heap{};
             upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
             D3D12_RESOURCE_DESC upload_desc{};
@@ -627,8 +629,11 @@ int sources_check(bool warp, bool slots_control)
                                                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                                           IID_PPV_ARGS(&upload))) &&
                               SUCCEEDED(upload->Map(0, nullptr, &mapped));
-            const bool missed = made && draw_at("unregistered", static_cast<std::uint8_t*>(mapped),
-                                                static_cast<std::uintptr_t>(upload->GetGPUVirtualAddress()), false);
+            const std::uint64_t desktop = made ? X2WTitleGpuTranslate(upload->GetGPUVirtualAddress(), title_bytes) : 0;
+            const bool missed = made && desktop && desktop != upload->GetGPUVirtualAddress() &&
+                                X2WTitleGpuTranslate(desktop, 4) == 0 &&
+                                draw_at("unregistered", static_cast<std::uint8_t*>(mapped),
+                                        static_cast<std::uintptr_t>(desktop), false);
             std::printf("control=%s\n", missed ? "miss_detected" : "miss_missed");
             good = good && missed;
             if (made) upload->Unmap(0, nullptr);
