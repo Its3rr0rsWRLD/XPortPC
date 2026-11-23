@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string_view>
 #include <vector>
+#include "test_guard.h"
 
 using namespace std::literals;
 
@@ -110,6 +111,7 @@ int check_shader()
 
 int main(int argc, char** argv)
 {
+    test_guard::install("era_title_va_check", 25);  // below the ctest TIMEOUT (CMakeLists.txt)
     const std::string_view scenario = argc == 2 ? argv[1] : ""sv;
     if (scenario == "translate"sv) return check_translate();
     if (scenario == "bounds"sv) return check_bounds();

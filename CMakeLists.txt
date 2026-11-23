@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.21)
 project(Xbox2Windows LANGUAGES CXX)
 
 enable_testing()
+# Standard C++ exception handling for every MSVC target, whatever CMAKE_CXX_FLAGS a build directory was first
+# configured with: without /EHsc (warning C4530) a throw skips destructors, and era_title_gpu_alloc_check, which
+# throws bad_alloc through std::map and lock guards, can hang instead of failing.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/EHsc>)
 include(cmake/x2w_sys.cmake)
 add_executable(root_probe tools/root_probe.cpp)
 target_compile_features(root_probe PRIVATE cxx_std_17)
@@ -20,18 +24,21 @@ target_include_directories(era_heap_check PRIVATE src)
 target_compile_features(era_heap_check PRIVATE cxx_std_20)
 foreach(scenario IN ITEMS allocation failure concurrency caller_layout reuse observed_words large_alignment graphics_types)
     add_test(NAME era_heap_${scenario} COMMAND era_heap_check ${scenario})
+    set_tests_properties(era_heap_${scenario} PROPERTIES TIMEOUT 60)
 endforeach()
 
 add_executable(memory_query_check tests/memory_query_check.cpp)
 target_compile_features(memory_query_check PRIVATE cxx_std_17)
 target_link_libraries(memory_query_check PRIVATE psapi)
 add_test(NAME desktop_memory_query COMMAND memory_query_check)
+set_tests_properties(desktop_memory_query PROPERTIES TIMEOUT 30)
 
 add_executable(era_query_check tests/era_query_check.cpp src/era_query.cpp)
 target_include_directories(era_query_check PRIVATE src)
 target_compile_features(era_query_check PRIVATE cxx_std_17)
 foreach(scenario IN ITEMS fields tail registry short)
     add_test(NAME era_query_${scenario} COMMAND era_query_check ${scenario})
+    set_tests_properties(era_query_${scenario} PROPERTIES TIMEOUT 30)
 endforeach()
 
 # Title GPU address to desktop GPU virtual address table (no GPU needed).
@@ -40,6 +47,7 @@ target_include_directories(era_title_va_check PRIVATE src)
 target_compile_features(era_title_va_check PRIVATE cxx_std_17)
 foreach(scenario IN ITEMS translate bounds registry shader)
     add_test(NAME era_title_va_${scenario} COMMAND era_title_va_check ${scenario})
+    set_tests_properties(era_title_va_${scenario} PROPERTIES TIMEOUT 30)
 endforeach()
 
 # era_title_gpu under allocation failure (no GPU needed). The program replaces operator new to fail
@@ -70,6 +78,7 @@ target_compile_features(xmem_shim_check PRIVATE cxx_std_17)
 # working_set_aggregation feeds synthetic adapter readings to src/xmem_gpu_usage.h.
 foreach(scenario IN ITEMS exports allocation query working_set working_set_aggregation)
     add_test(NAME xmem_shim_${scenario} COMMAND xmem_shim_check ${scenario})
+    set_tests_properties(xmem_shim_${scenario} PROPERTIES TIMEOUT 60)
 endforeach()
 # The allocation scenario checks with VirtualQuery that XMemFree returns graphics memory to MEM_FREE, which holds for
 # the standalone layout (src/xmem_title_api.h); arena memory reads as free through XMemVirtualQuery instead
@@ -1133,6 +1142,7 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME xmem_attribute_scan COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/xmem_attribute_scan_check.py" "$<TARGET_FILE:cpu_xmem_attributes>"
         "$<TARGET_FILE:cpu_xmem_delay>")
+    set_tests_properties(xmem_attribute_scan PROPERTIES TIMEOUT 120)
 
     # VEX.128 16-bit packed-integer leaf functions, an arithmetic-shift control, and their C++.
     foreach(variant IN ITEMS original altered)

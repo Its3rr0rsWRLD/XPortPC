@@ -44,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "../test_guard.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -495,6 +496,7 @@ int sources_check(bool warp, bool slots_control)
         // Draws from title address `address`, whose bytes the CPU writes through `title`; `hit` says whether the
         // layer registered it.
         const auto draw_at = [&](const char* name, std::uint8_t* title, std::uintptr_t address, bool hit) {
+            test_guard::stage(name);
             if (!good || !title) {
                 std::printf("source=%s missing\n", name);
                 return false;
@@ -632,6 +634,7 @@ int refused_check()
 
 int main(int argc, char** argv)
 {
+    test_guard::install("r3_triangle", 110);  // below the ctest TIMEOUT (CMakeLists.txt)
     if (argc != 3) return 2;
     const std::string_view adapter = argv[1];
     const std::string_view mode = argv[2];

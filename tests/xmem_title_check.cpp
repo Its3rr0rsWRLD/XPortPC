@@ -45,6 +45,7 @@
 #include <utility>
 #include <string_view>
 #include <vector>
+#include "test_guard.h"
 
 extern "C" __declspec(dllimport) BOOL XMemVirtualQuery(HANDLE process, LPCVOID address, void* buffer);
 
@@ -790,6 +791,7 @@ int gpu(bool warp)
 
 int main(int argc, char** argv)
 {
+    test_guard::install("xmem_title_check", 50);  // below the ctest TIMEOUT (CMakeLists.txt)
     if (argc != 2) return 2;
     X2WXMemSetLogSink(capture, nullptr);
     const std::string_view scenario = argv[1];

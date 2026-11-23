@@ -23,6 +23,7 @@
 
 #include "adapter_identity.h"
 #include "xmem_gpu_usage.h"
+#include "test_guard.h"
 
 extern "C" __declspec(dllimport) void* XMemAlloc(SIZE_T bytes, ULONGLONG attributes);
 extern "C" __declspec(dllimport) void XMemFree(void* allocation, ULONGLONG attributes);
@@ -381,6 +382,7 @@ int working_set_gpu_checks(bool warp)
 
 int main(int argc, char** argv)
 {
+    test_guard::install("xmem_shim_check", 50);  // below the ctest TIMEOUT (CMakeLists.txt)
     if (argc != 2) {
         return 2;
     }

@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string_view>
+#include "test_guard.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -223,6 +224,7 @@ bool enable_lock_memory()
 
 int main(int argc, char** argv)
 {
+    test_guard::install("xmem_alias_probe", 50);  // below the ctest TIMEOUT (CMakeLists.txt)
     if (argc != 2) return 2;
     const std::string_view adapter = argv[1];
     if (adapter != "warp" && adapter != "hardware") return 2;
