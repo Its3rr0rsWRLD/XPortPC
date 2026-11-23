@@ -285,8 +285,10 @@ through the shim's device gets a title GPU address, registered with `xmem.dll` (
   that span is already an XMem allocation, nothing new is registered.
 - Everything else (DEFAULT, reserved, other placed buffers): a range of process address space reserved for the buffer
   (`MEM_RESERVE`, no access, 64 KiB granularity), so it never collides with title memory.
-- READBACK buffers and buffers of 4 GiB or more are registered for API translation only, not for `TitleLookup`. Note
-  that every shader-visible registered buffer takes one of the converter's 8 title-memory slots.
+- READBACK buffers, buffers that deny shader resources and buffers of 4 GiB or more are registered for API translation
+  only, not for `TitleLookup`. A shader-visible buffer without UAV access (UPLOAD) gets a null UAV in the title-memory
+  table (stores to it write nothing). Every shader-visible registered buffer takes one of the converter's 8
+  title-memory slots, so a title with many such buffers runs into that limit (draws are then refused, logged).
 - Textures have no GPU address. Without `xmem.dll` the address is the desktop one (identity), noted once.
 - Releasing the wrapper unregisters the range and frees the reservation.
 

@@ -1857,7 +1857,20 @@ private:
             raw_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             raw_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
             raw_uav.Buffer.NumElements = raw.Buffer.NumElements;
-            device_->CreateUnorderedAccessView(resource, nullptr, &raw_uav, uav_handle);
+            // A buffer the title created without UAV access (an UPLOAD buffer, d3d12_xs_resources.h) gets a null UAV:
+            // translated shaders read it through the SRV, and a store to it writes nothing, as desktop D3D12 allows
+            // no UAV on it.
+            ID3D12Resource* writable = resource;
+            if (resource) {
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+                D3D12_RESOURCE_DESC rd{};
+                resource->GetDesc(&rd);
+#else
+                const D3D12_RESOURCE_DESC rd = resource->GetDesc();
+#endif
+                if (!(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) writable = nullptr;
+            }
+            device_->CreateUnorderedAccessView(writable, nullptr, &raw_uav, uav_handle);
             uav_handle.ptr += increment_;
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC misses{};

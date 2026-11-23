@@ -77,7 +77,8 @@ TitleAddress assign(ID3D12Resource* desktop, const D3D12_HEAP_PROPERTIES* heap, 
 
     const bool readback = heap && heap->Type == D3D12_HEAP_TYPE_READBACK;
     std::uint32_t flags = 0;
-    if (readback || desc.Width >= shader_range_limit) flags |= X2W_TITLE_GPU_REGISTER_NO_SHADER;
+    if (readback || desc.Width >= shader_range_limit || (desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
+        flags |= X2W_TITLE_GPU_REGISTER_NO_SHADER;
 
     if (existing_heap_address) {
         out.title = existing_heap_address + offset;

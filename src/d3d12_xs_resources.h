@@ -18,8 +18,10 @@
 //   offset; when that span is already title memory xmem.dll translates (an XMem allocation), nothing is registered;
 // - any other buffer (DEFAULT heaps, reserved buffers, placed buffers in other heaps): a range of process address
 //   space reserved for it (MEM_RESERVE, no access, rounded up to 64 KiB), so it cannot collide with title memory.
-// READBACK buffers and buffers of 4 GiB or more are registered for API translation only (no shader reads them, and
-// TitleLookup ranges are below 4 GiB). Textures have no GPU virtual address and get none.
+// READBACK buffers, buffers that deny shader resources and buffers of 4 GiB or more are registered for API translation
+// only (no shader reads them, and TitleLookup ranges are below 4 GiB). A shader-visible buffer without UAV access (an
+// UPLOAD buffer) gets a null UAV in the title-memory table: translated shaders read it, stores to it write nothing.
+// Textures have no GPU virtual address and get none.
 //
 // Without xmem.dll in the process (or without its registration export) there is no registry: the title address is
 // the desktop GPU address (identity), and the first such buffer is noted once.
