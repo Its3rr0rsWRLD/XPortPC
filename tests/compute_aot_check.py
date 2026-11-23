@@ -214,6 +214,21 @@ def run_family(directory, compiler, renderer, backend, name, programs):
         subprocess.run([compiler, "-Gis", "-T", "cs_6_0", "-E", "main", "-Fo", shader, source], check=True)
         dispatch = [renderer, backend, "--check-compute-case", shader, case]
         separated = [False] * len(flaws)
+        if name in BATCHED:
+            with common.DrawBatch(directory, renderer, backend, shader, f"{name}{index}",
+                                  operation="--check-compute-batch") as batch:
+                for number, inputs in enumerate(cases):
+                    right = reference(inputs, ())
+                    batch.add(case_of(right), "pass", f"{name} program {index} case {number} differs from the reference")
+                    for k, flaw in enumerate(flaws):
+                        wrong = reference(inputs, flaw)
+                        if outcome(wrong) == outcome(right):
+                            continue
+                        separated[k] = True
+                        batch.add(case_of(right, wrong), "mismatch",
+                                  f"A wrong {name} result escaped detection in program {index}, {sorted(flaw)}")
+            assert all(separated), (name, index, separated)
+            continue
         for inputs in cases:
             right = reference(inputs, ())
             case.write_bytes(case_of(right))
@@ -1348,9 +1363,360 @@ DYNSMEM_PROGRAMS = [
 ]
 
 
+# Family `lds` (card C-6, docs/design/compute-stage.md): groupshared LDS, s_barrier and the LDS wait count. Program A,
+# 256 threads (four wave64 waves; several desktop waves too): each thread writes its word to A[t] and a marker to B[t]
+# through computed addresses, rewrites B[t] through the offset field after a barrier, and after a second barrier reads
+# the partner t' = 255 - t's B and A words and A[t' + 1], A[t' + 64] by ds_read2_b32. Program B, 64x2 threads: private
+# initial words, then nine epochs of one LDS atomic each (add, sub, min/max unsigned and signed, and, or, xor) on eight
+# shared words per operation, separated by barriers, and every thread reads its own word back. Program C, one-thread
+# groups (no barrier needed): every width of ds_write and ds_read, sub-dword writes and sign-extending reads,
+# ds_write2/ds_read2 with b32, b64 and st64 offsets, and out-of-range dwords at run-time addresses (reads 0, writes
+# dropped) up to and past the 1 KiB allocation. Program D, the Sascha Willems n-body shape: a region skipped by waves
+# with no particle, a uniform loop over chunks that fills LDS (an else arm writes zeros), a barrier, a uniform inner
+# loop that reads LDS at a uniform address into SGPRs with v_readfirstlane_b32 (C-7 after C-6), and a second barrier.
+LDS_BASE = 0x3_0000_8000
+LDS_GROUPS_CONTRACT = {"wave": 64, "sgprs": {"s2": "descriptors", "s3": "group_id.x"}, "buffer_descriptors": {0: 8}}
+LDS_A = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshl_add_u32 v1, s0, 8, v0",
+    "v_lshlrev_b32_e32 v2, 2, v1",
+    "v_lshlrev_b32_e32 v3, 2, v0",
+    "v_add_nc_u32_e32 v9, 0x400, v3",
+    "v_or_b32_e32 v5, 0x5a5a0000, v0",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dword v4, v2, s[8:11], 0 offen",
+    "s_waitcnt vmcnt(0)",
+    "ds_write_b32 v3, v4",
+    "ds_write_b32 v9, v5",
+    "s_barrier",
+    "v_lshl_add_u32 v6, v4, 1, v4",
+    "ds_write_b32 v3, v6 offset:1024",
+    "s_barrier",
+    "v_xor_b32_e32 v7, 0x3fc, v3",
+    "v_add_nc_u32_e32 v8, 0x400, v7",
+    "ds_read_b32 v10, v8",
+    "ds_read_b32 v11, v7",
+    "ds_read2_b32 v[12:13], v7 offset0:1 offset1:64",
+    "v_lshlrev_b32_e32 v14, 4, v1",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dwordx4 v[10:13], v14, s[8:11], 0 offen offset:2048",
+    "s_endpgm",
+]
+LDS_A_CONTRACT = {**LDS_GROUPS_CONTRACT, "numthreads": (256, 1, 1), "local_ids": 1, "lds_size": 4096}
+LDS_B_OPS = ("add_u32", "sub_u32", "min_u32", "max_u32", "min_i32", "max_i32", "and_b32", "or_b32", "xor_b32")
+LDS_B = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshl_add_u32 v2, v1, 6, v0",
+    "v_lshl_add_u32 v3, s0, 7, v2",
+    "v_lshlrev_b32_e32 v3, 2, v3",
+    "v_lshlrev_b32_e32 v4, 2, v2",
+    "v_and_b32_e32 v5, 7, v2",
+    "v_lshlrev_b32_e32 v5, 2, v5",
+    "v_lshl_or_b32 v7, v2, 25, v2",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dword v6, v3, s[8:11], 0 offen",
+    "ds_write_b32 v4, v7",
+    "s_waitcnt vmcnt(0)",
+    *(line for k, op in enumerate(LDS_B_OPS) for line in
+      ("s_barrier", f"ds_{op} v5, v6" + (f" offset:{32 * k}" if k else ""))),
+    "s_barrier",
+    "ds_read_b32 v8, v4",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dword v8, v3, s[8:11], 0 offen offset:1024",
+    "s_endpgm",
+]
+LDS_B_CONTRACT = {**LDS_GROUPS_CONTRACT, "numthreads": (64, 2, 1), "local_ids": 2, "lds_size": 512}
+LDS_C = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "s_lshl_b32 s1, s0, 4",
+    "s_lshl_b32 s4, s0, 7",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dwordx4 v[0:3], off, s[8:11], s1",
+    "s_waitcnt vmcnt(0)",
+    "v_lshlrev_b32_e32 v4, 4, v0",
+    "ds_write_b128 v4, v[0:3]",
+    "ds_write_b96 v4, v[1:3] offset:16",
+    "ds_write_b64 v4, v[2:3] offset:32",
+    "ds_write_b32 v4, v1 offset:40",
+    "ds_write_b8 v4, v3 offset:17",
+    "ds_write_b16 v4, v2 offset:26",
+    "ds_write2_b32 v4, v3, v1 offset0:11 offset1:12",
+    "ds_write2st64_b64 v4, v[2:3], v[0:1] offset1:1",
+    "ds_read_b128 v[8:11], v4",
+    "ds_read_b96 v[12:14], v4 offset:16",
+    "ds_read2_b64 v[16:19], v4 offset0:4 offset1:5",
+    "ds_read_u8 v20, v4 offset:17",
+    "ds_read_i8 v21, v4 offset:17",
+    "ds_read_u16 v22, v4 offset:26",
+    "ds_read_i16 v23, v4 offset:26",
+    "ds_read2st64_b32 v[24:25], v4 offset1:2",
+    "ds_read2_b32 v[26:27], v4 offset0:11 offset1:12",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_store_dwordx4 v[8:11], off, s[8:11], s4 offset:1024",
+    "buffer_store_dwordx3 v[12:14], off, s[8:11], s4 offset:1040",
+    "buffer_store_dwordx4 v[16:19], off, s[8:11], s4 offset:1056",
+    "buffer_store_dwordx4 v[20:23], off, s[8:11], s4 offset:1072",
+    "buffer_store_dwordx4 v[24:27], off, s[8:11], s4 offset:1088",
+    "s_endpgm",
+]
+LDS_C_CONTRACT = {**LDS_GROUPS_CONTRACT, "wave": 32, "numthreads": (1, 1, 1), "local_ids": 1, "lds_size": 1024}
+LDS_D = [
+    "s_mov_b32 s0, s3",
+    "s_movk_i32 s3, 0x8000",
+    "s_load_dwordx4 s[4:7], s[2:3], 0x10",
+    "s_waitcnt lgkmcnt(0)",
+    "s_buffer_load_dword s1, s[4:7], 0x4",
+    "v_lshl_add_u32 v1, s0, 7, v0",
+    "s_lshl_b32 s16, s0, 7",
+    "s_waitcnt lgkmcnt(0)",
+    "s_sub_u32 s16, s1, s16",
+    "s_min_u32 s16, s16, 0x80",
+    "v_cmpx_gt_u32_e32 s1, v1",
+    "s_cbranch_execz BB9",
+    "s_load_dwordx4 s[8:11], s[2:3], null",
+    "v_lshlrev_b32_e32 v1, 5, v1",
+    "s_waitcnt lgkmcnt(0)",
+    "buffer_load_dword v2, v1, s[8:11], 0 offen",
+    "s_mov_b32 s0, 0",
+    "v_mov_b32_e32 v7, 0",
+    "BB2:",
+    "s_cmp_ge_u32 s0, s1",
+    "s_cbranch_scc1 BB8",
+    "v_add_nc_u32_e32 v8, s0, v0",
+    "s_mov_b64 s[2:3], exec",
+    "v_cmpx_gt_u32_e32 s1, v8",
+    "s_cbranch_execz BB5",
+    "v_lshlrev_b32_e32 v8, 5, v8",
+    "buffer_load_dwordx4 v[8:11], v8, s[8:11], 0 offen",
+    "v_lshlrev_b32_e32 v12, 4, v0",
+    "s_waitcnt vmcnt(0)",
+    "ds_write_b128 v12, v[8:11]",
+    "BB5:",
+    "s_andn2_b64 exec, s[2:3], exec",
+    "s_cbranch_execz BB7",
+    "v_lshlrev_b32_e32 v8, 4, v0",
+    "v_mov_b32_e32 v12, 0",
+    "v_mov_b32_e32 v13, 0",
+    "v_mov_b32_e32 v14, 0",
+    "v_mov_b32_e32 v15, 0",
+    "ds_write_b128 v8, v[12:15]",
+    "BB7:",
+    "s_mov_b64 exec, s[2:3]",
+    "s_barrier",
+    "s_mov_b32 s2, 0",
+    "BB10:",
+    "s_cmp_ge_u32 s2, s16",
+    "s_cbranch_scc1 BB12",
+    "s_lshl_b32 s3, s2, 4",
+    "v_mov_b32_e32 v8, s3",
+    "ds_read_b64 v[8:9], v8",
+    "s_add_u32 s2, s2, 1",
+    "s_waitcnt lgkmcnt(0)",
+    "v_readfirstlane_b32 s12, v8",
+    "v_readfirstlane_b32 s13, v9",
+    "s_waitcnt vmcnt(0)",
+    "v_xor_b32_e32 v9, s12, v2",
+    "v_add_nc_u32_e32 v7, v7, v9",
+    "v_add_nc_u32_e32 v7, s13, v7",
+    "s_branch BB10",
+    "BB12:",
+    "s_barrier",
+    "s_addk_i32 s0, 0x80",
+    "s_branch BB2",
+    "BB8:",
+    "buffer_store_dword v7, v1, s[8:11], 0 offen offset:16",
+    "BB9:",
+    "s_endpgm",
+]
+LDS_D_CONTRACT = {**LDS_GROUPS_CONTRACT, "numthreads": (128, 1, 1), "local_ids": 1, "lds_size": 2048,
+                  "constant_descriptor": 0x10}
+
+
+def lds_words(seed, count):
+    """Words with every byte pattern a sub-dword read must keep apart (high bits, sign bits)."""
+    out, state = [], (seed * 0x9e3779b9 + 0x7f4a7c15) & M32
+    for _ in range(count):
+        state = (state * 1664525 + 1013904223) & M32
+        out.append(state ^ (state >> 13))
+    return out
+
+
+def lds_memory(words, out_bytes):
+    before = struct.pack(f"<{len(words)}I", *words) + bytes(out_bytes)
+    return Memory([(LDS_BASE, LDS_BASE + len(before), 0)], [before]), before
+
+
+def lds_constants(size):
+    constants = [0] * 64
+    constants[8:12] = vsharp(LDS_BASE, 0, size, 3)
+    return constants
+
+
+def lds_a_reference(inputs, flaws):
+    seed, = inputs
+    xs = lds_words(seed, 512)
+    memory, before = lds_memory(xs, 16 * 512)
+    for group in range(2):
+        x = xs[256 * group:256 * group + 256]
+        a, b = list(x), [0x5a5a0000 | t for t in range(256)]
+        marker = list(b)
+        w = [(3 * v) & M32 for v in x]
+        if "offset" in flaws:
+            a = w  # the offset field dropped: the second write lands in A
+        else:
+            b = w
+        seen_b = marker if "barrier" in flaws else b  # the partner's rewrite not yet visible
+        step = {"stride8": 8, "stride1": 1}.get(next(iter(flaws), ""), 4)
+        for t in range(256):
+            tp = 255 - t
+            slots = a + seen_b
+            words = [seen_b[tp], a[tp], slots[(4 * tp + step) // 4], slots[(4 * tp + 64 * step) // 4]]
+            for j, word in enumerate(words):
+                memory.store(LDS_BASE + 2048 + 16 * (256 * group + t) + 4 * j, word)
+    return (2, 1, 1), lds_constants(len(before)), memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+def lds_b_reference(inputs, flaws):
+    seed, = inputs
+    data = lds_words(seed, 256)
+    data[0], data[1], data[2] = 0x80000000, 0x7fffffff, 0xffffffff  # signed and unsigned extremes
+    memory, before = lds_memory(data, 1024)
+    signed = (lambda v: v - (1 << 32) if v & 0x80000000 else v)
+    for group in range(2):
+        lds = [((t << 25) | t) & M32 for t in range(128)]
+        ops = LDS_B_OPS[:-1] if "barrier" in flaws else LDS_B_OPS
+        for k, op in enumerate(ops):
+            for t in range(128):
+                slot = (t & 7) + (0 if "offset" in flaws else 8 * k)
+                m, d = lds[slot], data[128 * group + t]
+                if op.endswith("i32") and "unsigned" not in flaws:
+                    m, d = signed(m), signed(d)
+                value = {"add_u32": m + d, "sub_u32": m - d if "sub_add" not in flaws else m + d,
+                         "min_u32": min(m, d), "max_u32": max(m, d), "min_i32": min(m, d), "max_i32": max(m, d),
+                         "and_b32": m & d, "or_b32": m | d, "xor_b32": m ^ d}[op]
+                lds[slot] = value & M32
+        for t in range(128):
+            memory.store(LDS_BASE + 1024 + 4 * (128 * group + t), lds[t])
+    return (2, 1, 1), lds_constants(len(before)), memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+LDS_C_INDICES = (0, 1, 5, 31, 32, 47, 60, 61, 62, 63, 64, 3, 0x0ffffe00, 17, 30, 9)
+
+
+def lds_c_reference(inputs, flaws):
+    seed, = inputs
+    records = []
+    for group, index in enumerate(LDS_C_INDICES):
+        d = lds_words(seed + group, 3)
+        d[(seed + group) % 3] |= 0x80808080  # sign bits in every byte and half
+        records += [index, *d]
+    memory, before = lds_memory(records, 2048)
+    size = 1024
+
+    def place(address):
+        if address < size:
+            return address
+        return address % size if "nobound" in flaws else None
+
+    for group in range(len(LDS_C_INDICES)):
+        lds = bytearray(size)
+        a, d0, d1, d2 = records[4 * group:4 * group + 4]
+        base = (a << 4) & M32
+        off = (lambda k: 0 if "offset" in flaws else k)
+        adj32 = 8 if "stride" in flaws else 4
+        adj64 = 4 if "stride" in flaws else 8
+        st = 1 if "st64" in flaws else 64
+
+        def write(address, value, width=4):
+            at = place(address)
+            if at is not None:
+                lds[at:at + width] = (value & ((1 << 8 * width) - 1)).to_bytes(width, "little")
+
+        def read(address, width=4):
+            at = place(address)
+            return 0 if at is None else int.from_bytes(lds[at:at + width], "little")
+
+        for j, v in enumerate((a, d0, d1, d2)):
+            write(base + off(0) + 4 * j, v)
+        for j, v in enumerate((d0, d1, d2)):
+            write(base + off(16) + 4 * j, v)
+        write(base + off(32), d1), write(base + off(32) + 4, d2)
+        write(base + off(40), d0)
+        if "byte_dword" in flaws:
+            write((base + off(17)) & ~3, d2)
+        else:
+            write(base + off(17), d2, 1)
+        write(base + off(26), d1, 2)
+        write(base + off(adj32 * 11), d2), write(base + off(adj32 * 12), d0)
+        for k, (lo, hi) in enumerate(((d1, d2), (a, d0))):
+            element = base + off(k * adj64 * st)
+            write(element, lo), write(element + 4, hi)
+        out = [read(base + off(0) + 4 * j) for j in range(4)]
+        out += [read(base + off(16) + 4 * j) for j in range(3)]
+        for k in (4, 5):
+            out += [read(base + off(k * adj64)), read(base + off(k * adj64) + 4)]
+        byte, half = read(base + off(17), 1), read(base + off(26), 2)
+        sign = (lambda v, bits: v if "nosign" in flaws or not v >> (bits - 1) else v | (M32 ^ ((1 << bits) - 1)))
+        out += [byte, sign(byte, 8), half, sign(half, 16)]
+        out += [read(base), read(base + off(2 * adj32 * st))]
+        out += [read(base + off(11 * adj32)), read(base + off(12 * adj32))]
+        for j, word in enumerate(out):
+            memory.store(LDS_BASE + 1024 + 128 * group + 4 * j, word)
+    groups = (len(LDS_C_INDICES), 1, 1)
+    return groups, lds_constants(len(before)), memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+def lds_d_reference(inputs, flaws):
+    seed, count = inputs
+    words = lds_words(seed, 8 * 512)  # 512 records of 32 bytes: x, y, z, w, then the output word and padding
+    memory, before = lds_memory(words, 0)
+    constants = lds_constants(len(before))
+    constants[1] = count
+    record = (lambda k, j: words[8 * k + j])
+    for group in range(3):
+        m = min(128, count - 128 * group)
+        for t in range(128):
+            index = 128 * group + t
+            if index >= count:
+                continue
+            pos = 0 if "pos_ignored" in flaws else record(index, 0)
+            acc, slots = 0, [(0, 0)] * 128
+            for chunk in range(0, count, 128):
+                for j in range(128):
+                    if chunk + j < count or "unmasked" in flaws:
+                        slots[j] = (record(chunk + j, 0), record(chunk + j, 1))
+                    elif "no_zero" not in flaws:
+                        slots[j] = (0, 0)
+                for j in range(m):
+                    x, y = slots[j]
+                    acc = (acc + (x ^ pos) + (0 if "y_ignored" in flaws else y)) & M32
+                if "one_chunk" in flaws:
+                    break
+            memory.store(LDS_BASE + 32 * index + 16, acc)
+    return (3, 1, 1), constants, memory.ranges, [before], [bytes(memory.slots[0])]
+
+
+LDS_PROGRAMS = [
+    (LDS_A, LDS_A_CONTRACT, [(1,), (2,)], lds_a_reference, [{"barrier"}, {"offset"}, {"stride8"}, {"stride1"}]),
+    (LDS_B, LDS_B_CONTRACT, [(3,), (4,)], lds_b_reference,
+     [{"barrier"}, {"offset"}, {"unsigned"}, {"sub_add"}]),
+    (LDS_C, LDS_C_CONTRACT, [(5,), (6,)], lds_c_reference,
+     [{"offset"}, {"stride"}, {"st64"}, {"nobound"}, {"byte_dword"}, {"nosign"}]),
+    (LDS_D, LDS_D_CONTRACT, [(7, 300), (8, 200)], lds_d_reference,
+     [{"no_zero"}, {"one_chunk"}, {"unmasked"}, {"pos_ignored"}, {"y_ignored"}]),
+]
+BATCHED = {"lds"}  # families dispatched through --check-compute-batch (one renderer launch per program)
+
+
 FAMILIES = {"ids": IDS_PROGRAMS, "store": STORE_PROGRAMS, "integrate": INTEGRATE_PROGRAMS,
             "image": IMAGE_PROGRAMS, "cf": CF_PROGRAMS, "neutral": NEUTRAL_PROGRAMS, "lanes": LANES_PROGRAMS,
-            "dynsmem": DYNSMEM_PROGRAMS}
+            "dynsmem": DYNSMEM_PROGRAMS, "lds": LDS_PROGRAMS}
 
 
 def check_reference_arithmetic():
@@ -1405,8 +1771,9 @@ def check_refusals():
     must_reject(lambda: compute_aot.lower_compute([*head, store], **base))  # no s_endpgm
     must_reject(program(store, "s_endpgm"))  # an instruction after the end
     assert "buffer_store32" in program(store)()
-    # Cross-lane, LDS, barrier, atomics, images, global stores, control flow and the pixel stage's own forms.
-    for bad in ("ds_write_b32 v4, v0", "ds_read_b32 v5, v4", "s_barrier", "v_readfirstlane_b32 s5, v0",
+    # Cross-lane, LDS without an allocation (C-6), atomics, images, global stores, control flow and the pixel stage's
+    # own forms.
+    for bad in ("ds_write_b32 v4, v0", "ds_read_b32 v5, v4", "v_readfirstlane_b32 s5, v0",
                 "v_readlane_b32 s5, v0, 1", "v_writelane_b32 v5, s0, 1", "v_mbcnt_lo_u32_b32 v5, -1, 0",
                 "s_bcnt1_i32_b64 s5, exec", "s_ff1_i32_b64 s5, exec", "v_permlane16_b32 v5, v0, s0, s0",
                 "buffer_atomic_add v0, v4, s[8:11], 0 offen", "global_store_dword v[4:5], v0, off",
@@ -1619,6 +1986,100 @@ def check_dynsmem_refusals():
     refuses(edit(b, "BB14:", "BB14:", "v_add_nc_u32_e32 v1, s15, v1"), DYNSMEM_B_CONTRACT, "Descriptor state differs")
 
 
+def check_lds_refusals():
+    """Neighbours of the lds programs (card C-6) that must stay refused, each with the reason it must give."""
+    def refuses(program, contract, reason):
+        try:
+            compute_aot.lower_compute(program, **contract)
+        except ValueError as error:
+            assert reason in str(error), (reason, str(error))
+            return
+        raise AssertionError(f"Accepted a program that must be refused ({reason})")
+
+    def edit(program, old, *new):
+        at = program.index(old)
+        return [*program[:at], *new, *program[at + 1:]]
+
+    a, b, c, d = LDS_A, LDS_B, LDS_C, LDS_D
+    ca, cb, cc, cd = LDS_A_CONTRACT, LDS_B_CONTRACT, LDS_C_CONTRACT, LDS_D_CONTRACT
+    # The contract: no allocation, a size that is not a multiple of 16, past D3D12's 32 KiB, not an integer.
+    for size, reason in ((0, "without an LDS allocation"), (1000, "Invalid LDS size"), (65536, "Invalid LDS size"),
+                         (-16, "Invalid LDS size"), (True, "Invalid LDS size"), (64.0, "Invalid LDS size")):
+        refuses(a, {**ca, "lds_size": size}, reason)
+    # The pixel stage lowers neither LDS nor barriers.
+    for line in ("ds_read_b32 v12, v12", "ds_write_b32 v12, v12", "s_barrier"):
+        must_reject(common.translate, common.with_constants([line]))
+    # Alignment the address does not prove: a dword at a byte address, a b64 at a dword address, b128 and b96 at 8,
+    # an offset field off the access size, a half at an odd offset, ds_read2_b64 from a dword address.
+    refuses(edit(a, "ds_read_b32 v11, v7", "ds_read_b32 v11, v0"), ca, "alignment to 4")
+    refuses(edit(c, "ds_write_b64 v4, v[2:3] offset:32", "ds_write_b64 v4, v[2:3] offset:36"), cc, "alignment to 8")
+    refuses(edit(c, "v_lshlrev_b32_e32 v4, 4, v0", "v_lshlrev_b32_e32 v4, 3, v0"), cc, "alignment to 16")
+    refuses(edit(c, "ds_write_b32 v4, v1 offset:40", "ds_write_b32 v4, v1 offset:42"), cc, "alignment to 4")
+    refuses(edit(c, "ds_read_u16 v22, v4 offset:26", "ds_read_u16 v22, v4 offset:27"), cc, "alignment to 2")
+    refuses(edit(c, "ds_write_b96 v4, v[1:3] offset:16", "ds_write_b96 v4, v[1:3] offset:20"), cc, "alignment to 16")
+    # A translation-time address outside the allocation.
+    refuses(edit(c, "v_lshlrev_b32_e32 v4, 4, v0", "v_mov_b32_e32 v4, 0x3f0"), cc, "translation-time address")
+    assert "lds_load32" in compute_aot.lower_compute(edit(c, "v_lshlrev_b32_e32 v4, 4, v0", "v_mov_b32_e32 v4, 0x100"),
+                                                     **cc)
+    # Races between threads with no barrier between: the partner's word read in the epoch it is written (A's second
+    # barrier and B's last one removed), a write that every thread makes to one word, a write to the partner's word,
+    # two atomic operations in one epoch, an atomic and a read, and a write after the loop's reads that the back edge
+    # brings before them (D without its second barrier). A's first barrier separates only private words: each thread
+    # writes its own A and B words on both sides, which needs no barrier, and is accepted without it.
+    race = "may race with another thread"
+    first, second = [n for n, line in enumerate(a) if line == "s_barrier"]
+    assert "lds_load32" in compute_aot.lower_compute([*a[:first], *a[first + 1:]], **ca)
+    refuses([*a[:second], *a[second + 1:]], ca, race)
+    refuses(b[:len(b) - 1 - b[::-1].index("s_barrier")] + b[len(b) - b[::-1].index("s_barrier"):], cb, race)
+    refuses(edit(a, "ds_write_b32 v9, v5", "v_mov_b32_e32 v15, 0x400", "ds_write_b32 v15, v5"), ca, race)
+    refuses(edit(a, "ds_write_b32 v3, v6 offset:1024", "v_xor_b32_e32 v15, 0x3fc, v3", "ds_write_b32 v15, v6"), ca,
+            race)
+    refuses(edit(b, "ds_sub_u32 v5, v6 offset:32", "ds_add_u32 v5, v6 offset:32", "ds_sub_u32 v5, v6 offset:32"), cb,
+            race)
+    refuses(edit(b, "ds_sub_u32 v5, v6 offset:32", "ds_sub_u32 v5, v6 offset:32", "ds_read_b32 v9, v5"), cb, race)
+    tail = len(d) - 1 - d[::-1].index("s_barrier")
+    refuses([*d[:tail], *d[tail + 1:]], cd, race)
+    # A one-thread group has no other thread: C's accesses need no barrier, and A in one thread neither.
+    assert "lds_atomic" in compute_aot.lower_compute([line for line in b if line != "s_barrier"],
+                                                     **{**cb, "numthreads": (1, 1, 1), "local_ids": 2})
+    # Barriers HLSL cannot keep: one in a loop a lane may leave (a lane-local exit), one in a region a wave may skip
+    # with another barrier after the region, one in such a region inside a loop, one on one path of a uniform branch
+    # (the other path's accesses join the epoch, so D's read after it races), and one in the pixel stage.
+    divergent = ["v_mov_b32_e32 v1, 0", "s_mov_b64 s[60:61], exec", "BB1:", "s_mov_b64 s[62:63], exec",
+                 "v_cmpx_ge_u32_e32 v1, v0", "BB2:", "s_andn2_b64 s[62:63], s[62:63], exec", "s_cbranch_scc0 BB4",
+                 "BB3:", "s_mov_b64 exec, s[62:63]", "s_barrier", "v_add_nc_u32_e32 v1, 1, v1", "s_branch BB1", "BB4:",
+                 "s_mov_b64 exec, s[60:61]", "s_endpgm"]
+    loop_contract = {"numthreads": (64, 1, 1), "wave": 64, "sgprs": {}, "local_ids": 1}
+    refuses(divergent, loop_contract, "not workgroup-uniform")
+    assert "while" in compute_aot.lower_compute([line for line in divergent if line != "s_barrier"], **loop_contract)
+    one_path = [*a[:second], "s_cmp_eq_u32 s0, 0", "s_cbranch_scc1 BB2", "BB1:", "s_barrier", "BB2:", *a[second + 1:]]
+    refuses(one_path, ca, race)
+    assert "GroupMemoryBarrierWithGroupSync" in compute_aot.lower_compute(
+        [*a[:second], "s_cmp_eq_u32 s0, 0", "s_cbranch_scc1 BB2", "BB1:", "s_barrier", "s_branch BB3", "BB2:",
+         "s_barrier", "BB3:", *a[second + 1:]], **ca)
+    refuses(edit(d, "BB9:", "BB9:", "s_barrier"), cd, "region a wave may skip")
+    skipped = ["v_cmpx_gt_u32_e32 64, v0", "s_cbranch_execz BB2", "BB1:", "s_barrier", "BB2:", "s_endpgm"]
+    assert "GroupMemoryBarrierWithGroupSync" in compute_aot.lower_compute(skipped, numthreads=(128, 1, 1), wave=64,
+                                                                          sgprs={}, local_ids=1)
+    looped = ["s_mov_b32 s4, 0", "BB0:", "v_cmpx_gt_u32_e32 64, v0", "s_cbranch_execz BB2", "BB1:", "s_barrier",
+              "BB2:", "s_add_u32 s4, s4, 1", "s_cmp_lt_u32 s4, 4", "s_cbranch_scc1 BB0", "BB3:", "s_endpgm"]
+    refuses(looped, {"numthreads": (128, 1, 1), "wave": 64, "sgprs": {}, "local_ids": 1}, "region a wave may skip")
+    # The LDS wait count: a read result used, or overwritten, before s_waitcnt lgkmcnt(0).
+    read2 = "ds_read2_b32 v[12:13], v7 offset0:1 offset1:64"
+    refuses(edit(a, read2, read2, "v_mov_b32_e32 v15, v10"), ca, "before s_waitcnt lgkmcnt(0)")
+    refuses(edit(a, "v_lshlrev_b32_e32 v14, 4, v1", "v_lshlrev_b32_e32 v11, 4, v1"), ca, "before s_waitcnt lgkmcnt(0)")
+    refuses(edit(c, "ds_read_b96 v[12:14], v4 offset:16", "ds_read_b96 v[8:10], v4 offset:16"), cc,
+            "before s_waitcnt lgkmcnt(0)")
+    # v_readfirstlane_b32 of an LDS word read at an address that is not workgroup-uniform (the thread's own slot).
+    refuses(edit(d, "v_mov_b32_e32 v8, s3", "v_lshlrev_b32_e32 v8, 4, v0"), cd, "not provably wave-uniform")
+    # Cross-lane, ordered, GDS and returning forms stay refused.
+    for line, reason in (("ds_swizzle_b32 v5, v4 offset:swizzle(SWAP,1)", "permutation"),
+                         ("ds_bpermute_b32 v5, v4, v3", "permutation"), ("ds_permute_b32 v5, v4, v3", "permutation"),
+                         ("ds_write_b32 v4, v5 gds", "GDS"), ("ds_append v5", "ordered"),
+                         ("ds_add_rtn_u32 v6, v4, v5", "Unsupported instruction")):
+        refuses(edit(c, "s_waitcnt lgkmcnt(0)", line, "s_waitcnt lgkmcnt(0)"), cc, reason)
+
+
 def check_adapter_skip(directory):
     """Without a hardware adapter the renderer exits 77 and every family must report that skip, not a failure."""
     compiler, renderer = "stub-dxc", "stub-offscreen"
@@ -1648,6 +2109,7 @@ def check_controls(directory):
         check_separation(name, programs)
     check_refusals()
     check_dynsmem_refusals()
+    check_lds_refusals()
     check_adapter_skip(directory)
 
 
