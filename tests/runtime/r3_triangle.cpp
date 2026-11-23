@@ -75,13 +75,14 @@ constexpr SIZE_T title_bytes = 64 * 1024;
 constexpr UINT root_constants = 0;  // root CBV b0: the colour
 constexpr UINT root_positions = 1;  // root SRV t0: the vertex buffer
 
-// Container (d3d12_xs_api.h) around one program.
+// Container (d3d12_xs_api.h) around one program. R3 keeps writing version 1 containers (no pixel input layout), as
+// before version 2: they must keep translating, with the same roles and keys.
 std::vector<std::uint8_t> container(X2WShaderStage stage, const std::uint8_t* code, std::size_t bytes,
                                     const std::vector<X2WShaderBinding>& bindings)
 {
     X2WShaderContainer header{};
     header.magic = X2W_SHADER_CONTAINER_MAGIC;
-    header.version = X2W_SHADER_CONTAINER_VERSION;
+    header.version = 1;
     header.stage = stage;
     header.binding_count = static_cast<std::uint32_t>(bindings.size());
     header.binding_offset = sizeof(header);

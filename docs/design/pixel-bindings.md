@@ -131,7 +131,9 @@ S_0286CC_*_ENA, bits 0..15: persp_sample, persp_center, persp_centroid, persp_pu
 linear_centroid, line_stipple, pos_x, pos_y, pos_z, pos_w, front_face, ancillary, sample_coverage, pos_fixed_pt). The
 inputs whose ADDR bit is set take VGPRs from v0 in bit order (two for a barycentric pair, three for pull_model, one for
 the others), and those whose ENA bit is set too are loaded; ENA is a subset of ADDR and has a barycentric input. ACO sets
-ADDR equal to ENA. `bindings.input_vgprs` gives the layout.
+ADDR equal to ENA. `bindings.input_vgprs` gives the layout. At run time the layout comes from a version 2 console
+container's `X2WShaderPixelInfo` record (`src/d3d12_xs_api.h`; docs/design/runtime.md, "Pixel input layout"), which
+the shim passes to `tools/pso_translate.py` as the pixel roles' `ps_input_ena` and `ps_input_addr`.
 
 Lowered inputs: persp_center (bary_i, bary_j, what `v_interp` reads; the desktop interpolates at the pixel centre), and
 from the HLSL inputs `SV_Position` and `SV_IsFrontFace`: pos_x and pos_y the pixel centre (x + 0.5, y + 0.5), pos_z the

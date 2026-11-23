@@ -122,8 +122,14 @@ X2W_GFX_API HRESULT WINAPI X2WGfxCreateSwapChainForHwnd(IUnknown* queue, HWND wi
 // size and wave size a title's compute pipeline state gives the console GPU); the other stages have none and leave
 // stage_info_offset 0. A compute binding is a root-parameter word (an inline user-data word of the program) or a
 // workgroup id component.
+// Version 2 adds the pixel stage's input-VGPR layout: a pixel container may point stage_info_offset at an
+// X2WShaderPixelInfo record (SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR, docs/design/pixel-bindings.md "Input VGPRs").
+// A pixel container without one (stage_info_offset 0, and every version 1 container) has the default layout,
+// persp_center alone in v0 and v1, as before. Version 1 containers are still accepted unchanged; a version 1 pixel
+// container with a nonzero stage_info_offset is malformed, as it always was.
 #define X2W_SHADER_CONTAINER_MAGIC 0x53573258u  // "X2WS"
-#define X2W_SHADER_CONTAINER_VERSION 1u
+#define X2W_SHADER_CONTAINER_VERSION 2u
+#define X2W_SHADER_CONTAINER_VERSION_MIN 1u
 
 typedef enum X2WShaderStage {
     X2W_SHADER_STAGE_VERTEX = 0,
@@ -148,7 +154,8 @@ typedef struct X2WShaderContainer {
     uint32_t binding_offset;  // byte offset of the bindings from the start of the container
     uint32_t code_offset;     // byte offset of the code, 4-byte aligned
     uint32_t code_bytes;
-    uint32_t stage_info_offset;  // compute: byte offset of the X2WShaderComputeInfo record; other stages: 0
+    uint32_t stage_info_offset;  // compute: byte offset of the X2WShaderComputeInfo record; pixel (version 2): 0
+                                 // or the byte offset of an X2WShaderPixelInfo record; vertex: 0
 } X2WShaderContainer;
 
 typedef struct X2WShaderComputeInfo {
@@ -156,6 +163,17 @@ typedef struct X2WShaderComputeInfo {
     uint32_t wave;            // 32 or 64: the console wave size the program was compiled for
     uint32_t local_ids;       // 1 to 3: how many of v0, v1, v2 hold the local ids (TIDIG_COMP_CNT + 1)
 } X2WShaderComputeInfo;
+
+// The pixel program's input VGPRs (version 2). AMD's register layout (Mesa sid.h S_0286CC_*_ENA), bits 0..15:
+// persp_sample, persp_center, persp_centroid, persp_pull_model, linear_sample, linear_center, linear_centroid,
+// line_stipple, pos_x, pos_y, pos_z, pos_w, front_face, ancillary, sample_coverage, pos_fixed_pt. The inputs whose
+// ADDR bit is set take VGPRs from v0 in bit order (two for a barycentric pair, three for pull_model, one for the
+// others); those whose ENA bit is set too are loaded. ENA must be a subset of ADDR with a barycentric input
+// (bits 0..6); bits 16..31 must be 0. ps_input_addr 0 means ADDR equal to ENA (as ACO sets it).
+typedef struct X2WShaderPixelInfo {
+    uint32_t ps_input_ena;   // SPI_PS_INPUT_ENA
+    uint32_t ps_input_addr;  // SPI_PS_INPUT_ADDR, or 0 for ADDR = ENA
+} X2WShaderPixelInfo;
 
 typedef struct X2WShaderBinding {
     uint32_t sgpr;            // entry SGPR number, 0..105

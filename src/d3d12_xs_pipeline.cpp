@@ -265,7 +265,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
     Sha256 sha;
-    sha.update_text("x2w-pso-translate-5");
+    sha.update_text("x2w-pso-translate-6");
     fingerprint_tree(sha, config->tools, 2);
     const std::wstring header = config->tools + L"\\..\\src";
     WIN32_FIND_DATAW found;
@@ -317,6 +317,10 @@ struct Program {
     std::uint32_t code_bytes = 0;
     std::vector<X2WShaderBinding> bindings;
     X2WShaderComputeInfo compute{};  // compute stage only
+    // Pixel stage: the input-VGPR layout (X2WShaderPixelInfo, container version 2); the default is persp_center
+    // alone (SPI_PS_INPUT_ENA bit 1) with ADDR equal to ENA.
+    std::uint32_t ps_input_ena = 2;
+    std::uint32_t ps_input_addr = 2;
 };
 
 enum class Parsed { desktop, container, malformed };
@@ -350,16 +354,32 @@ Parsed parse_container(const void* data, SIZE_T size, Program& out, std::string&
         std::uint64_t(header.binding_offset) + std::uint64_t(header.binding_count) * sizeof(X2WShaderBinding);
     const std::uint64_t code_end = std::uint64_t(header.code_offset) + header.code_bytes;
     const bool compute = header.stage == X2W_SHADER_STAGE_COMPUTE;
-    const std::uint64_t info_end = std::uint64_t(header.stage_info_offset) + sizeof(X2WShaderComputeInfo);
-    if (header.version != X2W_SHADER_CONTAINER_VERSION || header.stage > X2W_SHADER_STAGE_COMPUTE ||
-        (compute ? !header.stage_info_offset || header.stage_info_offset % 4 || info_end > size
-                 : header.stage_info_offset != 0) ||
+    // Version 2: a pixel container may carry an X2WShaderPixelInfo record (its input-VGPR layout).
+    const bool pixel_info = header.stage == X2W_SHADER_STAGE_PIXEL && header.version >= 2 && header.stage_info_offset;
+    const std::uint64_t info_end =
+        std::uint64_t(header.stage_info_offset) + (compute ? sizeof(X2WShaderComputeInfo) : sizeof(X2WShaderPixelInfo));
+    if (header.version < X2W_SHADER_CONTAINER_VERSION_MIN || header.version > X2W_SHADER_CONTAINER_VERSION ||
+        header.stage > X2W_SHADER_STAGE_COMPUTE ||
+        (compute || pixel_info ? !header.stage_info_offset || header.stage_info_offset % 4 || info_end > size
+                               : header.stage_info_offset != 0) ||
         header.binding_count > 32 || binding_end > size ||
         header.code_offset % 4 || header.code_bytes % 4 || !header.code_bytes || code_end > size) {
         why = "malformed container header";
         return Parsed::malformed;
     }
     if (compute) std::memcpy(&out.compute, bytes + header.stage_info_offset, sizeof(out.compute));
+    if (pixel_info) {
+        X2WShaderPixelInfo info;
+        std::memcpy(&info, bytes + header.stage_info_offset, sizeof(info));
+        if ((info.ps_input_ena | info.ps_input_addr) >> 16) {
+            why = "malformed pixel input layout (SPI_PS_INPUT_ENA/ADDR have 16 bits)";
+            return Parsed::malformed;
+        }
+        // Whether ENA is a subset of ADDR with a barycentric input is the translator's check (it refuses with the
+        // reason); the shim only passes the words on, and they are part of the key through the roles.
+        out.ps_input_ena = info.ps_input_ena;
+        out.ps_input_addr = info.ps_input_addr ? info.ps_input_addr : info.ps_input_ena;
+    }
     out.stage = header.stage;
     out.code = bytes + header.code_offset;
     out.code_bytes = header.code_bytes;
@@ -1077,7 +1097,19 @@ HRESULT translate_graphics(const D3D12_SHADER_BYTECODE& vs_code, const D3D12_SHA
         if (ps_roles.back() != '{') ps_roles += ", ";
         ps_roles += entry;
     }
-    ps_roles += "}}";
+    ps_roles += "}";
+    // The input-VGPR layout (container version 2), only when it is not the default persp_center alone, so the roles
+    // (and with them the key and input id) of every pixel container without one are unchanged.
+    if (ps.ps_input_ena != 2 || ps.ps_input_addr != 2) {
+        char layout[96];
+        std::snprintf(layout, sizeof(layout), ", \"ps_input_ena\": %u", ps.ps_input_ena);
+        ps_roles += layout;
+        if (ps.ps_input_addr != ps.ps_input_ena) {
+            std::snprintf(layout, sizeof(layout), ", \"ps_input_addr\": %u", ps.ps_input_addr);
+            ps_roles += layout;
+        }
+    }
+    ps_roles += "}";
 
     // The pipeline's missing shaders translate together; the first that fails is reported, as when they were
     // translated one after another. When the pixel program stores to title memory and the vertex program reads it
