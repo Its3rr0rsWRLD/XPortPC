@@ -2799,7 +2799,44 @@ The warm time includes the once-per-process converter fingerprint (a directory w
 
 PC results at the R4 tip (RTX 4070 Ti and WARP): all R2, R3 and R4 cases, the `d3d12_xs_shim_*` cases and `pixel_aot_controls`/`vertex_aot_controls` pass (30 of 30).
 
-Not covered yet: textures from console tiled bytes (the console's texture upload path is not public; the scene uploads rows through `CopyTextureRegion`), descriptor words written to title memory, recycled descriptor blocks, compute.
+Not covered yet: textures from console tiled bytes (the console's texture upload path is not public; the scene uploads rows through `CopyTextureRegion`), descriptor words written to title memory (descriptor-block recycling and compute came with R5).
+
+#### Compute and a frame loop (runtime rung R5)
+
+`d3d12_xs.dll` translates console compute shaders in `CreateComputePipelineState` and runs them on any queue type ([runtime.md](design/runtime.md), section 6; `src/d3d12_xs_pipeline.h`).
+
+- **Container.** `X2W_SHADER_STAGE_COMPUTE`. The header's last word, formerly `reserved`, is now `stage_info_offset`: for compute it points at an `X2WShaderComputeInfo` record (workgroup size, wave size 32 or 64, local-id VGPR count); the other stages keep it 0. Bindings: root words, which become push words in binding order (the program reads them as inline user data, `compute_aot` role `user:N`), and `X2W_SHADER_BINDING_GROUP_ID` (value 16) for a workgroup id component. A descriptor-table binding is refused, and so is a translation that reads a table (compute tables in title heaps stay refused, as in R4).
+- **Translation.** `tools/pso_translate.py --stage compute` lowers with `compute_aot.lower_compute`, drops its offline `[RootSignature]`, moves its 64 constant words onto the 32 push words (`b3 space1000`), refusing a read of a word past them or at a run-time index, and compiles with `-Gis -T cs_6_0`. Title memory is `RWByteAddressBuffer title_memory[8]` at `u0..u7 space1001`. The key covers the role map, which includes the workgroup and wave size.
+- **Root signatures.** The title-memory table is R4's SRVs and miss counter followed by 8 raw UAVs over the same ranges (17 descriptors per view block). It costs no root DWORD.
+- **Dispatch.** Lists record compute root arguments apart from graphics ones. Before a `Dispatch` of a translated pipeline, `bind_for_dispatch` sets the push words, ranges, title-memory table and the placeholders of descriptor-table parameters through the compute root arguments. Compute queues, allocators, lists and cross-queue `Wait`/`Signal` were already pass-throughs of the R2 wrappers.
+- **Block recycling.** The shim's shader-visible blocks (256 title-memory views, 4096 texture tables, 512 sampler tables) used to be handed out once. Now a list holds every block its draws and dispatches read until it is reset or destroyed. Each `ExecuteCommandLists` stamps those blocks with the next value of a per-queue fence that the shim signals right after the lists (up to 16 queues; more are logged and never recycled). A block is rewritten only when no list holds it and all its stamps have completed. Texture and sampler blocks drop their old key when reused. The ranges of every view block live in one persistently mapped upload buffer with a 256-byte slice per block, replacing one 64 KiB committed buffer per view.
+- **gfx_text.py** verifies `buffer_load_dwordx4`, `buffer_store_dwordx2`, `buffer_store_dwordx4`, `s_barrier` (printed without its zero immediate), `s_lshl_b32`, `v_subrev_f32`.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_r5_programs` | `tests/runtime/r5_programs_check.py check`. `r5_programs.h` decodes to `r5_cs.s`/`r5_refused_cs.s` line for line. `r5_cs` translates under the shim's role map and declares only `b1`, `b3`, `t2`, `u0` (space 1000) and `u0` (space 1001), with `[numthreads(4, 1, 1)]` and no root signature. `r5_refused_cs` is refused with "s_barrier is card C-6". A contract without a workgroup size and a read past the push words are refused. The committed bytes were assembled with llvm-mc 18 (the R3 programs with 15); given llvm-mc, bytes and text are compared for the programs and 14 forms. |
+| `runtime_r5_frames_cold_warp`, `_hardware` | `tests/runtime/r5_frames.cpp`. Title memory holds 8 colours at 256-byte steps, 8 particle states (cx, cy, vx, vy) and 8 x 128 bytes of vertices. Each of 600 frames records a compute list: root UAVs with the title addresses of states and vertices, a root constant with the half-size, `Dispatch(2, 1, 1)`. `r5_cs.s` builds raw V#s around the addresses, adds the velocity, stores the state and writes the six corners of the particle's quad. That list runs on a `COMPUTE` queue, which first waits for the previous frame's graphics fence, and then signals its own fence. The direct queue waits for that fence, clears a 256x256 back buffer, draws each particle with the R3 programs (root SRV = its 6 vertices, root CBV = its colour) and presents with two frames in flight. Frames 0, 1, 149, 299, 449 and 599 are read back and must equal the CPU reference bit for bit. In the reference, every edge sits at an odd multiple of 1/32 pixel and every velocity is even, so no pixel centre lies on an edge in any of the 601 states and all values are exact in binary32. After the loop, the CPU reads the states and vertices through the alias and they must equal the reference's words. Also required: 3 shaders translated, no shader loaded during the loop, no refusal, no TitleLookup miss, no debug-layer error, handle growth <= 16 and private-byte growth < 8 MB between frames 100 and 599, every wrapper released. |
+| `runtime_r5_frames_warm_*` | After cold: the same run with 3 shaders from the cache and none translated. |
+| `runtime_r5_wrong_reference_*` | Control: the reference is 16 compute steps stale, which is what a missing cross-queue wait could show. Passes only when the read-back frames differ in exactly the pixels where the two references differ (48, 48, 614, 606, 601 and 576 pixels on both adapters). |
+| `runtime_r5_view_churn_*` | As warm. Each frame also allocates 64 KiB of graphics title memory and frees the allocation made three frames earlier, so the title-memory view changes 600 times on one device (more than the 256 view blocks). It passes only if blocks are recycled: no draw or dispatch is refused, and frames and memory match. |
+| `runtime_r5_refused_warp` | `r5_refused_cs` fails `CreateComputePipelineState` with `E_NOTIMPL`, and so do a vertex container in the compute slot and a compute container in the vertex slot. There are three REFUSED events, one naming `s_barrier`, and no shader is translated. |
+
+PC results at r5 tip `45a9d4a0` (RTX 4070 Ti and WARP): all R2, R3, R4 and R5 cases, the `d3d12_xs_shim_*` cases and `compute_aot_controls` pass (39 of 39).
+
+Frame time, from a diagnostic run of the same code (`r5_frames`, debug layer on, `Present(0, 0)` to a flip-discard swap chain, two frames in flight, 8 draws and one dispatch per frame). The time is the interval between successive Present returns, over frames 1 to 599; the first frame is not counted. These numbers are published, not gated:
+
+| Adapter | Run | avg ms | p50 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| WARP | cold | 3.15 | 1.07 | 34.5 | 317 |
+| WARP | warm (3 runs) | 1.55, 2.38, 1.72 | 0.83, 0.86, 0.89 | 5.2, 19.9, 6.0 | 270, 277, 267 |
+| WARP | view churn | 2.10 | 1.48 | 6.2 | 214 |
+| RTX 4070 Ti | cold | 1.00 | 0.83 | 3.6 | 4.4 |
+| RTX 4070 Ti | warm (3 runs) | 1.24, 1.45, 0.92 | 1.03, 0.93, 0.78 | 4.5, 8.9, 3.1 | 5.9, 30.9, 3.8 |
+| RTX 4070 Ti | view churn | 1.79 | 1.69 | 3.7 | 5.5 |
+
+Pipeline creation: cold 0.60 s for compute and 1.0 to 1.9 s for vertex + pixel; warm 15 to 31 ms for compute and 2 to 10 ms for graphics. WARP's maximum (about 0.2 to 0.3 s, one frame per run) and its heavier p99 tail are single stalls of the software rasterizer. Churn costs about 0.6 to 0.8 ms per frame on top of warm: an `XMemAlloc` (`OpenExistingHeapFromAddress` plus a placed buffer), a free and new view descriptors every frame.
+
+Not covered yet: compute descriptor tables in title heaps, LDS and barriers in the runtime path (C-6), global stores (C-5). The converter parameters still take 46 of 64 root DWORDs, 32 of them push words; a per-draw upload ring for push words would free most of that.
 
 ### Attribute words at xmem call sites
 
