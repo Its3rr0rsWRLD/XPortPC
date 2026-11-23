@@ -127,6 +127,14 @@ names at run time. `x2w_launch` therefore hooks the program's `LoadLibrary*`, `G
 `xgameruntime.dll` with every spec function is always built), and each load and resolve is logged once
 (`dynamic-load`, `dynamic-resolve`). `tools/shimgen.py --run-log` turns those lines into shims.
 
+Measured on the five stand-in GDK samples (Microsoft's public Xbox-GDK-Samples built for PC, 2026-11-22):
+every one loads `xgameruntime.dll` and asks it only for `QueryApiImpl`, `InitializeApiImpl`,
+`InitializeApiImplEx`, `InitializeApiImplEx2`, `XErrorReport` and `UninitializeApiImpl`. The PC runtime's
+boundary is therefore an interface query, not the flat API names, and no public document describes those
+interfaces, so the generated shims cannot serve PC GDK builds; the launcher passes names a shim lacks to the
+Windows DLL of that name (`windows-fallback`) so such programs keep running and their logs stay useful.
+Whether console builds import the flat names is what the first console report will show.
+
 ## 3. Graphics: console D3D12 over desktop D3D12
 
 The console D3D12 surface beyond the public desktop API is **not publicly documented**. What we may use:
