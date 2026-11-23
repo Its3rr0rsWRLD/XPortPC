@@ -19,6 +19,17 @@
 //   r3_triangle warp refused                   a vertex program the translator refuses fails the pipeline with
 //                                              E_NOTIMPL and one REFUSED event naming the refused export, also when
 //                                              it comes in a stream
+//   r3_triangle warp|hardware xmem_sources     the title memory layer (src/xmem_title.h): after 300 live graphics
+//                                              allocations, the triangle is drawn from title memory of each kind:
+//                                              an arena allocation at a nonzero arena offset, a standalone allocation
+//                                              (8 MiB alignment), a mapped title physical page (not the pool's first),
+//                                              and hook memory adopted as GPU-visible. Each frame must equal the
+//                                              reference with no TitleLookup miss. Control: plain VirtualAlloc memory
+//                                              the layer never saw must miss (frame = clear colour, misses > 0). With
+//                                              a graphics window configured, every layer address must lie in it.
+//   r3_triangle warp|hardware xmem_slots_control
+//                                              control, run with X2W_XMEM_LAYOUT=standalone: the same 300 allocations
+//                                              each take a title memory slot, so the draw is refused (no triangle)
 //
 // Each drawing mode renders one 64x64 R8G8B8A8_UNORM frame (clear, draw, read back, present) and compares every
 // pixel with a CPU reference: pixel centres strictly inside the triangle (exact integer edge functions; the vertices
@@ -29,6 +40,7 @@
 #include "runtime_common.h"
 #include "era_title_gpu_api.h"
 #include "r3_programs.h"
+#include "xmem_title_api.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -37,11 +49,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "../test_guard.h"
 
 using Microsoft::WRL::ComPtr;
 
-extern "C" __declspec(dllimport) void* XMemAlloc(SIZE_T bytes, ULONGLONG attributes);
-extern "C" __declspec(dllimport) void XMemFree(void* allocation, ULONGLONG attributes);
 
 namespace {
 
@@ -478,6 +489,171 @@ int triangle_check(bool warp, std::string_view mode)
     return released.live_objects == 0 ? rc : 1;
 }
 
+// The vertex program's inputs at `title` (colour at +0, positions at +256).
+void write_inputs(std::uint8_t* title)
+{
+    float color[4], positions[3][4];
+    for (int c = 0; c < 4; ++c) color[c] = triangle_rgba[c] / 255.0f;
+    for (int v = 0; v < 3; ++v) {
+        positions[v][0] = vertices[v][0] / 32.0f - 1.0f;
+        positions[v][1] = 1.0f - vertices[v][1] / 32.0f;
+        positions[v][2] = 0.0f;
+        positions[v][3] = 1.0f;
+    }
+    std::memcpy(title + constants_offset, color, sizeof(color));
+    std::memcpy(title + positions_offset, positions, sizeof(positions));
+}
+
+std::uint8_t* g_hook_block = nullptr;
+PVOID WINAPI adopting_alloc(SIZE_T, ULONGLONG) { return g_hook_block + 64 * 1024; }
+void WINAPI adopting_free(PVOID, ULONGLONG) {}
+
+int sources_check(bool warp, bool slots_control)
+{
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // each line survives a crash
+    std::vector<std::uint8_t> expected;
+    unsigned covered = 0;
+    reference(0, expected, covered);
+    std::printf("covered_pixels=%u\n", covered);
+    // 300 live graphics allocations of mixed shapes, more than the converter's 8 title memory slots.
+    std::vector<std::pair<void*, ULONGLONG>> many;
+    for (unsigned i = 0; i < 300; ++i) {
+        const ULONGLONG w = (ULONGLONG{1 + i % 6} << 29) | (ULONGLONG{i % 2} << 14) | (ULONGLONG{(i * 3) % 13} << 24);
+        many.emplace_back(XMemAlloc(256 + (i % 5) * 1000, w), w);
+        if (!many.back().first) {
+            std::fputs("r3: XMemAlloc failed\n", stderr);
+            return 1;
+        }
+    }
+    X2WXMemWindow windows[2]{};
+    std::uint32_t window_count = 0;
+    X2WXMemGetWindows(windows, 2, &window_count);
+    const X2WXMemWindow graphics = windows[X2W_XMEM_WINDOW_GRAPHICS];
+    std::printf("graphics_window=[0x%llx,0x%llx)\n", static_cast<unsigned long long>(graphics.begin),
+                static_cast<unsigned long long>(graphics.end));
+    Recorded recorded;
+    int rc = 1;
+    {
+        Gpu gpu;
+        if (const int created = gpu.create(warp)) return created;
+        X2WGfxSetLogSink(record, &recorded);
+        const auto start = counters();
+        bool good = start.title_gpu_state == X2W_GFX_TITLE_GPU_ATTACHED;
+        ComPtr<ID3D12RootSignature> root = title_root_signature(gpu.device.Get());
+        const auto vs = container(X2W_SHADER_STAGE_VERTEX, r3_vs, sizeof(r3_vs), vertex_bindings());
+        const auto ps = container(X2W_SHADER_STAGE_PIXEL, r3_ps, sizeof(r3_ps), {{2, X2W_SHADER_BINDING_INTERP, 0, 0}});
+        ComPtr<ID3D12PipelineState> pso;
+        const HRESULT hr = root ? create_pipeline(gpu.device.Get(), root.Get(), vs, ps, pso, nullptr) : E_FAIL;
+        good = good && SUCCEEDED(hr);
+        // Draws from title address `address`, whose bytes the CPU writes through `title`; `hit` says whether the
+        // layer registered it.
+        const auto draw_at = [&](const char* name, std::uint8_t* title, std::uintptr_t address, bool hit) {
+            test_guard::stage(name);
+            if (!good || !title) {
+                std::printf("source=%s missing\n", name);
+                return false;
+            }
+            write_inputs(title);
+            X2WXMemAllocationInfo info{};
+            info.size = sizeof(info);
+            X2WXMemDescribe(title, &info);
+            const auto before = counters();
+            unsigned mismatches = 0;
+            const bool drawn = draw_frame(gpu, root.Get(), pso.Get(), address, expected, mismatches);
+            const auto after = counters();
+            const auto misses = after.title_lookup_misses - before.title_lookup_misses;
+            const auto refused = after.draws_refused - before.draws_refused;
+            const bool in_window = graphics.begin == graphics.end || info.backing == X2W_XMEM_BACKING_NONE ||
+                                   info.backing == X2W_XMEM_BACKING_PHYSICAL || info.backing == X2W_XMEM_BACKING_ADOPTED ||
+                                   (reinterpret_cast<std::uintptr_t>(title) >= graphics.begin &&
+                                    reinterpret_cast<std::uintptr_t>(title) < graphics.end);
+            std::printf("source=%s address=0x%llx backing=%u region_offset=0x%llx mismatches=%u title_misses=%llu "
+                        "draws_refused=%u in_window=%d\n", name,
+                        static_cast<unsigned long long>(address), info.backing,
+                        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(title) - info.region_base),
+                        mismatches, static_cast<unsigned long long>(misses), refused, in_window);
+            if (slots_control) return drawn && refused > 0 && mismatches == covered;
+            return drawn && in_window && (hit ? mismatches == 0 && misses == 0 && refused == 0
+                                              : mismatches == covered && misses > 0);
+        };
+        const auto draw_from = [&](const char* name, std::uint8_t* title, bool hit) {
+            return draw_at(name, title, reinterpret_cast<std::uintptr_t>(title), hit);
+        };
+        constexpr ULONGLONG w64k = (ULONGLONG{5} << 29) | (ULONGLONG{1} << 14) | (ULONGLONG{8} << 24);
+        if (slots_control) {
+            auto* title = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w64k));
+            const bool refused = draw_from("standalone_layout", title, true);
+            std::printf("control=%s\n", refused ? "refusal_detected" : "refusal_missed");
+            good = good && refused;
+            XMemFree(title, w64k);
+        } else {
+            // Arena, behind a padding allocation so the title block is not at the arena's start.
+            void* pad = XMemAlloc(title_bytes, w64k);
+            auto* arena = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w64k));
+            good = draw_from("arena", arena, true) && good;
+            // Standalone: an 8 MiB alignment is above what an arena serves.
+            constexpr ULONGLONG w8m = (ULONGLONG{5} << 29) | (ULONGLONG{1} << 14) | (ULONGLONG{23} << 24);
+            auto* standalone = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w8m));
+            good = draw_from("standalone", standalone, true) && good;
+            // A mapped physical page: the second of two, so its pool offset is not 0.
+            ULONG_PTR pages[2] = {};
+            ULONG_PTR count = 2;
+            XMemAllocatePhysicalPages(MEM_64K_PAGES, &count, pages);
+            auto* physical = count == 2 ? static_cast<std::uint8_t*>(XMemMapPhysicalPages(nullptr, 1, &pages[1])) : nullptr;
+            good = draw_from("physical", physical, true) && good;
+            // Hook memory, adopted: 64 KiB into the hook's own block.
+            g_hook_block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 1 << 20, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+            XMemSetAllocationHooks(adopting_alloc, adopting_free);
+            auto* adopted = static_cast<std::uint8_t*>(XMemAlloc(title_bytes, w64k));
+            XMemSetAllocationHooks(nullptr, nullptr);
+            good = draw_from("adopted", adopted, true) && good;
+            // Control: the correct inputs in a desktop upload buffer, drawn from its own GPU virtual address, which no
+            // title memory range holds. The address is valid for the desktop root views, so only TitleLookup decides:
+            // every load must miss and no triangle may be drawn. (An unmapped title address must not be used here:
+            // desktop D3D12 reads root CBVs, and WARP faults on one.)
+            D3D12_HEAP_PROPERTIES upload_heap{};
+            upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC upload_desc{};
+            upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            upload_desc.Width = title_bytes;
+            upload_desc.Height = 1;
+            upload_desc.DepthOrArraySize = 1;
+            upload_desc.MipLevels = 1;
+            upload_desc.SampleDesc.Count = 1;
+            upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> upload;
+            void* mapped = nullptr;
+            const bool made = SUCCEEDED(gpu.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                                                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                          IID_PPV_ARGS(&upload))) &&
+                              SUCCEEDED(upload->Map(0, nullptr, &mapped));
+            const bool missed = made && draw_at("unregistered", static_cast<std::uint8_t*>(mapped),
+                                                static_cast<std::uintptr_t>(upload->GetGPUVirtualAddress()), false);
+            std::printf("control=%s\n", missed ? "miss_detected" : "miss_missed");
+            good = good && missed;
+            if (made) upload->Unmap(0, nullptr);
+            upload.Reset();
+            XMemFree(pad, w64k);
+            XMemFree(arena, w64k);
+            XMemFree(standalone, w8m);
+        }
+        pso.Reset();
+        root.Reset();
+        const unsigned debug_errors = gpu.debug_errors();
+        const auto end = counters();
+        std::printf("debug_errors=%u unknown_slots=%llu unknown_iids=%llu refused_events=%u\n", debug_errors,
+                    static_cast<unsigned long long>(end.unknown_slot_calls),
+                    static_cast<unsigned long long>(end.unknown_iid_calls), recorded.refused);
+        good = good && debug_errors == 0 && end.unknown_slot_calls == 0 && end.unknown_iid_calls == 0;
+        rc = good ? 0 : 1;
+        X2WGfxSetLogSink(nullptr, nullptr);
+    }
+    for (const auto& [p, w] : many) XMemFree(p, w);
+    const auto released = counters();
+    std::printf("live_objects=%u\n", released.live_objects);
+    return released.live_objects == 0 ? rc : 1;
+}
+
 int refused_check()
 {
     Gpu gpu;
@@ -516,6 +692,7 @@ int refused_check()
 
 int main(int argc, char** argv)
 {
+    test_guard::install("r3_triangle", 110);  // below the ctest TIMEOUT (CMakeLists.txt)
     if (argc != 3) return 2;
     const std::string_view adapter = argv[1];
     const std::string_view mode = argv[2];
@@ -525,5 +702,7 @@ int main(int argc, char** argv)
         mode == "stream_wrong_reference")
         return triangle_check(warp, mode);
     if (mode == "refused" && warp) return refused_check();
+    if (mode == "xmem_sources") return sources_check(warp, false);
+    if (mode == "xmem_slots_control") return sources_check(warp, true);
     return 2;
 }

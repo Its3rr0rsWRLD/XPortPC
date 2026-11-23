@@ -38,6 +38,19 @@ def main():
     # Control: without the shim directory, an import that resolves nowhere is still a stub.
     bare = subprocess.run([launcher, title], capture_output=True, text=True, timeout=30)
     assert "[x2w] import x2w_missing.dll!X2wMissingFirst -> stub" in bare.stderr.splitlines(), bare.stderr
+    # --xmem configures the xmem.dll title memory layer through its environment; the layer logs what it applied.
+    configured = subprocess.run([launcher, "--shims", shims, "--xmem", "layout=standalone", "--xmem",
+                                 "windows=off", title], capture_output=True, text=True, timeout=30)
+    lines = configured.stderr.splitlines()
+    assert "[x2w] xmem setting X2W_XMEM_LAYOUT=standalone" in lines, configured.stderr
+    assert any(l.startswith("[x2w] xmem config layout=standalone windows=off") for l in lines), configured.stderr
+    assert configured.returncode == 0x47, configured.returncode
+    # Control: without --xmem the defaults apply (arena layout, preferred windows).
+    assert any(l.startswith("[x2w] xmem config layout=arena windows=prefer") for l in report.splitlines()), report
+    # Control: a setting without '=' is a usage error.
+    bad = subprocess.run([launcher, "--shims", shims, "--xmem", "layout", title], capture_output=True, text=True,
+                         timeout=30)
+    assert bad.returncode == 2, bad.returncode
     print("native_launch_fake_title: all routes behaved")
     return 0
 

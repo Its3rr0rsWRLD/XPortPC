@@ -25,7 +25,7 @@ struct ShaderRange {
     std::uint32_t end_low;
     std::uint32_t end_high;
     std::uint32_t slot;  // descriptor index of the buffer that aliases the range
-    std::uint32_t reserved;
+    std::uint32_t base;  // byte offset of the range's first byte in that buffer (0 for shader_ranges)
 };
 static_assert(sizeof(ShaderRange) == 24);
 

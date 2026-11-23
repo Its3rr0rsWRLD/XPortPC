@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <cstdio>
+#include "test_guard.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -17,6 +18,7 @@ using ClientFn = int32_t (*)(void*, uint64_t*);
 
 int main(int argc, char* argv[])
 {
+    test_guard::install("xmem_gpu_cross_dll_check", 25);  // below the ctest TIMEOUT (CMakeLists.txt)
     const wchar_t* client_dll_path = L"xmem_gpu_client.dll";
     wchar_t path_buffer[MAX_PATH]{};
     if (argc > 1) {

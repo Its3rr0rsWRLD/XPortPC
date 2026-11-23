@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include "test_guard.h"
 
 namespace {
 long allocations_until_failure = -1;  // the allocation at this count fails once; -1: none fails
@@ -97,14 +98,9 @@ long sweep(void* base, std::size_t bytes, const char* phase)
 
 int main()
 {
-    // An exception escaping a noexcept function ends in abort(). Report it on stderr and exit,
-    // instead of the debug CRT's dialog, so the test fails at once rather than waiting.
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    test_guard::install("era_title_gpu_alloc_check", 25);  // below the ctest TIMEOUT (CMakeLists.txt)
+    // An exception escaping a noexcept function ends in abort(); the guard reports it on stderr and exits instead of
+    // showing the debug CRT's dialog, so the test fails at once rather than waiting.
 
     constexpr std::size_t bytes = 64 * 1024;
     void* base = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -116,6 +112,7 @@ int main()
 
     // Before the first track nothing exists, and the other entry points must not create it: with the
     // next allocation set to fail, none of them may allocate.
+    test_guard::stage("entry points before the first track");
     era_title_gpu::ShaderView view;
     ID3D12Resource* buffer = nullptr;
     std::uint64_t offset = 0;
@@ -128,8 +125,10 @@ int main()
     allocations_until_failure = -1;
     expect(empty && failed_allocations == 0, "the other entry points create nothing before the first track", -1);
 
+    test_guard::stage("first track sweep");
     const long first = sweep(base, bytes, "first track");
     expect(era_title_gpu::untrack(base) && !registered(base), "untrack after the first sweep", -1);
+    test_guard::stage("later track sweep");
     const long later = sweep(base, bytes, "later track");
     expect(era_title_gpu::untrack(base) && !registered(base), "untrack after the later sweep", -1);
     // The first track also creates the registry, so it has more allocations that can fail.

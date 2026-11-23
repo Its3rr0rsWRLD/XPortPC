@@ -1822,10 +1822,19 @@ private:
             for (void* r : resources)
                 if (r) static_cast<IUnknown*>(r)->Release();
         };
-        if (ranges.size() > title_memory_slots) {
+        // Several ranges can share one slot (an xmem arena or physical page pool, src/era_title_gpu.h); the converter's
+        // title_memory table has 8 slots, and a view block's slice holds max_title_ranges ranges.
+        if (ranges.size() > max_title_ranges) {
             release();
-            why = "more than 8 title memory ranges; the converter's title_memory table has 8 slots";
+            why = "more than 1024 title memory ranges in one view";
             return false;
+        }
+        for (const auto& range : ranges) {
+            if (range.slot >= title_memory_slots) {
+                release();
+                why = "more than 8 title memory slots; the converter's title_memory table has 8 slots";
+                return false;
+            }
         }
         if (have_view_ && ranges.size() == last_.size() && resources == last_resources_ &&
             (ranges.empty() || std::memcmp(ranges.data(), last_.data(), ranges.size() * sizeof(ranges[0])) == 0)) {
@@ -1853,10 +1862,10 @@ private:
             raw.Buffer.NumElements = 1;
             for (std::size_t r = 0; r < ranges.size(); ++r) {
                 if (ranges[r].slot != i) continue;
-                const std::uint64_t begin = std::uint64_t(ranges[r].begin_high) << 32 | ranges[r].begin_low;
-                const std::uint64_t end = std::uint64_t(ranges[r].end_high) << 32 | ranges[r].end_low;
+                // The whole aliasing buffer: each range's base offset selects its bytes.
                 resource = static_cast<ID3D12Resource*>(resources[r]);
-                raw.Buffer.NumElements = static_cast<UINT>((end - begin) / 4);
+                raw.Buffer.NumElements = static_cast<UINT>(resource->GetDesc().Width / 4);
+                break;
             }
             device_->CreateShaderResourceView(resource, &raw, handle);
             handle.ptr += increment_;
@@ -1912,7 +1921,7 @@ private:
             }
             ranges_mapped_ = static_cast<std::uint8_t*>(mapped);
         }
-        static_assert(title_memory_slots * sizeof(X2WTitleGpuRange) <= ranges_slice, "ranges slice too small");
+        static_assert(max_title_ranges * sizeof(X2WTitleGpuRange) <= ranges_slice, "ranges slice too small");
         std::uint8_t* slice = ranges_mapped_ + static_cast<std::size_t>(block_) * ranges_slice;
         std::memset(slice, 0, ranges_slice);
         if (!ranges.empty()) std::memcpy(slice, ranges.data(), ranges.size() * sizeof(ranges[0]));
@@ -1931,7 +1940,8 @@ private:
     UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
     bool have_view_ = false;
-    static constexpr UINT ranges_slice = 256;
+    static constexpr UINT max_title_ranges = 1024;
+    static constexpr UINT ranges_slice = max_title_ranges * sizeof(X2WTitleGpuRange);  // 24 KiB per view block
     ComPtr<ID3D12Resource> ranges_all_;  // the ranges of every title-memory view block, one slice each
     std::uint8_t* ranges_mapped_ = nullptr;
     std::vector<BlockState> states_[3];

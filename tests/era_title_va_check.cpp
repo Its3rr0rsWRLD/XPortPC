@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string_view>
 #include <vector>
+#include "test_guard.h"
 
 using namespace std::literals;
 
@@ -84,7 +85,7 @@ int check_shader()
     expect(packed.size() == 2, "two packed ranges");
     if (packed.size() == 2) {
         expect(packed[0].begin_low == 0x10000 && packed[0].begin_high == 0 && packed[0].end_low == 0x11000 &&
-                   packed[0].end_high == 0 && packed[0].slot == 0 && packed[0].reserved == 0,
+                   packed[0].end_high == 0 && packed[0].slot == 0 && packed[0].base == 0,
                "low range words and slot");
         expect(packed[1].begin_low == 0xffff0000 && packed[1].begin_high == 1 && packed[1].end_low == 0x10000 &&
                    packed[1].end_high == 2 && packed[1].slot == 1,
@@ -110,6 +111,7 @@ int check_shader()
 
 int main(int argc, char** argv)
 {
+    test_guard::install("era_title_va_check", 25);  // below the ctest TIMEOUT (CMakeLists.txt)
     const std::string_view scenario = argc == 2 ? argv[1] : ""sv;
     if (scenario == "translate"sv) return check_translate();
     if (scenario == "bounds"sv) return check_bounds();

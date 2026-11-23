@@ -27,10 +27,18 @@ struct Alias {
     std::uint64_t size = 0;
 };
 
-// base must be the start of a committed allocation, as returned by VirtualAlloc, and the
-// allocation must cover size bytes. Returns E_INVALIDARG without calling D3D12 when base is
-// not the start of a committed allocation, E_INVALIDARG for other bad arguments or a too-small
+// base must be the start of an allocation committed throughout, as returned by VirtualAlloc, and the
+// allocation must cover size bytes. Opening the heap locks every page of the allocation in memory
+// (measured with tests/xmem_alias_probe.cpp: the working set grows by the allocation's size). Returns
+// E_INVALIDARG without calling D3D12 when base is not the start of an allocation or any part of it
+// is not committed, E_INVALIDARG for other bad arguments or a too-small
 // allocation, E_NOTIMPL when the device does not support existing heaps, or the failing D3D12
 // HRESULT.
 HRESULT open(ID3D12Device* device, void* base, std::uint64_t size, Alias& alias) noexcept;
+
+// The same for a file mapping (a pagefile-backed section, such as the title physical page pool): the heap is
+// ID3D12Device3::OpenExistingHeapFromFileMapping of `section`, and the buffer spans its first `size` bytes, so
+// buffer offset n is section offset n. Every view of the section shares the bytes. Returns E_INVALIDARG for a null
+// section or size, E_NOTIMPL as above, or the failing D3D12 HRESULT.
+HRESULT open_mapping(ID3D12Device* device, HANDLE section, std::uint64_t size, Alias& alias) noexcept;
 }
