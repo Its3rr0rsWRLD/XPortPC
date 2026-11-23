@@ -1,0 +1,12 @@
+LIBRARY x2w_sys
+EXPORTS
+    X2WSysInit
+    X2WSysHookLookup
+    X2WSysShutdown
+    X2wGameInputCreate
+    X2wGameInputBackend
+    X2wGameInputFallbackEnumerate
+    X2wGameInputFallbackRead
+    X2wXAudio2Create
+    X2wXAudio2CheckFormat
+    X2wDStorageGetFactory
