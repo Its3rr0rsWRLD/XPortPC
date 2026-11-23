@@ -116,6 +116,9 @@ size_t apu_request_bytes(const uintptr_t (&args)[4]) noexcept
 constexpr size_t kSlots = 64;
 HRESULT (STDMETHODCALLTYPE* g_vtable[3 + kSlots])();  // filled once
 
+// IID_IUnknown, spelled out: WIN32_LEAN_AND_MEAN leaves IUnknown undeclared and uuid.lib is not linked.
+const GUID kIUnknown = {0, 0, 0, {0xC0, 0, 0, 0, 0, 0, 0, 0x46}};
+
 struct TextureComputer {
     const void* const* vtable;
     LONG refs;
@@ -124,7 +127,7 @@ struct TextureComputer {
 HRESULT STDMETHODCALLTYPE tc_query(TextureComputer* self, const IID& iid, void** out)
 {
     if (!out) return E_POINTER;
-    if (IsEqualIID(iid, __uuidof(IUnknown))) {
+    if (IsEqualGUID(iid, kIUnknown)) {
         InterlockedIncrement(&self->refs);
         *out = self;
         return S_OK;
