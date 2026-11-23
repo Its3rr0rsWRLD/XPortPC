@@ -28,6 +28,8 @@ WHERE = r"(?:[a-z0-9_.\-]+\+0x[0-9a-f]+|0x[0-9a-f]+)"
 EXCEPTION = (rf"exception 0x[0-9a-f]{{8}} at {WHERE} thread (?:program|watchdog)"
              rf"(?: (?:reading|writing|executing|accessing) {WHERE})?")
 LAST = rf"(?:{SYMBOL}|none)"
+FEATURES = r"(?:none|[a-z0-9.\-]+(?:,[a-z0-9.\-]+)*)"
+MNEMONIC = r"[a-z0-9\-]+"
 GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            r"imports shim=\d+ package=\d+ windows=\d+ stub=\d+ missing=\d+",
            rf"package-map-failed {NAME} status \d+ .*",
@@ -42,6 +44,9 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"dynamic-load {NAME} -> (?:shim|loader|failed)",
            rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|missing|windows)",
            rf"shim-(?:unimplemented|note|forward) {SYMBOL} .*",
+           rf"cpu-host-missing emulated={FEATURES} unhandled={FEATURES} silent={FEATURES}",
+           rf"cpu-trap first {MNEMONIC} at {WHERE}", rf"cpu-unhandled {MNEMONIC} at {WHERE}",
+           rf"cpu-traps total=\d+(?: {MNEMONIC}=\d+)*", r"cpu-trap-forced sites \d+",
            rf"summary (?:exit|crash|timeout): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
            rf"first-thread=(?:yes|no) d3d12-call=(?:yes|no) crash=(?:yes|no) last-stub={LAST}"]
 

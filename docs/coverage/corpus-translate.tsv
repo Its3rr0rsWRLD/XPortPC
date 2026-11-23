@@ -1,51 +1,50 @@
 # End-to-end translation of the corpus pixel shaders (tools/corpus_translate.py; inputs
 # tests/corpus/isa/pixel, sources and licenses tests/corpus/README.md). all_covered is the site's measure
 # (every form covered by a test); translated means lower() accepted the whole program and produced HLSL.
-# Pixel: shaders 250; translated 140; all_covered 197; all_covered_translated 139.
+# Pixel: shaders 250; translated 158; all_covered 238; all_covered_translated 158.
 # Refusal reasons, most shaders first: shaders (all_covered shaders), kind, place, reason.
-# Reason 23 (18)	no_form	dispatch	no form matches image_sample
+# Reason 7 (7)	refused	vintrp.interpolate	Unknown interpolation context
 # Reason 6 (6)	refused	exp.pack_e64	Unsupported pack operand
-# Reason 6 (0)	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word
-# Reason 6 (3)	refused	vintrp.interpolate	Unknown interpolation context
-# Reason 5 (3)	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant
-# Reason 5 (0)	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)
-# Reason 5 (1)	refused	smem.scalar_load	Constant read exceeds binding
-# Reason 4 (3)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9
-# Reason 4 (3)	refused	valu_f32.arithmetic	Read of unset vector register v2
-# Reason 3 (1)	no_form	dispatch	no form matches image_load
+# Reason 6 (5)	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word
+# Reason 5 (4)	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant
+# Reason 5 (2)	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)
+# Reason 5 (5)	refused	mimg.sample	Unsupported texture coordinate
+# Reason 5 (5)	refused	smem.scalar_load	Constant read exceeds binding
+# Reason 5 (5)	refused	valu_f32.arithmetic	Read of unset vector register v2
+# Reason 4 (4)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9
+# Reason 3 (3)	no_form	dispatch	no form matches image_load
 # Reason 3 (2)	no_form	dispatch	no form matches image_sample_l
-# Reason 3 (1)	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode
-# Reason 3 (1)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11
-# Reason 2 (1)	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor
-# Reason 2 (1)	no_form	dispatch	no form matches image_sample_b
+# Reason 3 (3)	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode
+# Reason 3 (3)	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11
+# Reason 2 (2)	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor
+# Reason 2 (2)	no_form	dispatch	no form matches image_sample_b
 # Reason 2 (2)	no_form	dispatch	no form matches s_endpgm
 # Reason 2 (2)	no_form	dispatch	no form matches s_mov_b32
-# Reason 2 (0)	refused	control_flow.plan_join	Lane mask differs at a loop entry
+# Reason 2 (2)	refused	control_flow.plan_join	Lane mask differs at a loop entry
 # Reason 2 (0)	refused	exec_mask.saveexec	Unsupported execution mask
-# Reason 2 (0)	refused	mimg.sample	Unsupported texture coordinate
 # Reason 2 (2)	refused	valu_f32.move	Read of unset vector register v2
-# Reason 2 (0)	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000
+# Reason 2 (1)	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000
 # Reason 2 (2)	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333
 # Reason 2 (2)	refused	vop3p.fma_mix	Unsupported arithmetic destination
 # Reason 1 (0)	contract	smem.compute_descriptor_load	Unresolved descriptor-list pointer
 # Reason 1 (0)	no_form	dispatch	no form matches image_sample_o
 # Reason 1 (1)	no_form	dispatch	no form matches s_cselect_b64
 # Reason 1 (1)	refused	control_flow.same_provenance	Execution or load state differs at a join
-# Reason 1 (0)	refused	valu_bits.bitfield_extract	Read of unset vector register v2
+# Reason 1 (1)	refused	valu_bits.bitfield_extract	Read of unset vector register v2
 # Reason 1 (0)	refused	valu_f32.arithmetic	Expected a numeric register
-# Reason 1 (0)	refused	valu_f32.arithmetic	Unsupported arithmetic operand neg(0.5)
-# Reason 1 (0)	refused	valu_f32.arithmetic	Unsupported output modifier
+# Reason 1 (1)	refused	valu_f32.arithmetic	Unsupported arithmetic operand neg(0.5)
+# Reason 1 (1)	refused	valu_f32.arithmetic	Unsupported output modifier
 # Reason 1 (1)	refused	valu_int.bitwise	Read of unset vector register v2
-# Reason 1 (0)	refused	valu_int.convert_to_float	Invalid conversion
+# Reason 1 (1)	refused	valu_int.convert_to_float	Invalid conversion
 # Reason 1 (1)	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x999a
-# Reason 1 (0)	refused	vopc.cmpx_f32	Read of unset vector register v2
+# Reason 1 (1)	refused	vopc.cmpx_f32	Read of unset vector register v2
 # Columns: shader, all_covered (0/1), status, kind, place, reason, first refused instruction.
 sascha__base__textoverlay.frag.s	1	translated				
 sascha__base__uioverlay.frag.s	1	translated				
 sascha__bloom__colorpass.frag.s	1	translated				
 sascha__bloom__gaussblur.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	16: s_bfe_u32 s27, s11, 0x4000c
 sascha__bloom__phongpass.frag.s	1	translated				
-sascha__bloom__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	22: image_sample v[0:3], v[7:9], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_CUBE
+sascha__bloom__skybox.frag.s	1	translated				
 sascha__bufferdeviceaddress__cube.frag.s	1	translated				
 sascha__computecloth__cloth.frag.s	1	translated				
 sascha__computecloth__sphere.frag.s	1	translated				
@@ -64,20 +63,20 @@ sascha__debugutils__postprocess.frag.s	1	translated
 sascha__debugutils__toon.frag.s	1	translated				
 sascha__deferred__deferred.frag.s	1	refused	no_form	dispatch	no form matches s_cselect_b64	26: s_cselect_b64 vcc, -1, 0
 sascha__deferred__mrt.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	47: v_cvt_pkrtz_f16_f32_e64 v0, v0, 1.0
-sascha__deferredmultisampling__deferred.frag.s	0	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9	9: s_bfe_u32 s1, s9, 0x2001e
+sascha__deferredmultisampling__deferred.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9	9: s_bfe_u32 s1, s9, 0x2001e
 sascha__deferredmultisampling__mrt.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	47: v_cvt_pkrtz_f16_f32_e64 v0, v0, 1.0
-sascha__deferredshadows__deferred.frag.s	0	refused	refused	smem.scalar_load	Constant read exceeds binding	21: s_buffer_load_dword s1, s[40:43], 0x164
+sascha__deferredshadows__deferred.frag.s	1	refused	refused	smem.scalar_load	Constant read exceeds binding	21: s_buffer_load_dword s1, s[40:43], 0x164
 sascha__deferredshadows__mrt.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	47: v_cvt_pkrtz_f16_f32_e64 v0, v0, 1.0
 sascha__descriptorbuffer__cube.frag.s	1	translated				
-sascha__descriptorheap__cube.frag.s	0	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	5: s_load_dwordx4 s[8:11], s[0:1], s4
+sascha__descriptorheap__cube.frag.s	1	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	5: s_load_dwordx4 s[8:11], s[0:1], s4
 sascha__descriptorindexing__descriptorindexing.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	18: v_readfirstlane_b32 s4, v3
 sascha__descriptorsets__cube.frag.s	1	translated				
 sascha__deviceaddresscommands__cube.frag.s	1	translated				
 sascha__displacement__base.frag.s	1	translated				
 sascha__distancefieldfonts__bitmap.frag.s	1	translated				
-sascha__distancefieldfonts__sdf.frag.s	0	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	19: v_subrev_f32_dpp v3, v0, v0 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
+sascha__distancefieldfonts__sdf.frag.s	1	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	19: v_subrev_f32_dpp v3, v0, v0 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
 sascha__dynamicrendering__texture.frag.s	1	translated				
-sascha__dynamicrenderinglocalread__scene.frag.s	0	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	32: v_mad_f32 v2, 2.0, v2, -1.0
+sascha__dynamicrenderinglocalread__scene.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	32: v_mad_f32 v2, 2.0, v2, -1.0
 sascha__dynamicuniformbuffer__base.frag.s	1	translated				
 sascha__fragmentshaderbarycentrics__scene.frag.s	0	refused	refused	valu_f32.arithmetic	Expected a numeric register	11: v_add_f32_e32 v2, v0, v1
 sascha__gears__gears.frag.s	1	translated				
@@ -89,15 +88,15 @@ sascha__gltfskinning__skinnedmodel.frag.s	1	translated
 sascha__graphicspipelinelibrary__uber.frag.s	1	translated				
 sascha__hdr__bloom.frag.s	1	translated				
 sascha__hdr__composition.frag.s	1	translated				
-sascha__hdr__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches image_sample	30: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+sascha__hdr__gbuffer.frag.s	1	translated				
 sascha__imgui__scene.frag.s	1	translated				
 sascha__imgui__ui.frag.s	1	translated				
 sascha__indirectdraw__ground.frag.s	1	translated				
-sascha__indirectdraw__indirectdraw.frag.s	0	refused	no_form	dispatch	no form matches image_sample	17: image_sample v[4:7], v[2:4], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D_ARRAY
+sascha__indirectdraw__indirectdraw.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	22: v_interp_p1_f32_e32 v9, v0, attr0.z
 sascha__indirectdraw__skysphere.frag.s	1	refused	refused	vop3p.fma_mix	Unsupported arithmetic destination	9: v_fma_mixlo_f16 v1, 0x7ae2, v0, s0
-sascha__inlineuniformblocks__pbr.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
+sascha__inlineuniformblocks__pbr.frag.s	1	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
 sascha__inputattachments__attachmentwrite.frag.s	1	translated				
-sascha__instancing__instancing.frag.s	0	refused	no_form	dispatch	no form matches image_sample	16: image_sample v[5:7], v[2:4], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D_ARRAY
+sascha__instancing__instancing.frag.s	1	translated				
 sascha__instancing__planet.frag.s	1	translated				
 sascha__instancing__starfield.frag.s	1	translated				
 sascha__multisampling__mesh.frag.s	1	translated				
@@ -105,53 +104,53 @@ sascha__multisamplingalphatocoverage__texture.frag.s	1	translated
 sascha__multithreading__phong.frag.s	1	translated				
 sascha__multithreading__starsphere.frag.s	1	translated				
 sascha__multiview__multiview.frag.s	1	translated				
-sascha__multiview__viewdisplay.frag.s	0	refused	refused	smem.scalar_load	Constant read exceeds binding	5: s_buffer_load_dword s1, s[4:7], 0x110
+sascha__multiview__viewdisplay.frag.s	1	refused	refused	smem.scalar_load	Constant read exceeds binding	5: s_buffer_load_dword s1, s[4:7], 0x110
 sascha__negativeviewportheight__quad.frag.s	1	translated				
-sascha__occlusionquery__mesh.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	8: v_interp_p1_f32_e32 v2, v0, attr0.y
+sascha__occlusionquery__mesh.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	8: v_interp_p1_f32_e32 v2, v0, attr0.y
 sascha__occlusionquery__occluder.frag.s	1	translated				
 sascha__occlusionquery__simple.frag.s	1	translated				
-sascha__offscreen__mirror.frag.s	0	refused	refused	vopc.cmpx_f32	Read of unset vector register v2	12: v_cmpx_lt_f32_e32 0, v2
-sascha__offscreen__phong.frag.s	0	translated				
+sascha__offscreen__mirror.frag.s	1	refused	refused	vopc.cmpx_f32	Read of unset vector register v2	12: v_cmpx_lt_f32_e32 0, v2
+sascha__offscreen__phong.frag.s	1	translated				
 sascha__offscreen__quad.frag.s	1	translated				
 sascha__oit__color.frag.s	0	refused	contract	smem.compute_descriptor_load	Unresolved descriptor-list pointer	1: s_load_dwordx2 s[0:1], s[0:1], null
 sascha__oit__geometry.frag.s	0	refused	refused	exec_mask.saveexec	Unsupported execution mask	5: s_and_saveexec_b64 s[12:13], s[12:13]
-sascha__parallaxmapping__parallax.frag.s	0	refused	refused	valu_int.convert_to_float	Invalid conversion	79: v_cvt_f32_i32_e32 v14, s4
+sascha__parallaxmapping__parallax.frag.s	1	refused	refused	valu_int.convert_to_float	Invalid conversion	79: v_cvt_f32_i32_e32 v14, s4
 sascha__particlesystem__normalmap.frag.s	1	refused	refused	vop3p.fma_mix	Unsupported arithmetic destination	95: v_fma_mixlo_f16 v1, v23, v11, neg(0) op_sel_hi:[0,0,1]
-sascha__particlesystem__particle.frag.s	0	refused	refused	mimg.sample	Unsupported texture coordinate	33: image_sample v[4:6], v[8:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D
-sascha__pbrbasic__pbr.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
-sascha__pbribl__genbrdflut.frag.s	0	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
-sascha__pbribl__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches image_sample	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
-sascha__pbribl__pbribl.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
-sascha__pbribl__prefilterenvmap.frag.s	0	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
-sascha__pbribl__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	23: image_sample v[10:12], v[7:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
-sascha__pbrtexture__genbrdflut.frag.s	0	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
-sascha__pbrtexture__irradiancecube.frag.s	0	refused	no_form	dispatch	no form matches image_sample	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
-sascha__pbrtexture__pbrtexture.frag.s	0	refused	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor	526: s_load_dwordx4 s[4:7], s[2:3], 0xd0
-sascha__pbrtexture__prefilterenvmap.frag.s	0	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
-sascha__pbrtexture__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	23: image_sample v[10:12], v[7:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+sascha__particlesystem__particle.frag.s	1	refused	refused	mimg.sample	Unsupported texture coordinate	33: image_sample v[4:6], v[8:9], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D
+sascha__pbrbasic__pbr.frag.s	1	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
+sascha__pbribl__genbrdflut.frag.s	1	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
+sascha__pbribl__irradiancecube.frag.s	1	refused	refused	mimg.sample	Unsupported texture coordinate	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+sascha__pbribl__pbribl.frag.s	1	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
+sascha__pbribl__prefilterenvmap.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
+sascha__pbribl__skybox.frag.s	1	translated				
+sascha__pbrtexture__genbrdflut.frag.s	1	refused	refused	control_flow.plan_join	Lane mask differs at a loop entry	
+sascha__pbrtexture__irradiancecube.frag.s	1	refused	refused	mimg.sample	Unsupported texture coordinate	63: image_sample v[21:23], v[18:20], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+sascha__pbrtexture__pbrtexture.frag.s	1	refused	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor	526: s_load_dwordx4 s[4:7], s[2:3], 0xd0
+sascha__pbrtexture__prefilterenvmap.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s11	18: s_bfe_u32 s19, s11, 0x4000c
+sascha__pbrtexture__skybox.frag.s	1	translated				
 sascha__pipelines__phong.frag.s	1	refused	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333	76: v_fma_mixlo_f16 v23, 0x3333, v8, v5
 sascha__pipelines__toon.frag.s	1	translated				
 sascha__pipelines__wireframe.frag.s	1	translated				
 sascha__pipelinestatistics__scene.frag.s	1	translated				
 sascha__pushconstants__pushconstants.frag.s	1	translated				
 sascha__pushdescriptors__cube.frag.s	1	translated				
-sascha__radialblur__colorpass.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
-sascha__radialblur__phongpass.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
+sascha__radialblur__colorpass.frag.s	1	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
+sascha__radialblur__phongpass.frag.s	1	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
 sascha__radialblur__radialblur.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9	11: s_bfe_u32 s1, s9, 0x2001e
 sascha__renderheadless__triangle.frag.s	1	translated				
 sascha__screenshot__mesh.frag.s	1	translated				
 sascha__shaderobjects__phong.frag.s	1	refused	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x3333	76: v_fma_mixlo_f16 v23, 0x3333, v8, v5
 sascha__shadowmapping__offscreen.frag.s	1	translated				
 sascha__shadowmapping__quad.frag.s	1	refused	refused	smem.scalar_load	Constant read exceeds binding	15: s_buffer_load_dwordx2 s[0:1], s[16:19], 0x110
-sascha__shadowmapping__scene.frag.s	0	refused	refused	mimg.sample	Unsupported texture coordinate	27: image_sample v6, v[6:7], s[8:15], s[4:7] dmask:0x1 dim:SQ_RSRC_IMG_2D
-sascha__shadowmappingcascade__debugshadowmap.frag.s	1	refused	no_form	dispatch	no form matches image_sample	15: image_sample v2, [v2, v0, v3], s[8:15], s[4:7] dmask:0x1 dim:SQ_RSRC_IMG_2D_ARRAY
+sascha__shadowmapping__scene.frag.s	1	refused	refused	mimg.sample	Unsupported texture coordinate	27: image_sample v6, v[6:7], s[8:15], s[4:7] dmask:0x1 dim:SQ_RSRC_IMG_2D
+sascha__shadowmappingcascade__debugshadowmap.frag.s	1	translated				
 sascha__shadowmappingcascade__depthpass.frag.s	1	translated				
-sascha__shadowmappingcascade__scene.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	24: v_interp_p1_f32_e32 v8, v0, attr0.w
+sascha__shadowmappingcascade__scene.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	24: v_interp_p1_f32_e32 v8, v0, attr0.w
 sascha__shadowmappingomni__cubemapdisplay.frag.s	0	refused	refused	lowering.masked_writes	Masked write of a register that does not hold a 32-bit word	
 sascha__shadowmappingomni__offscreen.frag.s	1	translated				
-sascha__shadowmappingomni__scene.frag.s	1	refused	no_form	dispatch	no form matches image_sample	36: image_sample v16, v[16:18], s[8:15], s[4:7] dmask:0x1 dim:SQ_RSRC_IMG_CUBE
+sascha__shadowmappingomni__scene.frag.s	1	translated				
 sascha__specializationconstants__uber.frag.s	1	translated				
-sascha__sphericalenvmapping__sem.frag.s	1	refused	no_form	dispatch	no form matches image_sample	37: image_sample v[14:16], v[10:12], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D_ARRAY
+sascha__sphericalenvmapping__sem.frag.s	1	refused	refused	mimg.sample	Unsupported texture coordinate	37: image_sample v[14:16], v[10:12], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D_ARRAY
 sascha__ssao__blur.frag.s	1	refused	refused	sop2.bitfield_extract	Expected a numeric scalar register: s9	13: s_bfe_u32 s4, s9, 0x2001e
 sascha__ssao__composition.frag.s	1	refused	contract	smem.compute_descriptor_load	Descriptor table word is not a tracked descriptor	45: s_load_dwordx8 s[8:15], s[2:3], 0x120
 sascha__ssao__gbuffer.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	18: v_mad_f32 v2, 2.0, v2, -1.0
@@ -164,22 +163,22 @@ sascha__terraintessellation__terrain.frag.s	1	refused	refused	valu_f32.move	Read
 sascha__tessellation__base.frag.s	1	translated				
 sascha__textoverlay__mesh.frag.s	1	translated				
 sascha__textoverlay__text.frag.s	1	translated				
-sascha__texture3d__texture3d.frag.s	1	refused	no_form	dispatch	no form matches image_sample	14: image_sample v5, [v5, v6, v4], s[8:15], s[4:7] dmask:0x1 dim:SQ_RSRC_IMG_3D
+sascha__texture3d__texture3d.frag.s	1	translated				
 sascha__texture__texture.frag.s	1	translated				
-sascha__texturearray__instancing.frag.s	1	refused	no_form	dispatch	no form matches image_sample	15: image_sample v[0:3], [v2, v0, v3], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_2D_ARRAY
+sascha__texturearray__instancing.frag.s	1	translated				
 sascha__texturecubemap__reflect.frag.s	1	refused	no_form	dispatch	no form matches image_sample_b	64: image_sample_b v[16:18], v[16:19], s[8:15], s[16:19] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
-sascha__texturecubemap__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	22: image_sample v[0:3], v[7:9], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_CUBE
+sascha__texturecubemap__skybox.frag.s	1	translated				
 sascha__texturecubemaparray__reflect.frag.s	1	refused	no_form	dispatch	no form matches image_sample_l	65: image_sample_l v[17:19], v[20:23], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
 sascha__texturecubemaparray__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample_l	27: image_sample_l v[0:3], v[8:11], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_CUBE
 sascha__texturemipmapgen__texture.frag.s	1	refused	contract	smem.compute_descriptor_load	Scalar load offset register must hold a known constant	11: s_load_dwordx4 s[4:7], s[2:3], s1 offset:0x50
-sascha__texturesparseresidency__sparseresidency.frag.s	0	refused	no_form	dispatch	no form matches image_sample_b	17: image_sample_b v[6:10], [v2, v5, v0], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_2D tfe
+sascha__texturesparseresidency__sparseresidency.frag.s	1	refused	no_form	dispatch	no form matches image_sample_b	17: image_sample_b v[6:10], [v2, v5, v0], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_2D tfe
 sascha__triangle__triangle.frag.s	1	translated				
-sascha__variablerateshading__scene.frag.s	0	refused	refused	valu_bits.bitfield_extract	Read of unset vector register v2	140: v_bfe_u32 v0, v2, 4, 2
+sascha__variablerateshading__scene.frag.s	1	refused	refused	valu_bits.bitfield_extract	Read of unset vector register v2	140: v_bfe_u32 v0, v2, 4, 2
 sascha__vertexattributes__scene.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	30: v_interp_p1_f32_e32 v11, v0, attr0.y
 sascha__viewportarray__scene.frag.s	1	translated				
 sascha__vulkanscene__logo.frag.s	1	translated				
 sascha__vulkanscene__mesh.frag.s	1	translated				
-sascha__vulkanscene__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	22: image_sample v[0:3], v[7:9], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_CUBE
+sascha__vulkanscene__skybox.frag.s	1	translated				
 vksamples__16bit_arithmetic__visualize.frag.s	1	translated				
 vksamples__async_compute__composite.frag.s	1	translated				
 vksamples__async_compute__shadow.frag.s	1	refused	no_form	dispatch	no form matches s_endpgm	1: s_endpgm
@@ -201,19 +200,19 @@ vksamples__descriptor_indexing__glsl__update-after-bind-quads.frag.s	1	refused	c
 vksamples__device_fault__glsl__render.frag.s	1	translated				
 vksamples__dynamic_blending__glsl__blending.frag.s	1	translated				
 vksamples__dynamic_line_rasterization__glsl__base.frag.s	1	translated				
-vksamples__dynamic_line_rasterization__glsl__grid.frag.s	0	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	25: v_subrev_f32_dpp v0, v5, v5 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
-vksamples__dynamic_multisample_rasterization__glsl__model.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	19: v_readfirstlane_b32 s3, v2
+vksamples__dynamic_line_rasterization__glsl__grid.frag.s	1	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	25: v_subrev_f32_dpp v0, v5, v5 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
+vksamples__dynamic_multisample_rasterization__glsl__model.frag.s	1	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	19: v_readfirstlane_b32 s3, v2
 vksamples__dynamic_primitive_clipping__glsl__primitive_clipping.frag.s	1	translated				
-vksamples__dynamic_rendering__glsl__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches image_sample	29: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+vksamples__dynamic_rendering__glsl__gbuffer.frag.s	1	translated				
 vksamples__dynamic_rendering_local_read__glsl__scene_opaque.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	16: v_mad_f32 v2, 2.0, v2, -1.0
 vksamples__dynamic_uniform_buffers__glsl__base.frag.s	1	translated				
-vksamples__extended_dynamic_state2__glsl__background.frag.s	1	refused	no_form	dispatch	no form matches image_sample	29: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+vksamples__extended_dynamic_state2__glsl__background.frag.s	1	translated				
 vksamples__extended_dynamic_state2__glsl__baseline.frag.s	1	translated				
 vksamples__extended_dynamic_state2__glsl__tess.frag.s	1	translated				
 vksamples__fragment_density_map__sky.frag.s	1	translated				
 vksamples__fragment_density_map__texture.frag.s	1	translated				
 vksamples__fragment_shader_barycentric__glsl__object.frag.s	0	refused	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000	18: v_lshrrev_b64 v[13:14], 0, 0x3f800000
-vksamples__fragment_shader_barycentric__glsl__skybox.frag.s	1	refused	no_form	dispatch	no form matches image_sample	22: image_sample v[0:3], v[7:9], s[8:15], s[4:7] dmask:0xf dim:SQ_RSRC_IMG_CUBE
+vksamples__fragment_shader_barycentric__glsl__skybox.frag.s	1	translated				
 vksamples__fragment_shading_rate__glsl__scene.frag.s	1	refused	refused	control_flow.same_provenance	Execution or load state differs at a join	
 vksamples__fragment_shading_rate_dynamic__scene.frag.s	1	refused	refused	dpp.dpp	DPP is lowered only where every lane is active and the wave is not in whole-quad mode	19: v_subrev_f32_dpp v9, v6, v6 quad_perm:[0,0,0,0] row_mask:0xf bank_mask:0xf bound_ctrl:1 fi:1
 vksamples__graphics_pipeline_library__glsl__uber.frag.s	1	translated				
@@ -222,28 +221,28 @@ vksamples__gshader_to_mshader__glsl__gshader_to_mshader_base.frag.s	1	translated
 vksamples__gshader_to_mshader__glsl__gshader_to_mshader_mesh.frag.s	1	translated				
 vksamples__hdr__glsl__bloom.frag.s	1	translated				
 vksamples__hdr__glsl__composition.frag.s	1	translated				
-vksamples__hdr__glsl__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches image_sample	30: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+vksamples__hdr__glsl__gbuffer.frag.s	1	translated				
 vksamples__hello_triangle_1_3__glsl__triangle.frag.s	1	translated				
 vksamples__hello_triangle__glsl__triangle.frag.s	1	translated				
 vksamples__imgui.frag.s	1	translated				
-vksamples__instancing__glsl__instancing.frag.s	0	refused	no_form	dispatch	no form matches image_sample	16: image_sample v[5:7], v[2:4], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D_ARRAY
+vksamples__instancing__glsl__instancing.frag.s	1	translated				
 vksamples__instancing__glsl__planet.frag.s	1	translated				
 vksamples__instancing__glsl__starfield.frag.s	1	translated				
-vksamples__logic_op_dynamic_state__glsl__background.frag.s	1	refused	no_form	dispatch	no form matches image_sample	29: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+vksamples__logic_op_dynamic_state__glsl__background.frag.s	1	translated				
 vksamples__logic_op_dynamic_state__glsl__baseline.frag.s	1	translated				
-vksamples__mobile_nerf__merged.frag.s	0	refused	refused	smem.scalar_load	Constant read exceeds binding	34: s_buffer_load_dwordx16 s[48:63], s[16:19], 0x7c0
-vksamples__mobile_nerf__merged_morpheus.frag.s	0	refused	refused	smem.scalar_load	Constant read exceeds binding	23: s_buffer_load_dwordx16 s[32:47], s[28:31], 0x7c0
+vksamples__mobile_nerf__merged.frag.s	1	refused	refused	smem.scalar_load	Constant read exceeds binding	34: s_buffer_load_dwordx16 s[48:63], s[16:19], 0x7c0
+vksamples__mobile_nerf__merged_morpheus.frag.s	1	refused	refused	smem.scalar_load	Constant read exceeds binding	23: s_buffer_load_dwordx16 s[32:47], s[28:31], 0x7c0
 vksamples__mobile_nerf__raster.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	27: v_interp_p1_f32_e32 v12, v0, attr0.w
 vksamples__mobile_nerf__raster_combo.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	27: v_interp_p1_f32_e32 v12, v0, attr0.w
 vksamples__mobile_nerf__raster_morpheus.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	30: v_cvt_pkrtz_f16_f32_e64 v14, v14, 1.0
 vksamples__mobile_nerf__raster_morpheus_combo.frag.s	1	refused	refused	exp.pack_e64	Unsupported pack operand	31: v_cvt_pkrtz_f16_f32_e64 v14, v14, 1.0
-vksamples__multi_draw_indirect__multi_draw_indirect.frag.s	0	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	7: v_readfirstlane_b32 s1, v2
+vksamples__multi_draw_indirect__multi_draw_indirect.frag.s	1	refused	refused	lanes.readfirstlane	v_readfirstlane_b32 is lowered in the compute stage only (C-7)	7: v_readfirstlane_b32 s1, v2
 vksamples__oit_depth_peeling__background.frag.s	1	translated				
-vksamples__oit_depth_peeling__combine.frag.s	0	refused	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000	15: v_lshrrev_b64 v[0:1], 0, 0x3f800000
-vksamples__oit_depth_peeling__gather.frag.s	0	refused	no_form	dispatch	no form matches image_load	5: image_load v3, v3, s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
+vksamples__oit_depth_peeling__combine.frag.s	1	refused	refused	valu_vop3int.shift64	Unsupported 64-bit operand 0x3f800000	15: v_lshrrev_b64 v[0:1], 0, 0x3f800000
+vksamples__oit_depth_peeling__gather.frag.s	1	refused	no_form	dispatch	no form matches image_load	5: image_load v3, v3, s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
 vksamples__oit_depth_peeling__gather_first.frag.s	1	translated				
 vksamples__oit_linked_lists__background.frag.s	1	translated				
-vksamples__oit_linked_lists__combine.frag.s	0	refused	no_form	dispatch	no form matches image_load	9: image_load v1, v2, s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
+vksamples__oit_linked_lists__combine.frag.s	1	refused	no_form	dispatch	no form matches image_load	9: image_load v1, v2, s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm a16
 vksamples__oit_linked_lists__gather.frag.s	0	refused	refused	exec_mask.saveexec	Unsupported execution mask	5: s_and_saveexec_b64 s[8:9], s[8:9]
 vksamples__open_cl_interop__glsl__texture_display.frag.s	1	translated				
 vksamples__patch_control_points__glsl__tess.frag.s	1	translated				
@@ -255,7 +254,7 @@ vksamples__push_descriptors__glsl__cube.frag.s	1	translated
 vksamples__rasterization_order_attachment_access__glsl__background.frag.s	1	translated				
 vksamples__render_octomap__glsl__gltf.frag.s	1	translated				
 vksamples__render_octomap__glsl__render.frag.s	1	translated				
-vksamples__render_octomap__glsl__splat.frag.s	0	refused	refused	vintrp.interpolate	Unknown interpolation context	22: v_interp_p1_f32_e32 v8, v0, attr1.z
+vksamples__render_octomap__glsl__splat.frag.s	1	refused	refused	vintrp.interpolate	Unknown interpolation context	22: v_interp_p1_f32_e32 v8, v0, attr1.z
 vksamples__separate_image_sampler__glsl__separate_image_sampler.frag.s	1	translated				
 vksamples__shader_debugprintf__glsl__scene.frag.s	1	refused	no_form	dispatch	no form matches s_mov_b32	18: s_mov_b32 s7, m0
 vksamples__shader_object__basic_n_dot_l.frag.s	1	translated				
@@ -268,17 +267,17 @@ vksamples__shader_object__material_reflective.frag.s	1	translated
 vksamples__shader_object__material_scene.frag.s	1	translated				
 vksamples__shader_object__material_texture.frag.s	1	translated				
 vksamples__shader_object__post_process_brighten.frag.s	1	refused	refused	vop3p.fma_mix	A literal source is lowered only as the low binary16 half: 0x999a	15: v_fma_mixlo_f16 v6, 0x999a, v3, neg(0) op_sel_hi:[0,0,1]
-vksamples__shader_object__post_process_color_cycle.frag.s	0	refused	refused	valu_f32.arithmetic	Unsupported output modifier	22: v_floor_f32_e64 v6, v6 mul:2
+vksamples__shader_object__post_process_color_cycle.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported output modifier	22: v_floor_f32_e64 v6, v6 mul:2
 vksamples__shader_object__post_process_edge_detection.frag.s	0	refused	no_form	dispatch	no form matches image_sample_o	17: image_sample_o v[7:9], [v3, v2, v0], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D
 vksamples__shader_object__post_process_grayscale.frag.s	1	translated				
 vksamples__shader_object__post_process_invert.frag.s	1	translated				
 vksamples__shader_object__post_process_quantize.frag.s	1	translated				
 vksamples__shader_object__skybox.frag.s	1	translated				
-vksamples__shader_object__terrain.frag.s	1	refused	no_form	dispatch	no form matches image_sample	19: image_sample v[12:14], v[4:6], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_2D_ARRAY
+vksamples__shader_object__terrain.frag.s	1	refused	refused	valu_f32.arithmetic	Read of unset vector register v2	54: v_mul_f32_e32 v2, v2, v3
 vksamples__shader_quad_control__glsl__quad_control.frag.s	1	translated				
 vksamples__shadows__shadowmap.frag.s	1	refused	no_form	dispatch	no form matches s_endpgm	1: s_endpgm
 vksamples__sparse_image__glsl__sparse.frag.s	0	refused	no_form	dispatch	no form matches image_sample_l	19: image_sample_l v[3:7], [v0, v2, v8], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D tfe
-vksamples__swapchain_present_timing__glsl__circle.frag.s	0	refused	refused	valu_f32.arithmetic	Unsupported arithmetic operand neg(0.5)	1: v_mad_f32 v2, s2, neg(0.5), v2
+vksamples__swapchain_present_timing__glsl__circle.frag.s	1	refused	refused	valu_f32.arithmetic	Unsupported arithmetic operand neg(0.5)	1: v_mad_f32 v2, s2, neg(0.5), v2
 vksamples__synchronization_2__glsl__particle.frag.s	1	translated				
 vksamples__tensor_and_data_graph__glsl__blit.frag.s	1	translated				
 vksamples__terrain_tessellation__glsl__skysphere.frag.s	1	translated				
@@ -289,4 +288,4 @@ vksamples__texture_mipmap_generation__glsl__texture.frag.s	1	refused	contract	sm
 vksamples__timeline_semaphore__glsl__render.frag.s	1	translated				
 vksamples__triangle.frag.s	1	translated				
 vksamples__uioverlay__uioverlay.frag.s	1	translated				
-vksamples__vertex_dynamic_state__glsl__gbuffer.frag.s	1	refused	no_form	dispatch	no form matches image_sample	29: image_sample v[11:13], v[8:10], s[8:15], s[4:7] dmask:0x7 dim:SQ_RSRC_IMG_CUBE
+vksamples__vertex_dynamic_state__glsl__gbuffer.frag.s	1	translated				
