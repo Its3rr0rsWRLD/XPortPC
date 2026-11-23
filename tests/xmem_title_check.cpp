@@ -587,6 +587,17 @@ bool physical_reserve()
                logs.has("path=physical-reservation align=0x200000"),
            "the call is logged with its arguments, result and path");
     expect(!logs.has("read as XMEM_MAPPABLE"), "Win32 bits are not read as unknown XMEM bits");
+    // The title's commit with a console protection (0x183) that Win32 refuses as-is: still committed, writable.
+    {
+        constexpr DWORD commit = MEM_COMMIT | MEM_RESERVE | MEM_LARGE_PAGES;
+        auto* p = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 64 * MiB, commit, 0x183));
+        expect(p != nullptr, "commit with console protection 0x183 is not NULL");
+        if (p) { p[0] = 1; p[64 * MiB - 1] = 2; expect(p[0] == 1 && p[64 * MiB - 1] == 2, "0x183 commit is writable"); }
+        expect(logs.has("protect 0x183: not a desktop protection"), "the protection mapping is logged");
+        auto* q = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 1 * MiB, MEM_COMMIT | MEM_RESERVE, 0x3));
+        expect(q != nullptr, "commit with console protection 0x3 is not NULL");
+        if (q) q[0] = 1;
+    }
     MEMORY_BASIC_INFORMATION info{};
     expect(VirtualQuery(base + 700 * MiB, &info, sizeof(info)) && info.State == MEM_RESERVE,
            "the whole range is reserved");

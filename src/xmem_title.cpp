@@ -1545,6 +1545,22 @@ static BOOL impl_XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR PageA
 //   XMemTransferMemory: signature unknown. Accepts any arguments, logs them and returns TRUE without moving data.
 //   XMemIsToolsMemAvailable: FALSE (no tools memory on a desktop).
 namespace {
+// Console page protections combine bits that Win32 treats as exclusive (e.g. 0x3, 0x21, 0x183 seen from a title);
+// VirtualAlloc refuses those with ERROR_INVALID_PARAMETER. A value Win32 accepts as-is is kept; any other value is
+// mapped to the most permissive desktop equivalent (execute-read-write when an execute bit is set, else
+// read-write), dropping the guard/cache modifiers, and logged once.
+DWORD desktop_protect(DWORD protect)
+{
+    if (!protect) return PAGE_READWRITE;
+    const DWORD base = protect & 0xffu, modifiers = protect & ~0xffu;
+    const bool single = base && !(base & (base - 1));
+    if (single && !(modifiers & ~DWORD(PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) && base != PAGE_NOACCESS)
+        return protect;
+    const DWORD mapped = (base & 0xf0u) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+    log_once("note", "XMemVirtualAlloc protect 0x%lx: not a desktop protection; using 0x%lx", protect, mapped);
+    return mapped;
+}
+
 PVOID virtual_alloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect, const char*& path,
                     std::uint64_t& alignment)
 {
@@ -1591,7 +1607,7 @@ PVOID virtual_alloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Prot
     } else if (extra) {
         path = "mappable-reservation";
     }
-    return VirtualAlloc(Address, Size, type, Protect ? Protect : PAGE_READWRITE);
+    return VirtualAlloc(Address, Size, type, desktop_protect(Protect));
 }
 }  // namespace
 
