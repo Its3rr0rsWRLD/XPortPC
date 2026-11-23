@@ -21,6 +21,14 @@
 //   r4_scene warp|hardware missing_memory   control: the depth allocation is freed before drawing, so its loads miss
 //                                           in TitleLookup. TitleLookup misses must be reported and the frame equal
 //                                           the reference in which every draw has depth 0
+//   r4_scene warp|hardware tiled            textures created from tiled bytes: the title's texture memory holds both
+//                                           textures in GFX10.3 layouts (texture 0: SW_64KB_R_X with 4 mips, so
+//                                           mip 0 sits in the mip tail, pipe/bank XOR 0x8b; texture 1: SW_4KB_S_X,
+//                                           XOR 0x6; 16 pipes, 16 packers). The upload detiles them with
+//                                           x2w::gfx10::DetileToFootprints (src/gfx10_detile.h) into the copyable
+//                                           footprints of the desktop textures. The frame must equal the reference
+//   r4_scene warp|hardware wrong_swizzle    control: as tiled, but texture 0 is detiled as SW_64KB_S_X. Every frame
+//                                           must differ from the reference
 //
 // Every mode renders two 64x64 R8G8B8A8_UNORM frames (clear colour and depth, three draws, read back, present) and
 // compares every pixel with the CPU reference. The reference is exact: quads are pixel-aligned rectangles (no pixel
@@ -32,8 +40,10 @@
 // Exit codes: 0 pass, 1 fail, 2 usage, 77 no hardware adapter.
 #include "runtime_common.h"
 #include "era_title_gpu_api.h"
+#include "gfx10_detile.h"
 #include "r4_programs.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -78,7 +88,8 @@ constexpr Quad quads[draws] = {
 
 // Title memory A: constants, vertex and index buffers. CBVs are 256-byte aligned.
 constexpr std::size_t vs_constants_offset = 0x0000;  // draw k at + 256 k: float2 offset (clip units)
-constexpr std::size_t ps_constants_offset = 0x0400;  // draw k at + 256 k: float4 tint
+constexpr std::size_t ps_constants_offset = 0x0400;  // draw k at + 512 k: a 512-byte CBV, its float4 tint at + 0x110
+constexpr std::size_t ps_constants_bytes = 512, ps_tint_offset = 0x110;
 constexpr std::size_t vertices_offset = 0x1000;      // 4 vertices per quad: float4 (x, y, u, v)
 constexpr std::size_t indices_offset = 0x1200;       // 6 uint16
 // Title memory B: the depth of instance k at 16 k.
@@ -94,6 +105,55 @@ constexpr UINT table_size = 3;
 std::uint8_t texel(int texture, int tx, int ty, int c)
 {
     return static_cast<std::uint8_t>(2 * ((tx * 29 + ty * 13 + c * 7 + texture * 61) % 128));
+}
+
+// Where the textures' bytes come from: linear rows (the default) or the title's tiled texture memory.
+enum class TextureSource { linear, tiled, wrong_swizzle };
+
+// The tiled textures of modes tiled and wrong_swizzle (header comment).
+const x2w::gfx10::Config tiled_config{x2w::gfx10::MakeGbAddrConfig(4, 4), true, true};
+x2w::gfx10::Surface tiled_surface(int texture)
+{
+    x2w::gfx10::Surface s;
+    s.mode = texture == 0 ? x2w::gfx10::SwizzleMode::R_64KB_X : x2w::gfx10::SwizzleMode::S_4KB_X;
+    s.element_bytes = 4;
+    s.width = s.height = texels;
+    s.mip_levels = texture == 0 ? 4 : 1;
+    s.pipe_bank_xor = texture == 0 ? 0x8b : 0x6;
+    return s;
+}
+constexpr std::size_t tiled_offsets[2] = {0, 64 * 1024};  // texture 1 after texture 0's 64 KiB block
+constexpr SIZE_T tiled_bytes = 128 * 1024;
+
+// Texel c of (tx, ty) of mip `mip`; mip 0 is texel(), smaller mips get other values (never sampled).
+std::uint8_t mip_texel(int texture, UINT mip, int tx, int ty, int c)
+{
+    if (c == 3) return 255;
+    return mip == 0 ? texel(texture, tx, ty, c) : static_cast<std::uint8_t>(17 * mip + 3 * tx + 5 * ty + c);
+}
+
+// Writes the textures into title memory in their tiled layouts, as the console GPU would find them.
+bool write_tiled_textures(std::uint8_t* memory)
+{
+    for (int t = 0; t < 2; ++t) {
+        const x2w::gfx10::Surface s = tiled_surface(t);
+        std::vector<x2w::gfx10::Footprint> fp(s.mip_levels);
+        std::vector<std::uint8_t> linear;
+        for (UINT m = 0; m < s.mip_levels; ++m) {
+            const UINT size = std::max(texels >> m, 1u);
+            fp[m] = {linear.size(), size, size, 1, size * 4};
+            for (UINT ty = 0; ty < size; ++ty)
+                for (UINT tx = 0; tx < size; ++tx)
+                    for (int c = 0; c < 4; ++c) linear.push_back(mip_texel(t, m, tx, ty, c));
+        }
+        std::string error;
+        if (!x2w::gfx10::TileFromFootprints(tiled_config, s, memory + tiled_offsets[t], tiled_bytes - tiled_offsets[t],
+                                            linear.data(), linear.size(), fp.data(), s.mip_levels, &error)) {
+            std::fprintf(stderr, "r4: TileFromFootprints(texture %d): %s\n", t, error.c_str());
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<std::uint8_t> container(X2WShaderStage stage, const std::uint8_t* code, std::size_t bytes,
@@ -321,7 +381,8 @@ struct Scene {
     }
 };
 
-bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view)
+bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view, TextureSource source,
+                  const std::uint8_t* tiled)
 {
     ID3D12Device* device = gpu.device.Get();
     // Heaps: the title's CBV/SRV/UAV and sampler heaps (shader visible), desktop RTV and DSV heaps.
@@ -339,19 +400,10 @@ bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view)
     std::printf("increments view=%u sampler=%u\n", view_step, sampler_step);
     if (view_step != 32 || sampler_step != 16) return false;
 
-    // Textures: 8x8 R8G8B8A8_UNORM, uploaded row by row through an upload buffer.
+    // Textures: 8x8 R8G8B8A8_UNORM. Linear source: uploaded row by row through an upload buffer. Tiled source: each
+    // texture's desktop copyable footprints (all its mips), filled by the detiler from the title's tiled bytes.
     constexpr UINT texture_pitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
-    s.upload = buffer(device, D3D12_HEAP_TYPE_UPLOAD, 2 * texture_pitch * texels, D3D12_RESOURCE_STATE_GENERIC_READ);
-    if (!s.upload) return false;
-    std::uint8_t* mapped = nullptr;
-    if (!ok(s.upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map(upload)")) return false;
-    for (int t = 0; t < 2; ++t)
-        for (UINT ty = 0; ty < texels; ++ty)
-            for (UINT tx = 0; tx < texels; ++tx)
-                for (int c = 0; c < 4; ++c)
-                    mapped[t * texture_pitch * texels + ty * texture_pitch + tx * 4 + c] =
-                        c == 3 ? 255 : texel(t, tx, ty, c);
-    s.upload->Unmap(0, nullptr);
+    const bool from_tiled = source != TextureSource::linear;
     D3D12_HEAP_PROPERTIES vram{};
     vram.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC td{};
@@ -362,9 +414,57 @@ bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view)
     td.MipLevels = 1;
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.SampleDesc.Count = 1;
-    for (auto& texture : s.textures)
-        if (!ok(device->CreateCommittedResource(&vram, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                nullptr, IID_PPV_ARGS(&texture)),
+    D3D12_RESOURCE_DESC texture_desc[2] = {td, td};
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts[2];
+    UINT64 upload_bytes = 2 * texture_pitch * texels;
+    if (from_tiled) {
+        UINT64 total = 0;
+        for (int t = 0; t < 2; ++t) {
+            texture_desc[t].MipLevels = static_cast<UINT16>(tiled_surface(t).mip_levels);
+            layouts[t].resize(texture_desc[t].MipLevels);
+            UINT64 bytes = 0;
+            total = (total + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+            device->GetCopyableFootprints(&texture_desc[t], 0, texture_desc[t].MipLevels, total, layouts[t].data(),
+                                          nullptr, nullptr, &bytes);
+            total += bytes;
+        }
+        upload_bytes = total;
+    }
+    s.upload = buffer(device, D3D12_HEAP_TYPE_UPLOAD, upload_bytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+    if (!s.upload) return false;
+    std::uint8_t* mapped = nullptr;
+    if (!ok(s.upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map(upload)")) return false;
+    if (!from_tiled) {
+        for (int t = 0; t < 2; ++t)
+            for (UINT ty = 0; ty < texels; ++ty)
+                for (UINT tx = 0; tx < texels; ++tx)
+                    for (int c = 0; c < 4; ++c)
+                        mapped[t * texture_pitch * texels + ty * texture_pitch + tx * 4 + c] =
+                            c == 3 ? 255 : texel(t, tx, ty, c);
+    } else {
+        for (int t = 0; t < 2; ++t) {
+            x2w::gfx10::Surface surface = tiled_surface(t);
+            if (t == 0 && source == TextureSource::wrong_swizzle) surface.mode = x2w::gfx10::SwizzleMode::S_64KB_X;
+            std::vector<x2w::gfx10::Footprint> fp;
+            for (const auto& l : layouts[t])
+                fp.push_back({l.Offset, l.Footprint.Width, l.Footprint.Height, l.Footprint.Depth, l.Footprint.RowPitch});
+            std::string error;
+            const bool detiled = x2w::gfx10::DetileToFootprints(
+                tiled_config, surface, tiled + tiled_offsets[t], tiled_bytes - tiled_offsets[t], mapped,
+                static_cast<std::size_t>(upload_bytes), fp.data(), static_cast<std::uint32_t>(fp.size()), &error);
+            std::printf("detile texture=%d mode=%s mips=%u pipe_bank_xor=0x%x result=%s%s\n", t,
+                        x2w::gfx10::SwizzleModeName(surface.mode), surface.mip_levels, surface.pipe_bank_xor,
+                        detiled ? "ok" : "refused ", detiled ? "" : error.c_str());
+            if (!detiled) {
+                s.upload->Unmap(0, nullptr);
+                return false;
+            }
+        }
+    }
+    s.upload->Unmap(0, nullptr);
+    for (int t = 0; t < 2; ++t)
+        if (!ok(device->CreateCommittedResource(&vram, D3D12_HEAP_FLAG_NONE, &texture_desc[t],
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&s.textures[t])),
                 "CreateCommittedResource(texture)"))
             return false;
     D3D12_RESOURCE_DESC dd = td;
@@ -399,7 +499,7 @@ bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view)
             srv.Texture2D.MipLevels = 1;
             device->CreateShaderResourceView(s.textures[quads[k].texture].Get(), &srv, at(table_size * k + 1));
         }
-        cbv = {base + ps_constants_offset + 256 * k, 256};
+        cbv = {base + ps_constants_offset + ps_constants_bytes * k, static_cast<UINT>(ps_constants_bytes)};
         device->CreateConstantBufferView(&cbv, at(table_size * k + 2));
     }
     D3D12_SAMPLER_DESC point{};
@@ -417,9 +517,17 @@ bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view)
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.pResource = s.upload.Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        src.PlacedFootprint.Offset = static_cast<UINT64>(t) * texture_pitch * texels;
-        src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, texels, texels, 1, texture_pitch};
-        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        if (from_tiled) {
+            for (UINT m = 0; m < texture_desc[t].MipLevels; ++m) {
+                dst.SubresourceIndex = m;
+                src.PlacedFootprint = layouts[t][m];
+                gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            }
+        } else {
+            src.PlacedFootprint.Offset = static_cast<UINT64>(t) * texture_pitch * texels;
+            src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, texels, texels, 1, texture_pitch};
+            gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
         const auto barrier = transition(s.textures[t].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         gpu.list->ResourceBarrier(1, &barrier);
@@ -536,6 +644,10 @@ int scene_check(bool warp, std::string_view mode)
 {
     const bool cold = mode == "cold", warm = mode == "warm", wrong = mode == "wrong_reference";
     const bool missing_view = mode == "missing_view", missing_memory = mode == "missing_memory";
+    const bool wrong_swizzle = mode == "wrong_swizzle";
+    const TextureSource source = mode == "tiled" ? TextureSource::tiled
+                                 : wrong_swizzle ? TextureSource::wrong_swizzle
+                                                 : TextureSource::linear;
     const std::wstring cache = cache_directory();
     if (cache.empty()) {
         std::fputs("r4: X2W_CACHE_DIR must name the test's cache root\n", stderr);
@@ -560,6 +672,17 @@ int scene_check(bool warp, std::string_view mode)
     }
     std::memset(title, 0, title_bytes);
     std::memset(instances, 0, title_bytes);
+    // The title's texture memory (tiled modes only).
+    std::uint8_t* textures = nullptr;
+    if (source != TextureSource::linear) {
+        textures = static_cast<std::uint8_t*>(XMemAlloc(tiled_bytes, graphics_word));
+        if (!textures) {
+            std::fputs("r4: XMemAlloc(graphics, textures) failed\n", stderr);
+            return 1;
+        }
+        std::memset(textures, 0, tiled_bytes);
+        if (!write_tiled_textures(textures)) return 1;
+    }
     std::uint16_t indices[6] = {0, 1, 2, 2, 1, 3};
     std::memcpy(title + indices_offset, indices, sizeof(indices));
     for (UINT k = 0; k < draws; ++k) {
@@ -573,8 +696,11 @@ int scene_check(bool warp, std::string_view mode)
         }
         const float offset[2] = {q.x / 32.0f, -q.y / 32.0f};
         std::memcpy(title + vs_constants_offset + 256 * k, offset, sizeof(offset));
-        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f};
-        std::memcpy(title + ps_constants_offset + 256 * k, tint, sizeof(tint));
+        // The tint past the first 256 bytes (r4_ps.s); the buffer's first float4 is another tint, which a translation
+        // that read the wrong word, or a root CBV that stopped short of the window, would show.
+        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f}, decoy[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+        std::memcpy(title + ps_constants_offset + ps_constants_bytes * k + ps_tint_offset, tint, sizeof(tint));
+        std::memcpy(title + ps_constants_offset + ps_constants_bytes * k, decoy, sizeof(decoy));
         std::memcpy(instances + 16 * k, &q.depth, 4);
     }
 
@@ -586,6 +712,7 @@ int scene_check(bool warp, std::string_view mode)
         if (created) {
             XMemFree(title, graphics_word);
             XMemFree(instances, graphics_word);
+            if (textures) XMemFree(textures, graphics_word);
             return created;
         }
         X2WGfxSetLogSink(record, &recorded);
@@ -599,7 +726,7 @@ int scene_check(bool warp, std::string_view mode)
             const HRESULT hr = scene.root ? create_pipeline(gpu.device.Get(), scene.root.Get(), scene.pso, &ms) : E_FAIL;
             std::printf("pso_create_ms=%.3f hr=0x%08lx mode=%s\n", ms, static_cast<unsigned long>(hr),
                         std::string(mode).c_str());
-            good = good && SUCCEEDED(hr) && create_scene(gpu, scene, title, missing_view);
+            good = good && SUCCEEDED(hr) && create_scene(gpu, scene, title, missing_view, source, textures);
             if (missing_memory) {
                 // The allocation's view leaves the title memory table; the root constants still hold its address.
                 XMemFree(instances, graphics_word);
@@ -608,8 +735,9 @@ int scene_check(bool warp, std::string_view mode)
             for (UINT f = 0; good && f < frames; ++f) good = draw_frame(gpu, scene, title, instances, expected,
                                                                         frame_mismatch[f]);
             const unsigned want = wrong ? covered : 0;
-            for (UINT f = 0; f < frames; ++f) good = good && frame_mismatch[f] == want;
-            if (wrong) std::printf("control=%s\n", good ? "mismatch_detected" : "mismatch_missed");
+            for (UINT f = 0; f < frames; ++f)
+                good = good && (wrong_swizzle ? frame_mismatch[f] > 0 : frame_mismatch[f] == want);
+            if (wrong || wrong_swizzle) std::printf("control=%s\n", good ? "mismatch_detected" : "mismatch_missed");
             gpu.list->Reset(gpu.allocator.Get(), nullptr);
             gpu.list->Close();
             good = gpu.submit_and_wait() && good;
@@ -640,6 +768,7 @@ int scene_check(bool warp, std::string_view mode)
     }
     XMemFree(title, graphics_word);
     if (!missing_memory) XMemFree(instances, graphics_word);
+    if (textures) XMemFree(textures, graphics_word);
     const auto released = counters();
     std::printf("live_objects=%u result=%s\n", released.live_objects, rc == 0 && !released.live_objects ? "pass" : "fail");
     return released.live_objects == 0 ? rc : 1;
@@ -654,7 +783,7 @@ int main(int argc, char** argv)
     const std::string_view mode = argv[2];
     if (adapter != "warp" && adapter != "hardware") return 2;
     if (mode == "cold" || mode == "warm" || mode == "wrong_reference" || mode == "missing_view" ||
-        mode == "missing_memory")
+        mode == "missing_memory" || mode == "tiled" || mode == "wrong_swizzle")
         return scene_check(adapter == "warp", mode);
     return 2;
 }

@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(Xbox2Windows LANGUAGES CXX)
 
 enable_testing()
+include(cmake/x2w_sys.cmake)
 add_executable(root_probe tools/root_probe.cpp)
 target_compile_features(root_probe PRIVATE cxx_std_17)
 target_link_libraries(root_probe PRIVATE d3d12)
@@ -123,12 +124,35 @@ target_include_directories(r3_triangle PRIVATE src)
 target_compile_features(r3_triangle PRIVATE cxx_std_17)
 target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
+# GFX10/GFX10.3 texture detiling (src/gfx10_addr.h, src/gfx10_detile.h; docs/design/runtime.md, "Textures:
+# detiling"), ported from AMD's addrlib in Mesa (MIT). No D3D12 dependency; checked against addrlib itself on Linux
+# by tests/gfx10_addr_oracle_check.py. gfx10_detile_roundtrip: tile/detile round trips and controls, CPU only.
+add_library(x2w_gfx10_detile STATIC src/gfx10_addr.cpp src/gfx10_detile.cpp)
+target_include_directories(x2w_gfx10_detile PUBLIC src)
+target_compile_features(x2w_gfx10_detile PUBLIC cxx_std_17)
+add_executable(gfx10_detile_check tests/gfx10_detile_check.cpp)
+target_link_libraries(gfx10_detile_check PRIVATE x2w_gfx10_detile)
+add_test(NAME gfx10_detile_roundtrip COMMAND gfx10_detile_check)
+set_tests_properties(gfx10_detile_roundtrip PROPERTIES TIMEOUT 300)
+
 # Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
-# r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3.
+# r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3. Modes tiled/wrong_swizzle
+# create its textures from GFX10.3 tiled bytes in title memory through the detiler.
 add_executable(r4_scene tests/runtime/r4_scene.cpp)
 target_include_directories(r4_scene PRIVATE src)
 target_compile_features(r4_scene PRIVATE cxx_std_17)
-target_link_libraries(r4_scene PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+target_link_libraries(r4_scene PRIVATE d3d12_xs_shim xmem_shim x2w_gfx10_detile dxgi dxguid user32)
+
+# Detiled uploads through the graphics shim (tests/runtime/r4_detile_upload.cpp): 2D/array/3D, uncompressed and BC
+# surfaces in GFX10.3 layouts, detiled into GetCopyableFootprints, copied in and read back element for element.
+add_executable(r4_detile_upload tests/runtime/r4_detile_upload.cpp)
+target_include_directories(r4_detile_upload PRIVATE src)
+target_compile_features(r4_detile_upload PRIVATE cxx_std_17)
+target_link_libraries(r4_detile_upload PRIVATE d3d12_xs_shim xmem_shim x2w_gfx10_detile dxgi dxguid user32)
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME runtime_r4_detile_upload_${adapter} COMMAND r4_detile_upload ${adapter})
+    set_tests_properties(runtime_r4_detile_upload_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+endforeach()
 
 # Runtime ladder R5: a 600-frame loop in which a compute program (tests/runtime/r5_cs.s, r5_programs.h) on a compute
 # queue moves particles in title memory and the R3 programs draw them on the direct queue, with cross-queue fences.
@@ -2694,9 +2718,9 @@ if(EXISTS "${INTAKE_PYTHON}")
         set(r4_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
             "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r4_cache_${adapter}")
         set(r4_after_cold)
-        foreach(mode IN ITEMS cold warm wrong_reference missing_view missing_memory)
+        foreach(mode IN ITEMS cold warm wrong_reference missing_view missing_memory tiled wrong_swizzle)
             set(r4_name runtime_r4_scene_${mode}_${adapter})
-            if(mode STREQUAL "wrong_reference" OR mode MATCHES "^missing_")
+            if(mode MATCHES "^(wrong_|missing_)")
                 set(r4_name runtime_r4_${mode}_${adapter})
             endif()
             add_test(NAME ${r4_name} COMMAND r4_scene ${adapter} ${mode})
@@ -3056,6 +3080,8 @@ endif()
 if(TARGET pe_map AND TARGET xmem_shim)
     add_executable(x2w_launch tools/x2w_launch.cpp)
     target_compile_features(x2w_launch PRIVATE cxx_std_17)
+    # No implicit TLS of its own: x2w_launch hands TLS slot 0 to the program (tools/x2w_launch.cpp, "slot 0").
+    target_compile_options(x2w_launch PRIVATE /Zc:threadSafeInit-)
     add_dependencies(x2w_launch pe_map)
     set(x2w_missing_lib "${CMAKE_CURRENT_BINARY_DIR}/x2w_missing.lib")
     add_custom_command(OUTPUT "${x2w_missing_lib}"
@@ -3086,13 +3112,19 @@ if(TARGET pe_map AND TARGET xmem_shim)
     target_compile_features(x2w_tls_crt_title PRIVATE cxx_std_17)
     set_target_properties(x2w_tls_crt_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
     target_link_options(x2w_tls_crt_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+    # C++ exceptions thrown and caught in a mapped image, and the launcher's cpp-throw run log lines.
+    add_executable(x2w_throw_title tests/native/throw_title.cpp)
+    target_compile_features(x2w_throw_title PRIVATE cxx_std_17)
+    target_compile_options(x2w_throw_title PRIVATE /EHsc)
+    set_target_properties(x2w_throw_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_throw_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
     enable_language(RC)
     add_executable(x2w_identity_title tests/native/identity_title.cpp tests/native/identity_title.rc)
     target_compile_options(x2w_identity_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
     target_link_options(x2w_identity_title PRIVATE /ENTRY:identity_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
         /DYNAMICBASE /INCREMENTAL:NO)
     target_link_libraries(x2w_identity_title PRIVATE kernel32)
-    foreach(title_check IN ITEMS tls tls_crt identity)
+    foreach(title_check IN ITEMS tls tls_crt identity throw)
         string(REPLACE "_" "-" title_mode "${title_check}")
         add_test(NAME native_launch_${title_check} COMMAND "${INTAKE_PYTHON}" -B
             "${CMAKE_SOURCE_DIR}/tests/native/launch_title_check.py" ${title_mode} "$<TARGET_FILE:x2w_launch>"
@@ -3154,3 +3186,8 @@ if(TARGET pe_map AND TARGET xmem_shim)
     endif()
 endif()
 
+
+# System-library shims: x2w_gdk.dll and the DLLs tools/shimgen.py generates (cmake/x2w_shimgen.cmake).
+include(cmake/x2w_shimgen.cmake)
+# The xgameruntime.dll gateway for PC GDK titles (cmake/x2w_xgr.cmake).
+include(cmake/x2w_xgr.cmake)

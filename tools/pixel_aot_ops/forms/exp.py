@@ -41,6 +41,16 @@ SALU_HELPERS["pack16_rtz"] = (
     "}")
 
 
+def pack_word(value):
+    """The raw word a pack source holds, or None: a tracked numeric word, or a memory word whose load has completed
+    (a sample or load result, mem_ex when a masked write selected it, CF-2c), read as the binary32 with those bits."""
+    if (word := tracked_word(value)) is not None:
+        return word
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint" and value[1].startswith("mem"):
+        return value[1]
+    return None
+
+
 def pair_of(st, dst, halves):
     pair = PackedPair(halves)
     pair.helpers = st.helpers
@@ -53,7 +63,7 @@ def pack_e32(st, i, m):
     pair = []
     for n, register in enumerate((lo, hi)):
         value = st.vector[register]
-        if isinstance(value, tuple) and tracked_word(value) is not None:
+        if isinstance(value, tuple) and pack_word(value) is not None:
             # A raw word is exported as the float with those bits; the export is where it becomes a float.
             st.lines.append(f"    precise float alu{i}_{n} = asfloat({value[1]});")
             value = f"alu{i}_{n}"
@@ -95,7 +105,7 @@ def pack_tokens(st, i, dst, tokens, clamp):
     pair = []
     for n, token in enumerate(tokens):
         for register in re.findall(r"[vs]\d+", token):
-            if tracked_word((st.vector if register.startswith("v") else st.scalar).get(register)) is None:
+            if pack_word((st.vector if register.startswith("v") else st.scalar).get(register)) is None:
                 raise ValueError(f"Unsupported pack operand {register}")
         st.lines.append(f"    precise float alu{i}_{n} = {fp_operand(token, st.scalar, st.vector, st.pending, st.sample_pending)};")
         pair.append(f"alu{i}_{n}")

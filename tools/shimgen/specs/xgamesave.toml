@@ -1,0 +1,204 @@
+# XGameSave: local folder-backed saves under %LOCALAPPDATA%\XPortPC\saves\<title> (X2W_SAVE_ROOT overrides
+# the root). https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgamesave/xgamesave_members
+# Format: see xgameruntime.toml.
+family = "xgamesave"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XGameSaveInitializeProvider"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgamesave/functions/"
+
+[[functions]]
+name = "XGameSaveInitializeProvider"
+returns = "HRESULT"
+params = "XUserHandle requestingUser, const char* configurationId, bool syncOnDemand, XGameSaveProviderHandle* provider"
+doc = "xgamesaveinitializeprovider"
+impl = true
+out = ["provider"]
+
+[[functions]]
+name = "XGameSaveInitializeProviderAsync"
+returns = "HRESULT"
+params = "XUserHandle requestingUser, const char* configurationId, bool syncOnDemand, XAsyncBlock* async"
+doc = "xgamesaveinitializeproviderasync"
+impl = true
+
+[[functions]]
+name = "XGameSaveInitializeProviderResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, XGameSaveProviderHandle* provider"
+doc = "xgamesaveinitializeproviderresult"
+impl = true
+out = ["provider"]
+
+[[functions]]
+name = "XGameSaveCloseProvider"
+returns = "void"
+params = "XGameSaveProviderHandle provider"
+doc = "xgamesavecloseprovider"
+impl = true
+
+[[functions]]
+name = "XGameSaveGetRemainingQuota"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, int64_t* remainingQuota"
+doc = "xgamesavegetremainingquota"
+impl = true
+out = ["remainingQuota"]
+
+[[functions]]
+name = "XGameSaveGetRemainingQuotaAsync"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, XAsyncBlock* async"
+doc = "xgamesavegetremainingquotaasync"
+impl = true
+
+[[functions]]
+name = "XGameSaveGetRemainingQuotaResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, int64_t* remainingQuota"
+doc = "xgamesavegetremainingquotaresult"
+impl = true
+out = ["remainingQuota"]
+
+[[functions]]
+name = "XGameSaveDeleteContainer"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, const char* containerName"
+doc = "xgamesavedeletecontainer"
+impl = true
+
+[[functions]]
+name = "XGameSaveDeleteContainerAsync"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, const char* containerName, XAsyncBlock* async"
+doc = "xgamesavedeletecontainerasync"
+impl = true
+
+[[functions]]
+name = "XGameSaveDeleteContainerResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async"
+doc = "xgamesavedeletecontainerresult"
+impl = true
+
+[[functions]]
+name = "XGameSaveCreateContainer"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, const char* containerName, XGameSaveContainerHandle* containerContext"
+doc = "xgamesavecreatecontainer"
+impl = true
+out = ["containerContext"]
+
+[[functions]]
+name = "XGameSaveCloseContainer"
+returns = "void"
+params = "XGameSaveContainerHandle context"
+doc = "xgamesaveclosecontainer"
+impl = true
+
+[[functions]]
+name = "XGameSaveGetContainerInfo"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, const char* containerName, void* context, XGameSaveContainerInfoCallback* callback"
+doc = "xgamesavegetcontainerinfo"
+impl = true
+
+[[functions]]
+name = "XGameSaveEnumerateContainerInfo"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, void* context, XGameSaveContainerInfoCallback* callback"
+doc = "xgamesaveenumeratecontainerinfo"
+impl = true
+
+[[functions]]
+name = "XGameSaveEnumerateContainerInfoByName"
+returns = "HRESULT"
+params = "XGameSaveProviderHandle provider, const char* containerNamePrefix, void* context, XGameSaveContainerInfoCallback* callback"
+doc = "xgamesaveenumeratecontainerinfobyname"
+impl = true
+
+[[functions]]
+name = "XGameSaveEnumerateBlobInfo"
+returns = "HRESULT"
+params = "XGameSaveContainerHandle container, void* context, XGameSaveBlobInfoCallback* callback"
+doc = "xgamesaveenumerateblobinfo"
+impl = true
+
+[[functions]]
+name = "XGameSaveEnumerateBlobInfoByName"
+returns = "HRESULT"
+params = "XGameSaveContainerHandle container, const char* blobNamePrefix, void* context, XGameSaveBlobInfoCallback* callback"
+doc = "xgamesaveenumerateblobinfobyname"
+impl = true
+
+[[functions]]
+name = "XGameSaveReadBlobData"
+returns = "HRESULT"
+params = "XGameSaveContainerHandle container, const char** blobNames, uint32_t* countOfBlobs, size_t blobsSize, XGameSaveBlob* blobData"
+doc = "xgamesavereadblobdata"
+impl = true
+
+[[functions]]
+name = "XGameSaveReadBlobDataAsync"
+returns = "HRESULT"
+params = "XGameSaveContainerHandle container, const char** blobNames, uint32_t countOfBlobs, XAsyncBlock* async"
+doc = "xgamesavereadblobdataasync"
+impl = true
+
+[[functions]]
+name = "XGameSaveReadBlobDataResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, size_t blobsSize, XGameSaveBlob* blobData, uint32_t* countOfBlobs"
+doc = "xgamesavereadblobdataresult"
+impl = true
+out = ["countOfBlobs"]
+
+[[functions]]
+name = "XGameSaveCreateUpdate"
+returns = "HRESULT"
+params = "XGameSaveContainerHandle container, const char* containerDisplayName, XGameSaveUpdateHandle* updateContext"
+doc = "xgamesavecreateupdate"
+impl = true
+out = ["updateContext"]
+
+[[functions]]
+name = "XGameSaveCloseUpdate"
+returns = "void"
+params = "XGameSaveUpdateHandle context"
+doc = "xgamesavecloseupdate"
+impl = true
+
+[[functions]]
+name = "XGameSaveSubmitBlobWrite"
+returns = "HRESULT"
+params = "XGameSaveUpdateHandle updateContext, const char* blobName, const uint8_t* data, size_t byteCount"
+doc = "xgamesavesubmitblobwrite"
+impl = true
+
+[[functions]]
+name = "XGameSaveSubmitBlobDelete"
+returns = "HRESULT"
+params = "XGameSaveUpdateHandle updateContext, const char* blobName"
+doc = "xgamesavesubmitblobdelete"
+impl = true
+
+[[functions]]
+name = "XGameSaveSubmitUpdate"
+returns = "HRESULT"
+params = "XGameSaveUpdateHandle updateContext"
+doc = "xgamesavesubmitupdate"
+impl = true
+
+[[functions]]
+name = "XGameSaveSubmitUpdateAsync"
+returns = "HRESULT"
+params = "XGameSaveUpdateHandle updateContext, XAsyncBlock* async"
+doc = "xgamesavesubmitupdateasync"
+impl = true
+
+[[functions]]
+name = "XGameSaveSubmitUpdateResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async"
+doc = "xgamesavesubmitupdateresult"
+impl = true
