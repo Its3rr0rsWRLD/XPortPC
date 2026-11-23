@@ -88,7 +88,8 @@ constexpr Quad quads[draws] = {
 
 // Title memory A: constants, vertex and index buffers. CBVs are 256-byte aligned.
 constexpr std::size_t vs_constants_offset = 0x0000;  // draw k at + 256 k: float2 offset (clip units)
-constexpr std::size_t ps_constants_offset = 0x0400;  // draw k at + 256 k: float4 tint
+constexpr std::size_t ps_constants_offset = 0x0400;  // draw k at + 512 k: a 512-byte CBV, its float4 tint at + 0x110
+constexpr std::size_t ps_constants_bytes = 512, ps_tint_offset = 0x110;
 constexpr std::size_t vertices_offset = 0x1000;      // 4 vertices per quad: float4 (x, y, u, v)
 constexpr std::size_t indices_offset = 0x1200;       // 6 uint16
 // Title memory B: the depth of instance k at 16 k.
@@ -498,7 +499,7 @@ bool create_scene(Gpu& gpu, Scene& s, std::uint8_t* title, bool skip_view, Textu
             srv.Texture2D.MipLevels = 1;
             device->CreateShaderResourceView(s.textures[quads[k].texture].Get(), &srv, at(table_size * k + 1));
         }
-        cbv = {base + ps_constants_offset + 256 * k, 256};
+        cbv = {base + ps_constants_offset + ps_constants_bytes * k, static_cast<UINT>(ps_constants_bytes)};
         device->CreateConstantBufferView(&cbv, at(table_size * k + 2));
     }
     D3D12_SAMPLER_DESC point{};
@@ -695,8 +696,11 @@ int scene_check(bool warp, std::string_view mode)
         }
         const float offset[2] = {q.x / 32.0f, -q.y / 32.0f};
         std::memcpy(title + vs_constants_offset + 256 * k, offset, sizeof(offset));
-        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f};
-        std::memcpy(title + ps_constants_offset + 256 * k, tint, sizeof(tint));
+        // The tint past the first 256 bytes (r4_ps.s); the buffer's first float4 is another tint, which a translation
+        // that read the wrong word, or a root CBV that stopped short of the window, would show.
+        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f}, decoy[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+        std::memcpy(title + ps_constants_offset + ps_constants_bytes * k + ps_tint_offset, tint, sizeof(tint));
+        std::memcpy(title + ps_constants_offset + ps_constants_bytes * k, decoy, sizeof(decoy));
         std::memcpy(instances + 16 * k, &q.depth, 4);
     }
 

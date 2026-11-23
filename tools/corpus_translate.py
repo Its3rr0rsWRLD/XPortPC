@@ -52,6 +52,7 @@ ISA = ROOT / "tests" / "corpus" / "isa" / "pixel"
 SHADERS = ROOT / "docs" / "coverage" / "corpus-shaders.tsv"
 STATUS = ROOT / "site" / "status.json"
 SUMMARY = ROOT / "docs" / "coverage" / "corpus-translate.tsv"
+PS_INPUTS = ROOT / "tests" / "corpus" / "ps-inputs.tsv"
 
 
 def restore_mix_literal(text, raw):
@@ -122,7 +123,19 @@ _NO_DESTINATION = ("s_cmp", "s_bitcmp", "s_waitcnt", "s_cbranch", "s_branch", "s
                    "s_setprio", "s_sendmsg", "s_inst_prefetch", "s_setpc", "s_ttracedata", "s_wqm_b64 exec")
 
 
-def derive_bindings(program):
+def _constant_reach(program, start, reg0):
+    """One past the highest byte an s_buffer_load at an immediate offset reads through s[reg0:reg0+3], from
+    instruction `start` on; 0 when there is none."""
+    reach = 0
+    for later in program[start:]:
+        m = re.fullmatch(rf"s_buffer_load_dword(x\d+)? \S+, s\[{reg0}:{reg0 + 3}\], (0x[0-9a-f]+|null)(?: glc)?(?: dlc)?",
+                         later)
+        if m:
+            reach = max(reach, _offset(m[2]) + 4 * (int(m[1][1:]) if m[1] else 1))
+    return reach
+
+
+def derive_bindings(program, ps_input_ena=None):
     """The binding description of a RADV pixel program (bindings.PixelBindings), read off the program the way the
     pipeline layout would give it. RADV's user SGPRs for a pixel shader are the 32-bit descriptor-set pointers, inline
     push-constant words and the primitive mask, which the program copies into m0:
@@ -141,7 +154,13 @@ def derive_bindings(program):
     - a T#'s dimension is the dim: field of the image instruction that first uses it (2D, 2D array, cube or 3D), as
       the layout's image view type would give it;
     - a sampler whose four registers s_mov_b32/s_movk_i32 set to constants is an inline (immutable) sampler with
-      those words.
+      those words;
+    - a constant-buffer V# that s_buffer_load reads past its first 256 bytes at immediate offsets gets a window
+      (constant_sizes) up to the highest byte read, rounded up to 16 bytes and at most 65536: the dump does not record
+      the uniform block's size, so the window is what the program is seen to read, as a title's pipeline layout would
+      bind at least that much;
+    - ps_input_ena, when given, is the program's SPI_PS_INPUT_ENA (tests/corpus/ps-inputs.tsv); otherwise the
+      description's default, persp_center alone.
     Slots are given in order of first use. Nothing in the program is rewritten."""
     written, alias, constants = set(), {}, {}
     entry_reads = []  # entry SGPRs in order of first read
@@ -159,7 +178,8 @@ def derive_bindings(program):
         if mnemonic.startswith("s_load_dword"):
             sources = ops[1:2]  # the address pair; its high word is read through the pair below
         for token in sources:
-            for reg in _span_regs(token.split()[0]) if token else []:
+            # A source modifier (-s4, |s4|, neg(s4), abs(s4)) does not hide the register it reads.
+            for reg in _span_regs(re.sub(r"^-?(?:\||abs\(|neg\()?|(?:\||\))$", "", token.split()[0])) if token else []:
                 if reg not in written and reg != "m0" and reg not in entry_reads:
                     entry_reads.append(reg)
         if mnemonic in ("s_mov_b32", "s_movk_i32") and len(ops) == 2:
@@ -211,7 +231,7 @@ def derive_bindings(program):
         sgprs[reg] = f"push:{n}"
     highs = {pointers[r] for r in sets if pointers[r] is not None}
     high = highs.pop() if len(highs) == 1 else bindings.RADV_DESCRIPTOR_HIGH
-    textures, samplers, cbvs, buffers, images, dims = {}, {}, {}, {}, {}, {}
+    textures, samplers, cbvs, buffers, images, dims, sizes = {}, {}, {}, {}, {}, {}, {}
     sampler_keys, inline_order = [], []
     spans = []  # (key, size) of the descriptors declared so far
 
@@ -251,6 +271,9 @@ def derive_bindings(program):
                 if use == "sampler":
                     sampler_keys.append(at)
                 elif use == "constants":
+                    reach = -(-_constant_reach(program, k + 1, reg0) // 16) * 16
+                    if reach > bindings.CONSTANT_WINDOW:
+                        sizes[len(cbvs)] = min(reach, bindings.MAX_CONSTANT_WINDOW)
                     cbvs[at] = len(cbvs)
                 else:
                     buffers[at] = 60 - 4 * len(buffers)
@@ -270,7 +293,9 @@ def derive_bindings(program):
         sgprs=sgprs, textures={k: v for k, v in textures.items() if v < bindings.TEXTURE_SLOTS},
         samplers=samplers, constant_buffers={k: v for k, v in cbvs.items() if v < bindings.CONSTANT_SLOTS},
         push_constants=push, buffers=buffers, storage_images={k: v for k, v in images.items() if v[0] < 4},
-        descriptor_high=high, dimensions={k: v for k, v in dims.items() if k < bindings.TEXTURE_SLOTS})
+        descriptor_high=high, dimensions={k: v for k, v in dims.items() if k < bindings.TEXTURE_SLOTS},
+        constant_sizes={k: v for k, v in sizes.items() if k < bindings.CONSTANT_SLOTS},
+        **({} if ps_input_ena is None else {"ps_input_ena": ps_input_ena}))
 
 
 # Refusals that come from the binding description (bindings.PixelBindings.check) or from resolving a program's
@@ -317,9 +342,19 @@ def _place(exc):
     return "unknown"
 
 
-def translate(program):
+def ps_inputs(path=PS_INPUTS):
+    """{shader file name: SPI_PS_INPUT_ENA} of tests/corpus/ps-inputs.tsv."""
+    out = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            name, ena, _inputs, _builtins = line.split("\t")
+            out[name] = int(ena, 16)
+    return out
+
+
+def translate(program, ps_input_ena=None):
     """('translated', hlsl, None) or ('refused', None, {reason, place, kind, instruction})."""
-    described = derive_bindings(program)
+    described = derive_bindings(program, ps_input_ena)
     recorder = _Dispatch(lowering.dispatch)
     lowering.dispatch = recorder
     try:
@@ -357,8 +392,9 @@ def all_covered(shaders_tsv, status_json):
 
 def run(isa_dir, covered_names, hlsl_dir=None):
     rows = []
+    inputs = ps_inputs()
     for path in sorted(Path(isa_dir).glob("*.s")):
-        status, source, refusal = translate(read_dump(path))
+        status, source, refusal = translate(read_dump(path), inputs.get(path.name))
         if hlsl_dir is not None and source is not None:
             Path(hlsl_dir).mkdir(parents=True, exist_ok=True)
             (Path(hlsl_dir) / (path.name[:-2] + ".hlsl")).write_text(source, encoding="utf-8")

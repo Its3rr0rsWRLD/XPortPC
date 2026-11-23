@@ -617,7 +617,7 @@ def _assemble(st, exports, vectors, root, uses_params, uses_vsharps, uses_instan
     if uses_params:
         # uint4, not float4: constant and V# words are raw data (see docs/experiments.md).
         # 16 uint4 (64 words) unless the program reads further; then the highest word read, rounded up to a uint4.
-        head.append(f"cbuffer Constants : register(b0) {{ uint4 params[{max(16, -(-st.constant_words // 4))}]; }};")
+        head.append(f"cbuffer Constants : register(b0) {{ uint4 params[{max(16, -(-st.constant_words.get('params', 0) // 4))}]; }};")
     if uses_vsharps:
         # The runtime V# words of the descriptor lists, apart from the constant buffer's data.
         head.append("cbuffer Descriptors : register(b4) { uint4 vsharp_words[16]; };")

@@ -33,7 +33,9 @@ Any other declaration (the vertex b4 descriptor words, pixel constant slots 2 an
 stores) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
-"x2w-bindings 1": "<texture|sampler|constants> <slot> <set> <byte offset>". The shim caches it beside the DXIL.
+"x2w-bindings 1": "<texture|sampler|constants> <slot> <set> <byte offset>", and for a constant buffer whose window
+is larger than 256 bytes (PixelBindings.constant_sizes: the program reads past its first 16 uint4) a fifth field, the
+window's bytes, which the root CBV must cover. The shim caches it beside the DXIL.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
@@ -177,7 +179,8 @@ def lower(stage, instructions, roles):
                 else:
                     del user[reg[1:]]  # a table the program never reads through
         source, layout = vertex_aot.lower_with_layout(lines, vertex_aot.parse_role_map(user))
-        return source, {"params": layout["params"], "instance_id": layout["instance_id"]}, refs
+        return source, {"params": layout["params"], "instance_id": layout["instance_id"]}, with_windows(refs, source,
+                                                                                                         "vertex")
     from pixel_aot_ops.bindings import PixelBindings, CONSTANT_SLOTS
     from pixel_aot_ops.lowering import lower as lower_pixel
     sgprs = dict(roles.get("sgprs", {}))
@@ -205,13 +208,30 @@ def lower(stage, instructions, roles):
             raise ValueError(f"a pixel push word past the {PUSH_WORDS} the runtime passes")
         push = next(n for n in range(CONSTANT_SLOTS) if n not in constants.values())
     description = PixelBindings(sgprs=sgprs, textures=textures, samplers=samplers, constant_buffers=constants,
-                                push_constants=push, **({"descriptor_high": high} if high is not None else {}))
+                                push_constants=push, constant_sizes=dict(derived.constant_sizes) if tables else {},
+                                **({"descriptor_high": high} if high is not None else {}))
     description.check()
     refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE) for key, slot in sorted(textures.items())]
     refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE) for slot, key in sorted(samplers.items())]
     refs += [("constants", slot, key // SET_STRIDE, key % SET_STRIDE) for key, slot in sorted(constants.items())]
     source = lower_pixel(lines, bindings=description)
-    return source, {"push_slot": push}, refs
+    return source, {"push_slot": push}, with_windows(refs, source, "pixel")
+
+
+def with_windows(refs, source, stage):
+    """refs with the bytes of each constant buffer's window appended where the translation declares more than the
+    default 16 uint4 (PixelBindings.constant_sizes; vertex_aot sizes params the same way): the shim binds the root CBV
+    over that many bytes of title memory (src/d3d12_xs_pipeline.cpp, TableRef::window). A ref of 16 uint4 is unchanged,
+    so its sidecar line is the same as before windows were recorded."""
+    declared = {m[3]: int(m[4]) for m in CBUFFER.finditer(source)}
+    out = []
+    for ref in refs:
+        if ref[0] == "constants":
+            array = "params" if stage == "vertex" or ref[1] == 0 else f"params{ref[1]}"
+            if declared.get(array, 16) > 16:
+                ref = (*ref, 16 * declared[array])
+        out.append(ref)
+    return out
 
 
 def place_in_runtime_spaces(source, stage="vertex", layout=None):
@@ -261,7 +281,7 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
 
 
 def bindings_text(refs):
-    return "x2w-bindings 1\n" + "".join(f"{kind} {slot} {table} {offset}\n" for kind, slot, table, offset in refs)
+    return "x2w-bindings 1\n" + "".join(" ".join(str(field) for field in ref) + "\n" for ref in refs)
 
 
 def translate(stage, code, roles, llvm=None, instructions=None):

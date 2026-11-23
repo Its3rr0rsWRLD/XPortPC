@@ -42,7 +42,11 @@ class Lowering:
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
         self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
         self.constant_limit = 256  # bytes of b0 a scalar buffer load may read; the vertex stage raises it (vertex_aot.py)
-        self.constant_words = 0  # one past the highest b0 word a load has read: sizes params[] when it exceeds 64
+        # Per constant array (params, params1..3): the window of a slot a binding description gives a size
+        # (PixelBindings.constant_sizes), in place of constant_limit, and one past the highest word a load has read,
+        # which sizes the array's declaration when it exceeds 64.
+        self.constant_limits = {}
+        self.constant_words = {}
         self.uses_memory = False  # emit the title-memory helpers
         self.writes_memory = False  # a store or atomic: title memory is declared writable (hlsl.TITLE_RW_DECLARATIONS)
         self.memory_helpers = {}  # name -> HLSL a form needs after MEMORY_HELPERS (it may call them), in insertion order
@@ -260,6 +264,17 @@ def poison_message(st, regs):
     return f"{kind}: {', '.join(regs)}"
 
 
+# The input words computed from the desktop's system values (bindings.LOWERED_INPUTS). SV_Position in a Direct3D pixel
+# shader is the pixel centre (x + 0.5, y + 0.5), the depth z and the clip-space w, the values the console's POS_X..POS_W
+# VGPRs hold (a program divides by gl_FragCoord.w as a product with POS_W, so POS_W is w and not 1 / w). POS_FIXED_PT
+# is the pixel's integer x in bits 0..15 and y in bits 16..31 (what an a16 image address reads), and FRONT_FACE a
+# binary32 that is positive for a front face (ACO tests it as 0 < v); +1.0 and -1.0 are given, and only the sign is
+# established.
+INPUT_WORDS = {**{f"psin_{c}": f"asuint(frag_position.{c})" for c in "xyzw"},
+               "psin_face": "front_face ? 0x3f800000u : 0xbf800000u",
+               "psin_pixel": "uint(frag_position.x) | (uint(frag_position.y) << 16)"}
+
+
 def described_state(b):
     """The Lowering of a program bound by the binding description b (bindings.PixelBindings,
     docs/design/pixel-bindings.md): entry SGPRs by role, every declared descriptor resolved word by word."""
@@ -276,9 +291,26 @@ def described_state(b):
             scalar[reg] = binding_names.pointer_role(role)
     head, sampled = binding_names.declarations(b)
     preamble = PREAMBLE if sampled else UNSAMPLED_PREAMBLE
-    st = Lowering(scalar, {"v0": "bary_i", "v1": "bary_j"}, [*head, preamble],
+    # The input VGPRs (bindings.input_vgprs): the lowered inputs get their tracked values, and the words main computes
+    # from SV_Position and SV_IsFrontFace are declared at its top. An input that is not lowered, or a VGPR whose ADDR
+    # bit gives it no value, stays unset; reading it is refused with what it holds (finish).
+    layout, enabled = binding_names.input_vgprs(b.ps_input_ena, b.ps_input_addr)
+    vector, unlowered, words = {}, {}, []
+    for reg, entry in layout.items():
+        value = binding_names.LOWERED_INPUTS.get(entry) if reg in enabled else None
+        if value is None:
+            unlowered[reg] = entry
+            continue
+        vector[reg] = value
+        if isinstance(value, tuple):
+            words.append(f"    uint {value[1]} = {INPUT_WORDS[value[1]]};")
+    st = Lowering(scalar, vector, [*head, preamble, *words],
                   {key: binding_names.texture_name(k) for key, k in b.textures.items()}, (), None, dict(b.buffers))
     st.preamble = preamble
+    st.unlowered_inputs = unlowered
+    st.quad_position = st.quad_position or any("frag_position" in line for line in words)
+    st.front_face = any("front_face" in line for line in words)
+    st.constant_limits = {binding_names.constant_array(k): size for k, size in b.constant_sizes.items()}
     st.texture_dims = {binding_names.texture_name(k): dim for k in b.textures.values()
                        if (dim := b.dimension(k)) != "2d"}
     st.descriptor_words = True
@@ -407,6 +439,12 @@ def finish(st, instructions, samples=None):
                 masked_writes(st, i, ex, before)
             restore_views(st, hidden)
         except ValueError as error:
+            unset = re.fullmatch(r"Read of unset vector register (v\d+)", str(error))
+            if unset and unset[1] in getattr(st, "unlowered_inputs", {}):
+                name, k = st.unlowered_inputs[unset[1]]
+                part = f".{k}" if dict(binding_names.PS_INPUTS)[name] > 1 else ""
+                raise ValueError(f"Read of input VGPR {unset[1]} ({name}{part}), an input that is not lowered or not "
+                                 "loaded") from error
             if poisoned:
                 raise ValueError(poison_message(st, poisoned)) from error
             if gone:
@@ -468,6 +506,14 @@ def finish(st, instructions, samples=None):
     if (st.attribute_input or st.texcoord4) and 0 not in st.flat_attrs:
         pos = st.lines.index(next(line for line in st.lines if "main(float2 uv : TEXCOORD0" in line))
         st.lines[pos] = st.lines[pos].replace("main(float2 uv : TEXCOORD0", "main(float4 uv : TEXCOORD0", 1)
+    if getattr(st, "front_face", False):
+        pos = st.lines.index(next(line for line in st.lines if "main(" in line and ") : SV_Target0 {" in line))
+        st.lines[pos] = st.lines[pos].replace(") : SV_Target0 {", ", bool front_face : SV_IsFrontFace) : SV_Target0 {", 1)
+    for array, words in st.constant_words.items():
+        if words > 64 and array is not None:
+            # The window grows past 16 uint4 only when the program reads past it (PixelBindings.constant_sizes).
+            pos = next(n for n, line in enumerate(st.lines) if line.startswith("cbuffer ") and f" uint4 {array}[16];" in line)
+            st.lines[pos] = st.lines[pos].replace(f" uint4 {array}[16];", f" uint4 {array}[{-(-words // 4)}];")
     if st.signature:
         returns, declaration = st.signature
         pos = st.lines.index(next(line for line in st.lines if "main(" in line and "SV_Target0 {" in line))
