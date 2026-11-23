@@ -170,6 +170,23 @@ HRESULT hand_out(W* wrapper, IUnknown* real, REFIID riid, void** out, const void
         return real_->SetName(name);                                                                 \
     }
 
+// IIDs D3D12XboxCreateDevice handed the device out through without knowing them (alias_device_iid): the device
+// answers QueryInterface for them with itself, so a title that asks again for its console device IID gets the
+// same object.
+constexpr unsigned max_device_aliases = 8;
+GUID g_device_aliases[max_device_aliases];
+std::atomic<unsigned> g_device_alias_count;
+SRWLOCK g_alias_lock = SRWLOCK_INIT;
+
+bool is_device_alias(REFIID riid)
+{
+    AcquireSRWLockShared(&g_alias_lock);
+    bool found = false;
+    for (unsigned i = 0; i < g_device_alias_count.load() && !found; ++i) found = IsEqualGUID(g_device_aliases[i], riid);
+    ReleaseSRWLockShared(&g_alias_lock);
+    return found;
+}
+
 class Device;
 std::atomic<Device*> g_attached_device;
 HRESULT device_query(Device* device, REFIID riid, void** out, const void* caller);
@@ -527,6 +544,54 @@ private:
         return state_.desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE ? reinterpret_cast<UINT64>(state_.base) : 0;
     }
     descriptors::Heap state_;
+};
+
+// An RTV or DSV heap: desktop descriptors, forwarded unchanged. Wrapped only so its vtable continues with the
+// logging thunks (a console-only method past the public slots is logged, not a jump past the desktop vtable) and
+// QueryInterface logs IIDs it does not know.
+class ViewHeap final : public Wrapper<ViewHeap, ID3D12DescriptorHeap, Kind::view_heap>, DeviceRef {
+public:
+    ViewHeap(ID3D12DescriptorHeap* real, Device* device) : Wrapper(real), DeviceRef(device) { install(); }
+    static bool implements(REFIID riid)
+    {
+        return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12DescriptorHeap));
+    }
+
+    X2W_D3D12_OBJECT_METHODS
+    X2W_DEVICE_CHILD_METHODS
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_DESCRIPTOR_HEAP_DESC* STDMETHODCALLTYPE GetDesc(D3D12_DESCRIPTOR_HEAP_DESC* ret) override
+    {
+        X2W_USE();
+        return real_->GetDesc(ret);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE* STDMETHODCALLTYPE GetCPUDescriptorHandleForHeapStart(D3D12_CPU_DESCRIPTOR_HANDLE* ret) override
+    {
+        X2W_USE();
+        return real_->GetCPUDescriptorHandleForHeapStart(ret);
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE* STDMETHODCALLTYPE GetGPUDescriptorHandleForHeapStart(D3D12_GPU_DESCRIPTOR_HANDLE* ret) override
+    {
+        X2W_USE();
+        return real_->GetGPUDescriptorHandleForHeapStart(ret);
+    }
+#else
+    D3D12_DESCRIPTOR_HEAP_DESC STDMETHODCALLTYPE GetDesc() override
+    {
+        X2W_USE();
+        return real_->GetDesc();
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetCPUDescriptorHandleForHeapStart() override
+    {
+        X2W_USE();
+        return real_->GetCPUDescriptorHandleForHeapStart();
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetGPUDescriptorHandleForHeapStart() override
+    {
+        X2W_USE();
+        return real_->GetGPUDescriptorHandleForHeapStart();
+    }
+#endif
 };
 
 // The title heap behind a wrapper, or null for a desktop heap.
@@ -1704,7 +1769,8 @@ public:
                (d3_ && IsEqualIID(riid, __uuidof(ID3D12Device3))) || (d4_ && IsEqualIID(riid, __uuidof(ID3D12Device4))) ||
                (d5_ && IsEqualIID(riid, __uuidof(ID3D12Device5))) || (d6_ && IsEqualIID(riid, __uuidof(ID3D12Device6))) ||
                (d7_ && IsEqualIID(riid, __uuidof(ID3D12Device7))) || (d8_ && IsEqualIID(riid, __uuidof(ID3D12Device8))) ||
-               (d9_ && IsEqualIID(riid, __uuidof(ID3D12Device9))) || (d10_ && IsEqualIID(riid, __uuidof(ID3D12Device10)));
+               (d9_ && IsEqualIID(riid, __uuidof(ID3D12Device9))) || (d10_ && IsEqualIID(riid, __uuidof(ID3D12Device10))) ||
+               is_device_alias(riid);
     }
     // Debug-layer interfaces are handed out as the desktop objects: they are developer tools that
     // take no wrapped arguments, and the R2 check reads the debug layer's messages through them.
@@ -1818,7 +1884,14 @@ public:
                                                    void** out) override
     {
         X2W_USE();
-        if (!desc || !out || !descriptors::title_increment(desc->Type)) return real_->CreateDescriptorHeap(desc, riid, out);
+        if (!desc || !out) return real_->CreateDescriptorHeap(desc, riid, out);
+        if (!descriptors::title_increment(desc->Type)) {
+            *out = nullptr;
+            ID3D12DescriptorHeap* real = nullptr;
+            const HRESULT hr = real_->CreateDescriptorHeap(desc, IID_PPV_ARGS(&real));
+            if (FAILED(hr)) return hr;
+            return hand_out(new (std::nothrow) ViewHeap(real, this), real, riid, out, X2W_RETURN_ADDRESS());
+        }
         *out = nullptr;
         D3D12_DESCRIPTOR_HEAP_DESC shadow_desc = *desc;
         shadow_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
@@ -2764,7 +2837,7 @@ private:
 
 static_assert(std::is_final_v<Device> && std::is_final_v<Queue> && std::is_final_v<Allocator> &&
               std::is_final_v<List> && std::is_final_v<Fence> && std::is_final_v<SwapChain> &&
-              std::is_final_v<DescriptorHeap> && std::is_final_v<Resource> && std::is_final_v<Heap> &&
+              std::is_final_v<DescriptorHeap> && std::is_final_v<ViewHeap> && std::is_final_v<Resource> && std::is_final_v<Heap> &&
               std::is_final_v<CommandSignature>);
 
 IUnknown* real_of(const void* object)
@@ -2782,6 +2855,7 @@ IUnknown* real_of(const void* object)
     case Kind::swap_chain: return static_cast<SwapChain*>(static_cast<IDXGISwapChain3*>(base))->real();
     case Kind::descriptor_heap:
         return static_cast<DescriptorHeap*>(static_cast<ID3D12DescriptorHeap*>(base))->real();
+    case Kind::view_heap: return static_cast<ViewHeap*>(static_cast<ID3D12DescriptorHeap*>(base))->real();
     case Kind::resource: return static_cast<Resource*>(static_cast<ID3D12Resource2*>(base))->real();
     case Kind::heap: return static_cast<Heap*>(static_cast<ID3D12Heap1*>(base))->real();
     case Kind::command_signature:
@@ -2792,6 +2866,18 @@ IUnknown* real_of(const void* object)
 
 }  // namespace
 
+void alias_device_iid(REFIID riid)
+{
+    if (is_device_alias(riid)) return;
+    AcquireSRWLockExclusive(&g_alias_lock);
+    const unsigned n = g_device_alias_count.load();
+    if (n < max_device_aliases) {
+        g_device_aliases[n] = riid;
+        g_device_alias_count.store(n + 1);
+    }
+    ReleaseSRWLockExclusive(&g_alias_lock);
+}
+
 HRESULT wrap_device(ID3D12Device* real, REFIID riid, void** out, const void* caller)
 {
     auto* device = new (std::nothrow) Device(real);
@@ -2800,11 +2886,32 @@ HRESULT wrap_device(ID3D12Device* real, REFIID riid, void** out, const void* cal
         return E_OUTOFMEMORY;
     }
     count_device();
+    install_dxgi_hooks(caller);
     device->attach_title_gpu();
     pipeline::prestart_translator();
     const HRESULT hr = device->query(riid, out, caller);
     device->Release();
     return hr;
+}
+
+IUnknown* real_queue_of(IUnknown* object)
+{
+    Kind kind;
+    if (!wrapper_kind(object, &kind) || kind != Kind::queue) return nullptr;
+    return static_cast<Queue*>(static_cast<ID3D12CommandQueue*>(object))->real();
+}
+
+HRESULT wrap_dxgi_swap_chain(IUnknown* wrapped_queue, IDXGISwapChain* real, REFIID riid, void** out)
+{
+    *out = nullptr;
+    Kind kind;
+    if (!real || !wrapper_kind(wrapped_queue, &kind) || kind != Kind::queue) return E_INVALIDARG;
+    IDXGISwapChain3* chain3 = nullptr;
+    HRESULT hr = real->QueryInterface(IID_PPV_ARGS(&chain3));
+    real->Release();
+    if (FAILED(hr)) return hr;
+    auto* wrapped = new (std::nothrow) SwapChain(chain3, static_cast<Queue*>(static_cast<ID3D12CommandQueue*>(wrapped_queue)));
+    return hand_out(wrapped, chain3, riid, out, nullptr);
 }
 
 HRESULT create_swap_chain_for_hwnd(IUnknown* queue, HWND window, const DXGI_SWAP_CHAIN_DESC1* desc,

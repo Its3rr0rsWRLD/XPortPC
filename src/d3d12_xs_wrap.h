@@ -10,8 +10,9 @@
 // ID3D12GraphicsCommandList through ID3D12GraphicsCommandList7, ID3D12Fence1, IDXGISwapChain3, CBV/SRV/UAV and
 // sampler ID3D12DescriptorHeaps (d3d12_xs_descriptors.h), ID3D12Resource2 (resources the title creates through the
 // device: their GPU virtual addresses are title addresses, d3d12_xs_resources.h), ID3D12Heap1 and
-// ID3D12CommandSignature. A versioned wrapper answers QueryInterface for version N only when the desktop object
-// implements it. Everything else a wrapped method returns (RTV and DSV heaps, pipeline state, root signatures, query
+// ID3D12CommandSignature, and RTV/DSV ID3D12DescriptorHeaps (forwarded unchanged; wrapped so slots past the public ones
+// log). A versioned wrapper answers QueryInterface for version N only when the desktop object
+// implements it. Everything else a wrapped method returns (pipeline state, root signatures, query
 // heaps, state objects, protected sessions, swap chain buffers) is the desktop object itself.
 
 #include <d3d12.h>
@@ -23,7 +24,8 @@
 namespace d3d12_xs {
 
 enum class Kind : unsigned {
-    device, queue, allocator, list, fence, swap_chain, descriptor_heap, resource, heap, command_signature, count
+    device, queue, allocator, list, fence, swap_chain, descriptor_heap, resource, heap, command_signature, view_heap,
+    count
 };
 
 // Public desktop method count of each wrapped interface (IUnknown included), from d3d12.h/dxgi1_4.h.
@@ -40,6 +42,7 @@ constexpr unsigned public_slots(Kind kind)
     case Kind::resource: return 17;    // ID3D12Resource2
     case Kind::heap: return 10;        // ID3D12Heap1
     case Kind::command_signature: return 8;  // ID3D12CommandSignature
+    case Kind::view_heap: return 11;   // ID3D12DescriptorHeap (RTV and DSV heaps)
     default: return 0;
     }
 }
@@ -61,8 +64,9 @@ void log_note(const char* symbol, const char* detail, const GUID* iid);
 // "module.dll+0xRVA" for an address inside a loader module, "image@0xBASE+0xRVA" inside an image the loader
 // does not name (pe_map), else the absolute address.
 void describe_caller(const void* address, char* out, std::size_t size);
-std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, std::uintptr_t a1,
-                                std::uintptr_t a2, std::uintptr_t a3);
+// a: RDX, R8, R9 and the caller's first three stack argument slots, as found. The detail line starts
+// "d3d12x-<kind>-unknown-slot N args ..." (kind: device, queue, list, ...).
+std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, const std::uintptr_t (&a)[6]);
 // A refused pipeline (draw=false) or draw (draw=true): counted, and reported as X2W_GFX_EVENT_REFUSED.
 void log_refused(const char* symbol, const char* detail, bool draw);
 void count_shader(bool cached);
@@ -84,6 +88,18 @@ void set_title_gpu(int state, HRESULT hr);
 // Wrapping entry points (d3d12_xs_wrap.cpp). wrap_device takes over one reference to `real`;
 // `caller` is the title's return address, used when riid is logged as unknown.
 HRESULT wrap_device(ID3D12Device* real, REFIID riid, void** out, const void* caller);
+// Makes every wrapped device answer QueryInterface(riid) with itself (an IID a title created its device through
+// that the shim does not know; D3D12XboxCreateDevice's assumed contracts). At most 8 are kept.
+void alias_device_iid(REFIID riid);
+// Installs, once per process, the DXGI hooks of d3d12_xs_dxgi.cpp: the swap chain creation methods of DXGI's
+// factory unwrap a wrapped queue and wrap the swap chain, and dxgi.dll imports of the image holding `caller`
+// (the title) are routed through logging factory creation. Called at every device creation.
+void install_dxgi_hooks(const void* caller);
+// The desktop queue behind a wrapped command queue (no reference added), or null when `object` is not one.
+IUnknown* real_queue_of(IUnknown* object);
+// Wraps a swap chain DXGI created on the desktop queue of `wrapped_queue` (takes over the reference to `real`), and
+// hands it out through riid: its GetDevice returns the wrapped queue and its presents are counted.
+HRESULT wrap_dxgi_swap_chain(IUnknown* wrapped_queue, IDXGISwapChain* real, REFIID riid, void** out);
 HRESULT create_swap_chain_for_hwnd(IUnknown* queue, HWND window, const DXGI_SWAP_CHAIN_DESC1* desc,
                                    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen_desc,
                                    IDXGIOutput* restrict_to_output, REFIID riid, void** out, const void* caller);
