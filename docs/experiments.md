@@ -2989,6 +2989,8 @@ heap's title memory at draw and dispatch time ([runtime.md](design/runtime.md), 
 | `runtime_r6_rawdesc_compute_wrong_dst_sel_*` | Control: compared with the identity-`DST_SEL` reference. Exactly the differing words must mismatch. |
 | `runtime_r6_rawdesc_compute_rewrite_*` | After dispatch 0 the title rewrites the V# (a second output, full range), `DST_SEL` and the S# (CLAMP). Dispatch 1's output must equal the new reference, dispatch 0's output must be unchanged, and dispatch 1's output must differ from the old reference in exactly the differing words. |
 
+PC results at `d2543799` (RTX 4070 Ti and WARP; job `^(runtime_r[2456]_.*|runtime_r3_(programs|triangle_.*|wrong_.*|refused_.*|translator_paths_.*)|d3d12_xs_shim_.*|gfx10_.*|compute_aot_controls)$`): 65 of 65 pass. These are the 16 `runtime_r6_*` cases above, `gfx10_descriptors_decode`, and every R2-R5 case, `d3d12_xs_shim_*` case and `runtime_r3_translator_paths_warp` on the frame-word root signature. `runtime_r3_translator_bench` was not run.
+
 Not covered: T# types other than 2D, cube and array textures, storage images (UAVs) from raw T#s, buffer V#s in vertex
 and pixel programs (still refused by the translator), constant-buffer V#s in compute programs, and texture writes
 made between recording and submission. The texture hash and the synchronous upload on a cache miss cost CPU time per
