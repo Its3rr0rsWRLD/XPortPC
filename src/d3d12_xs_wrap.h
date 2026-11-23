@@ -17,6 +17,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace d3d12_xs {
@@ -57,6 +58,9 @@ bool wrapper_kind(const void* object, Kind* kind);
 void log_first_use(Kind kind, const char* method, const void* caller);
 void log_unknown_iid(Kind kind, REFIID riid, const void* caller);
 void log_note(const char* symbol, const char* detail, const GUID* iid);
+// "module.dll+0xRVA" for an address inside a loader module, "image@0xBASE+0xRVA" inside an image the loader
+// does not name (pe_map), else the absolute address.
+void describe_caller(const void* address, char* out, std::size_t size);
 std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, std::uintptr_t a1,
                                 std::uintptr_t a2, std::uintptr_t a3);
 // A refused pipeline (draw=false) or draw (draw=true): counted, and reported as X2W_GFX_EVENT_REFUSED.
@@ -72,6 +76,9 @@ void count_indirect_rewrite();
 // A call the shim has no translation for: logged once per (symbol, detail) as X2W_GFX_EVENT_REFUSED without
 // counting a pipeline or draw (an API object or call refused with a documented failure code).
 void log_refused_call(const char* symbol, const char* detail);
+// An X2WGfxUnknownExport stub's first call (X2W_GFX_EVENT_UNKNOWN_EXPORT).
+void log_unknown_export(const char* symbol, const char* detail, const void* caller, std::uintptr_t a0,
+                        std::uintptr_t a1, std::uintptr_t a2, std::uintptr_t a3);
 void set_title_gpu(int state, HRESULT hr);
 
 // Wrapping entry points (d3d12_xs_wrap.cpp). wrap_device takes over one reference to `real`;

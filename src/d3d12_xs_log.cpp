@@ -118,6 +118,26 @@ void describe_address(const void* address, char* out, std::size_t size)
                                                       reinterpret_cast<const char*>(module)));
         return;
     }
+    // An image the loader does not list by name (a title mapped by pe_map): its base from the loader's
+    // function tables when registered there, else the allocation base when that starts with "MZ".
+    void* base = nullptr;
+    if (address) RtlPcToFileHeader(const_cast<void*>(address), &base);
+    MEMORY_BASIC_INFORMATION info{};
+    if (!base && address && VirtualQuery(address, &info, sizeof(info)) == sizeof(info) && info.AllocationBase &&
+        info.State == MEM_COMMIT) {
+        MEMORY_BASIC_INFORMATION head{};
+        if (VirtualQuery(info.AllocationBase, &head, sizeof(head)) == sizeof(head) && head.State == MEM_COMMIT &&
+            !(head.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+            *static_cast<const std::uint16_t*>(info.AllocationBase) == 0x5a4d) {
+            base = info.AllocationBase;
+        }
+    }
+    if (base) {
+        std::snprintf(out, size, "image@0x%llx+0x%llx",
+                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(base)),
+                      static_cast<unsigned long long>(static_cast<const char*>(address) - static_cast<const char*>(base)));
+        return;
+    }
     std::snprintf(out, size, "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)));
 }
 
@@ -147,6 +167,8 @@ void emit(const X2WGfxEvent& event)
 }
 
 }  // namespace
+
+void describe_caller(const void* address, char* out, std::size_t size) { describe_address(address, out, size); }
 
 const char* interface_name(Kind kind)
 {
@@ -266,6 +288,21 @@ void log_refused_call(const char* symbol, const char* detail)
     event.kind = X2W_GFX_EVENT_REFUSED;
     event.symbol = symbol;
     event.detail = detail;
+    emit(event);
+}
+
+void log_unknown_export(const char* symbol, const char* detail, const void* caller, std::uintptr_t a0,
+                        std::uintptr_t a1, std::uintptr_t a2, std::uintptr_t a3)
+{
+    X2WGfxEvent event{};
+    event.kind = X2W_GFX_EVENT_UNKNOWN_EXPORT;
+    event.symbol = symbol;
+    event.detail = detail;
+    event.caller = caller;
+    event.args[0] = a0;
+    event.args[1] = a1;
+    event.args[2] = a2;
+    event.args[3] = a3;
     emit(event);
 }
 

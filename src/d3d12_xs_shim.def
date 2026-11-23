@@ -4,6 +4,9 @@ EXPORTS
     D3D12CreateRootSignatureDeserializer=d3d12_xs_CreateRootSignatureDeserializer
     D3D12CreateDevice=d3d12_xs_CreateDevice
     D3D12GetDebugInterface=d3d12_xs_GetDebugInterface
+    D3D12XboxCreateDevice=d3d12_xs_XboxCreateDevice
+    D3D12ConfigureVirtualMemoryX=d3d12_xs_ConfigureVirtualMemoryX
     X2WGfxCreateSwapChainForHwnd
     X2WGfxSetLogSink
     X2WGfxGetCounters
+    X2WGfxUnknownExport
