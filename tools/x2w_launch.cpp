@@ -706,7 +706,10 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
             if (void* address = map_export(base, name)) return report(key, symbol, "package", "package", address);
         return report(key, symbol, "stub (package)", "stub", make_stub(key, symbol, false));
     }
-    if (void* hook = hook_for(key, name)) return report(key, symbol, "windows (x2w hook)", "windows", hook);
+    // GetModuleHandleA/W have both hooks: the shim lookup first, then the title identity answer.
+    if (void* hook = hook_for(key, name))
+        return report(key, symbol, identity_hook(key, name) ? "windows (title identity)" : "windows (x2w hook)", "windows",
+                      hook);
     if (HMODULE module = LoadLibraryA(dll)) {
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
             if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
