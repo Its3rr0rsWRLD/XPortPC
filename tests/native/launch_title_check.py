@@ -20,8 +20,9 @@ throw     tests/native/throw_title.cpp: C++ exceptions of three types thrown and
           static runtime's _CxxThrowException finds no image base for a mapped ThrowInfo; x2w_launch supplies
           it). Expected 0x107 and the same output under both loaders. With --log, exactly one
           "cpp-throw TYPE at SITE from CALLER" line per type (.?AVruntime_error@std@@, .?AUbad_probe@probe@@,
-          .H) and one "cpp-throw rethrow" line, all at the same _CxxThrowException site, each CALLER inside the
-          throwing function's .pdata entry, and every log line within the run log grammar.
+          .H) and one "cpp-throw rethrow" line at the same _CxxThrowException site, each CALLER inside the
+          throwing function's .pdata entry (the runtime's re-raise of the rethrown bad_probe may add one more
+          line at its own site), and every log line within the run log grammar.
 """
 import ctypes
 import re
@@ -156,23 +157,32 @@ def check_throw(launcher, title):
     check_grammar(lines, title)
     compare(launcher, title, 0x107)
     where = rf"{re.escape(name)}\+0x([0-9a-f]+)"
-    found = {}
+    throws = []
     for line in lines:
         match = re.fullmatch(rf"cpp-throw (\S+) at {where} from {where}", line)
         if line.startswith("cpp-throw") and not match:
             raise AssertionError(f"cpp-throw line without two title frames: {line!r}")
         if match:
-            if match[1] in found:
-                raise AssertionError(f"{match[1]} logged twice:\n" + "\n".join(lines))
-            found[match[1]] = (int(match[2], 16), int(match[3], 16))
+            throws.append((match[1], int(match[2], 16), int(match[3], 16)))
+    if len(set(throws)) != len(throws):
+        raise AssertionError("a cpp-throw line is repeated:\n" + "\n".join(lines))
+    # Every throw statement goes through the title's _CxxThrowException, the site of the first throw. The
+    # runtime raises a rethrown object once more from its catch-block helper, under its own type and site.
+    site = throws[0][1] if throws else None
+    found = {}
+    for type_name, at, caller in throws:
+        if at == site:
+            if type_name in found:
+                raise AssertionError(f"{type_name} logged twice at the throw site:\n" + "\n".join(lines))
+            found[type_name] = caller
+        elif type_name != ".?AUbad_probe@probe@@":
+            raise AssertionError(f"{type_name} raised outside the throw site:\n" + "\n".join(lines))
     types = {".?AVruntime_error@std@@": "runtime", ".?AUbad_probe@probe@@": "probe", ".H": "int"}
     if set(found) != set(types) | {"rethrow"}:
         raise AssertionError(f"thrown types {sorted(found)} != {sorted(set(types) | {'rethrow'})}")
-    if len({site for site, _ in found.values()}) != 1:
-        raise AssertionError(f"throw sites differ: {found}")
     for type_name, function in types.items():
         begin, end = function_range(title, int(sites[function], 16))
-        caller = found[type_name][1]
+        caller = found[type_name]
         if not begin < caller <= end:
             raise AssertionError(f"{type_name}: caller {caller:#x} outside {function} [{begin:#x}, {end:#x}]")
     for line in err.splitlines():
