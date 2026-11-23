@@ -2996,6 +2996,32 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
 
+    # Implicit TLS data and module identity of a mapped title, each compared with the Windows loader running
+    # the same EXE (tests/native/launch_title_check.py). The TLS title brings its own TLS directory with a
+    # template and a zero fill; the second one is built with the static C runtime and uses thread_local.
+    add_executable(x2w_tls_title tests/native/tls_title.cpp)
+    target_compile_options(x2w_tls_title PRIVATE /GS- /Zl)
+    target_link_options(x2w_tls_title PRIVATE /ENTRY:tls_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+        /INCREMENTAL:NO)
+    target_link_libraries(x2w_tls_title PRIVATE kernel32)
+    add_executable(x2w_tls_crt_title tests/native/tls_crt_title.cpp)
+    target_compile_features(x2w_tls_crt_title PRIVATE cxx_std_17)
+    set_target_properties(x2w_tls_crt_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_tls_crt_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+    enable_language(RC)
+    add_executable(x2w_identity_title tests/native/identity_title.cpp tests/native/identity_title.rc)
+    target_compile_options(x2w_identity_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_identity_title PRIVATE /ENTRY:identity_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO)
+    target_link_libraries(x2w_identity_title PRIVATE kernel32)
+    foreach(title_check IN ITEMS tls tls_crt identity)
+        string(REPLACE "_" "-" title_mode "${title_check}")
+        add_test(NAME native_launch_${title_check} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/launch_title_check.py" ${title_mode} "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_${title_check}_title>")
+        set_tests_properties(native_launch_${title_check} PROPERTIES TIMEOUT 120)
+    endforeach()
+
     # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
     # each one and compares with software references, naturally and with --force-cpu-traps.
     add_executable(x2w_cpu_trap_title tests/native/cpu_trap_title.cpp tests/native/cpu_trap_ops.asm)

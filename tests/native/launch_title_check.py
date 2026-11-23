@@ -1,0 +1,130 @@
+"""Run source-built titles natively and through x2w_launch and compare what they observe.
+
+Usage: launch_title_check.py tls|tls-crt|identity x2w_launch.exe TITLE.exe
+
+tls       tests/native/tls_title.cpp: implicit TLS data (template, zero fill, a relocated pointer) read and
+          written on the main thread and two workers, gs:[0x58][_tls_index], and the TLS callback on
+          process attach, thread attach and detach and process detach. Expected exit code 0x13f and the
+          line "process-detach main=0000600d" under both loaders.
+          Control: a copy whose template value is changed gives exit code 0x108 under both (only the
+          check that the main thread kept its own writes holds), so the checks read the template.
+tls-crt   tests/native/tls_crt_title.cpp: the static C runtime's startup and thread_local machinery
+          (dynamic initializer, destructor on thread exit) in the mapped image. Expected 0x13f and the same
+          output line under both loaders.
+identity  tests/native/identity_title.cpp: GetModuleHandle(NULL), GetModuleHandleEx, GetModuleFileName(NULL),
+          the PEB image base and a resource found through the null module name the title. Expected 0x1ff
+          under both loaders. Controls: x2w_launch --host-identity gives 0x180 (every identity answer names
+          the launcher; only the short-buffer behavior still holds), and a renamed copy run natively gives
+          0x1e3 (its name lookup and file-name checks fail).
+"""
+import ctypes
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pefile
+
+TIMEOUT = 60
+
+
+def quiet_errors():
+    # The child inherits the error mode, so a crash returns instead of opening a dialog.
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+
+
+def run(command):
+    result = subprocess.run([str(part) for part in command], capture_output=True, text=True, timeout=TIMEOUT)
+    return result.returncode & 0xffffffff, result.stdout, result.stderr
+
+
+def compare(launcher, title, expected_code, expected_stdout=None, label=""):
+    native_code, native_out, native_err = run([title])
+    launch_code, launch_out, launch_err = run([launcher, title])
+    print(f"{label}native: exit {native_code:#x} stdout {native_out.strip()!r}")
+    print(f"{label}x2w_launch: exit {launch_code:#x} stdout {launch_out.strip()!r}")
+    if native_code != expected_code:
+        raise AssertionError(f"{label}native exit {native_code:#x} != {expected_code:#x}: {native_err}")
+    if launch_code != expected_code:
+        raise AssertionError(f"{label}x2w_launch exit {launch_code:#x} != {expected_code:#x}:\n{launch_err}")
+    if native_out != launch_out:
+        raise AssertionError(f"{label}stdout differs: native {native_out!r} x2w_launch {launch_out!r}")
+    if expected_stdout is not None and native_out.strip() != expected_stdout:
+        raise AssertionError(f"{label}stdout {native_out!r} != {expected_stdout!r}")
+    if "-> stub" in launch_err:
+        raise AssertionError(f"{label}an import fell back to a stub:\n{launch_err}")
+    return launch_err
+
+
+def template_copy(title, folder, old, new):
+    """A copy of title whose TLS template holds new in place of old (each a 32-bit value)."""
+    data = bytearray(Path(title).read_bytes())
+    with pefile.PE(str(title)) as pe:
+        tls = pe.DIRECTORY_ENTRY_TLS.struct
+        base = pe.OPTIONAL_HEADER.ImageBase
+        start = pe.get_offset_from_rva(tls.StartAddressOfRawData - base)
+        size = tls.EndAddressOfRawData - tls.StartAddressOfRawData
+        zero_fill = tls.SizeOfZeroFill
+    if size <= 0 or zero_fill != 256:
+        raise AssertionError(f"unexpected TLS directory: template {size} bytes, zero fill {zero_fill}")
+    template = bytes(data[start:start + size])
+    needle = struct.pack("<I", old)
+    if template.count(needle) != 1:
+        raise AssertionError(f"template holds {template.count(needle)} copies of {old:#x}")
+    offset = start + template.index(needle)
+    data[offset:offset + 4] = struct.pack("<I", new)
+    copy = Path(folder) / Path(title).name
+    copy.write_bytes(data)
+    return copy
+
+
+def check_tls(launcher, title):
+    err = compare(launcher, title, 0x13f, "process-detach main=0000600d")
+    if "[x2w] cannot map" in err:
+        raise AssertionError(err)
+
+    with tempfile.TemporaryDirectory() as folder:
+        changed = template_copy(title, folder, 0x5eed1234, 0x0bad1234)
+        compare(launcher, changed, 0x108, "process-detach main=0000600d", "changed template: ")
+    print("native_launch_tls: template, zero fill, relocated pointer, gs:[0x58] and TLS callbacks match Windows")
+
+
+def check_tls_crt(launcher, title):
+    compare(launcher, title, 0x13f, "tls-crt code=0x13f constructed=3 destroyed=2")
+    print("native_launch_tls_crt: C runtime thread_local initializers and destructors match Windows")
+
+
+def check_identity(launcher, title):
+    err = compare(launcher, title, 0x1ff)
+    for symbol in ("GetModuleHandleW", "GetModuleHandleA", "GetModuleHandleExW", "GetModuleFileNameW",
+                   "GetModuleFileNameA"):
+        line = f"[x2w] import kernel32.dll!{symbol} -> windows (title identity)"
+        if line not in err.splitlines():
+            raise AssertionError(f"missing report line: {line}\n{err}")
+    host_code, _, host_err = run([launcher, "--host-identity", title])
+    print(f"--host-identity: exit {host_code:#x}")
+    if host_code != 0x180:
+        raise AssertionError(f"--host-identity exit {host_code:#x} != 0x180:\n{host_err}")
+    if "(title identity)" in host_err:
+        raise AssertionError(f"--host-identity still bound the identity functions:\n{host_err}")
+    with tempfile.TemporaryDirectory() as folder:
+        renamed = Path(folder) / "x2w_identity_renamed.exe"
+        shutil.copy(title, renamed)
+        renamed_code, _, _ = run([renamed])
+        print(f"renamed copy, native: exit {renamed_code:#x}")
+        if renamed_code != 0x1e3:
+            raise AssertionError(f"renamed copy exit {renamed_code:#x} != 0x1e3")
+    print("native_launch_identity: module handle, file name, PEB image base and resources name the title")
+
+
+def main():
+    mode, launcher, title = sys.argv[1:4]
+    quiet_errors()
+    {"tls": check_tls, "tls-crt": check_tls_crt, "identity": check_identity}[mode](Path(launcher), Path(title))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
