@@ -2,12 +2,13 @@
 in forms/ lower the instructions; this module owns the state they share, the checks around them and the final text."""
 import re
 
-from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, POISON_MESSAGE, find_loops, poisoned_operands, program,
+from .control_flow import (JOIN_POISON, JOIN_POISON_MESSAGE, LANE_GONE, LANE_GONE_MESSAGE, POISON_MESSAGE, LaneOnly,
+                           LaneOnlyWord, covers, find_loops, interpolation_half, lane_view, poisoned_operands, program,
                            split_blocks, word_expr)
 from .dispatch import GUARDS, dispatch
 from .hlsl import (MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_DECLARATIONS, TITLE_LOOKUP, TITLE_RW_DECLARATIONS,
                    UNSAMPLED_PREAMBLE)
-from .registers import tracked_word
+from .registers import RAW_WORD_PREFIXES, PackedPair, tracked_word
 from . import bindings as binding_names
 from .bindings import PixelBindings
 from . import forms  # noqa: F401  (registers every form)
@@ -97,6 +98,8 @@ class Lowering:
         # CF-2c: HLSL names a VGPR took unmasked because it had no value before (masked_writes); a lane that was
         # inactive holds something else on the console, so they are never wave-uniform.
         self.lane_values = set()
+        # The LaneOnly registers whose value this instruction reads through a view (lane_views): register -> value.
+        self.hidden = {}
         # C-7 (forms/lanes.py): each masked-write name -> (the lane bit it was written under, the new word), and the
         # names of v_readfirstlane_b32 results the compute stage must prove wave-uniform once the text is complete.
         self.masked = {}
@@ -157,29 +160,98 @@ class Lowering:
             self.ex = f"ex{i}"
 
 
+# The interpolated attr0.x and .y in whole-quad mode (forms/vintrp.py): binary32 names that are words through asuint.
+UV_NAMES = ("uv.x", "uv.y")
+
+
+def masked_word(value):
+    """The 32 bits of a VGPR value for a masked select, or None when it is no word."""
+    if isinstance(value, LaneOnly) or type(value) is str and value in UV_NAMES:
+        return f"asuint({value})"
+    if isinstance(value, LaneOnlyWord):
+        return value[1]
+    return word_expr(value)
+
+
 def masked_writes(st, i, ex, before):
     """The masked-write rule for instruction i, run while this lane's EXEC bit was `ex` (not "true"): a VGPR the
     instruction wrote keeps its old value when the lane is inactive, `v = ex ? new : old`. A register with no value
-    before takes the new one (a refinement of an undefined register). Both values must be 32-bit words."""
+    before takes the new one (a refinement of an undefined register). The new value must be a 32-bit word. An old
+    value that is none (a barycentric, a half-done interpolation) has no HLSL expression on the inactive lane: in the
+    pixel stage the register then holds the new value as LaneOnly (control_flow.lane_view), the word on the lanes of
+    `ex` and the old value on the others; a masked write over a LaneOnly value selects over its word and adds `ex` to
+    its bits. v_interp_p1_f32 under `ex` writes a half (interpolation_half) that carries the old value, and its
+    v_interp_p2_f32 under the same bit selects over that old value: the pair is one masked write."""
     for reg, value in list(st.vector.items()):
         if i in st.pack_ex.get(reg, {}):
             continue
         old = before.get(reg)
+        if value == old:
+            continue
+        if interpolation_half(value, ex):
+            continue  # p1: the select is p2's, over the old value the half carries
+        if interpolation_half(old, ex):
+            old = old[5]  # the lanes off in ex never ran p1: they hold the value from before it
         if old is None and value is not None:
             st.lane_values.add(word_expr(value) or str(value))
         if old is None or value == old:
             continue
-        new_word, old_word = word_expr(value), word_expr(old)
-        if new_word is None or old_word is None:
+        new_word, old_word = masked_word(value), masked_word(old)
+        if new_word is None:
             raise ValueError("Masked write of a register that does not hold a 32-bit word")
+        if old_word is None:
+            if st.stage != "pixel" or isinstance(old, PackedPair):
+                raise ValueError("Masked write of a register that does not hold a 32-bit word")
+            # Not a lane value for the uniformity lattice either (CF-2c): an inactive lane holds something else.
+            st.lane_values.add(new_word)
+            st.vector[reg] = LaneOnly(value, {ex}, old) if isinstance(value, str) else LaneOnlyWord(new_word, {ex}, old)
+            continue
         # exw: both sides are raw words that the float readers accept (registers.RAW_WORD_PREFIXES); exv: an integer result.
         # mem_ex: the destination of an outstanding sample (CF-2c), which, like a memory word, waits for vmcnt(0).
-        name = f"{'exw' if tracked_word(value) and tracked_word(old) else 'exv'}{i}_{reg[1:]}"
+        floats = all(tracked_word(v) or isinstance(v, LaneOnly) or (type(v) is str and v in UV_NAMES)
+                     or isinstance(v, LaneOnlyWord) and v[1].startswith(RAW_WORD_PREFIXES) for v in (value, old))
+        name = f"{'exw' if floats else 'exv'}{i}_{reg[1:]}"
         if reg in st.sample_dest:
             name = f"mem_ex{i}_{reg[1:]}"
         st.lines.append(f"    uint {name} = {ex} ? {new_word} : {old_word};")
         st.masked[name] = (ex, new_word)
         st.vector[reg] = ("uint", name)
+        if isinstance(old, (LaneOnly, LaneOnlyWord)):
+            bits = old.bits | {ex}
+            # Once the bits cover every lane (an if-else's two arms), the select is the register's value everywhere.
+            if not covers(st.lines, "true", bits):
+                st.vector[reg] = LaneOnlyWord(name, bits, old.rest)
+
+
+def lane_views(st):
+    """Before an instruction: each LaneOnly register reads as control_flow.lane_view gives it under the lane's current
+    bit. Returns the registers whose value was replaced for the instruction (register -> the LaneOnly value), which
+    restore_views puts back unless the instruction wrote the register."""
+    hidden = {}
+    for reg, value in list(st.vector.items()):
+        view = lane_view(st.lines, st.ex, value)
+        if view is not value:
+            hidden[reg] = (value, view)
+            st.vector[reg] = view
+    st.hidden = {reg: value for reg, (value, _) in hidden.items()}
+    return hidden
+
+
+def restore_views(st, hidden):
+    for reg, (value, view) in hidden.items():
+        if st.vector.get(reg) is view or st.vector.get(reg) == view and type(st.vector.get(reg)) is type(view):
+            st.vector[reg] = value
+    st.hidden = {}
+
+
+def lane_gone_operands(st, line):
+    """The VGPRs an instruction names that hold LANE_GONE."""
+    if LANE_GONE not in st.vector.values():
+        return []
+    names = set(re.findall(r"(?<![\w\[:])v\d+\b", line))
+    for first, last in re.findall(r"v\[(\d+):(\d+)\]", line):
+        names.update(f"v{n}" for n in range(int(first), int(last) + 1))
+    return sorted(name for name in names if st.vector.get(name) == LANE_GONE)
 
 
 def poison_message(st, regs):
@@ -320,18 +392,25 @@ def finish(st, instructions, samples=None):
             raise ValueError("Only exports may follow an export that is not done")
         # CF-2c: an instruction that names a scalar register poisoned by a skipped region must overwrite it, not read it.
         poisoned = poisoned_operands(st.scalar, line)
+        hidden = lane_views(st)
+        gone = lane_gone_operands(st, line)
         try:
             for guard in GUARDS:
                 guard(st, i, line)
             if st.ex == "true":
                 dispatch(st, i, line)
             else:
-                ex, before = st.ex, dict(st.vector)
+                # The value before is the register's own, not the view this lane reads (lane_views).
+                ex, before = st.ex, {**st.vector, **st.hidden}
                 dispatch(st, i, line)
+                restore_views(st, hidden)
                 masked_writes(st, i, ex, before)
+            restore_views(st, hidden)
         except ValueError as error:
             if poisoned:
                 raise ValueError(poison_message(st, poisoned)) from error
+            if gone:
+                raise ValueError(f"{LANE_GONE_MESSAGE}: {', '.join(gone)}") from error
             raise
         if poisoned and set(poisoned) & set(poisoned_operands(st.scalar, line)):
             raise ValueError(poison_message(st, poisoned))
