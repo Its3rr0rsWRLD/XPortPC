@@ -137,7 +137,11 @@ struct Gpu {
 
     bool run()
     {
-        if (FAILED(list->Close())) return false;
+        const HRESULT closed = list->Close();
+        if (FAILED(closed)) {
+            std::printf("probe close_hr=0x%08lx\n", static_cast<unsigned long>(closed));
+            return false;
+        }
         ID3D12CommandList* lists[] = {list.Get()};
         queue->ExecuteCommandLists(1, lists);
         if (FAILED(queue->Signal(fence.Get(), ++value))) return false;
@@ -175,6 +179,12 @@ const char* roundtrip(Gpu& gpu, ID3D12Resource* buffer, UINT64 offset, std::uint
     D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
     return gpu_read && cpu_read ? "both" : gpu_read ? "gpu_read_only" : cpu_read ? "cpu_read_only" : "none";
+}
+
+void removed(Gpu& gpu, const char* after)
+{
+    std::printf("probe device_after_%s removed=0x%08lx\n", after,
+                static_cast<unsigned long>(gpu.device->GetDeviceRemovedReason()));
 }
 
 // Opens a heap over [base, ...) with OpenExistingHeapFromAddress, places a 2 MiB buffer at 0 and checks coherence.
@@ -229,13 +239,18 @@ int main(int argc, char** argv)
     {
         void* p = VirtualAlloc(nullptr, 64 * MiB, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         address_case(gpu, "committed", p);
+        removed(gpu, "committed_open");
         VirtualFree(p, 0, MEM_RELEASE);
+        removed(gpu, "committed_release");
     }
     {
-        void* p = VirtualAlloc(nullptr, 64 * MiB, MEM_RESERVE, PAGE_NOACCESS);
-        VirtualAlloc(p, 16 * MiB, MEM_COMMIT, PAGE_READWRITE);
-        address_case(gpu, "partial", p);
-        VirtualFree(p, 0, MEM_RELEASE);
+        // A fresh device-independent check: a submission with no aliasing at all.
+        auto upload = gpu.buffer(D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto target = gpu.buffer(D3D12_HEAP_TYPE_DEFAULT, 256, D3D12_RESOURCE_STATE_COPY_DEST);
+        gpu.allocator->Reset();
+        gpu.list->Reset(gpu.allocator.Get(), nullptr);
+        gpu.list->CopyBufferRegion(target.Get(), 0, upload.Get(), 0, 256);
+        std::printf("probe plain_submit ok=%d\n", gpu.run());
     }
     {
         auto* p = static_cast<std::uint8_t*>(
@@ -268,7 +283,7 @@ int main(int argc, char** argv)
                     GetWriteWatch(0, p, 64 * MiB, hits, &count, &granularity);
                     std::printf(" cpu_plus_gpu_pages=%llu granularity=%lu coherence=%s",
                                 static_cast<unsigned long long>(count), granularity,
-                                roundtrip(gpu, buffer.Get(), 8 * MiB, p + 8 * MiB));
+                                roundtrip(gpu, buffer.Get(), 1 * MiB, p + 1 * MiB));
                 }
             }
             std::printf("\n");
@@ -375,6 +390,13 @@ int main(int argc, char** argv)
             VirtualFree(p, 0, MEM_RELEASE);
         }
     }
+    {
+        void* p = VirtualAlloc(nullptr, 64 * MiB, MEM_RESERVE, PAGE_NOACCESS);
+        VirtualAlloc(p, 16 * MiB, MEM_COMMIT, PAGE_READWRITE);
+        address_case(gpu, "partial", p);
+        VirtualFree(p, 0, MEM_RELEASE);
+    }
+    removed(gpu, "partial");
     std::printf("probe done\n");
     return 0;
 }
