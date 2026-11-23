@@ -1,0 +1,120 @@
+# XTaskQueue. Signatures: public libHttpClient Include/XTaskQueue.h (MIT) and
+# https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/xtaskqueue_members
+# Format: see xgameruntime.toml.
+family = "xtaskqueue"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XTaskQueueCreate"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/"
+
+[[functions]]
+name = "XTaskQueueCreate"
+returns = "HRESULT"
+params = "XTaskQueueDispatchMode workDispatchMode, XTaskQueueDispatchMode completionDispatchMode, XTaskQueueHandle* queue"
+doc = "xtaskqueuecreate"
+impl = true
+out = ["queue"]
+
+[[functions]]
+name = "XTaskQueueCreateComposite"
+returns = "HRESULT"
+params = "XTaskQueuePortHandle workPort, XTaskQueuePortHandle completionPort, XTaskQueueHandle* queue"
+doc = "xtaskqueuecreatecomposite"
+impl = true
+out = ["queue"]
+
+[[functions]]
+name = "XTaskQueueGetPort"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, XTaskQueuePort port, XTaskQueuePortHandle* portHandle"
+doc = "xtaskqueuegetport"
+impl = true
+out = ["portHandle"]
+
+[[functions]]
+name = "XTaskQueueDuplicateHandle"
+returns = "HRESULT"
+params = "XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicatedHandle"
+doc = "xtaskqueueduplicatehandle"
+impl = true
+out = ["duplicatedHandle"]
+
+[[functions]]
+name = "XTaskQueueDispatch"
+returns = "bool"
+params = "XTaskQueueHandle queue, XTaskQueuePort port, uint32_t timeoutInMs"
+doc = "xtaskqueuedispatch"
+impl = true
+
+[[functions]]
+name = "XTaskQueueCloseHandle"
+returns = "void"
+params = "XTaskQueueHandle queue"
+doc = "xtaskqueueclosehandle"
+impl = true
+
+[[functions]]
+name = "XTaskQueueTerminate"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, bool wait, void* callbackContext, XTaskQueueTerminatedCallback* callback"
+doc = "xtaskqueueterminate"
+impl = true
+
+[[functions]]
+name = "XTaskQueueSubmitCallback"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, XTaskQueuePort port, void* callbackContext, XTaskQueueCallback* callback"
+doc = "xtaskqueuesubmitcallback"
+impl = true
+
+[[functions]]
+name = "XTaskQueueSubmitDelayedCallback"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, XTaskQueuePort port, uint32_t delayMs, void* callbackContext, XTaskQueueCallback* callback"
+doc = "xtaskqueuesubmitdelayedcallback"
+impl = true
+
+[[functions]]
+name = "XTaskQueueRegisterWaiter"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, XTaskQueuePort port, HANDLE waitHandle, void* callbackContext, XTaskQueueCallback* callback, XTaskQueueRegistrationToken* token"
+doc = "xtaskqueueregisterwaiter"
+impl = true
+out = ["token"]
+
+[[functions]]
+name = "XTaskQueueUnregisterWaiter"
+returns = "void"
+params = "XTaskQueueHandle queue, XTaskQueueRegistrationToken token"
+doc = "xtaskqueueunregisterwaiter"
+impl = true
+
+[[functions]]
+name = "XTaskQueueRegisterMonitor"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, void* callbackContext, XTaskQueueMonitorCallback* callback, XTaskQueueRegistrationToken* token"
+doc = "xtaskqueueregistermonitor"
+impl = true
+out = ["token"]
+
+[[functions]]
+name = "XTaskQueueUnregisterMonitor"
+returns = "void"
+params = "XTaskQueueHandle queue, XTaskQueueRegistrationToken token"
+doc = "xtaskqueueunregistermonitor"
+impl = true
+
+[[functions]]
+name = "XTaskQueueGetCurrentProcessTaskQueue"
+returns = "bool"
+params = "XTaskQueueHandle* queue"
+doc = "xtaskqueuegetcurrentprocesstaskqueue"
+impl = true
+out = ["queue"]
+
+[[functions]]
+name = "XTaskQueueSetCurrentProcessTaskQueue"
+returns = "void"
+params = "XTaskQueueHandle queue"
+doc = "xtaskqueuesetcurrentprocesstaskqueue"
+impl = true

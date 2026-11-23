@@ -104,6 +104,37 @@ Rules:
 - **Identity answers.** `XSystemGetDeviceType` and similar queries return a Series X value, since titles branch on it.
 - Every own implementation is a static library with a source-built test, like `era_heap` and `era_query` today.
 
+Shim generation (`tools/shimgen.py`, specs in `tools/shimgen/specs/*.toml`, built by `cmake/x2w_shimgen.cmake`).
+The console import DLL names are not public, so shims are generated from a title's measured import list:
+
+```
+python -B tools/x2w_report.py TITLE.exe --out out/x2w-report
+python -B tools/shimgen.py --report out/x2w-report/report.json --out out/shimgen/title
+cmake --preset dev -DX2W_SHIM_REPORT=out/x2w-report/report.json   # builds them into out/build/dev/shims
+```
+
+Each export of a generated DLL is a forwarder (only when `X2W_FORWARD` turns its family on; off by default,
+per the rule above), a call into `x2w_gdk.dll` (the hand-written family modules in `src/gdk`: XGameRuntime,
+XTaskQueue, XAsync, XSystem, XUser, XGameSave, XPackage, XGameUI; one process-wide copy, so handles work
+across DLLs), or a typed stub that zeroes out-params and returns the spec's documented default. Functions
+no spec describes get an untyped stub (0, or `E_NOTIMPL` for `*Async`/`*Result` names). Stubs log their first
+call through `x2w_unimplemented`, which also reaches the run log. Overrides (`--override FILE.toml`,
+`X2W_SHIM_OVERRIDES`) change any function's body or return value per title.
+
+PC GDK builds do not import the Gaming Runtime: `xgameruntime.lib` loads `xgameruntime.dll` and resolves
+names at run time. `x2w_launch` therefore hooks the program's `LoadLibrary*`, `GetModuleHandle*` and
+`GetProcAddress` imports: a load whose name is in a `--shims` directory gets the shim (a generated
+`xgameruntime.dll` with every spec function is always built), and each load and resolve is logged once
+(`dynamic-load`, `dynamic-resolve`). `tools/shimgen.py --run-log` turns those lines into shims.
+
+Measured on the five stand-in GDK samples (Microsoft's public Xbox-GDK-Samples built for PC, 2026-11-22):
+every one loads `xgameruntime.dll` and asks it only for `QueryApiImpl`, `InitializeApiImpl`,
+`InitializeApiImplEx`, `InitializeApiImplEx2`, `XErrorReport` and `UninitializeApiImpl`. The PC runtime's
+boundary is therefore an interface query, not the flat API names, and no public document describes those
+interfaces, so the generated shims cannot serve PC GDK builds; the launcher passes names a shim lacks to the
+Windows DLL of that name (`windows-fallback`) so such programs keep running and their logs stay useful.
+Whether console builds import the flat names is what the first console report will show.
+
 ## 3. Graphics: console D3D12 over desktop D3D12
 
 The console D3D12 surface beyond the public desktop API is **not publicly documented**. What we may use:

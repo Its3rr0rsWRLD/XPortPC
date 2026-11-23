@@ -1,0 +1,95 @@
+# XPackage: the title folder is the installed package; mounting it gives the folder (X2W_TITLE_DIR, set by
+# x2w_launch). https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xpackage/xpackage_members
+# Installation monitors, chunk install/uninstall and features have no full public signature on the pages
+# read; shimgen's generic stub covers them.
+# Format: see xgameruntime.toml.
+family = "xpackage"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XPackageGetCurrentProcessPackageIdentifier"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xpackage/functions/"
+
+[[functions]]
+name = "XPackageGetCurrentProcessPackageIdentifier"
+returns = "HRESULT"
+params = "size_t bufferSize, char* buffer"
+doc = "xpackagegetcurrentprocesspackageidentifier"
+impl = true
+out_buffers = ["buffer:bufferSize"]
+
+[[functions]]
+name = "XPackageIsPackagedProcess"
+returns = "bool"
+params = ""
+doc = "xpackageispackagedprocess"
+impl = true
+
+[[functions]]
+name = "XPackageGetUserLocale"
+returns = "HRESULT"
+params = "size_t localeSize, char* locale"
+doc = "xpackagegetuserlocale"
+impl = true
+out_buffers = ["locale:localeSize"]
+
+[[functions]]
+name = "XPackageMount"
+returns = "HRESULT"
+params = "const char* packageIdentifier, XPackageMountHandle* mount"
+doc = "xpackagemount"
+impl = true
+out = ["mount"]
+
+[[functions]]
+name = "XPackageMountWithUiAsync"
+returns = "HRESULT"
+params = "const char* packageIdentifier, XAsyncBlock* async"
+doc = "xpackagemountwithuiasync"
+impl = true
+
+# Signature from the call in the XPackageMountWithUiAsync page's example: XPackageMountWithUiResult(&async, handle).
+[[functions]]
+name = "XPackageMountWithUiResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, XPackageMountHandle* mount"
+doc = "xpackagemountwithuiresult"
+impl = true
+out = ["mount"]
+
+[[functions]]
+name = "XPackageGetMountPathSize"
+returns = "HRESULT"
+params = "XPackageMountHandle mount, size_t* pathSize"
+doc = "xpackagegetmountpathsize"
+impl = true
+out = ["pathSize"]
+
+[[functions]]
+name = "XPackageGetMountPath"
+returns = "HRESULT"
+params = "XPackageMountHandle mount, size_t pathSize, char* path"
+doc = "xpackagegetmountpath"
+impl = true
+out_buffers = ["path:pathSize"]
+
+[[functions]]
+name = "XPackageCloseMountHandle"
+returns = "void"
+params = "XPackageMountHandle mount"
+doc = "xpackageclosemounthandle"
+impl = true
+
+[[functions]]
+name = "XPackageEnumeratePackages"
+returns = "HRESULT"
+params = "XPackageKind kind, XPackageEnumerationScope scope, void* context, XPackageEnumerationCallback* callback"
+doc = "xpackageenumeratepackages"
+impl = true
+
+[[functions]]
+name = "XPackageFindChunkAvailability"
+returns = "HRESULT"
+params = "const char* packageIdentifier, uint32_t selectorCount, XPackageChunkSelector* selectors, XPackageChunkAvailability* availability"
+doc = "xpackagefindchunkavailability"
+impl = true
+out = ["availability"]

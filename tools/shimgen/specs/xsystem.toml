@@ -1,0 +1,46 @@
+# XSystem. https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xsystem/xsystem_members
+# Identity answers are fixed (docs/design/runtime.md, section 2), so this family never forwards.
+# Format: see xgameruntime.toml.
+family = "xsystem"
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xsystem/functions/"
+
+[[functions]]
+name = "XSystemGetDeviceType"
+returns = "XSystemDeviceType"
+params = ""
+doc = "xsystemgetdevicetype"
+impl = true
+
+[[functions]]
+name = "XSystemGetConsoleId"
+returns = "HRESULT"
+params = "size_t consoleIdSize, char* consoleId, size_t* consoleIdUsed"
+doc = "xsystemgetconsoleid"
+impl = true
+out = ["consoleIdUsed"]
+out_buffers = ["consoleId:consoleIdSize"]
+
+[[functions]]
+name = "XSystemGetXboxLiveSandboxId"
+returns = "HRESULT"
+params = "size_t sandboxIdSize, char* sandboxId, size_t* sandboxIdUsed"
+doc = "xsystemgetxboxlivesandboxid"
+impl = true
+out = ["sandboxIdUsed"]
+out_buffers = ["sandboxId:sandboxIdSize"]
+
+[[functions]]
+name = "XSystemGetAnalyticsInfo"
+returns = "XSystemAnalyticsInfo"
+params = ""
+doc = "xsystemgetanalyticsinfo"
+impl = true
+
+# The size constant XSystemAppSpecificDeviceIdBytes has no public value, so no answer can be built: a stub.
+[[functions]]
+name = "XSystemGetAppSpecificDeviceId"
+returns = "HRESULT"
+params = "size_t appSpecificDeviceIdSize, char* appSpecificDeviceId, size_t* appSpecificDeviceIdUsed"
+doc = "xsystemgetappspecificdeviceid"
+out = ["appSpecificDeviceIdUsed"]
+out_buffers = ["appSpecificDeviceId:appSpecificDeviceIdSize"]
