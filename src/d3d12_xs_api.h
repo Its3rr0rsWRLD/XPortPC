@@ -81,6 +81,9 @@ typedef struct X2WGfxCounters {
     uint64_t raw_descriptor_reads;
     uint32_t raw_texture_uploads;
     uint32_t raw_samplers_created;
+    // ExecuteIndirect calls whose argument buffer held title GPU addresses and was rewritten on the GPU before the
+    // desktop call (d3d12_xs_indirect.h).
+    uint64_t indirect_rewrites;
 } X2WGfxCounters;
 
 typedef enum X2WGfxTitleGpuState {

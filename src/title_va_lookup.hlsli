@@ -3,9 +3,11 @@
 // graphics allocation's CPU pointer is also its GPU address. On desktop each aliased
 // allocation is a separate buffer, so the shader finds the range holding the address and
 // loads through that range's buffer at the byte offset. Ranges come from
-// era_title_va::shader_ranges: sorted by title address, non-overlapping, each shorter than
+// era_title_gpu::shader_view: sorted by title address, non-overlapping, each shorter than
 // 4 GiB and starting on a 4-byte boundary, with `slot` naming the descriptor of the buffer that
-// aliases the range. Raw buffer operations move whole DWORDs, so a lookup is for an access of
+// aliases the range and `base` the byte offset of the range's first byte in that buffer (several
+// ranges of one xmem arena or physical page pool share a buffer; base + size never exceeds 4 GiB).
+// Raw buffer operations move whole DWORDs, so a lookup is for an access of
 // `bytes` bytes (a multiple of 4) at a 4-byte-aligned address, and succeeds only when the whole
 // access lies inside one range.
 // Addresses are uint2 values: x is the low 32 bits, y the high 32 bits.
@@ -16,7 +18,7 @@ struct TitleRange {
     uint2 begin;
     uint2 end;  // exclusive
     uint slot;
-    uint reserved;
+    uint base;  // byte offset of `begin` in the slot's buffer (0 when the buffer aliases only this range)
 };
 
 bool TitleAddressLess(uint2 a, uint2 b)
@@ -26,7 +28,7 @@ bool TitleAddressLess(uint2 a, uint2 b)
 
 // Returns false when the address is not 4-byte aligned, `bytes` is zero or not a multiple of 4,
 // or no single range holds all of [address, address + bytes). Otherwise sets the range's slot
-// and the byte offset of `address` inside it.
+// and the byte offset of `address` in the slot's buffer.
 bool TitleLookup(StructuredBuffer<TitleRange> ranges, uint count, uint2 address, uint bytes,
                  out uint slot, out uint offset)
 {
@@ -59,7 +61,7 @@ bool TitleLookup(StructuredBuffer<TitleRange> ranges, uint count, uint2 address,
     if (bytes > size || start > size - bytes) {
         return false;
     }
-    offset = start;
+    offset = range.base + start;
     slot = range.slot;
     return true;
 }

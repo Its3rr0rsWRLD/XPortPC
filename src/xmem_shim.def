@@ -4,8 +4,25 @@ EXPORTS
     XMemFree
     XMemVirtualQuery
     XMemGetWorkingSetStatistics
+    XMemAllocDefault
+    XMemFreeDefault
+    XMemSetAllocationHooks
+    XMemCheckDefaultHeaps
+    XMemAllocatePhysicalPages
+    XMemMapPhysicalPages
+    XMemFreePhysicalPages
+    X2WXMemConfigure
+    X2WXMemGetConfig
+    X2WXMemGetStatistics
+    X2WXMemDescribe
+    X2WXMemGetWindows
+    X2WXMemCollectWrites
+    X2WXMemSetLogSink
     X2WTitleGpuAttach
     X2WTitleGpuDetach
     X2WTitleGpuTranslate
     X2WTitleGpuLocate
     X2WTitleGpuGetShaderView
+    X2WTitleGpuRegisterResource
+    X2WTitleGpuUnregisterResource
+    X2WTitleGpuGetTranslations
