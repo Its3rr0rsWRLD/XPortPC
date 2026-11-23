@@ -1026,7 +1026,7 @@ public:
         if (good) {
             hold(use, kind_view, block_);
             *table = views_gpu(block_ * memory_block);
-            *ranges = ranges_[block_]->GetGPUVirtualAddress();
+            *ranges = ranges_all_->GetGPUVirtualAddress() + static_cast<UINT64>(block_) * ranges_slice;
             *count = static_cast<UINT>(last_.size());
         }
         ReleaseSRWLockExclusive(&lock_);
@@ -1380,30 +1380,35 @@ private:
         misses.Buffer.NumElements = 64;
         misses.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
         device_->CreateUnorderedAccessView(counter_.Get(), nullptr, &misses, handle);
-        // The ranges as TitleLookup reads them (stride 24), in an upload buffer kept for the device's lifetime.
-        D3D12_HEAP_PROPERTIES upload{};
-        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = (ranges.empty() ? 1 : ranges.size()) * sizeof(X2WTitleGpuRange);
-        desc.Height = 1;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        ComPtr<ID3D12Resource> buffer;
-        void* mapped = nullptr;
-        if (FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &desc,
-                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer))) ||
-            FAILED(buffer->Map(0, nullptr, &mapped))) {
-            release();
-            why = "cannot create the title ranges buffer";
-            return false;
+        // The ranges as TitleLookup reads them (stride 24): one 256-byte slice per view block of a persistently
+        // mapped upload buffer, rewritten only with its block (see free_block).
+        if (!ranges_all_) {
+            D3D12_HEAP_PROPERTIES upload{};
+            upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = static_cast<UINT64>(blocks) * ranges_slice;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            void* mapped = nullptr;
+            if (FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&ranges_all_))) ||
+                FAILED(ranges_all_->Map(0, nullptr, &mapped))) {
+                ranges_all_.Reset();
+                release();
+                why = "cannot create the title ranges buffer";
+                return false;
+            }
+            ranges_mapped_ = static_cast<std::uint8_t*>(mapped);
         }
-        std::memset(mapped, 0, static_cast<std::size_t>(desc.Width));
-        if (!ranges.empty()) std::memcpy(mapped, ranges.data(), ranges.size() * sizeof(ranges[0]));
-        buffer->Unmap(0, nullptr);
-        ranges_[block_] = buffer;  // the block's previous ranges buffer is no longer read (see free_block)
+        static_assert(title_memory_slots * sizeof(X2WTitleGpuRange) <= ranges_slice, "ranges slice too small");
+        std::uint8_t* slice = ranges_mapped_ + static_cast<std::size_t>(block_) * ranges_slice;
+        std::memset(slice, 0, ranges_slice);
+        if (!ranges.empty()) std::memcpy(slice, ranges.data(), ranges.size() * sizeof(ranges[0]));
         have_view_ = true;
         release();
         last_ = ranges;
@@ -1419,7 +1424,9 @@ private:
     UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
     bool have_view_ = false;
-    ComPtr<ID3D12Resource> ranges_[blocks];  // the ranges buffer of each title-memory view block
+    static constexpr UINT ranges_slice = 256;
+    ComPtr<ID3D12Resource> ranges_all_;  // the ranges of every title-memory view block, one slice each
+    std::uint8_t* ranges_mapped_ = nullptr;
     std::vector<BlockState> states_[3];
     UINT cursor_[3] = {};
     UINT texture_next_ = 0, sampler_next_ = 0;  // blocks never handed out start here
