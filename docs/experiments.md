@@ -2929,7 +2929,7 @@ A port of AMD's addrlib (Mesa 26.2.6, `src/amd/addrlib`, MIT) for GFX10.1 and GF
 | `runtime_r4_wrong_swizzle_*` | Control: texture 0 detiled as `SW_64KB_S_X`; both frames must differ from the reference. |
 | `runtime_r4_detile_upload_*` | `tests/runtime/r4_detile_upload.cpp`: 11 surfaces (RGBA8 `SW_64KB_R_X` 300x200 full chain; BC1 array of 3 `SW_4KB_S_X`; BC7 `SW_64KB_S_X`; R8 1000x7 `SW_64KB_D_X`; RGBA16 array of 6 `SW_64KB_Z_X`; RGBA32 `SW_256B_S`; RG16 linear; 3D RGBA8 `SW_64KB_S` 37x19x23, R16 `SW_64KB_D_X`, BC4 `SW_4KB_S_X`, RGBA8 `SW_64KB_R_X`) tiled from random data into title memory, detiled, uploaded through the shim, read back: every element equal. Control: a wrong pipe/bank XOR must differ. |
 
-PC results: pending.
+PC results at detile tip `6d2a655e` (RTX 4070 Ti and WARP): `gfx10_detile_roundtrip` and all `runtime_r4_*` cases, including `runtime_r4_scene_tiled_*`, `runtime_r4_wrong_swizzle_*` and `runtime_r4_detile_upload_*`, pass (18 of 18). The first run (`0f3ec027`) failed the 6 detiling cases: footprints were required to span `row_pitch * rows * depth` bytes, more than `GetCopyableFootprints` gives the last subresource, whose last row ends at its last element.
 
 ```bash
 python3 -B tests/gfx10_addr_oracle_check.py            # or --quick, or --tarball PATH
