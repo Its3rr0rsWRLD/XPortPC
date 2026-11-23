@@ -71,7 +71,7 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"caller={WHERE}",
            # The stall detector (tools/x2w_launch.cpp, "stall detector"): a call pending for more than 2 s.
            rf"stalled thread \d+\((?:main|program)\) in {NAME}![A-Za-z0-9_#@?$]+\(0x[0-9a-f]+(?:,0x[0-9a-f]+){{3}}\) "
-           rf"for \d+s caller={WHERE}(?: .+)?", r"stalled-threads more are not logged",
+           rf"for \d+s(?: \(still\))? caller={WHERE}(?: .+)?", r"stalled-threads more are not logged",
            rf"heap-guard invalid [A-Za-z_]+ ptr=0x[0-9a-f]+ heap=0x[0-9a-f]+ owner=[a-z\-]+(?:\([^)]*\))?"
            rf"(?: callers {WHERE}(?: from {WHERE})*| callers\? {WHERE}(?: {WHERE})* \(stack-scan\)| callers none) not-forwarded",
            r"heap-guard corrupted-before .+ after .+",
