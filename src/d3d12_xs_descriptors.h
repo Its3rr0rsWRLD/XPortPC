@@ -10,10 +10,26 @@
 // RTV and DSV heaps are desktop heaps, unwrapped.
 //
 // Writes through the API (Create*View, CreateSampler, CopyDescriptors*) create the desktop descriptor in the shadow
-// heap at the same index and record what the slot holds (Slot). The block of title memory is not written: translated
-// shaders resolve a descriptor-table read at translation time (tools/pso_translate.py) to (table root parameter, byte
-// offset), and the shim resolves that to the slot at draw time (d3d12_xs_pipeline.cpp), so no shader reads
-// descriptor words as data yet. A title that reads or copies descriptor memory itself sees zeros.
+// heap at the same index and record what the slot holds (Slot). Translated shaders resolve a descriptor-table read at
+// translation time (tools/pso_translate.py) to (table root parameter, byte offset), and the shim resolves that to the
+// slot at draw time (d3d12_xs_pipeline.cpp).
+//
+// Buffer views (rung R4b). A buffer SRV or UAV also gets the V# a console shader reads for it (BufferForm, the vsharp
+// words), encoded once when the view is written. Its base is the view's title GPU address: the view's resource must
+// lie in title memory (the title-memory aliases of xmem.dll, or any desktop resource placed in their range), found by
+// its desktop GPU address. The rest follows the D3D12 view and the gfx10 buffer resource layout (AMD RDNA ISA, Buffer
+// Resource Descriptor; the converter's reading of it is tools/pixel_aot_ops/hlsl.py):
+//   raw (ByteAddressBuffer)   stride 0, num_records = bytes, OOB_SELECT 3 (raw: an offset at or past num_records)
+//   structured                stride = StructureByteStride, num_records = NumElements, OOB_SELECT 0
+//   typed                     stride = the format's size, num_records = NumElements, OOB_SELECT 0
+//   all                       DST_SEL x, y, z, w; FORMAT 20 (32_UINT) or 21 (32_SINT) for R32_UINT and R32_SINT
+//                             views, 22 (32_FLOAT) otherwise; RESOURCE_LEVEL 1; swizzle, ADD_TID and type 0.
+// What the console driver writes for a view is not public; these are the words that give the D3D12 view's semantics
+// under the converter's (and the hardware's) V# reading. Typed accesses are exact only for the two 32-bit integer
+// formats, so the draw-time check (pipeline.cpp) refuses a typed access through any other view. The words are also
+// written to the descriptor's first 16 bytes in the heap's title memory (zeros for every other kind of view), so a
+// title that reads its descriptor memory sees them; descriptors the title writes or copies there itself are not read
+// back.
 //
 // All functions take the registry lock; the records are read only through the functions below.
 
@@ -31,11 +47,24 @@ constexpr UINT sampler_increment = 16;  // one S#
 enum class SlotKind : std::uint8_t { empty = 0, srv, uav, cbv, sampler };
 const char* slot_kind_name(SlotKind kind);
 
+// What a buffer V# encodes (Slot::buffer).
+enum class BufferForm : std::uint8_t {
+    none = 0,     // not a buffer view (or not a view)
+    raw,          // ByteAddressBuffer
+    structured,   // StructureByteStride != 0
+    typed_int,    // typed R32_UINT or R32_SINT: typed loads and stores are exact
+    typed_other,  // any other typed format: untyped accesses only
+    unencoded     // a buffer view that has no V# (Slot::buffer_why says why): it reads as a miss
+};
+
 struct Slot {
     SlotKind kind = SlotKind::empty;
     std::uint32_t generation = 0;      // incremented on every write; identifies the descriptor's contents
     std::uint64_t cbv_address = 0;     // CBV: the title GPU address the title passed (BufferLocation)
     std::uint32_t cbv_size = 0;
+    BufferForm buffer = BufferForm::none;
+    std::uint32_t vsharp[4] = {};      // buffer SRV/UAV: the V# words
+    const char* buffer_why = nullptr;  // BufferForm::unencoded: why
 };
 
 // One wrapped heap. Owned by its wrapper; registered while it lives.
@@ -80,10 +109,18 @@ struct Resolved {
     std::uint32_t serial = 0, index = 0, generation = 0;
     D3D12_CPU_DESCRIPTOR_HANDLE shadow{};   // the desktop descriptor (srv, sampler)
     std::uint64_t cbv_address = 0;          // cbv
+    SlotKind kind = SlotKind::empty;        // what the slot holds (buffer reads accept an SRV or a UAV)
+    BufferForm buffer = BufferForm::none;   // buffer reads
+    std::uint32_t vsharp[4] = {};
 };
 // `bound_serial` is the serial of the heap of this type the title bound on the list (0 for none): D3D12 requires a
-// table to point into it.
-Resolved resolve(std::uint64_t table, std::uint32_t offset, SlotKind kind, std::uint32_t bound_serial);
+// table to point into it. A buffer read (`buffer` true; `kind` is then SRV for a read, UAV for a store) is found for a
+// buffer SRV or UAV with a V#; a store needs a UAV.
+Resolved resolve(std::uint64_t table, std::uint32_t offset, SlotKind kind, std::uint32_t bound_serial,
+                 bool buffer = false);
+
+// The bytes of one element of a typed buffer view's format, or 0 when the shim does not know the format.
+UINT format_bytes(DXGI_FORMAT format);
 
 }  // namespace descriptors
 }  // namespace d3d12_xs

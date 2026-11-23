@@ -35,16 +35,18 @@ VS_ROLES = {"user_sgprs": {"2": {"role": "inline", "word": 0}, "3": {"role": "in
 PS_ROLES = {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:4"}}
 # Descriptor-table reads (kind, slot, set, byte offset): the scene's per-draw CBV/SRV/UAV table holds the vertex
 # constants at 0x00, the texture at 0x20 and the pixel constants at 0x40; its sampler table the sampler at 0.
-EXPECTED = {"r4_vs": [("constants", 0, 0, 0)],
-            "r4_ps": [("texture", 0, 0, 0x20), ("sampler", 0, 1, 0), ("constants", 0, 0, 0x40)]}
+EXPECTED = {"r4_vs": [("constants", 0, 0, 0, 0)],
+            "r4_ps": [("texture", 0, 0, 0x20, 0), ("sampler", 0, 1, 0, 0), ("constants", 0, 0, 0x40, 0)]}
 # Forms the runtime does not bind yet, as one-line changes of the pixel or vertex program, and the reason they give.
 REFUSED = [
     ("r4_ps", "s_load_dwordx4 s[32:35], s[22:23], null", ["s_mov_b32 s32, 0", "s_mov_b32 s33, 0", "s_mov_b32 s34, 0",
                                                           "s_mov_b32 s35, 0"],
      "an inline (immutable) sampler"),
     ("r4_ps", "s_mov_b32 s22, s4", ["s_mov_b32 s22, s6"], "does not bind as a descriptor table"),
-    ("r4_vs", "s_buffer_load_dwordx2 s[16:17], s[12:15], null", ["buffer_load_dwordx2 v[16:17], v1, s[12:15], 0 offen"],
-     "b4 descriptor words"),
+    # A buffer V# read from a table translates since rung R4b (tests/runtime/r4b_programs_check.py); a typed fetch
+    # through it does not.
+    ("r4_vs", "s_buffer_load_dwordx2 s[16:17], s[12:15], null",
+     ["buffer_load_format_xy v[16:17], v1, s[12:15], 0 idxen"], "typed vertex fetch"),
 ]
 FORMS = [
     "s_mov_b64 s[50:51], exec", "s_mov_b64 exec, s[4:5]", "s_wqm_b64 exec, exec", "s_and_b64 exec, exec, s[50:51]",

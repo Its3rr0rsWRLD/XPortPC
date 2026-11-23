@@ -33,6 +33,9 @@ VERIFIED = frozenset({
     "image_sample", "s_and_b64", "s_buffer_load_dword", "s_buffer_load_dwordx2", "s_buffer_load_dwordx4",
     "s_load_dwordx8", "s_mov_b64", "s_movk_i32", "s_wqm_b64", "v_add_f32_e32", "v_add_nc_u32_e32",
     "v_interp_p1_f32_e32", "v_interp_p2_f32_e32", "v_mul_f32_e32",
+    # Rung R4b (tests/runtime/r4b_programs_check.py): MUBUF loads and stores, whose text disasm_rdna2 already prints
+    # as LLVM does.
+    "buffer_load_dword", "buffer_load_dwordx2", "buffer_load_dwordx4", "buffer_store_dword", "buffer_store_format_x",
 })
 # 64-bit scalar operations whose operands disasm_rdna2 prints as their low 32-bit register.
 PAIR_OPERANDS = frozenset({"s_and_b64", "s_mov_b64", "s_wqm_b64"})

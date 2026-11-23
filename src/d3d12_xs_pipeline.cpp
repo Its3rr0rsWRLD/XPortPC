@@ -252,7 +252,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
     Sha256 sha;
-    sha.update_text("x2w-pso-translate-2");
+    sha.update_text("x2w-pso-translate-3");
     fingerprint_tree(sha, config->tools, 2);
     const std::wstring header = config->tools + L"\\..\\src";
     WIN32_FIND_DATAW found;
@@ -541,7 +541,7 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
             params[i].Constants = {i, placeholder_space, 1};
         }
     }
-    D3D12_DESCRIPTOR_RANGE1 memory[2]{};
+    D3D12_DESCRIPTOR_RANGE1 memory[3]{};
     memory[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     memory[0].NumDescriptors = title_memory_slots;
     memory[0].RegisterSpace = runtime_memory_space;
@@ -551,6 +551,11 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
     memory[1].RegisterSpace = runtime_space;
     memory[1].Flags = memory[0].Flags;
     memory[1].OffsetInDescriptorsFromTableStart = title_memory_slots;
+    memory[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;  // writable title_memory[8] (u0..u7 space1001)
+    memory[2].NumDescriptors = title_memory_slots;
+    memory[2].RegisterSpace = runtime_memory_space;
+    memory[2].Flags = memory[0].Flags;
+    memory[2].OffsetInDescriptorsFromTableStart = title_memory_slots + 1;
     D3D12_DESCRIPTOR_RANGE1 textures{};
     textures.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     textures.NumDescriptors = texture_table;
@@ -568,7 +573,7 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
     extra[param_ranges].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     extra[param_ranges].Descriptor = {2, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     extra[param_memory].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    extra[param_memory].DescriptorTable = {2, memory};
+    extra[param_memory].DescriptorTable = {3, memory};
     extra[param_push_words].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_push_words].Constants = {3, runtime_space, push_word_count};
     extra[param_vertex_root].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -583,6 +588,8 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
         p.Descriptor = {k, runtime_pixel_constant_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
         p.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     }
+    extra[param_buffer_words].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    extra[param_buffer_words].Descriptor = {4, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC};
     extra[param_textures].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     extra[param_textures].DescriptorTable = {1, &textures};
     extra[param_textures].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -658,22 +665,37 @@ const char* table_problem(const RootInfo& root, const X2WShaderBinding& b)
 const char* add_refs(const std::string& text, std::uint32_t stage, const std::vector<UINT>& tables, PsoInfo& info)
 {
     std::size_t at = text.find('\n');
-    if (text.compare(0, at, "x2w-bindings 1") != 0) return "the translator's bindings have an unknown format";
+    if (text.compare(0, at, "x2w-bindings 2") != 0) return "the translator's bindings have an unknown format";
     while (at != std::string::npos && at + 1 < text.size()) {
         const std::size_t next = text.find('\n', at + 1);
         const std::string line = text.substr(at + 1, next == std::string::npos ? std::string::npos : next - at - 1);
         at = next;
+        if (line == "memory rw") {
+            info.writes_memory = 1;
+            continue;
+        }
         char kind[16] = {};
-        unsigned slot = 0, set = 0, offset = 0;
-        if (std::sscanf(line.c_str(), "%15s %u %u %u", kind, &slot, &set, &offset) != 4) return "malformed bindings line";
+        unsigned slot = 0, set = 0, offset = 0, flags = 0;
+        if (std::sscanf(line.c_str(), "%15s %u %u %u %u", kind, &slot, &set, &offset, &flags) != 5)
+            return "malformed bindings line";
         TableRef ref{};
         ref.stage = static_cast<std::uint8_t>(stage);
         if (!std::strcmp(kind, "texture")) ref.kind = RefKind::texture;
         else if (!std::strcmp(kind, "sampler")) ref.kind = RefKind::sampler;
         else if (!std::strcmp(kind, "constants")) ref.kind = RefKind::constants;
+        else if (!std::strcmp(kind, "buffer")) ref.kind = RefKind::buffer;
         else return "unknown kind of descriptor in the bindings";
+        if (ref.kind == RefKind::buffer) {
+            // The stage's own range of descriptor words, one V# (four words) per read.
+            const unsigned first = stage == X2W_SHADER_STAGE_VERTEX ? 0 : pixel_buffer_words;
+            if (slot < first || slot >= first + pixel_buffer_words || slot % 4 || flags > (ref_typed | ref_stored))
+                return "a buffer V# in descriptor words the runtime does not bind";
+        } else if (flags) {
+            return "flags on a descriptor that is not a buffer";
+        }
         const unsigned slots = ref.kind == RefKind::texture   ? 8
                                : ref.kind == RefKind::sampler ? sampler_table
+                               : ref.kind == RefKind::buffer  ? buffer_words
                                : stage == X2W_SHADER_STAGE_VERTEX ? 1
                                                                   : pixel_constant_slots;
         if (slot >= slots) return "a descriptor slot the runtime does not bind";
@@ -687,6 +709,7 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         ref.slot = static_cast<std::uint8_t>(slot);
         ref.parameter = static_cast<std::uint8_t>(tables[set]);
         ref.offset = offset;
+        ref.flags = static_cast<std::uint8_t>(flags);
         info.refs[info.ref_count++] = ref;
     }
     return nullptr;
@@ -816,16 +839,10 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     }
     ps_roles += "}}";
 
+    // The pixel program first: when it stores to title memory, the vertex program is translated to read title memory
+    // through the same UAVs (role "title_memory": "rw"; vertex programs never store, tools/vertex_aot.py refuses it).
     std::vector<std::uint8_t> vs_dxil, ps_dxil;
     std::string key, vs_bind, ps_bind;
-    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
-        refuse("vertex", key, why);
-        return E_NOTIMPL;
-    }
-    if (const char* problem = add_refs(vs_bind, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
-        refuse("vertex", key, problem);
-        return E_NOTIMPL;
-    }
     if (desc->PS.BytecodeLength) {
         if (!translated_shader(ps, ps_roles, ps_dxil, ps_bind, key, why)) {
             refuse("pixel", key, why);
@@ -835,6 +852,15 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
             refuse("pixel", key, problem);
             return E_NOTIMPL;
         }
+    }
+    if (info.writes_memory) vs_roles.insert(vs_roles.size() - 1, ", \"title_memory\": \"rw\"");
+    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
+        refuse("vertex", key, why);
+        return E_NOTIMPL;
+    }
+    if (const char* problem = add_refs(vs_bind, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
+        refuse("vertex", key, problem);
+        return E_NOTIMPL;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
     copy.VS = {vs_dxil.data(), vs_dxil.size()};
@@ -889,6 +915,42 @@ std::uint64_t translate_address(std::uint64_t address, std::uint64_t bytes)
     return desktop ? desktop : address;
 }
 
+std::uint64_t title_address_of(ID3D12Resource* resource, std::uint64_t offset, std::uint64_t bytes)
+{
+    HMODULE xmem = GetModuleHandleW(L"xmem.dll");
+    auto view = xmem ? reinterpret_cast<GetShaderViewFn>(
+                           reinterpret_cast<void*>(GetProcAddress(xmem, "X2WTitleGpuGetShaderView")))
+                     : nullptr;
+    if (!resource || !view) return 0;
+    const std::uint64_t desktop = resource->GetGPUVirtualAddress() + offset;
+    std::vector<X2WTitleGpuRange> ranges;
+    std::vector<void*> resources;
+    std::uint32_t required = 0;
+    view(nullptr, nullptr, 0, &required);
+    if (!required) return 0;
+    ranges.resize(required);
+    resources.resize(required);
+    if (FAILED(view(ranges.data(), resources.data(), required, &required)) || required != ranges.size()) {
+        for (void* r : resources)
+            if (r) static_cast<IUnknown*>(r)->Release();
+        return 0;
+    }
+    std::uint64_t title = 0;
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+        auto* alias = static_cast<ID3D12Resource*>(resources[i]);
+        if (!alias) continue;
+        const std::uint64_t begin = std::uint64_t(ranges[i].begin_high) << 32 | ranges[i].begin_low;
+        const std::uint64_t end = std::uint64_t(ranges[i].end_high) << 32 | ranges[i].end_low;
+        // The alias's offset 0 is the allocation's first byte (era_title_gpu.cpp, locate).
+        const std::uint64_t first = alias->GetGPUVirtualAddress();
+        if (!title && desktop >= first && desktop - first < end - begin && bytes <= end - begin - (desktop - first))
+            title = begin + (desktop - first);
+    }
+    for (void* r : resources)
+        if (r) static_cast<IUnknown*>(r)->Release();
+    return title;
+}
+
 namespace {
 
 // The TitleLookup miss counter of the live device (its mapped word), and the counts of devices already destroyed.
@@ -898,6 +960,8 @@ std::atomic<std::uint64_t> g_title_misses_before;
 // The identity of the descriptors a block holds: (heap serial, index, generation) per entry; zero for a null entry.
 template <unsigned N>
 using BlockKey = std::array<std::uint32_t, 3 * N>;
+// The descriptor words of one draw's buffer V#s.
+using WordsKey = std::array<std::uint32_t, buffer_words>;
 
 }  // namespace
 
@@ -1009,6 +1073,28 @@ public:
         return good;
     }
 
+    // An upload block holding `words` (the buffer V# descriptor words of a draw), cached by content like the
+    // descriptor blocks, so a later draw never changes words an earlier draw reads.
+    bool words_block(const WordsKey& words, D3D12_GPU_VIRTUAL_ADDRESS* out, std::string& why)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        bool good = true;
+        auto it = word_blocks_.find(words);
+        if (it == word_blocks_.end()) {
+            if (word_blocks_.size() == word_block_count) {
+                why = "more than 4096 distinct sets of buffer V#s on one device (blocks are not recycled yet)";
+                good = false;
+            } else {
+                const UINT block = static_cast<UINT>(word_blocks_.size());
+                std::memcpy(words_mapped_ + std::size_t(block) * word_block_bytes, words.data(), sizeof(words));
+                it = word_blocks_.emplace(words, block).first;
+            }
+        }
+        if (good) *out = words_->GetGPUVirtualAddress() + std::uint64_t(it->second) * word_block_bytes;
+        ReleaseSRWLockExclusive(&lock_);
+        return good;
+    }
+
     // Whether a miss at (serial, index) is the first of its kind on this device (it is logged then).
     bool first_miss(std::uint32_t serial, std::uint32_t index, RefKind kind)
     {
@@ -1024,6 +1110,8 @@ private:
     static constexpr UINT blocks = 256;  // title-memory views
     static constexpr UINT texture_block_count = 4096;
     static constexpr UINT sampler_block_count = 512;  // 2048 samplers, the desktop limit of a shader-visible heap
+    static constexpr UINT word_block_count = 4096;
+    static constexpr UINT word_block_bytes = buffer_words * 4;  // 512, a multiple of the 256-byte CBV alignment
     static constexpr UINT texture_first = blocks * memory_block;
 
     D3D12_CPU_DESCRIPTOR_HANDLE views_cpu(UINT index) const
@@ -1071,7 +1159,10 @@ private:
         zero.Flags = D3D12_RESOURCE_FLAG_NONE;
         D3D12_HEAP_PROPERTIES upload{};
         upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC words = zero;
+        words.Width = UINT64(word_block_count) * word_block_bytes;
         void* mapped = nullptr;
+        void* words_mapped = nullptr;
         if (FAILED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap_))) ||
             FAILED(device_->CreateDescriptorHeap(&sampler_desc, IID_PPV_ARGS(&samplers_))) ||
             FAILED(device_->CreateCommittedResource(&counter_heap, D3D12_HEAP_FLAG_NONE, &buffer,
@@ -1079,16 +1170,21 @@ private:
                                                     IID_PPV_ARGS(&counter_))) ||
             FAILED(counter_->Map(0, nullptr, &mapped)) ||
             FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &zero,
-                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&zero_)))) {
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&zero_))) ||
+            FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &words,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&words_))) ||
+            FAILED(words_->Map(0, nullptr, &words_mapped))) {
             heap_.Reset();
             samplers_.Reset();
             counter_.Reset();
             zero_.Reset();
+            words_.Reset();
             why = "cannot create the shim's descriptor heaps or counter buffers";
             return false;
         }
         std::memset(mapped, 0, 256);
         counter_word_ = static_cast<volatile std::uint32_t*>(mapped);
+        words_mapped_ = static_cast<std::uint8_t*>(words_mapped);  // upload heaps may stay mapped
         volatile std::uint32_t* expected = nullptr;
         g_title_misses.compare_exchange_strong(expected, counter_word_);
         void* zeros = nullptr;
@@ -1174,6 +1270,24 @@ private:
         misses.Buffer.NumElements = 64;
         misses.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
         device_->CreateUnorderedAccessView(counter_.Get(), nullptr, &misses, handle);
+        // The same ranges as raw UAVs, for pipelines that store to title memory.
+        for (UINT i = 0; i < title_memory_slots; ++i) {
+            handle.ptr += increment_;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC raw{};
+            raw.Format = DXGI_FORMAT_R32_TYPELESS;
+            raw.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            raw.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            raw.Buffer.NumElements = 1;
+            ID3D12Resource* resource = nullptr;
+            for (std::size_t r = 0; r < ranges.size(); ++r) {
+                if (ranges[r].slot != i) continue;
+                const std::uint64_t begin = std::uint64_t(ranges[r].begin_high) << 32 | ranges[r].begin_low;
+                const std::uint64_t end = std::uint64_t(ranges[r].end_high) << 32 | ranges[r].end_low;
+                resource = static_cast<ID3D12Resource*>(resources[r]);
+                raw.Buffer.NumElements = static_cast<UINT>((end - begin) / 4);
+            }
+            device_->CreateUnorderedAccessView(resource, nullptr, &raw, handle);
+        }
         // The ranges as TitleLookup reads them (stride 24), in an upload buffer kept for the device's lifetime.
         D3D12_HEAP_PROPERTIES upload{};
         upload.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1207,8 +1321,9 @@ private:
     ID3D12Device* device_;  // the desktop device; the owning wrapper outlives this object
     SRWLOCK lock_;
     ComPtr<ID3D12DescriptorHeap> heap_, samplers_;
-    ComPtr<ID3D12Resource> counter_, zero_;
+    ComPtr<ID3D12Resource> counter_, zero_, words_;
     volatile std::uint32_t* counter_word_ = nullptr;
+    std::uint8_t* words_mapped_ = nullptr;
     UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
     UINT used_ = 0;
@@ -1217,6 +1332,7 @@ private:
     std::vector<void*> last_resources_;  // identity only; not referenced
     std::map<BlockKey<texture_table>, UINT> texture_blocks_;
     std::map<BlockKey<sampler_table>, UINT> sampler_blocks_;
+    std::map<WordsKey, UINT> word_blocks_;
     std::map<std::uint64_t, int> misses_logged_;
 };
 
@@ -1257,13 +1373,33 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     bool any_texture = false, any_sampler = false;
     D3D12_GPU_VIRTUAL_ADDRESS constants[1 + pixel_constant_slots] = {};
     bool any_constants[1 + pixel_constant_slots] = {};
+    WordsKey words{};
+    bool any_words = false;
     for (std::uint32_t r = 0; r < pso.ref_count; ++r) {
         const TableRef& ref = pso.refs[r];
+        const bool buffer = ref.kind == RefKind::buffer;
         const descriptors::SlotKind want = ref.kind == RefKind::texture   ? descriptors::SlotKind::srv
                                            : ref.kind == RefKind::sampler ? descriptors::SlotKind::sampler
-                                                                          : descriptors::SlotKind::cbv;
-        const descriptors::Resolved found = descriptors::resolve(
-            args.address[ref.parameter], ref.offset, want, ref.kind == RefKind::sampler ? heaps.samplers : heaps.views);
+                                           : buffer ? (ref.flags & ref_stored ? descriptors::SlotKind::uav
+                                                                              : descriptors::SlotKind::srv)
+                                                    : descriptors::SlotKind::cbv;
+        const descriptors::Resolved found =
+            descriptors::resolve(args.address[ref.parameter], ref.offset, want,
+                                 ref.kind == RefKind::sampler ? heaps.samplers : heaps.views, buffer);
+        if (buffer && found.found && (ref.flags & ref_typed) && found.buffer != descriptors::BufferForm::typed_int) {
+            // The converter lowers typed accesses exactly for 32_UINT and 32_SINT only (tools/pixel_aot_ops/hlsl.py):
+            // through any other view the shader would read zeros or drop the store where the console converts.
+            char detail[256];
+            std::snprintf(detail, sizeof(detail),
+                          "draw skipped: %s buffer V# at root parameter %u + %u is accessed typed (buffer_*_format) "
+                          "through a %s view; typed accesses are translated for R32_UINT and R32_SINT views only",
+                          ref.stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel", ref.parameter, ref.offset,
+                          found.buffer == descriptors::BufferForm::raw          ? "raw"
+                          : found.buffer == descriptors::BufferForm::structured ? "structured"
+                                                                                : "typed (other format or swizzle)");
+            log_refused(symbol, detail, true);
+            return false;
+        }
         if (!found.found) {
             count_texture_miss();
             if (views->first_miss(found.serial, found.index, ref.kind)) {
@@ -1274,11 +1410,13 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
                               ref.stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel",
                               ref.kind == RefKind::texture   ? "texture"
                               : ref.kind == RefKind::sampler ? "sampler"
+                              : buffer                       ? "buffer V# (descriptor word)"
                                                              : "constant buffer",
                               ref.slot, ref.parameter, ref.offset, found.serial, found.index, found.why,
                               ref.kind == RefKind::texture   ? "a null SRV"
                               : ref.kind == RefKind::sampler ? "through a point sampler"
-                                                             : "zeros");
+                              : buffer ? "a zero V# (num_records 0: loads read zeros, stores write nothing)"
+                                       : "zeros");
                 log_note(symbol, detail, nullptr);
             }
         }
@@ -1293,6 +1431,9 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
             sampler_src[ref.slot] = found.found ? found.shadow : D3D12_CPU_DESCRIPTOR_HANDLE{};
             std::memcpy(&sampler_key[3 * ref.slot], identity, sizeof(identity));
             any_sampler = true;
+        } else if (buffer) {
+            if (found.found) std::memcpy(&words[ref.slot], found.vsharp, sizeof(found.vsharp));
+            any_words = true;
         } else {
             const unsigned at = ref.stage == X2W_SHADER_STAGE_VERTEX ? 0 : 1 + ref.slot;
             constants[at] = found.found ? translate_address(found.cbv_address, 256) : views->zero_buffer();
@@ -1300,8 +1441,10 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
         }
     }
     D3D12_GPU_DESCRIPTOR_HANDLE texture_table_at{}, sampler_table_at{};
+    D3D12_GPU_VIRTUAL_ADDRESS words_at = 0;
     if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, why)) ||
-        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why))) {
+        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why)) ||
+        (any_words && !views->words_block(words, &words_at, why))) {
         log_refused(symbol, ("draw skipped: " + why).c_str(), true);
         return false;
     }
@@ -1329,6 +1472,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
     if (any_constants[0]) list->SetGraphicsRootConstantBufferView(base + param_vertex_constants, constants[0]);
     for (UINT k = 0; k < pixel_constant_slots; ++k)
         if (any_constants[1 + k]) list->SetGraphicsRootConstantBufferView(base + param_pixel_constants + k, constants[1 + k]);
+    if (any_words) list->SetGraphicsRootConstantBufferView(base + param_buffer_words, words_at);
     if (any_texture) list->SetGraphicsRootDescriptorTable(base + param_textures, texture_table_at);
     if (any_sampler) list->SetGraphicsRootDescriptorTable(base + param_samplers, sampler_table_at);
     return true;

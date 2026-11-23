@@ -14,21 +14,33 @@ from the container and the pipeline:
 A descriptor-table SGPR (rung R4) holds the low word of the table's address; the program completes the pair with a
 constant high word. Which descriptors the program reads from each table, and as what, is read off the program
 (corpus_translate.derive_bindings: a T# where an image instruction names it, an S# where it is the sampler, a
-constant-buffer V# where s_buffer_load reads through it); nothing is inferred about the table itself. Push words
-("inline" in the vertex stage, "push:W" in the pixel stage) are one numbering shared by both stages of a pipeline.
+constant-buffer V# where s_buffer_load reads through it, a buffer V# where a buffer instruction does); nothing is
+inferred about the table itself. Push words ("inline" in the vertex stage, "push:W" in the pixel stage) are one
+numbering shared by both stages of a pipeline.
+
+Buffer V#s read from a table (rung R4b: vertex fetch, buffer loads and stores) become descriptor words the shim fills
+at draw time from the buffer view the title created through the API (b4 space1000, `vsharp_words`: the vertex
+stage's V#s at words 0..60, the pixel stage's at 64..124). The shader decodes base, stride, num_records and format
+from them and reaches title memory through TitleLookup, as for any V#. Each buffer read carries flags for how the
+program uses it: 1 typed (buffer_load_format, buffer_store_format; the shim requires an R32_UINT or R32_SINT view,
+the only formats the converter lowers exactly), 2 stored to (the shim requires a UAV). A program that stores binds
+title memory as UAVs (u0..u7 space1001) and says so with "memory rw" in the bindings; the shim then translates the
+other stage of the pipeline with the role "title_memory": "rw", so one draw never sees title memory through both an
+SRV and a UAV.
 
 The translated HLSL may declare only the bindings the shim fills at draw time, all in the runtime's register spaces
 (src/d3d12_xs_pipeline.h, ConverterParam):
-    both stages  b1 title_range_count, t2 title_ranges, t0..t7 space1 title_memory (-> spaces 1000/1001), b3 push
-                 words (b3 space1000), and u0 space1000, the TitleLookup miss counter this script adds
+    both stages  b1 title_range_count, t2 title_ranges, t0..t7 space1 title_memory (-> spaces 1000/1001) or, when
+                 writable, u0..u7 space1 (-> space1001), b3 push words (b3 space1000), b4 the buffer V# words
+                 (b4 space1000), and u0 space1000, the TitleLookup miss counter this script adds
     vertex       b0 the constant buffer of a descriptor table (b0 space1000), b2 base vertex and start instance
     pixel        textures t0, t1, t3..t8 (-> space1002, one table), samplers s0..s3 (-> space1002), constant slots 0
-                 and 1 (-> b0, b1 space1003), the push-word slot (-> b3 space1000, the vertex stage's push words)
-Any other declaration (the vertex b4 descriptor words, pixel constant slots 2 and 3, storage images, title-memory
-stores) is refused with the register it needs.
+                 to 3 (-> b0..b3 space1003), the push-word slot (-> b3 space1000, the vertex stage's push words)
+Any other declaration (storage images) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
-"x2w-bindings 1": "<texture|sampler|constants> <slot> <set> <byte offset>". The shim caches it beside the DXIL.
+"x2w-bindings 2": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word> <set> <byte offset>
+<flags>", and the line "memory rw" when the program writes title memory. The shim caches it beside the DXIL.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
@@ -49,11 +61,22 @@ sys.path.insert(0, str(TOOLS))
 RUNTIME_SPACES = {0: 1000, 1: 1001}
 TEXTURE_SPACE = 1002
 PIXEL_CONSTANT_SPACE = 1003
-PIXEL_CONSTANT_SLOTS = 2  # params (b0) and params1 (b1) in space 1003
+PIXEL_CONSTANT_SLOTS = 4  # params, params1..params3 -> b0..b3 in space 1003
 PUSH_WORDS = 32
 # The bindings both stages may declare, as (register, converter space).
-BOUND = {("b1", 0), ("t2", 0), ("t0", 1), ("b3", 0)}
-VERTEX_BOUND = BOUND | {("b0", 0), ("b2", 0)}
+BOUND = {("b1", 0), ("t2", 0), ("t0", 1), ("u0", 1), ("b3", 0)}
+VERTEX_BOUND = BOUND | {("b0", 0), ("b2", 0), ("b4", 0)}
+# Buffer V# words (one buffer of 128 words the shim fills per draw): the vertex stage's 16 V#s, then the pixel stage's.
+PIXEL_BUFFER_WORDS = 64
+BUFFER_VSHARPS = 16
+TYPED, STORED = 1, 2
+READ_ONLY_MEMORY = "ByteAddressBuffer title_memory[8] : register(t0, space1);"
+WRITABLE_MEMORY = "RWByteAddressBuffer title_memory[8] : register(u0, space1);"
+# Calls of the title-memory helpers (tools/pixel_aot_ops/hlsl.py, forms/stores.py) that take a V# as their first
+# argument, and the flags their use gives it.
+BUFFER_CALLS = {"buffer_load32(": 0, "buffer_load_sub(": 0, "buffer_load_format(": TYPED, "buffer_store32(": STORED,
+                "buffer_store_sub(": STORED, "buffer_store_format(": TYPED | STORED}
+VSHARP_WORD = re.compile(r"vsharp_words\[(\d+)\]\.([xyzw])")
 REGISTER = re.compile(r"register\(\s*([btsu])(\d+)\s*(?:,\s*space(\d+)\s*)?\)")
 CBUFFER = re.compile(r"cbuffer (\w+) : register\(b(\d+)\) \{ uint4 (\w+)\[(\d+)\]; \};")
 LOOKUP_CALL = "TitleLookup(title_ranges, title_range_count,"
@@ -112,8 +135,33 @@ def derived_tables(program, tables):
     return derived, keys
 
 
+def buffer_flags(source, first_word):
+    """{first descriptor word of a buffer V#: flags} from the title-memory helper calls of the translated HLSL. The
+    lowering builds each V# as `uint4 rsrcN = uint4(<four words>);` and passes rsrcN to the helper; a V# that holds
+    descriptor words but is not the four words of one descriptor-table V#, in order, is refused."""
+    flags, temporaries = {}, {}
+    for line in source.splitlines():
+        if m := re.match(r"\s*uint4 (\w+) = uint4\((.*)\);\s*$", line):
+            words = [4 * int(w[1]) + "xyzw".index(w[2]) for w in VSHARP_WORD.finditer(m[2])]
+            if words and (words != list(range(words[0], words[0] + 4)) or (words[0] - first_word) % 4):
+                raise ValueError("a buffer instruction whose V# is not one descriptor-table V# is not bound by the "
+                                 "runtime")
+            if words:
+                temporaries[m[1]] = words[0]
+            continue
+        for call, flag in BUFFER_CALLS.items():
+            for m in re.finditer(r"(?<![\w.])" + re.escape(call) + r"\s*(\w+)\s*,", line):
+                if m[1] in temporaries:
+                    flags[temporaries[m[1]]] = flags.get(temporaries[m[1]], 0) | flag
+                elif m[1] != "uint4":  # not the helper's own definition
+                    if VSHARP_WORD.search(line):
+                        raise ValueError("a buffer instruction whose V# is not one descriptor-table V# is not bound "
+                                         "by the runtime")
+    return flags
+
+
 def lower(stage, instructions, roles):
-    """(HLSL in converter registers, layout, descriptor-table reads [(kind, slot, set, offset)])."""
+    """(HLSL in converter registers, layout, descriptor-table reads [(kind, slot, set, offset, flags)])."""
     from pixel_aot_ops.bindings import SET_STRIDE
     lines = [line for line in instructions]
     if stage == "vertex":
@@ -126,38 +174,49 @@ def lower(stage, instructions, roles):
             if derived.textures or derived.samplers:
                 raise ValueError("a vertex program that samples a texture is not lowered (image operations in the "
                                  "vertex stage)")
-            if derived.buffers or derived.storage_images:
-                raise ValueError("a buffer V# read from a descriptor table (the vertex b4 descriptor words) is not "
-                                 "bound by the runtime yet")
+            if derived.storage_images:
+                raise ValueError("a storage image read from a descriptor table is not bound by the runtime yet")
+            if len(derived.buffers) > BUFFER_VSHARPS:
+                raise ValueError(f"more than {BUFFER_VSHARPS} buffer V#s in one stage; the runtime passes "
+                                 f"{BUFFER_VSHARPS}")
             entries = {reg: {} for reg in tables}
             for key in derived.constant_buffers:
                 shim = keys[key]
                 reg = next(r for r, s in tables.items() if s == shim // SET_STRIDE)
                 entries[reg][str(shim % SET_STRIDE)] = "constants"
-                refs.append(("constants", 0, shim // SET_STRIDE, shim % SET_STRIDE))
+                refs.append(("constants", 0, shim // SET_STRIDE, shim % SET_STRIDE, 0))
+            for n, key in enumerate(sorted(derived.buffers, key=lambda k: keys[k])):
+                shim = keys[key]
+                reg = next(r for r, s in tables.items() if s == shim // SET_STRIDE)
+                entries[reg][str(shim % SET_STRIDE)] = {"vsharp": 4 * n}
+                refs.append(("buffer", 4 * n, shim // SET_STRIDE, shim % SET_STRIDE, 0))
             for reg in tables:
                 if entries[reg]:
                     user[reg[1:]] = {"role": "descriptors", "high": derived.descriptor_high, "entries": entries[reg]}
                 else:
                     del user[reg[1:]]  # a table the program never reads through
         source, layout = vertex_aot.lower_with_layout(lines, vertex_aot.parse_role_map(user))
+        flags = buffer_flags(source, 0)
+        refs = [(*ref[:4], flags.get(ref[1], 0)) if ref[0] == "buffer" else ref for ref in refs]
         return source, {"params": layout["params"], "instance_id": layout["instance_id"]}, refs
     from pixel_aot_ops.bindings import PixelBindings, CONSTANT_SLOTS
     from pixel_aot_ops.lowering import lower as lower_pixel
     sgprs = dict(roles.get("sgprs", {}))
     tables = _table_sets(sgprs)
-    textures, samplers, constants, high = {}, {}, {}, None
+    textures, samplers, constants, buffers, high = {}, {}, {}, {}, None
     if tables:
         derived, keys = derived_tables(lines, tables)
-        if derived.buffers or derived.storage_images:
-            raise ValueError("buffer V#s and storage images read from a descriptor table are not bound by the runtime "
-                             "yet")
+        if derived.storage_images:
+            raise ValueError("storage images read from a descriptor table are not bound by the runtime yet")
         if any(not isinstance(source, int) for source in derived.samplers.values()):
             raise ValueError("an inline (immutable) sampler set by s_mov needs its S# words decoded, which the runtime "
                              "does not do yet")
+        if len(derived.buffers) > BUFFER_VSHARPS:
+            raise ValueError(f"more than {BUFFER_VSHARPS} buffer V#s in one stage; the runtime passes {BUFFER_VSHARPS}")
         textures = {keys[k]: slot for k, slot in derived.textures.items()}
         samplers = {slot: keys[k] for slot, k in derived.samplers.items()}
         constants = {keys[k]: slot for k, slot in derived.constant_buffers.items()}
+        buffers = {shim: 4 * n for n, shim in enumerate(sorted(keys[k] for k in derived.buffers))}
         high = derived.descriptor_high
     if any(slot >= PIXEL_CONSTANT_SLOTS for slot in constants.values()):
         raise ValueError(f"more than {PIXEL_CONSTANT_SLOTS} constant-buffer V#s in a pixel program; the runtime binds "
@@ -167,14 +226,23 @@ def lower(stage, instructions, roles):
     if pushed:
         if max(pushed) >= PUSH_WORDS:
             raise ValueError(f"a pixel push word past the {PUSH_WORDS} the runtime passes")
-        push = next(n for n in range(CONSTANT_SLOTS) if n not in constants.values())
+        push = next((n for n in range(CONSTANT_SLOTS) if n not in constants.values()), None)
+        if push is None:
+            raise ValueError(f"push words beside {CONSTANT_SLOTS} constant-buffer V#s in a pixel program; the "
+                             f"converter's binding description has {CONSTANT_SLOTS} constant slots in all")
+    # The pixel stage's V# words follow the vertex stage's in the one descriptor-words buffer.
     description = PixelBindings(sgprs=sgprs, textures=textures, samplers=samplers, constant_buffers=constants,
-                                push_constants=push, **({"descriptor_high": high} if high is not None else {}))
+                                push_constants=push, buffers={k: w + PIXEL_BUFFER_WORDS for k, w in buffers.items()},
+                                buffer_words="vsharp_words",
+                                **({"descriptor_high": high} if high is not None else {}))
     description.check()
-    refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE) for key, slot in sorted(textures.items())]
-    refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE) for slot, key in sorted(samplers.items())]
-    refs += [("constants", slot, key // SET_STRIDE, key % SET_STRIDE) for key, slot in sorted(constants.items())]
+    refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(textures.items())]
+    refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for slot, key in sorted(samplers.items())]
+    refs += [("constants", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(constants.items())]
     source = lower_pixel(lines, bindings=description)
+    flags = buffer_flags(source, PIXEL_BUFFER_WORDS)
+    refs += [("buffer", w + PIXEL_BUFFER_WORDS, key // SET_STRIDE, key % SET_STRIDE,
+              flags.get(w + PIXEL_BUFFER_WORDS, 0)) for key, w in sorted(buffers.items())]
     return source, {"push_slot": push}, refs
 
 
@@ -188,6 +256,10 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
 
     def move_cbuffer(m):
         name, register, array, size = m[1], int(m[2]), m[3], int(m[4])
+        if array == "vsharp_words":
+            if (stage, register) not in (("pixel", 5), ("vertex", 4)):
+                raise ValueError(f"the buffer V# words are declared at b{register}, which the runtime does not fill")
+            return f"cbuffer {name} : register(b4, space1000) {{ uint4 {array}[{2 * BUFFER_VSHARPS}]; }};"
         if stage == "pixel":
             slot = constant_slot(array)
             if slot is None:
@@ -223,8 +295,20 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
     return source
 
 
-def bindings_text(refs):
-    return "x2w-bindings 1\n" + "".join(f"{kind} {slot} {table} {offset}\n" for kind, slot, table, offset in refs)
+def writable_memory(source, roles):
+    """The source with title memory declared writable when the pipeline's other stage writes it (the role
+    "title_memory": "rw"), and whether the translation binds title memory as UAVs."""
+    if roles.get("title_memory", "ro") not in ("ro", "rw"):
+        raise ValueError("unknown title_memory role")
+    if roles.get("title_memory") == "rw":
+        source = source.replace(READ_ONLY_MEMORY, WRITABLE_MEMORY)
+    return source, WRITABLE_MEMORY in source
+
+
+def bindings_text(refs, writes=False):
+    return ("x2w-bindings 2\n" + "".join(f"{kind} {slot} {table} {offset} {flags}\n"
+                                         for kind, slot, table, offset, flags in refs)
+            + ("memory rw\n" if writes else ""))
 
 
 def main():
@@ -243,6 +327,7 @@ def main():
         roles = json.loads(args.roles.read_text(encoding="utf-8"))
         instructions = disassemble(code, args.llvm)
         source, layout, refs = lower(args.stage, instructions, roles)
+        source, writes = writable_memory(source, roles)
         source = place_in_runtime_spaces(source, args.stage, layout)
     except (ValueError, KeyError) as error:
         print(f"refused: {error}", file=sys.stderr)
@@ -264,9 +349,10 @@ def main():
         if result.returncode or not dxil.exists():
             print(f"tool failure: DXC exit {result.returncode}: {result.stderr.strip()[-2000:]}", file=sys.stderr)
             return 2
-        args.bindings.write_text(bindings_text(refs), encoding="ascii", newline="\n")
+        args.bindings.write_text(bindings_text(refs, writes), encoding="ascii", newline="\n")
         os.replace(dxil, args.output)
-    print(json.dumps({"stage": args.stage, "instructions": len(instructions), "bindings": len(refs), **layout}))
+    print(json.dumps({"stage": args.stage, "instructions": len(instructions), "bindings": len(refs), "writes": writes,
+                      **layout}))
     return 0
 
 

@@ -39,7 +39,8 @@ class Lowering:
         self.constant_buffers = {}  # descriptor key of a constant-buffer V# -> its word tag "cbv<k>" (bindings.py)
         self.samplers = None  # HLSL sampler name -> its four tracked words; None: the one sampler st.sampler, "samp"
         self.constant_descriptor = constant_descriptor  # byte offset of the constant-buffer V#, or None
-        self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in params
+        self.vsharp_words = vsharp_words  # byte offset of a buffer V# -> index of its first word in vsharp_array
+        self.vsharp_array = "params"  # the uint4 array that holds the buffer V# words (bindings.PixelBindings.buffer_words)
         self.constant_limit = 256  # bytes of b0 a scalar buffer load may read; the vertex stage raises it (vertex_aot.py)
         self.constant_words = 0  # one past the highest b0 word a load has read: sizes params[] when it exceeds 64
         self.uses_memory = False  # emit the title-memory helpers
@@ -193,6 +194,7 @@ def described_state(b):
     st.preamble = preamble
     st.descriptor_words = True
     st.descriptor_high = b.descriptor_high
+    st.vsharp_array = b.buffer_words
     st.constant_buffers = {key: binding_names.constant_tag(k) for key, k in b.constant_buffers.items()}
     st.sampler_offsets = {key: binding_names.sampler_tag(k) for k, key in b.samplers.items() if isinstance(key, int)}
     st.samplers = {binding_names.sampler_name(k): tuple((binding_names.sampler_tag(k), j) for j in range(4))

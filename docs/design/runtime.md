@@ -135,8 +135,12 @@ have not implemented stops with that line as its first unimplemented call.
 Converted shaders read descriptors as hardware words (V#, T#, S#) from memory, as the console GPU does; the converter
 already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixel-bindings.md)).
 
-- **Buffers (V#):** already handled. The converted shader decodes base and range from the V# words and loads through
-  `TitleLookup` (`src/title_va_lookup.hlsli`) from the title GPU address. No desktop descriptor per buffer is needed.
+- **Buffers (V#):** the converted shader decodes base and range from the V# words and loads (and stores) through
+  `TitleLookup` (`src/title_va_lookup.hlsli`) at the title GPU address. No desktop descriptor per buffer is needed.
+  As built in R4b, a V# read from a descriptor table gets its words from the buffer view the title created through
+  the API, encoded when the view is written (base = the view's title GPU address); the shim passes the words of a
+  draw's buffer reads in one constant buffer. Typed accesses are exact for R32_UINT and R32_SINT views only, and a
+  typed access through any other view refuses the draw.
 - **As built in R4:** the translator resolves every descriptor load to (descriptor table, byte offset) at
   translation time, since the converter already tracks descriptor loads by key, and the shim resolves that to the
   slot of the title heap the table points into at draw time. This is a CPU-side TextureLookup: no T# search on the
@@ -285,6 +289,8 @@ descriptor resolution (design choices and tests in
 [experiments.md](../experiments.md#title-descriptor-heaps-textures-constants-and-depth-runtime-rung-r4)). Its exit
 criteria pass on WARP and hardware except "textures created from tiled bytes": the console's texture upload path is
 not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
+R4b (`tests/runtime/r4b_scene.cpp`) adds vertex fetch through buffer V#s from descriptor tables, pixel constant slots
+2 and 3 and pixel stores to title memory through a UAV's V# ([experiments.md](../experiments.md#buffer-vs-from-descriptor-tables-four-pixel-constant-slots-pixel-stores-runtime-rung-r4b)).
 
 R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
 `src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
