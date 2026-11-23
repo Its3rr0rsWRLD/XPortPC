@@ -237,7 +237,7 @@ std::string scrub_program_dir(std::string text) {
 
 std::string scrub_program_name(std::string text) {
     text = scrub_program_dir(std::move(text));
-    if (!show_program_name) text = x2w_redact::hide_paths(text, real_program_name, kHiddenProgram);
+    if (!show_program_name) text = x2w_redact::apply(x2w_redact::hide_paths(text, real_program_name, kHiddenProgram));
     if (show_program_name || real_program_name.empty()) return text;
     const std::string folded = lower(text);
     std::string out;
