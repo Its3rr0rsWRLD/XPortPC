@@ -2906,6 +2906,21 @@ if(EXISTS "${INTAKE_PYTHON}")
             endif()
         endforeach()
     endforeach()
+    # Tessellation stages (cards T-1 and T-2, docs/design/stages.md): the desktop tessellator measured against the D3D11
+    # reference tessellator (tests/third_party/d3d11_tessellator, wrapped by tests/tess_reference.cpp), per adapter.
+    add_executable(tess_reference tests/tess_reference.cpp tests/third_party/d3d11_tessellator/tessellator.cpp)
+    target_compile_features(tess_reference PRIVATE cxx_std_17)
+    target_include_directories(tess_reference PRIVATE "${CMAKE_SOURCE_DIR}/tests"
+        "${CMAKE_SOURCE_DIR}/tests/third_party/d3d11_tessellator")
+    foreach(adapter IN ITEMS hardware warp)
+        add_test(NAME tess_aot_tessellator_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/tess_aot_check.py" tessellator "${DXC_EXECUTABLE}"
+            "$<TARGET_FILE:offscreen_check>" ${adapter} "$<TARGET_FILE:tess_reference>")
+        set_tests_properties(tess_aot_tessellator_${adapter} PROPERTIES TIMEOUT 600)
+        if(adapter STREQUAL "hardware")
+            set_tests_properties(tess_aot_tessellator_hardware PROPERTIES SKIP_RETURN_CODE 77)
+        endif()
+    endforeach()
     # One compute_aot test per draw family and adapter (docs/design/compute-stage.md), listed by the script itself as
     # for pixel_aot, with the programs each test translated recorded for tools/form_coverage.py.
     execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py" --list-families
