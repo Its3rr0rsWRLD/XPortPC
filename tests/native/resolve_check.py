@@ -94,7 +94,7 @@ def main():
         assert code == 0x66, f"crash mode exit {code:#x}, expected 0x66 from the program's own filter"
         index_of(lines, r"unhandled-filter program filter kept behind the launcher's")
         crash = index_of(lines, rf"crash exception 0xc0000005 at {re.escape(HIDDEN)}\+0x[0-9a-f]+ thread program"
-                                r"(?: thread-name \S+)? writing 0x0 last-stub none")
+                                r"(?: thread-name \S+)? writing 0x0 last-stub none(?: regs(?: [a-z0-9]+=0x[0-9a-f]+){16})?")
         final = index_of(lines, r"summary crash: .* crash=yes last-stub=none")
         assert crash < final, (crash, final)
         assert sum(line.startswith(("summary crash", "summary exit", "summary terminate")) for line in lines) == 1, lines

@@ -97,6 +97,23 @@ void log_call(const char* symbol, const std::uintptr_t (&args)[arg_count], const
     }
 }
 
+// The first 64 readable bytes at value as little-endian words of `width` bytes (4: dwords, 8: qwords), one line.
+void log_words(const char* symbol, const char* name, std::uintptr_t value, unsigned width)
+{
+    const std::size_t bytes = readable_bytes(value, dump_bytes) / width * width;
+    if (!bytes) return;
+    char line[dump_bytes * 3 + 128];
+    int n = std::snprintf(line, sizeof(line), "%s=0x%llx as %s:", name, static_cast<unsigned long long>(value),
+                          width == 4 ? "dwords" : "qwords");
+    for (std::size_t off = 0; off < bytes && n > 0 && static_cast<std::size_t>(n) < sizeof(line); off += width) {
+        unsigned long long word = 0;
+        std::memcpy(&word, reinterpret_cast<const void*>(value + off), width);
+        n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), width == 4 ? " %08llx" : " %016llx",
+                           word);
+    }
+    log_note(symbol, line, nullptr);
+}
+
 struct KnownIid {
     const IID* iid;
     const char* name;
@@ -233,7 +250,21 @@ extern "C" HRESULT WINAPI d3d12_xs_ConfigureVirtualMemoryX(std::uintptr_t a0, st
     if (g_configure_calls.fetch_add(1) < logged_calls) {
         const char* symbol = "d3d12_xs!D3D12ConfigureVirtualMemoryX";
         log_call(symbol, args, caller);
-        log_note(symbol, "d3d12x-configure-virtual-memory accepted (no effect on desktop) -> S_OK", nullptr);
+        // rcx: the struct as dwords (a real title's starts 0, 4); rdx: an array of pointers, as qwords.
+        log_words(symbol, "rcx", a0, 4);
+        log_words(symbol, "rdx", a1, 8);
+        // stack2 was 0x400000000 (16 GiB) in a real title's call: plausibly a size (a virtual range the title wants
+        // configured); logged as one so the owner log shows it. Nothing here acts on it.
+        if (s2 && !(s2 & 0xffff)) {
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "d3d12x-configure-virtual-memory stack2=0x%llx = %llu MiB (if a size)",
+                          static_cast<unsigned long long>(s2), static_cast<unsigned long long>(s2 >> 20));
+            log_note(symbol, detail, nullptr);
+        }
+        log_note(symbol,
+                 "d3d12x-configure-virtual-memory accepted (no effect on desktop); nothing written through any "
+                 "argument -> S_OK",
+                 nullptr);
     }
     return S_OK;
 }

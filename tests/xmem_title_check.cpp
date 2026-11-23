@@ -15,6 +15,8 @@
 //                                      memory as GPU-visible, refusal of a non-code routine, restoring the defaults
 //   xmem_title_check virtual_scatter   XMemVirtualAlloc, XMemMapPhysicalPagesScatter, XMemTransferMemory,
 //                                      XMemIsToolsMemAvailable (assumed contracts, src/xmem_title.cpp)
+//   xmem_title_check physical_reserve  XMemVirtualAlloc(MEM_RESERVE | MEM_PHYSICAL | MEM_LARGE_PAGES), the type a real
+//                                      title passes: an aligned range any page of which maps; the call lines
 //   xmem_title_check physical          XMemAllocatePhysicalPages / XMemMapPhysicalPages / XMemFreePhysicalPages: two
 //                                      addresses showing one page, remapping, 4 MB runs, adopted reservations,
 //                                      refusals, zeroing on reuse
@@ -567,6 +569,88 @@ bool virtual_scatter()
     return !failed;
 }
 
+// The allocation type a real title passes: MEM_RESERVE | MEM_PHYSICAL | MEM_LARGE_PAGES (= MEM_RESERVE | MEM_64K_PAGES,
+// 0x20402000), Win32 flag values. The range is reserved for physical mapping, 2 MiB aligned, and any page in it maps.
+bool physical_reserve()
+{
+    constexpr DWORD type = MEM_RESERVE | MEM_PHYSICAL | MEM_LARGE_PAGES;
+    static_assert(type == 0x20402000, "the title's allocation type");
+    SetLastError(12345);
+    auto* base = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, std::size_t{1} << 30, type, PAGE_READWRITE));
+    const DWORD error = GetLastError();
+    expect(base != nullptr, "1 GiB MEM_RESERVE|MEM_PHYSICAL|MEM_LARGE_PAGES reservation is not NULL");
+    if (!base) return false;
+    expect(addr(base) % (2 * MiB) == 0, "large pages: 2 MiB aligned");
+    expect(error == ERROR_SUCCESS, "success leaves ERROR_SUCCESS");
+    expect(logs.has("call XMemVirtualAlloc(addr=0x0 size=0x40000000 type=0x20402000[MEM_RESERVE|MEM_PHYSICAL|"
+                    "MEM_LARGE_PAGES] protect=0x4") &&
+               logs.has("path=physical-reservation align=0x200000"),
+           "the call is logged with its arguments, result and path");
+    expect(!logs.has("read as XMEM_MAPPABLE"), "Win32 bits are not read as unknown XMEM bits");
+    MEMORY_BASIC_INFORMATION info{};
+    expect(VirtualQuery(base + 700 * MiB, &info, sizeof(info)) && info.State == MEM_RESERVE,
+           "the whole range is reserved");
+    ULONG_PTR pages[4] = {};
+    ULONG_PTR count = 4;
+    expect(XMemAllocatePhysicalPages(MEM_64K_PAGES, &count, pages) && count == 4, "four pages");
+    std::vector<ULONG_PTR> nz;
+    for (ULONG_PTR p : pages) if (p) nz.push_back(p);
+    if (nz.size() < 3) return false;
+    // Pages deep inside the range, through both map calls (no call at the base came first).
+    unsigned char* far_page = base + 900 * MiB;
+    PVOID where[2] = {base + 5 * 64 * KiB, far_page};
+    ULONG_PTR same[2] = {nz[0], nz[0]};
+    expect(XMemMapPhysicalPagesScatter(where, 2, same), "scatter maps inside the reservation");
+    base[5 * 64 * KiB + 3] = 0x77;
+    expect(far_page[3] == 0x77, "two addresses in the reservation show one page");
+    expect(XMemMapPhysicalPages(base + 64 * MiB, 2, &nz[1]) != nullptr, "XMemMapPhysicalPages inside it");
+    base[64 * MiB + 64 * KiB + 1] = 0x42;
+    expect(describe(base + 64 * MiB).backing == X2W_XMEM_BACKING_PHYSICAL &&
+               describe(base + 64 * MiB).physical_page == nz[1] &&
+               describe(base + 64 * MiB + 64 * KiB).physical_page == nz[2] && query(far_page).tail[0] == 1,
+           "described as physical and GPU-registered");
+    expect(logs.has("call XMemMapPhysicalPagesScatter(") && logs.has("call XMemMapPhysicalPages(") &&
+               logs.has("call XMemAllocatePhysicalPages("), "map and allocate calls are logged");
+    expect(XMemMapPhysicalPagesScatter(where, 2, nullptr) && describe(far_page).backing == X2W_XMEM_BACKING_NONE,
+           "unmapped again");
+    // A requested address is honoured exactly (no large pages: 64 KiB alignment is enough).
+    void* probe = VirtualAlloc(nullptr, 8 * 64 * KiB, MEM_RESERVE, PAGE_NOACCESS);
+    auto* wanted = static_cast<unsigned char*>(probe) + 64 * KiB;
+    VirtualFree(probe, 0, MEM_RELEASE);
+    auto* at = static_cast<unsigned char*>(XMemVirtualAlloc(wanted, 3 * 64 * KiB, MEM_RESERVE | MEM_PHYSICAL, PAGE_READWRITE));
+    expect(at == wanted, "the requested address is honoured");
+    if (at) {
+        expect(XMemMapPhysicalPages(at + 2 * 64 * KiB, 1, &nz[0]) && (at[2 * 64 * KiB + 3] == 0x77),
+               "the last page of the requested range maps");
+        XMemMapPhysicalPages(at + 2 * 64 * KiB, 1, nullptr);
+    }
+    // MEM_4MB_PAGES: 4 MiB alignment.
+    auto* four = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 8 * MiB, MEM_RESERVE | 0x80000000u, PAGE_READWRITE));
+    expect(four && addr(four) % (4 * MiB) == 0, "MEM_4MB_PAGES: 4 MiB aligned");
+    // Refusals are never silent: an unaligned address fails with a logged reason.
+    SetLastError(0);
+    expect(XMemVirtualAlloc(base + 4096, 64 * KiB, type, PAGE_READWRITE) == nullptr &&
+               GetLastError() == ERROR_INVALID_ADDRESS && logs.has("returned NULL (path refused-unaligned"),
+           "an unaligned address is refused, logged, with ERROR_INVALID_ADDRESS");
+    // An occupied address is refused too (the range above is taken).
+    SetLastError(0);
+    expect(XMemVirtualAlloc(base, 64 * KiB, type, PAGE_READWRITE) == nullptr && GetLastError() != 0 &&
+               logs.has("returned NULL (path physical-reservation"),
+           "an occupied address is refused with an error");
+    // MEM_COMMIT with the physical bits: plain committed memory.
+    auto* plain = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 64 * KiB, MEM_COMMIT | MEM_RESERVE | MEM_PHYSICAL,
+                                                               PAGE_READWRITE));
+    expect(plain && (plain[9] = 3, plain[9] == 3), "committed memory with MEM_PHYSICAL is usable");
+    if (plain) VirtualFree(plain, 0, MEM_RELEASE);
+    // XMemAlloc / XMemFree are logged too.
+    void* small = XMemAlloc(256, word(1, 0, 0));
+    XMemFree(small, word(1, 0, 0));
+    expect(logs.has("call XMemAlloc(size=0x100") && logs.has("call XMemFree(addr="), "XMemAlloc/XMemFree logged");
+    // Control: a log check that looks for a line nobody wrote must fail.
+    expect(!logs.has("call XMemVirtualAlloc(addr=0x0 size=0x41000000"), "control: an unseen call is not found");
+    return !failed;
+}
+
 // --- write watch -------------------------------------------------------------------------------------------------------
 struct Runs {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;
@@ -860,6 +944,7 @@ int main(int argc, char** argv)
     else if (scenario == "hooks") rc = hooks() ? 0 : 1;
     else if (scenario == "physical") rc = physical() ? 0 : 1;
     else if (scenario == "virtual_scatter") rc = virtual_scatter() ? 0 : 1;
+    else if (scenario == "physical_reserve") rc = physical_reserve() ? 0 : 1;
     else if (scenario == "write_watch") rc = write_watch() ? 0 : 1;
     else if (scenario == "large_pages") rc = large_pages() ? 0 : 1;
     else if (scenario == "config") rc = configuration() ? 0 : 1;

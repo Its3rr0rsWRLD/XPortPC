@@ -35,4 +35,7 @@ namespace xmem_title {
 // its own committed private allocation (base, page-rounded size), arena space that no allocation holds reads as
 // MEM_FREE. Returns false (info untouched) for any other address.
 bool query_overlay(const void* address, MEMORY_BASIC_INFORMATION& info) noexcept;
+// One "xmem call NAME<formatted> error=<last error>" line for an export, within the export's call cap (src/xmem_title.cpp,
+// g_calls). Keeps the last error.
+void log_export_call(const char* name, const char* format, ...) noexcept;
 }

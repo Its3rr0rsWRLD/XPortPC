@@ -108,7 +108,7 @@ add_executable(xmem_title_check tests/xmem_title_check.cpp)
 target_include_directories(xmem_title_check PRIVATE src)
 target_compile_features(xmem_title_check PRIVATE cxx_std_17)
 target_link_libraries(xmem_title_check PRIVATE xmem_shim d3d12 dxgi)
-foreach(scenario IN ITEMS attributes reuse standalone windows reserve hooks physical virtual_scatter write_watch large_pages config)
+foreach(scenario IN ITEMS attributes reuse standalone windows reserve hooks physical virtual_scatter physical_reserve write_watch large_pages config)
     add_test(NAME xmem_title_${scenario} COMMAND xmem_title_check ${scenario})
     set_tests_properties(xmem_title_${scenario} PROPERTIES TIMEOUT 60)
 endforeach()
@@ -3343,6 +3343,19 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "${CMAKE_SOURCE_DIR}/tests/native/cpu_trap_check.py" "$<TARGET_FILE:x2w_launch>"
         "$<TARGET_FILE:x2w_cpu_trap_title>")
     set_tests_properties(native_cpu_traps PROPERTIES TIMEOUT 120)
+
+    # int3 in a mapped image: logged with the registers and skipped by default (--continue-breakpoints), a crash
+    # with the registers under --stop-on-breakpoints (tests/native/break_check.py).
+    add_executable(x2w_break_title tests/native/break_title.cpp tests/native/break_ops.asm)
+    target_compile_options(x2w_break_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_break_title PRIVATE /ENTRY:break_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO)
+    set_target_properties(x2w_break_title PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(x2w_break_title PRIVATE kernel32)
+    add_test(NAME native_launch_breakpoints COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/break_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_break_title>")
+    set_tests_properties(native_launch_breakpoints PROPERTIES TIMEOUT 120)
 
     # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
     # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a

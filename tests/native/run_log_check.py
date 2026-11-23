@@ -29,6 +29,8 @@ EXCEPTION = (rf"exception 0x[0-9a-f]{{8}} at {WHERE} thread (?:program|watchdog)
              rf"(?: (?:reading|writing|executing|accessing) {WHERE})?")
 LAST = rf"(?:{SYMBOL}|none)"
 CALLERS = rf"(?: callers {WHERE}(?: from {WHERE}){{0,2}})?"
+# General registers (values only) on a crash, first-chance or breakpoint line for an exception in a mapped image.
+REGS = r"(?: regs(?: (?:r[a-ds]x|r[sd]i|r(?:8|9|1[0-5])|rbp|rsp)=0x[0-9a-f]+){16})?"
 FEATURES = r"(?:none|[a-z0-9.\-]+(?:,[a-z0-9.\-]+)*)"
 MNEMONIC = r"[a-z0-9\-]+"
 GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
@@ -39,7 +41,9 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"milestone first-program-thread start {WHERE}",
            rf"milestone first-d3d12-call {SYMBOL} \((?:bound|stub|missing)\)",
            rf"first-call (?:stub|missing) {SYMBOL}",
-           rf"first-chance {EXCEPTION} last-stub {LAST}{CALLERS}", rf"crash {EXCEPTION} last-stub {LAST}{CALLERS}",
+           rf"first-chance {EXCEPTION} last-stub {LAST}{CALLERS}{REGS}", rf"crash {EXCEPTION} last-stub {LAST}{CALLERS}{REGS}",
+           rf"breakpoint continued at {WHERE} count \d+{REGS}", r"breakpoint \d+ lines logged; later breakpoints are counted only",
+           r"breakpoints continued \d+",
            r"exit code 0x[0-9a-f]+ \(\d+\); stubs \d+ \(missing \d+\), stub calls \d+",
            r"timeout still running after \d+ s",
            rf"dynamic-load {NAME} -> (?:shim|loader|failed|mapped|package|gateway \((?:ours|trace|record)\))",
@@ -150,14 +154,14 @@ def main():
     assert_hidden(real, "\n".join(lines), result.stderr)
     assert result.returncode & 0xFFFFFFFF == 0xC0000005, f"exit {result.returncode & 0xffffffff:#x}"
     crash = index_of(lines, rf"crash exception 0xc0000005 at {re.escape(name)}\+0x([0-9a-f]+) thread program "
-                            r"writing 0x0 last-stub x2w_missing\.dll!#7")
+                            rf"writing 0x0 last-stub x2w_missing\.dll!#7{REGS}")
     rva = int(re.search(r"\+0x([0-9a-f]+)", lines[crash])[1], 16)
     assert text_start <= rva < text_end, lines[crash]
     # The first error exception is the title's write unless a Windows DLL raised (and handled) one before it.
     first = index_of(lines, r"first-chance exception .*")
     if f" at {name}+" in lines[first]:
         assert re.fullmatch(rf"first-chance exception 0xc0000005 at {re.escape(name)}\+0x{rva:x} thread program "
-                            r"writing 0x0 last-stub x2w_missing\.dll!#7", lines[first]), lines[first]
+                            rf"writing 0x0 last-stub x2w_missing\.dll!#7{REGS}", lines[first]), lines[first]
     summary = index_of(lines, r"summary crash: tls-callbacks=done entry=reached first-thread=yes d3d12-call=yes "
                               r"crash=yes last-stub=x2w_missing\.dll!#7")
     assert first < crash < summary, (first, crash, summary)

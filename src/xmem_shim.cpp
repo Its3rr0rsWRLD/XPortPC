@@ -37,7 +37,7 @@ constexpr UINT32 gpu_usage_selector = 0x20000001;
 constexpr std::size_t gpu_usage_offset = 8;
 }
 
-extern "C" BOOL XMemVirtualQuery(HANDLE process, LPCVOID address, void* buffer)
+static BOOL virtual_query(HANDLE process, LPCVOID address, void* buffer)
 {
     if (era_query::query(process, address, buffer, query_buffer_bytes) == 0) {
         return FALSE;
@@ -52,9 +52,29 @@ extern "C" BOOL XMemVirtualQuery(HANDLE process, LPCVOID address, void* buffer)
     return TRUE;
 }
 
+extern "C" BOOL XMemVirtualQuery(HANDLE process, LPCVOID address, void* buffer)
+{
+    const BOOL ok = virtual_query(process, address, buffer);
+    xmem_title::log_export_call("XMemVirtualQuery", "(process=0x%llx addr=0x%llx buffer=0x%llx) -> %d",
+                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(process)),
+                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)),
+                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(buffer)), ok);
+    return ok;
+}
+
 // Desktop policy (docs/experiments.md): writes only +8, with this process's GPU memory in bytes;
 // on failure the output is untouched and the callers use zero.
+static BOOL working_set_statistics(UINT32 selector, void* statistics);
+
 extern "C" BOOL XMemGetWorkingSetStatistics(UINT32 selector, void* statistics)
+{
+    const BOOL ok = working_set_statistics(selector, statistics);
+    xmem_title::log_export_call("XMemGetWorkingSetStatistics", "(selector=0x%x statistics=0x%llx) -> %d", selector,
+                                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(statistics)), ok);
+    return ok;
+}
+
+static BOOL working_set_statistics(UINT32 selector, void* statistics)
 {
     if (!statistics) {
         SetLastError(ERROR_INVALID_PARAMETER);

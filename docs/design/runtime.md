@@ -195,8 +195,15 @@ arguments and returning `E_NOTIMPL`; `E_POINTER` when the output is not writable
 as the linear/standard mode, the one a title can always read back without detiling.
 
 xmem additions (`src/xmem_title.cpp`; the reference pages are login-gated, so these are assumptions too):
-`XMemVirtualAlloc` is `VirtualAlloc`-like, reads any allocation-type bit `VirtualAlloc` lacks as XMEM_MAPPABLE or
-64 KiB pages (stripped, size rounded to 64 KiB) and makes a plain reservation that `XMemMapPhysicalPages` adopts;
+`XMemVirtualAlloc` is `VirtualAlloc`-like and its allocation type uses the Win32 values (`MEM_64K_PAGES` is
+`MEM_LARGE_PAGES | MEM_PHYSICAL`, 0x20400000; a real title passes 0x20402000). `MEM_RESERVE | MEM_PHYSICAL` (with or
+without the page-size bits, without `MEM_COMMIT`) reserves a range for physical mapping, as AWE does: the requested
+address is honoured, a null one is aligned to 2 MiB with `MEM_LARGE_PAGES` (4 MiB with `MEM_4MB_PAGES`, else 64 KiB),
+and any 64 KiB page in it can be mapped at once. With `MEM_COMMIT` those bits are dropped. Any other bit `VirtualAlloc`
+lacks is read as XMEM_MAPPABLE (stripped, size rounded to 64 KiB, a plain reservation that `XMemMapPhysicalPages`
+adopts). Every XMem export call is logged as `xmem call NAME(arguments) -> result error=N` (first 256 calls of
+`XMemVirtualAlloc` and `XMemMapPhysicalPages`, 32 of `XMemAlloc`/`XMemFree`, then counted), and a NULL
+`XMemVirtualAlloc` result is also logged as unimplemented with its reason;
 `XMemMapPhysicalPagesScatter(addresses, count, pages)` is `MapUserPhysicalPagesScatter`-like, one 64 KiB page per entry
 (a null array or a zero entry unmaps, so physical page 0 cannot be mapped by it); `XMemTransferMemory` logs its
 arguments and returns TRUE without moving anything; `XMemIsToolsMemAvailable` returns FALSE. GPU-visible memory still
@@ -255,7 +262,11 @@ Neither is publicly documented, so their contracts are **assumptions**, kept in 
   out=<arg>(void**) adapter=<default|warp> -> <HRESULT>`. With no such pair it returns `E_NOTIMPL` and logs
   `d3d12x-create-device unknown-contract`, so the owner's next log shows the arguments to read the real contract from.
 - `D3D12ConfigureVirtualMemoryX` is logged the same way and returns `S_OK` with no effect: desktop D3D12 has no
-  virtual-memory configuration for the shim to forward to.
+  virtual-memory configuration for the shim to forward to. It writes nothing through any argument. The struct at RCX
+  is also logged as dwords and the array at RDX as qwords. In a real title's call the struct started 0, 4, RDX
+  pointed at an array of heap pointers and the third stack argument was 0x400000000 (16 GiB), plausibly the size of
+  a virtual range; a 64 KiB-aligned third stack argument is logged as a size in MiB. None of this is a known
+  contract.
 
 Any other export a title asks `d3d12_xs.dll` for by name can be routed to `X2WGfxUnknownExport(name)`
 (`src/d3d12_xs_api.h`): one stub per distinct name that logs `d3d12_xs!<name>`, its caller and four argument registers

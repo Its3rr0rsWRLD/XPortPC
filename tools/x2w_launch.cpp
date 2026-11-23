@@ -1,7 +1,8 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
-//                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] program.exe
+//                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name]
+//                   [--continue-breakpoints|--stop-on-breakpoints] program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -16,7 +17,8 @@
 // bytes of the program: the import route totals, each first call to a stub ("stub" when the DLL exists but
 // lacks the function, "missing" when no route has the DLL), how far startup got (TLS callbacks, entry, the
 // first thread created, the first call into a d3d12* import), the first exception and the first unhandled
-// crash (code, module + RVA, last stub called) and the exit code. Each line is written with its own
+// crash (code, module + RVA, last stub called; for a fault in a mapped image also the general registers, values
+// only) and the exit code. Each line is written with its own
 // WriteFile call, so the log survives a crash. Addresses are given as module+RVA. --timeout ends a run that
 // is still going after that many seconds with exit code 124, after logging how far it got. Each distinct C++
 // throw (0xe06d7363) is logged as "cpp-throw TYPE at SITE from CALLER": the thrown type's decorated name from
@@ -310,6 +312,8 @@ void log_cpu_traps() {
     log_line("%s", line);
 }
 
+volatile long breakpoints_continued;  // int3s skipped by breakpoint_continue
+
 void log_flush() {
     if (log_file != INVALID_HANDLE_VALUE) FlushFileBuffers(log_file);
 }
@@ -328,6 +332,7 @@ void write_summary(const char* how) {
 void log_summary(const char* how) {
     if (InterlockedExchange(&summary_written, 1) != 0) return;
     log_cpu_traps();
+    if (breakpoints_continued) log_line("breakpoints continued %ld", breakpoints_continued);
     write_summary(how);
 }
 
@@ -1255,6 +1260,57 @@ std::string caller_chain(const EXCEPTION_POINTERS* info) {
     return frames.empty() ? std::string() : " callers " + frames;
 }
 
+// " regs rax=0x.. ... rsp=0x.." for an exception in a mapped image: register values only, never memory they point at.
+std::string register_text(const EXCEPTION_POINTERS* info) {
+    if (!region_at(reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress))) return {};
+    const CONTEXT* c = info->ContextRecord;
+    const std::pair<const char*, DWORD64> regs[] = {
+        {"rax", c->Rax}, {"rbx", c->Rbx}, {"rcx", c->Rcx}, {"rdx", c->Rdx}, {"rsi", c->Rsi}, {"rdi", c->Rdi},
+        {"r8", c->R8},   {"r9", c->R9},   {"r10", c->R10}, {"r11", c->R11}, {"r12", c->R12}, {"r13", c->R13},
+        {"r14", c->R14}, {"r15", c->R15}, {"rbp", c->Rbp}, {"rsp", c->Rsp},
+    };
+    std::string out = " regs";
+    char one[40];
+    for (const auto& [name, value] : regs) {
+        std::snprintf(one, sizeof one, " %s=0x%llx", name, static_cast<unsigned long long>(value));
+        out += one;
+    }
+    return out;
+}
+
+// --continue-breakpoints (the default when no debugger is attached; --stop-on-breakpoints turns it off): an int3 in a
+// mapped image (0xCC, or the two-byte CD 03) is logged with its registers and skipped, because a retail title's
+// asserts often fall through. At most kBreakpointLines lines; every one is counted ("breakpoints" line before the
+// summary). __fastfail (int 29h) reaches no handler in the process and cannot be continued or logged here.
+constexpr long kBreakpointLines = 50;
+bool continue_breakpoints = false;
+
+LONG CALLBACK breakpoint_continue(EXCEPTION_POINTERS* info) {
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_BREAKPOINT || !continue_breakpoints) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* context = info->ContextRecord;
+    const auto at = static_cast<std::uintptr_t>(context->Rip);
+    if (!region_at(at) || !region_at(at + 1) || !region_at(at - 1)) return EXCEPTION_CONTINUE_SEARCH;
+    // Windows reports an int3 at the instruction (RIP already moved back by one): 0xCC at RIP. For CD 03 it moves
+    // back by one as well, so RIP is at the 03 byte; a record that names the CD byte itself is handled too.
+    const auto* code = reinterpret_cast<const std::uint8_t*>(at);
+    std::uintptr_t next = 0;
+    if (code[0] == 0xCC) next = at + 1;
+    else if (code[0] == 0x03 && code[-1] == 0xCD) next = at + 1;
+    else if (code[0] == 0xCD && code[1] == 0x03) next = at + 2;
+    if (!next) return EXCEPTION_CONTINUE_SEARCH;
+    const long count = InterlockedIncrement(&breakpoints_continued);
+    if (count <= kBreakpointLines) {
+        char where[160];
+        describe(reinterpret_cast<const void*>(at), where, sizeof where);
+        const std::string regs = register_text(info);
+        err_printf("[x2w] breakpoint continued at %s (count %ld)\n", where, count);
+        log_line("breakpoint continued at %s count %ld%s", where, count, regs.c_str());
+        if (count == kBreakpointLines) log_line("breakpoint %ld lines logged; later breakpoints are counted only", count);
+    }
+    context->Rip = next;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 // Error exceptions after the first are logged too, once per code and site and at most kFirstChanceLines in all.
 constexpr long kFirstChanceLines = 8;
 volatile long first_chance_lines;
@@ -1278,7 +1334,8 @@ LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
             InterlockedExchange(&first_exception, 1);
             char text[512];
             exception_text(info->ExceptionRecord, text, sizeof text);
-            log_line("first-chance %s last-stub %s%s", text, last_stub_name().c_str(), caller_chain(info).c_str());
+            log_line("first-chance %s last-stub %s%s%s", text, last_stub_name().c_str(), caller_chain(info).c_str(),
+                     register_text(info).c_str());
             log_provisional_summary();
         }
     }
@@ -1292,7 +1349,8 @@ LONG WINAPI unhandled(EXCEPTION_POINTERS* info) {
     if (InterlockedExchange(&crashed, 1) == 0) {
         char text[512];
         exception_text(info->ExceptionRecord, text, sizeof text);
-        log_line("crash %s last-stub %s%s", text, last_stub_name().c_str(), caller_chain(info).c_str());
+        log_line("crash %s last-stub %s%s%s", text, last_stub_name().c_str(), caller_chain(info).c_str(),
+                 register_text(info).c_str());
         log_summary("crash");
     }
     // The program's own filter (hook_SetUnhandledExceptionFilter) runs after the log is written.
@@ -1447,6 +1505,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring program, log_path, sys_config;
     unsigned long timeout = 0;
     bool usage = false, force_cpu_traps = false;
+    int breakpoint_mode = -1;  // -1: continue unless a debugger is attached
     for (int i = 1; i < argc; ++i) {
         const std::wstring argument = argv[i];
         if (argument == L"--shims" && i + 1 < argc) {
@@ -1459,6 +1518,10 @@ int wmain(int argc, wchar_t** argv) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--show-program-name") {
             show_program_name = true;
+        } else if (argument == L"--continue-breakpoints") {
+            breakpoint_mode = 1;
+        } else if (argument == L"--stop-on-breakpoints") {
+            breakpoint_mode = 0;
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
         } else if (argument == L"--xgr" && i + 1 < argc) {
@@ -1488,7 +1551,8 @@ int wmain(int argc, wchar_t** argv) {
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] program.exe\n");
+                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
+                     "[--continue-breakpoints|--stop-on-breakpoints] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -1519,6 +1583,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     // After the logger, so the logger sees the corrected base.
     AddVectoredExceptionHandler(1, cpp_throw_base);
+    continue_breakpoints = breakpoint_mode == 1 || (breakpoint_mode == -1 && !IsDebuggerPresent());
+    AddVectoredExceptionHandler(1, breakpoint_continue);
     // Added last, so it runs before the first-chance logger and a performed instruction is not logged as one.
     AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];

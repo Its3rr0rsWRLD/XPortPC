@@ -50,11 +50,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <intrin.h>
 #include <limits>
 #include <map>
 #include <new>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef MEM_RESERVE_PLACEHOLDER
@@ -1113,6 +1115,23 @@ void register_runs(State&, std::uintptr_t base, Mapping& m)
     }
 }
 
+// Splits the placeholder region [base, base + total pages) into one placeholder per 64 KiB page, so each page can hold
+// its own view, and records it as a mapping with nothing mapped. Caller holds the lock.
+std::map<std::uintptr_t, Mapping>::iterator track_placeholders(State& s, std::uintptr_t base, std::size_t total)
+{
+    for (std::size_t i = 1; i < total; ++i)
+        VirtualFree(reinterpret_cast<void*>(base + (total - i) * physical_page), physical_page,
+                    MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+    try {
+        Mapping m;
+        m.pages = total;
+        m.physical.assign(total, -1);
+        return s.mappings.emplace(base, std::move(m)).first;
+    } catch (const std::bad_alloc&) {
+        return s.mappings.end();
+    }
+}
+
 // A placeholder region for a mapping at `address` (null: anywhere in the system window). Caller holds the lock.
 std::map<std::uintptr_t, Mapping>::iterator mapping_for(State& s, std::uintptr_t address, std::size_t pages)
 {
@@ -1175,33 +1194,179 @@ std::map<std::uintptr_t, Mapping>::iterator mapping_for(State& s, std::uintptr_t
         base = reinterpret_cast<std::uintptr_t>(p);
     }
     if (!p) return s.mappings.end();
-    // One placeholder per 64 KiB page, so each page can hold its own view.
-    for (std::size_t i = 1; i < total; ++i)
-        VirtualFree(reinterpret_cast<void*>(base + (total - i) * physical_page), physical_page,
-                    MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
-    try {
-        Mapping m;
-        m.pages = total;
-        m.physical.assign(total, -1);
-        return s.mappings.emplace(base, std::move(m)).first;
-    } catch (const std::bad_alloc&) {
-        return s.mappings.end();
+    return track_placeholders(s, base, total);
+}
+
+// XMemVirtualAlloc(MEM_RESERVE | MEM_PHYSICAL [| MEM_LARGE_PAGES | MEM_4MB_PAGES]): a range reserved for later
+// XMemMapPhysicalPages / XMemMapPhysicalPagesScatter calls (as AWE reserves with MEM_PHYSICAL). It is made a mapping
+// region at once (64 KiB placeholders, nothing mapped), so a map call at any page inside it finds it. A non-null
+// address is honoured exactly (it must be 64 KiB aligned and free); a null one is placed on `alignment` (2 MiB with
+// large pages, 4 MiB with MEM_4MB_PAGES, else 64 KiB), in the system window when one is in use. Returns 0 with the
+// last error set on failure. Caller holds the lock.
+std::uintptr_t reserve_physical_range(State& s, std::uintptr_t address, std::size_t pages, std::uint64_t alignment)
+{
+    const auto va2 = kernel().virtual_alloc2;
+    if (!va2) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return 0;
     }
+    const std::uint64_t bytes = pages * physical_page;
+    void* p = nullptr;
+    if (address) {
+        p = va2(GetCurrentProcess(), reinterpret_cast<void*>(address), bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                PAGE_NOACCESS, nullptr, 0);
+        if (!p) return 0;
+    } else {
+        const auto& w = s.config.windows[X2W_XMEM_WINDOW_SYSTEM];
+        const bool in_window = window_enabled(s, X2W_XMEM_WINDOW_SYSTEM);
+        if (in_window && s.config.window_mode == X2W_XMEM_WINDOWS_RESERVE)
+            p = reinterpret_cast<void*>(take_placeholder(s, X2W_XMEM_WINDOW_SYSTEM, static_cast<std::size_t>(bytes),
+                                                         alignment));
+        for (int attempt = in_window ? 0 : 1; !p && attempt < 2; ++attempt) {
+            MEM_ADDRESS_REQUIREMENTS requirements{};
+            MEM_EXTENDED_PARAMETER parameter{};
+            if (attempt == 0) {
+                requirements.LowestStartingAddress = reinterpret_cast<PVOID>(w.begin);
+                requirements.HighestEndingAddress = reinterpret_cast<PVOID>(w.end - 1);
+            }
+            requirements.Alignment = static_cast<SIZE_T>(alignment);
+            parameter.Type = MemExtendedParameterAddressRequirements;
+            parameter.Pointer = &requirements;
+            p = va2(GetCurrentProcess(), nullptr, bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                    &parameter, 1);
+        }
+        if (!p) {
+            // Over-reserve one placeholder, keep the aligned part, give the head and tail back.
+            const std::uint64_t padded = bytes + alignment;
+            auto* raw = static_cast<unsigned char*>(va2(GetCurrentProcess(), nullptr, padded,
+                                                        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
+            if (!raw) return 0;
+            const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(raw);
+            const std::uintptr_t aligned = static_cast<std::uintptr_t>(align_up(start, alignment));
+            const std::uintptr_t end = start + padded;
+            if (aligned > start) {
+                VirtualFree(raw, aligned - start, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+                VirtualFree(raw, 0, MEM_RELEASE);
+            }
+            if (aligned + bytes < end) {
+                VirtualFree(reinterpret_cast<void*>(aligned), static_cast<SIZE_T>(bytes),
+                            MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+                VirtualFree(reinterpret_cast<void*>(aligned + bytes), 0, MEM_RELEASE);
+            }
+            p = reinterpret_cast<void*>(aligned);
+            log_once("fallback", "physical reservation: address requirements refused (error %lu); aligned by hand",
+                     GetLastError());
+        }
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(p);
+    if (track_placeholders(s, base, pages) == s.mappings.end()) {
+        VirtualFree(p, 0, MEM_RELEASE);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    log_line("physical", "reservation 0x%llx (%zu pages, alignment 0x%llx) made for mappings",
+             static_cast<unsigned long long>(base), pages, static_cast<unsigned long long>(alignment));
+    return base;
+}
+
+// Per-export call logging: the first `cap` calls in full ("xmem call ..."), later ones counted (a count line at each
+// power of two). Lines are informational: on stderr with X2W_XMEM_LOG=1, which x2w_launch sets.
+struct CallCount {
+    const char* name;
+    unsigned cap;
+    std::atomic<unsigned> n{0};
+};
+CallCount g_calls[] = {
+    {"XMemVirtualAlloc", 256},        {"XMemMapPhysicalPages", 256}, {"XMemMapPhysicalPagesScatter", 128},
+    {"XMemAllocatePhysicalPages", 64}, {"XMemFreePhysicalPages", 64}, {"XMemAlloc", 32},
+    {"XMemFree", 32},                 {"XMemAllocDefault", 32},      {"XMemFreeDefault", 32},
+    {"XMemIsToolsMemAvailable", 8},   {"XMemTransferMemory", 32},    {"XMemVirtualQuery", 32},
+    {"XMemGetWorkingSetStatistics", 16},
+};
+
+CallCount* call_count(const char* name)
+{
+    for (auto& c : g_calls)
+        if (std::strcmp(c.name, name) == 0) return &c;
+    return nullptr;
+}
+
+// Logs one call line ("xmem call NAME(ARGS) -> RESULT error=N") when the call is within its cap. Keeps the last error.
+void log_call_line(const char* name, DWORD error, const char* format, va_list args)
+{
+    CallCount* c = call_count(name);
+    const unsigned i = c ? c->n.fetch_add(1, std::memory_order_relaxed) : 0;
+    if (c && i >= c->cap) {
+        if (i == c->cap) log_line("call", "%s: %u calls logged; later calls are counted only", name, c->cap);
+        else if (!((i + 1) & i)) log_line("call", "%s: %u calls so far", name, i + 1);
+        SetLastError(error);
+        return;
+    }
+    char detail[400];
+    std::vsnprintf(detail, sizeof(detail), format, args);
+    log_line("call", "%s%s error=%lu", name, detail, error);
+    SetLastError(error);
+}
+
+void log_call(const char* name, const char* format, ...)
+{
+    const DWORD error = GetLastError();
+    va_list args;
+    va_start(args, format);
+    log_call_line(name, error, format, args);
+    va_end(args);
+}
+
+// The allocation-type flags spelled out for the call lines.
+std::string type_names(DWORD type)
+{
+    static const std::pair<DWORD, const char*> names[] = {
+        {MEM_COMMIT, "MEM_COMMIT"},       {MEM_RESERVE, "MEM_RESERVE"},         {MEM_RESET, "MEM_RESET"},
+        {MEM_TOP_DOWN, "MEM_TOP_DOWN"},   {MEM_WRITE_WATCH, "MEM_WRITE_WATCH"}, {MEM_PHYSICAL, "MEM_PHYSICAL"},
+        {MEM_RESET_UNDO, "MEM_RESET_UNDO"}, {MEM_LARGE_PAGES, "MEM_LARGE_PAGES"}, {0x80000000u, "MEM_4MB_PAGES"},
+    };
+    std::string out;
+    DWORD rest = type;
+    for (const auto& [bit, name] : names) {
+        if (!(type & bit)) continue;
+        if (!out.empty()) out += '|';
+        out += name;
+        rest &= ~bit;
+    }
+    if (rest) {
+        char hex[24];
+        std::snprintf(hex, sizeof(hex), "%s0x%lx", out.empty() ? "" : "|", rest);
+        out += hex;
+    }
+    return out.empty() ? "0" : out;
 }
 }  // namespace
 
+namespace xmem_title {
+void log_export_call(const char* name, const char* format, ...) noexcept
+{
+    const DWORD error = GetLastError();
+    va_list args;
+    va_start(args, format);
+    log_call_line(name, error, format, args);
+    va_end(args);
+}
+}  // namespace xmem_title
+
 // ---- exports --------------------------------------------------------------------------------------------------------
-extern "C" PVOID WINAPI XMemAllocDefault(SIZE_T dwSize, ULONGLONG dwAttributes)
+static PVOID impl_XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray);
+
+static PVOID impl_XMemAllocDefault(SIZE_T dwSize, ULONGLONG dwAttributes)
 {
     return allocate_default(dwSize, dwAttributes);
 }
 
-extern "C" void WINAPI XMemFreeDefault(PVOID lpAddress, ULONGLONG dwAttributes)
+static void impl_XMemFreeDefault(PVOID lpAddress, ULONGLONG dwAttributes)
 {
     free_default(lpAddress, dwAttributes);
 }
 
-extern "C" PVOID WINAPI XMemAlloc(SIZE_T dwSize, ULONGLONG dwAttributes)
+static PVOID impl_XMemAlloc(SIZE_T dwSize, ULONGLONG dwAttributes)
 {
     const Hooks* hooks = g_hooks.load(std::memory_order_acquire);
     if (!hooks) return allocate_default(dwSize, dwAttributes);
@@ -1215,7 +1380,7 @@ extern "C" PVOID WINAPI XMemAlloc(SIZE_T dwSize, ULONGLONG dwAttributes)
     return p;
 }
 
-extern "C" void WINAPI XMemFree(PVOID lpAddress, ULONGLONG dwAttributes)
+static void impl_XMemFree(PVOID lpAddress, ULONGLONG dwAttributes)
 {
     const Hooks* hooks = g_hooks.load(std::memory_order_acquire);
     if (!hooks) {
@@ -1281,7 +1446,7 @@ extern "C" void WINAPI XMemCheckDefaultHeaps(void)
              s.mappings.size(), problems);
 }
 
-extern "C" BOOL WINAPI XMemAllocatePhysicalPages(DWORD flAllocationType, PULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+static BOOL impl_XMemAllocatePhysicalPages(DWORD flAllocationType, PULONG_PTR NumberOfPages, PULONG_PTR PageArray)
 {
     State& s = state();
     Exclusive guard(s.lock);
@@ -1325,7 +1490,7 @@ extern "C" BOOL WINAPI XMemAllocatePhysicalPages(DWORD flAllocationType, PULONG_
     return got > 0;
 }
 
-extern "C" BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+static BOOL impl_XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
 {
     State& s = state();
     Exclusive guard(s.lock);
@@ -1359,47 +1524,105 @@ extern "C" BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR
 // XMemVirtualAlloc, XMemMapPhysicalPagesScatter, XMemTransferMemory, XMemIsToolsMemAvailable.
 // The reference pages (devdocs.xbox.com/reference/system/xmem/functions/) are login-gated and were not read past their
 // public one-line descriptions. The contracts below are therefore stated assumptions, not documented behaviour:
-//   XMemVirtualAlloc(address, size, type, protect): VirtualAlloc-like. The Scatter page's one public line says to
-//     reserve with MEM_RESERVE and XMEM_MAPPABLE (64 KiB pages via MEM_64K_PAGES); the values of those two flags are
-//     not public, so any allocation-type bit VirtualAlloc does not define is read as one of them: it is stripped
-//     (logged once), the size is rounded up to 64 KiB and the range is a plain reservation that the first
-//     XMemMapPhysicalPages call adopts as a mapping (mapping_for). Committed memory is plain VirtualAlloc memory:
-//     it is not GPU-visible by itself; GPU visibility comes from XMemAlloc and from physical mappings (register_runs).
+//   XMemVirtualAlloc(address, size, type, protect): VirtualAlloc-like, and the allocation type uses the Win32 flag
+//     values (winnt.h): MEM_64K_PAGES is MEM_LARGE_PAGES | MEM_PHYSICAL (0x20400000) and MEM_4MB_PAGES is 0x80000000.
+//     A real title passes 0x20402000 = MEM_RESERVE | MEM_64K_PAGES. MEM_RESERVE with MEM_PHYSICAL (with or without
+//     the page-size bits) and no MEM_COMMIT reserves a range for later physical mapping, as AWE does: the requested
+//     address is honoured (64 KiB aligned), a null one is placed on 2 MiB with MEM_LARGE_PAGES, 4 MiB with
+//     MEM_4MB_PAGES, else 64 KiB, the size is rounded up to 64 KiB, and the range is a mapping region at once
+//     (reserve_physical_range), so XMemMapPhysicalPages / XMemMapPhysicalPagesScatter can map any page in it. With
+//     MEM_COMMIT the physical and page-size bits are dropped (logged) and the memory is plain VirtualAlloc memory.
+//     The Scatter page's one public line names an XMEM_MAPPABLE flag whose value is not public, so any other bit
+//     VirtualAlloc does not define is read as it: stripped (logged once), the size is rounded up to 64 KiB and the
+//     range is a plain reservation that the first XMemMapPhysicalPages call at its base adopts (mapping_for).
+//     Committed memory is not GPU-visible by itself; GPU visibility comes from XMemAlloc and from physical mappings
+//     (register_runs). Every call is logged ("xmem call XMemVirtualAlloc(...)", first 256), with the two stack slots
+//     after the four register arguments in case the console signature has more; a NULL result is also logged as
+//     "unimplemented" with its reason, so it is never silent.
 //   XMemMapPhysicalPagesScatter(addresses, count, pages): MapUserPhysicalPagesScatter-like, one 64 KiB page per entry;
 //     a null page array, or a zero entry, unmaps that address. Arguments are validated before anything changes.
 //     Page number 0 therefore cannot be mapped through this call (the pool does hand page 0 out).
 //   XMemTransferMemory: signature unknown. Accepts any arguments, logs them and returns TRUE without moving data.
 //   XMemIsToolsMemAvailable: FALSE (no tools memory on a desktop).
-extern "C" PVOID WINAPI XMemVirtualAlloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect)
+namespace {
+PVOID virtual_alloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect, const char*& path,
+                    std::uint64_t& alignment)
 {
-    constexpr DWORD known = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO | MEM_TOP_DOWN | MEM_WRITE_WATCH;
+    constexpr DWORD mem_4mb_pages = 0x80000000u;
+    constexpr DWORD page_bits = MEM_PHYSICAL | MEM_LARGE_PAGES | mem_4mb_pages;
+    constexpr DWORD known = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO | MEM_TOP_DOWN | MEM_WRITE_WATCH |
+                            page_bits;
     const DWORD extra = AllocationType & ~known;
-    DWORD type = AllocationType & known;
+    const DWORD pages = AllocationType & page_bits;
+    DWORD type = AllocationType & known & ~page_bits;
+    path = "virtualalloc";
     if (extra)
-        log_once("note", "XMemVirtualAlloc type 0x%lx: bits 0x%lx read as XMEM_MAPPABLE/64K pages and stripped",
+        log_once("note", "XMemVirtualAlloc type 0x%lx: bits 0x%lx read as XMEM_MAPPABLE and stripped",
                  AllocationType, extra);
     if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO))) type |= MEM_RESERVE;
-    if (extra && (type & (MEM_COMMIT | MEM_RESERVE))) {
+    if ((extra || pages) && (type & (MEM_COMMIT | MEM_RESERVE))) {
         Size = (Size + physical_page - 1) / physical_page * physical_page;
         if (Address && (reinterpret_cast<std::uintptr_t>(Address) % physical_page)) {
+            path = "refused-unaligned";
             SetLastError(ERROR_INVALID_ADDRESS);
             return nullptr;
         }
     }
     if (!Size) {
+        path = "refused-size";
         SetLastError(ERROR_INVALID_PARAMETER);
         return nullptr;
     }
-    {
-        State& s = state();
-        Exclusive guard(s.lock);
-        ensure_configured(s);
-        s.memory_exists = true;
+    State& s = state();
+    Exclusive guard(s.lock);
+    ensure_configured(s);
+    s.memory_exists = true;
+    if ((pages & (MEM_PHYSICAL | mem_4mb_pages)) && (type & MEM_RESERVE) && !(type & MEM_COMMIT)) {
+        alignment = (pages & mem_4mb_pages) ? 4 * MiB : (pages & MEM_LARGE_PAGES) ? 2 * MiB : physical_page;
+        path = "physical-reservation";
+        return reinterpret_cast<PVOID>(reserve_physical_range(s, reinterpret_cast<std::uintptr_t>(Address),
+                                                              static_cast<std::size_t>(Size / physical_page),
+                                                              alignment));
+    }
+    if (pages) {
+        log_once("note", "XMemVirtualAlloc type 0x%lx: physical/page-size bits 0x%lx dropped; plain VirtualAlloc",
+                 AllocationType, pages);
+        if (extra) path = "mappable-reservation";
+    } else if (extra) {
+        path = "mappable-reservation";
     }
     return VirtualAlloc(Address, Size, type, Protect ? Protect : PAGE_READWRITE);
 }
+}  // namespace
 
-extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+extern "C" PVOID WINAPI XMemVirtualAlloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect)
+{
+    // The caller's stack slots for a fifth and sixth argument (readable whatever the caller passed: x64 callers
+    // always reserve the home area, and the slots above it are in the caller's frame).
+    auto* const ret = static_cast<ULONG_PTR*>(_AddressOfReturnAddress());
+    const ULONG_PTR stack5 = ret[5], stack6 = ret[6];
+    const char* path = "";
+    std::uint64_t alignment = 0;
+    PVOID p = virtual_alloc(Address, Size, AllocationType, Protect, path, alignment);
+    const DWORD error = p ? ERROR_SUCCESS : GetLastError();
+    if (!p)
+        log_once("unimplemented", "XMemVirtualAlloc(0x%llx, 0x%llx, 0x%lx, 0x%lx) returned NULL (path %s, error %lu)",
+                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(Address)),
+                 static_cast<unsigned long long>(Size), AllocationType, Protect, path, error);
+    SetLastError(error);
+    log_call("XMemVirtualAlloc",
+             "(addr=0x%llx size=0x%llx type=0x%lx[%s] protect=0x%lx stack5=0x%llx stack6=0x%llx) -> 0x%llx path=%s "
+             "align=0x%llx",
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(Address)),
+             static_cast<unsigned long long>(Size), AllocationType, type_names(AllocationType).c_str(), Protect,
+             static_cast<unsigned long long>(stack5), static_cast<unsigned long long>(stack6),
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)), path,
+             static_cast<unsigned long long>(alignment));
+    SetLastError(error);
+    return p;
+}
+
+static BOOL impl_XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
 {
     if (!VirtualAddressArray || NumberOfPages > (std::uint64_t{1} << 24)) {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -1419,7 +1642,7 @@ extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, U
         const bool unmap = !PageArray || page == 0;
         if (PageArray && page == 0)
             log_once("note", "XMemMapPhysicalPagesScatter: a zero page entry unmaps (page number 0 cannot be mapped here)");
-        if (!XMemMapPhysicalPages(VirtualAddressArray[i], 1, unmap ? nullptr : &page)) return FALSE;
+        if (!impl_XMemMapPhysicalPages(VirtualAddressArray[i], 1, unmap ? nullptr : &page)) return FALSE;
     }
     SetLastError(ERROR_SUCCESS);
     return TRUE;
@@ -1427,6 +1650,10 @@ extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, U
 
 extern "C" BOOL WINAPI XMemTransferMemory(ULONG_PTR a0, ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3)
 {
+    SetLastError(ERROR_SUCCESS);
+    log_call("XMemTransferMemory", "(0x%llx, 0x%llx, 0x%llx, 0x%llx) -> TRUE", static_cast<unsigned long long>(a0),
+             static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+             static_cast<unsigned long long>(a3));
     log_once("unimplemented", "XMemTransferMemory(0x%llx, 0x%llx, 0x%llx, 0x%llx): signature unknown; nothing moved, TRUE",
              static_cast<unsigned long long>(a0), static_cast<unsigned long long>(a1),
              static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3));
@@ -1434,12 +1661,12 @@ extern "C" BOOL WINAPI XMemTransferMemory(ULONG_PTR a0, ULONG_PTR a1, ULONG_PTR 
     return TRUE;
 }
 
-extern "C" BOOL WINAPI XMemIsToolsMemAvailable(void)
+static BOOL impl_XMemIsToolsMemAvailable(void)
 {
     return FALSE;
 }
 
-extern "C" PVOID WINAPI XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+static PVOID impl_XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
 {
     State& s = state();
     Exclusive guard(s.lock);
@@ -1714,6 +1941,77 @@ bool query_overlay(const void* address, MEMORY_BASIC_INFORMATION& info) noexcept
     }
     return false;
 }
+}
+
+// ---- logged export wrappers (log_call: first N calls in full, the rest counted) ----------------------------------------
+extern "C" PVOID WINAPI XMemAllocDefault(SIZE_T dwSize, ULONGLONG dwAttributes)
+{
+    PVOID p = impl_XMemAllocDefault(dwSize, dwAttributes);
+    log_call("XMemAllocDefault", "(size=0x%llx attributes=0x%llx) -> 0x%llx", static_cast<unsigned long long>(dwSize), static_cast<unsigned long long>(dwAttributes), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)));
+    return p;
+}
+
+extern "C" void WINAPI XMemFreeDefault(PVOID lpAddress, ULONGLONG dwAttributes)
+{
+    impl_XMemFreeDefault(lpAddress, dwAttributes);
+    log_call("XMemFreeDefault", "(addr=0x%llx attributes=0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(lpAddress)), static_cast<unsigned long long>(dwAttributes));
+}
+
+extern "C" PVOID WINAPI XMemAlloc(SIZE_T dwSize, ULONGLONG dwAttributes)
+{
+    PVOID p = impl_XMemAlloc(dwSize, dwAttributes);
+    log_call("XMemAlloc", "(size=0x%llx attributes=0x%llx) -> 0x%llx", static_cast<unsigned long long>(dwSize), static_cast<unsigned long long>(dwAttributes), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)));
+    return p;
+}
+
+extern "C" void WINAPI XMemFree(PVOID lpAddress, ULONGLONG dwAttributes)
+{
+    impl_XMemFree(lpAddress, dwAttributes);
+    log_call("XMemFree", "(addr=0x%llx attributes=0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(lpAddress)), static_cast<unsigned long long>(dwAttributes));
+}
+
+extern "C" BOOL WINAPI XMemAllocatePhysicalPages(DWORD flAllocationType, PULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+{
+    const unsigned long long asked = NumberOfPages ? *NumberOfPages : 0;
+    const BOOL ok = impl_XMemAllocatePhysicalPages(flAllocationType, NumberOfPages, PageArray);
+    log_call("XMemAllocatePhysicalPages", "(type=0x%lx count=%llu array=0x%llx) -> %d count=%llu first=0x%llx",
+             flAllocationType, asked, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(PageArray)), ok, NumberOfPages ? static_cast<unsigned long long>(*NumberOfPages) : 0ull,
+             ok && PageArray && NumberOfPages && *NumberOfPages ? static_cast<unsigned long long>(PageArray[0]) : 0ull);
+    return ok;
+}
+
+extern "C" BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+{
+    const BOOL ok = impl_XMemFreePhysicalPages(NumberOfPages, PageArray);
+    log_call("XMemFreePhysicalPages", "(count=%llu array=0x%llx) -> %d", static_cast<unsigned long long>(NumberOfPages), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(PageArray)), ok);
+    return ok;
+}
+
+extern "C" PVOID WINAPI XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+{
+    PVOID p = impl_XMemMapPhysicalPages(VirtualAddress, NumberOfPages, PageArray);
+    log_call("XMemMapPhysicalPages", "(addr=0x%llx count=%llu array=0x%llx first=0x%llx) -> 0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(VirtualAddress)), static_cast<unsigned long long>(NumberOfPages), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(PageArray)),
+             PageArray && NumberOfPages ? static_cast<unsigned long long>(PageArray[0]) : 0ull, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)));
+    return p;
+}
+
+extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+{
+    const BOOL ok = impl_XMemMapPhysicalPagesScatter(VirtualAddressArray, NumberOfPages, PageArray);
+    log_call("XMemMapPhysicalPagesScatter", "(addresses=0x%llx count=%llu pages=0x%llx first=0x%llx->0x%llx) -> %d",
+             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(VirtualAddressArray)), static_cast<unsigned long long>(NumberOfPages), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(PageArray)),
+             VirtualAddressArray && NumberOfPages
+                 ? static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(VirtualAddressArray[0]))
+                 : 0ull,
+             PageArray && NumberOfPages ? static_cast<unsigned long long>(PageArray[0]) : 0ull, ok);
+    return ok;
+}
+
+extern "C" BOOL WINAPI XMemIsToolsMemAvailable(void)
+{
+    const BOOL ok = impl_XMemIsToolsMemAvailable();
+    log_call("XMemIsToolsMemAvailable", "() -> %d", ok);
+    return ok;
 }
 
 // With reserved windows, reserve them while xmem.dll loads, before later DLLs and heaps can take the ranges. Only

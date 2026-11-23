@@ -178,12 +178,15 @@ bool configure_checks()
 {
     Params params;
     g_events.clear();
-    const HRESULT hr = D3D12ConfigureVirtualMemoryX(u(&params), 0x10000, 2, 0, 0, 0, 0, 0);
+    const HRESULT hr = D3D12ConfigureVirtualMemoryX(u(&params), 0x10000, 2, 0, 0, 0, 0x400000000ull, 0);
     std::printf("configure hr=0x%08lx\n", static_cast<unsigned long>(hr));
     const char* symbol = "d3d12_xs!D3D12ConfigureVirtualMemoryX";
     return hr == S_OK && saw(X2W_GFX_EVENT_NOTE, symbol, "caller=d3d12_xs_xbox_check.exe+0x") &&
            saw(X2W_GFX_EVENT_NOTE, symbol, "rdx=0x10000 r8=0x2") &&
            saw(X2W_GFX_EVENT_NOTE, symbol, "rcx=0x") && saw(X2W_GFX_EVENT_NOTE, symbol, ": a0 a1 a2 a3") &&
+           saw(X2W_GFX_EVENT_NOTE, symbol, "as dwords: a3a2a1a0 a7a6a5a4") &&
+           saw(X2W_GFX_EVENT_NOTE, symbol, "stack2=0x400000000 = 16384 MiB") &&
+           !saw(X2W_GFX_EVENT_NOTE, symbol, "stack3=0x0 =") &&  // control: only stack2 is read as a size
            saw(X2W_GFX_EVENT_NOTE, symbol, "-> S_OK");
 }
 
