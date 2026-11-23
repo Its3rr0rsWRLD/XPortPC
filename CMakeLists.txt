@@ -93,7 +93,7 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -152,6 +152,13 @@ foreach(adapter IN ITEMS warp hardware)
     add_test(NAME runtime_r4_detile_upload_${adapter} COMMAND r4_detile_upload ${adapter})
     set_tests_properties(runtime_r4_detile_upload_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 endforeach()
+
+# Runtime ladder R5: a 600-frame loop in which a compute program (tests/runtime/r5_cs.s, r5_programs.h) on a compute
+# queue moves particles in title memory and the R3 programs draw them on the direct queue, with cross-queue fences.
+add_executable(r5_frames tests/runtime/r5_frames.cpp)
+target_include_directories(r5_frames PRIVATE src)
+target_compile_features(r5_frames PRIVATE cxx_std_17)
+target_link_libraries(r5_frames PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
@@ -2728,6 +2735,37 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
+    # Runtime ladder R5 (tests/runtime/r5_frames.cpp): compute translation, compute queue, 600 frames.
+    add_test(NAME runtime_r5_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r5_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r5_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_${adapter}")
+        add_test(NAME runtime_r5_frames_cold_${adapter} COMMAND r5_frames ${adapter} cold)
+        add_test(NAME runtime_r5_frames_warm_${adapter} COMMAND r5_frames ${adapter} warm)
+        add_test(NAME runtime_r5_wrong_reference_${adapter} COMMAND r5_frames ${adapter} wrong_reference)
+        add_test(NAME runtime_r5_view_churn_${adapter} COMMAND r5_frames ${adapter} view_churn)
+        set_tests_properties(runtime_r5_frames_cold_${adapter} PROPERTIES FIXTURES_SETUP r5_cache_${adapter})
+        set_tests_properties(runtime_r5_frames_warm_${adapter} runtime_r5_wrong_reference_${adapter}
+            runtime_r5_view_churn_${adapter} PROPERTIES FIXTURES_REQUIRED r5_cache_${adapter})
+        set_tests_properties(runtime_r5_frames_cold_${adapter} runtime_r5_frames_warm_${adapter}
+            runtime_r5_wrong_reference_${adapter} runtime_r5_view_churn_${adapter} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
+            ENVIRONMENT "${r5_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    add_test(NAME runtime_r5_refused_warp COMMAND r5_frames warp refused)
+    set_tests_properties(runtime_r5_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_refused")
+    # The shim's translation paths (translator service, per-process fallback, ahead of time through
+    # tools/precompile_cache.py) write byte-identical cache files (tests/runtime/xl_check.py), and their throughput on
+    # the R3 programs and 200 draw-check programs (tests/runtime/xl_bench.py; serial: it measures time).
+    add_test(NAME runtime_r3_translator_paths_warp COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/xl_check.py" shim "$<TARGET_FILE:r3_triangle>" "${DXC_EXECUTABLE}"
+        "${CMAKE_BINARY_DIR}/r3_translator_paths" "$<TARGET_FILE:r4_scene>"
+        "$<TARGET_FILE:r5_frames>")
+    set_tests_properties(runtime_r3_translator_paths_warp PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+    add_test(NAME runtime_r3_translator_bench COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/xl_bench.py" run "${DXC_EXECUTABLE}" "${CMAKE_BINARY_DIR}/r3_translator_bench")
+    set_tests_properties(runtime_r3_translator_bench PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600
@@ -2991,6 +3029,32 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "${CMAKE_SOURCE_DIR}/tests/native/launch_check.py" "$<TARGET_FILE:x2w_launch>"
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
+
+    # Implicit TLS data and module identity of a mapped title, each compared with the Windows loader running
+    # the same EXE (tests/native/launch_title_check.py). The TLS title brings its own TLS directory with a
+    # template and a zero fill; the second one is built with the static C runtime and uses thread_local.
+    add_executable(x2w_tls_title tests/native/tls_title.cpp)
+    target_compile_options(x2w_tls_title PRIVATE /GS- /Zl)
+    target_link_options(x2w_tls_title PRIVATE /ENTRY:tls_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+        /INCREMENTAL:NO)
+    target_link_libraries(x2w_tls_title PRIVATE kernel32)
+    add_executable(x2w_tls_crt_title tests/native/tls_crt_title.cpp)
+    target_compile_features(x2w_tls_crt_title PRIVATE cxx_std_17)
+    set_target_properties(x2w_tls_crt_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_tls_crt_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+    enable_language(RC)
+    add_executable(x2w_identity_title tests/native/identity_title.cpp tests/native/identity_title.rc)
+    target_compile_options(x2w_identity_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_identity_title PRIVATE /ENTRY:identity_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO)
+    target_link_libraries(x2w_identity_title PRIVATE kernel32)
+    foreach(title_check IN ITEMS tls tls_crt identity)
+        string(REPLACE "_" "-" title_mode "${title_check}")
+        add_test(NAME native_launch_${title_check} COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/launch_title_check.py" ${title_mode} "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_${title_check}_title>")
+        set_tests_properties(native_launch_${title_check} PROPERTIES TIMEOUT 120)
+    endforeach()
 
     # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
     # each one and compares with software references, naturally and with --force-cpu-traps.

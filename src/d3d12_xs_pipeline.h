@@ -18,6 +18,11 @@
 // (which root words feed which push words, which table descriptors feed which converter slots) is attached to the
 // desktop pipeline as private data.
 //
+// Compute (R5). create_compute_pipeline translates a compute container the same way (tools/pso_translate.py --stage
+// compute, tools/compute_aot.py's lowering); bind_for_dispatch supplies the same converter parameters through the
+// compute root arguments before a Dispatch. The compute translation reads and writes title memory through the UAV
+// half of the title-memory table.
+//
 // Draws. bind_for_draw supplies the converter parameters before a draw of a translated pipeline: the push words
 // from the recorded root arguments (title GPU addresses as the title passed them: the shader looks them up with
 // TitleLookup), the title-memory view of xmem.dll (X2WTitleGpuGetShaderView) as a shader-visible heap the shim
@@ -35,6 +40,7 @@
 #include <d3d12.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace d3d12_xs {
 namespace pipeline {
@@ -43,7 +49,8 @@ namespace pipeline {
 enum ConverterParam : unsigned {
     param_range_count = 0,       // root constants b1 space1000: title_range_count
     param_ranges = 1,            // root SRV t2 space1000: StructuredBuffer<TitleRange> title_ranges
-    param_memory = 2,            // table: SRV t0..t7 space1001 title_memory[8], UAV u0 space1000 x2w_lookup_misses
+    param_memory = 2,            // table: SRV t0..t7 space1001 title_memory[8], UAV u0 space1000 x2w_lookup_misses,
+                                 // UAV u0..u7 space1001 (compute: RWByteAddressBuffer title_memory[8]) of the same ranges
     param_push_words = 3,        // root constants b3 space1000: uint4 push_words[8] (both stages)
     param_vertex_root = 4,       // root constants b2 space1000 (vertex): base_vertex, start_instance
     param_vertex_constants = 5,  // root CBV b0 space1000 (vertex): the constant buffer of a descriptor table
@@ -54,7 +61,7 @@ enum ConverterParam : unsigned {
 };
 constexpr unsigned push_word_count = 32;
 constexpr unsigned title_memory_slots = 8;
-constexpr unsigned memory_block = title_memory_slots + 1;  // the SRVs and the miss counter UAV
+constexpr unsigned memory_block = 2 * title_memory_slots + 1;  // the SRVs, the miss counter UAV, the UAVs (R5)
 constexpr unsigned texture_table = 9;
 constexpr unsigned sampler_table = 4;
 constexpr unsigned pixel_constant_slots = 2;
@@ -114,6 +121,16 @@ struct RootArgs {
 
 class TitleViews;
 
+// The blocks of the shim's shader-visible heaps (title-memory views, texture and sampler tables) one command list's
+// recorded draws and dispatches read (R5). bind_for_draw/bind_for_dispatch add to it; the list releases it when it is
+// reset or destroyed (release_blocks), and the queue stamps it on each submission (submitted_blocks), so a block is
+// rewritten only once no list holds it and the GPU has finished with it.
+struct BlockUse {
+    std::vector<std::uint32_t> blocks;  // kind << 24 | index
+};
+void release_blocks(TitleViews* views, BlockUse& use);
+void submitted_blocks(TitleViews* views, ID3D12CommandQueue* queue, BlockUse* const* uses, unsigned count);
+
 HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* blob, SIZE_T size, REFIID riid,
                               void** out);
 HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
@@ -121,9 +138,14 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
 HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                 void** out);
 
+// Starts the first translator service in the background (at device creation), unless X2W_TRANSLATE says otherwise.
+void prestart_translator();
+
 // The records attached at creation, or false for an object the shim did not create this way.
 bool root_info(ID3D12RootSignature* root, RootInfo* info);
 bool pso_info(ID3D12PipelineState* state, PsoInfo* info);
+// The record of a translated compute pipeline (R5); pso_info answers false for one.
+bool compute_pso_info(ID3D12PipelineState* state, PsoInfo* info);
 
 TitleViews* create_title_views(ID3D12Device* device);
 void destroy_title_views(TitleViews* views);
@@ -132,7 +154,7 @@ void destroy_title_views(TitleViews* views);
 // zero base vertex and start instance. `ours_bound` tracks whether the shim's heaps are bound. Returns false, after
 // logging, when the draw cannot be bound; the caller then skips the draw.
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound);
+                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound, BlockUse* use);
 // The placeholders of the title's descriptor-table parameters, for a draw of a desktop pipeline with a title root
 // signature (their registers are in space 1004, which desktop shaders do not declare).
 void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root);
@@ -140,6 +162,13 @@ void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root);
 // Lookup misses (X2WGfxCounters): TitleLookup misses counted by translated shaders in the device's counter buffer
 // (read without waiting; valid once the GPU work has completed), and TextureLookup misses counted at draw time.
 std::uint64_t title_lookup_misses();
+
+// The compute counterpart (runtime rung R5): the converter parameters of a translated compute pipeline through the
+// compute root arguments, before a Dispatch. Same contract as bind_for_draw.
+bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
+                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound, BlockUse* use);
+// set_placeholders for the compute root arguments.
+void set_compute_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root);
 
 // Title GPU address -> desktop GPU address through xmem.dll (X2WTitleGpuTranslate), or the address unchanged when
 // it is not title memory (a desktop resource's address) or xmem.dll is not loaded.

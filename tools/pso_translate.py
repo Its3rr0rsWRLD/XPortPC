@@ -2,7 +2,7 @@
 
 d3d12_xs.dll runs this out of process on a cache miss:
 
-    python -B tools/pso_translate.py --stage vertex|pixel --code CODE.bin --roles ROLES.json --dxc DXC
+    python -B tools/pso_translate.py --stage vertex|pixel|compute --code CODE.bin --roles ROLES.json --dxc DXC
                                      --output OUT.dxil --bindings OUT.bind [--llvm LIBLLVM] [--hlsl OUT.hlsl]
 
 CODE.bin is the raw code of one program (the shim cut it out of the console bytecode container). It is disassembled
@@ -11,6 +11,8 @@ from the container and the pipeline:
     vertex: {"user_sgprs": {"2": {"role": "inline", "word": 0}, "4": {"role": "base_vertex"},
                             "5": {"role": "start_instance"}, "6": {"role": "descriptors", "set": 0}, ...}}
     pixel:  {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:2"}}
+    compute: {"sgprs": {"s2": "user:0", "s7": "group_id.x"}, "numthreads": [4, 1, 1], "wave": 32, "local_ids": 1}
+            (rung R5: tools/compute_aot.py's entry-SGPR roles; user:N is push word N)
 A descriptor-table SGPR (rung R4) holds the low word of the table's address; the program completes the pair with a
 constant high word. Which descriptors the program reads from each table, and as what, is read off the program
 (corpus_translate.derive_bindings: a T# where an image instruction names it, an S# where it is the sampler, a
@@ -24,6 +26,9 @@ The translated HLSL may declare only the bindings the shim fills at draw time, a
     vertex       b0 the constant buffer of a descriptor table (b0 space1000), b2 base vertex and start instance
     pixel        textures t0, t1, t3..t8 (-> space1002, one table), samplers s0..s3 (-> space1002), constant slots 0
                  and 1 (-> b0, b1 space1003), the push-word slot (-> b3 space1000, the vertex stage's push words)
+    compute      u0..u7 space1 title_memory, read-write (-> space1001, the UAV half of the title-memory table); its
+                 constant words (params, b0) are the 32 push words (-> b3 space1000), and a program that reads a
+                 word past them is refused; descriptor tables are not read by compute translations yet
 Any other declaration (the vertex b4 descriptor words, pixel constant slots 2 and 3, storage images, title-memory
 stores) is refused with the register it needs.
 
@@ -32,12 +37,19 @@ stores) is refused with the register it needs.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
+
+This command is the shim's fallback path. The shim's usual path is the long-lived service tools/pso_service.py, and
+tools/precompile_cache.py translates ahead of time. Both call translate() and compile it with the same arguments
+(dxc_arguments) through DXC's library (DxcLibrary), so all three write byte-identical DXIL and bindings for one input.
+--text FILE gives the program as instruction text (one instruction per line, as the disassembler returns it) in place
+of --code; the shim never uses it, the throughput checks of tests/runtime/xl_bench.py do.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,6 +66,7 @@ PUSH_WORDS = 32
 # The bindings both stages may declare, as (register, converter space).
 BOUND = {("b1", 0), ("t2", 0), ("t0", 1), ("b3", 0)}
 VERTEX_BOUND = BOUND | {("b0", 0), ("b2", 0)}
+COMPUTE_BOUND = BOUND | {("u0", 1)}
 REGISTER = re.compile(r"register\(\s*([btsu])(\d+)\s*(?:,\s*space(\d+)\s*)?\)")
 CBUFFER = re.compile(r"cbuffer (\w+) : register\(b(\d+)\) \{ uint4 (\w+)\[(\d+)\]; \};")
 LOOKUP_CALL = "TitleLookup(title_ranges, title_range_count,"
@@ -112,10 +125,33 @@ def derived_tables(program, tables):
     return derived, keys
 
 
+def lower_compute(instructions, roles):
+    """Rung R5: tools/compute_aot.py's lowering, without its offline root signature, its constant words moved onto
+    the push words."""
+    import compute_aot
+    numthreads = roles.get("numthreads")
+    if not isinstance(numthreads, list) or len(numthreads) != 3:
+        raise ValueError("the compute entry contract has no workgroup size")
+    source = compute_aot.lower_compute(instructions, numthreads=tuple(numthreads), wave=roles.get("wave"),
+                                       sgprs=dict(roles.get("sgprs", {})), local_ids=roles.get("local_ids", 3))
+    source, embedded = re.subn(r'^\[RootSignature\("[^"]*"\)\]\n', "", source, flags=re.M)
+    constants = "cbuffer Constants : register(b0) { uint4 params[16]; };"
+    if embedded != 1 or source.count(constants) != 1:
+        raise ValueError("compute_aot output without its root signature or constant window")
+    reads = re.findall(r"\bparams\[([^\]]*)\]", source.replace(constants, ""))
+    if any(not re.fullmatch(r"\d+", index) or int(index) >= PUSH_WORDS // 4 for index in reads):
+        raise ValueError("the program reads a constant word past the 32 push words (a descriptor-set or constant-buffer "
+                         "window is not bound by the runtime yet)")
+    source = source.replace(constants, f"cbuffer PushWords : register(b3) {{ uint4 params[{PUSH_WORDS // 4}]; }};")
+    return source, {"numthreads": numthreads}, []
+
+
 def lower(stage, instructions, roles):
     """(HLSL in converter registers, layout, descriptor-table reads [(kind, slot, set, offset)])."""
     from pixel_aot_ops.bindings import SET_STRIDE
     lines = [line for line in instructions]
+    if stage == "compute":
+        return lower_compute(lines, roles)
     if stage == "vertex":
         import vertex_aot
         user = dict(roles.get("user_sgprs", {}))
@@ -212,7 +248,8 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
             return m[0]  # already placed (a cbuffer above, the miss counter)
         if stage == "pixel" and space == 0 and (kind == "t" and number != 2 or kind == "s"):
             return f"register({kind}{number}, space{TEXTURE_SPACE})"
-        if (f"{kind}{number}", space) not in (VERTEX_BOUND if stage == "vertex" else BOUND):
+        allowed = {"vertex": VERTEX_BOUND, "compute": COMPUTE_BOUND}.get(stage, BOUND)
+        if (f"{kind}{number}", space) not in allowed:
             raise ValueError(f"the translation declares {kind}{number}" + (f", space{space}" if space else "")
                              + ", a binding the runtime does not fill yet")
         return f"register({kind}{number}, space{RUNTIME_SPACES[space]})"
@@ -227,10 +264,148 @@ def bindings_text(refs):
     return "x2w-bindings 1\n" + "".join(f"{kind} {slot} {table} {offset}\n" for kind, slot, table, offset in refs)
 
 
+def translate(stage, code, roles, llvm=None, instructions=None):
+    """The HLSL of one program in the runtime's spaces, its layout, the bindings sidecar text (bindings_text) and the
+    instruction count. Raises ValueError or KeyError for a refusal. `instructions` (text lines) replaces the
+    disassembly of `code`."""
+    if instructions is None:
+        instructions = disassemble(code, llvm)
+    source, layout, refs = lower(stage, instructions, roles)
+    source = place_in_runtime_spaces(source, stage, layout)
+    return source, {"bindings": len(refs), **layout}, bindings_text(refs), len(instructions)
+
+
+def dxc_arguments(stage):
+    """DXC's arguments before the source file. The compile flags of the draw checks: IEEE strictness, and for the
+    pixel stage binary32 denormals preserved at ps_6_2 (tests/pixel_aot_draws/common.py), which also covers
+    GetAttributeAtVertex (shader model 6.1)."""
+    # The compute stage compiles as tests/compute_aot_check.py's draws do (cs_6_0).
+    profile = {"vertex": ["-T", "vs_6_0"], "compute": ["-T", "cs_6_0"]}.get(stage,
+                                                                         ["-denorm", "preserve", "-T", "ps_6_2"])
+    return ["-Gis", *profile, "-E", "main"]
+
+
+def source_bytes(source):
+    """The bytes DXC reads: the HLSL as Path.write_text(encoding="utf-8") writes it on this platform."""
+    return source.replace("\n", os.linesep).encode("utf-8")
+
+
+class ToolFailure(Exception):
+    """DXC or its library failed (exit status 2)."""
+
+
+def compile_with_process(dxc, stage, source, directory):
+    """DXIL of `source` from one dxc.exe process, with its files in a temporary directory under `directory`."""
+    with tempfile.TemporaryDirectory(dir=directory) as tmp:
+        hlsl = Path(tmp) / "shader.hlsl"
+        hlsl.write_text(source, encoding="utf-8")
+        dxil = Path(tmp) / "shader.dxil"
+        result = subprocess.run([dxc, *dxc_arguments(stage), "-Fo", str(dxil), str(hlsl)], capture_output=True,
+                                text=True)
+        if result.returncode or not dxil.exists():
+            raise ToolFailure(f"DXC exit {result.returncode}: {result.stderr.strip()[-2000:]}")
+        return dxil.read_bytes()
+
+
+class DxcLibrary:
+    """DXC's compiler (IDxcCompiler3) in this process, from the dxcompiler.dll beside `dxc`. Compiles with the
+    arguments dxc.exe gets (dxc_arguments), so the DXIL is dxc.exe's byte for byte (tests/runtime/xl_check.py dxc).
+    dxil.dll from the same directory, which validates and signs the container, is loaded first, so dxcompiler.dll
+    uses the one dxc.exe would. One instance per thread."""
+    CLSID_COMPILER = "73e22d93-e6ce-47f3-b5bf-f0664f39c1b0"
+    IID_COMPILER3 = "228b4687-5a6a-4730-900c-9702b2203f54"
+    IID_RESULT = "58346cda-dde7-4497-9461-6f87af5e0659"
+    IID_BLOB = "8ba5fb08-5195-40e2-ac58-0d989c3a0102"
+    OUT_OBJECT, OUT_ERRORS = 1, 2
+
+    def __init__(self, dxc):
+        import ctypes
+        import uuid
+        self._ctypes = ctypes
+        located = shutil.which(dxc) or dxc
+        directory = Path(located).resolve().parent
+        library = directory / "dxcompiler.dll"
+        if not library.exists():
+            raise ToolFailure(f"no dxcompiler.dll beside {located}")
+        if (directory / "dxil.dll").exists():
+            self._dxil = ctypes.WinDLL(str(directory / "dxil.dll"))
+        self._dll = ctypes.WinDLL(str(library))
+
+        class Guid(ctypes.Structure):
+            _fields_ = [("bytes", ctypes.c_ubyte * 16)]
+
+        class Buffer(ctypes.Structure):
+            _fields_ = [("ptr", ctypes.c_void_p), ("size", ctypes.c_size_t), ("encoding", ctypes.c_uint32)]
+
+        self._Buffer = Buffer
+        self._guids = {name: Guid((ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID(text).bytes_le))
+                       for name, text in (("clsid", self.CLSID_COMPILER), ("compiler3", self.IID_COMPILER3),
+                                          ("result", self.IID_RESULT), ("blob", self.IID_BLOB))}
+        create = self._dll.DxcCreateInstance
+        create.restype = ctypes.c_long
+        create.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+        self._compiler = ctypes.c_void_p()
+        hr = create(ctypes.byref(self._guids["clsid"]), ctypes.byref(self._guids["compiler3"]),
+                    ctypes.byref(self._compiler))
+        if hr < 0 or not self._compiler:
+            raise ToolFailure(f"DxcCreateInstance(IDxcCompiler3) -> {hr & 0xffffffff:#010x}")
+
+    def _method(self, obj, index, *argtypes):
+        ctypes = self._ctypes
+        table = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        return ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(table[index])
+
+    def _release(self, obj):
+        if obj:
+            self._method(obj, 2)(obj)
+
+    def _blob(self, result, kind):
+        ctypes = self._ctypes
+        blob = ctypes.c_void_p()
+        get_output = self._method(result, 7, ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                                  ctypes.c_void_p)
+        if get_output(result, kind, ctypes.byref(self._guids["blob"]), ctypes.byref(blob), None) < 0 or not blob:
+            return None
+        try:
+            table = ctypes.cast(blob, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+            pointer = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)(table[3])(blob)
+            size = ctypes.WINFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p)(table[4])(blob)
+            return ctypes.string_at(pointer, size) if size else b""
+        finally:
+            self._release(blob)
+
+    def compile(self, stage, source):
+        ctypes = self._ctypes
+        data = source_bytes(source)
+        text = ctypes.create_string_buffer(data, len(data))
+        buffer = self._Buffer(ctypes.cast(text, ctypes.c_void_p), len(data), 0)
+        arguments = [*dxc_arguments(stage), "shader.hlsl"]
+        argv = (ctypes.c_wchar_p * len(arguments))(*arguments)
+        result = ctypes.c_void_p()
+        compile_ = self._method(self._compiler, 3, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                                ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+        hr = compile_(self._compiler, ctypes.byref(buffer), argv, len(arguments), None,
+                      ctypes.byref(self._guids["result"]), ctypes.byref(result))
+        if hr < 0 or not result:
+            raise ToolFailure(f"IDxcCompiler3::Compile -> {hr & 0xffffffff:#010x}")
+        try:
+            status = ctypes.c_long()
+            self._method(result, 3, ctypes.POINTER(ctypes.c_long))(result, ctypes.byref(status))
+            dxil = self._blob(result, self.OUT_OBJECT) if status.value >= 0 else None
+            if not dxil:
+                errors = (self._blob(result, self.OUT_ERRORS) or b"").decode("utf-8", "replace").strip()
+                raise ToolFailure(f"DXC status {status.value & 0xffffffff:#010x}: {errors[-2000:]}")
+            return dxil
+        finally:
+            self._release(result)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stage", choices=("vertex", "pixel"), required=True)
-    parser.add_argument("--code", type=Path, required=True)
+    parser.add_argument("--stage", choices=("vertex", "pixel", "compute"), required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--code", type=Path)
+    inputs.add_argument("--text", type=Path, help="Instruction text, one per line, in place of --code")
     parser.add_argument("--roles", type=Path, required=True)
     parser.add_argument("--dxc", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -239,11 +414,14 @@ def main():
     parser.add_argument("--hlsl", type=Path, help="Also keep the HLSL here (local debugging only)")
     args = parser.parse_args()
     try:
-        code = args.code.read_bytes()
-        roles = json.loads(args.roles.read_text(encoding="utf-8"))
-        instructions = disassemble(code, args.llvm)
-        source, layout, refs = lower(args.stage, instructions, roles)
-        source = place_in_runtime_spaces(source, args.stage, layout)
+        if args.text:
+            roles = json.loads(args.roles.read_text(encoding="utf-8"))
+            instructions = args.text.read_text(encoding="utf-8").splitlines()
+            source, layout, bindings, count = translate(args.stage, None, roles, instructions=instructions)
+        else:
+            code = args.code.read_bytes()
+            roles = json.loads(args.roles.read_text(encoding="utf-8"))
+            source, layout, bindings, count = translate(args.stage, code, roles, args.llvm)
     except (ValueError, KeyError) as error:
         print(f"refused: {error}", file=sys.stderr)
         return 1
@@ -252,21 +430,17 @@ def main():
         return 2
     if args.hlsl:
         args.hlsl.write_text(source, encoding="utf-8")
-    # The compile flags of the draw checks: IEEE strictness, and for the pixel stage binary32 denormals preserved at
-    # ps_6_2 (tests/pixel_aot_draws/common.py), which also covers GetAttributeAtVertex (shader model 6.1).
-    profile = ["-T", "vs_6_0"] if args.stage == "vertex" else ["-denorm", "preserve", "-T", "ps_6_2"]
-    with tempfile.TemporaryDirectory(dir=args.output.parent) as tmp:
-        hlsl = Path(tmp) / "shader.hlsl"
-        hlsl.write_text(source, encoding="utf-8")
-        dxil = Path(tmp) / "shader.dxil"
-        result = subprocess.run([args.dxc, "-Gis", *profile, "-E", "main", "-Fo", str(dxil), str(hlsl)],
-                                capture_output=True, text=True)
-        if result.returncode or not dxil.exists():
-            print(f"tool failure: DXC exit {result.returncode}: {result.stderr.strip()[-2000:]}", file=sys.stderr)
-            return 2
-        args.bindings.write_text(bindings_text(refs), encoding="ascii", newline="\n")
-        os.replace(dxil, args.output)
-    print(json.dumps({"stage": args.stage, "instructions": len(instructions), "bindings": len(refs), **layout}))
+    try:
+        dxil = compile_with_process(args.dxc, args.stage, source, args.output.parent)
+    except ToolFailure as error:
+        print(f"tool failure: {error}", file=sys.stderr)
+        return 2
+    # The sidecar first: a DXIL file in the cache always has its bindings.
+    args.bindings.write_text(bindings, encoding="ascii", newline="\n")
+    temporary = args.output.with_name(args.output.name + ".tmp")
+    temporary.write_bytes(dxil)
+    os.replace(temporary, args.output)
+    print(json.dumps({"stage": args.stage, "instructions": count, **layout}))
     return 0
 
 

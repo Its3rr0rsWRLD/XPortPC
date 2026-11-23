@@ -26,7 +26,12 @@ What exists (`tools/x2w_launch.cpp`, `tools/pe_map.cpp`, test `tests/native/laun
 
 - `pe_map` maps an x64 image away from its preferred base, applies DIR64/HIGHLOW relocations, binds ordinary and delay
   imports through a host resolver, sets section protections, registers `.pdata` with `RtlAddFunctionTable` (so SEH and
-  unwinding work through mapped frames) and runs TLS callbacks in order. Title code runs unchanged.
+  unwinding work through mapped frames), gives implicit TLS data (`__declspec(thread)`, `thread_local`) a loader-owned
+  index through a carrier DLL, and runs TLS callbacks in order, for a started EXE also on thread attach and detach and
+  on process detach. Title code runs unchanged.
+- The title sees itself as the process image: `x2w_launch` binds its `GetModuleHandle{A,W,ExA,ExW}` and
+  `GetModuleFileName{A,W}` imports to replacements that answer for the mapped images, and sets
+  `PEB->ImageBaseAddress` to the title while it runs (`--host-identity` turns both off).
 - Import resolution order, per `dll!symbol`, first hit wins:
   1. `DIR\<dll>` in a `--shims` directory, loaded with `LoadLibrary` (our desktop implementation of a console library).
      If the shim DLL exists but lacks the symbol, the import becomes a stub ("stub (not in shim)").
@@ -39,8 +44,8 @@ Known gaps, all measured by existing tests and to be closed in this order as tit
 
 | Gap | Effect on a title | Fix |
 |---|---|---|
-| Implicit TLS (`__declspec(thread)`): `pe_map` refuses a non-empty TLS template (`cpu_native_tls_value`) | Any CRT-linked title fails to map | Allocate the index, fill each thread's TLS slot from the template, run callbacks on thread attach |
-| `GetModuleHandle(NULL)`, PEB image base, module list still name the host | Resource loads and self-lookup go to `x2w_launch.exe` | Patch PEB `ImageBaseAddress` and add a loader-list entry, or hook the few kernel32 calls |
+| Closed: implicit TLS data (`native_launch_tls`, `native_launch_tls_crt`, `cpu_native_tls_value`) | Was: any title with `thread_local` data failed to map | Carrier DLL per image: ntdll owns the index and every thread's block (`docs/experiments.md`, "Implicit TLS data and module identity under x2w_launch") |
+| Closed for the title's imports: `GetModuleHandle(NULL)`, `GetModuleFileName(NULL)`, PEB image base (`native_launch_identity`) | Was: resource loads and self-lookup went to `x2w_launch.exe` | Import replacements plus PEB `ImageBaseAddress`; the loader's module list, `GetProcAddress`ed pointers to these functions and `GetCommandLine` still name the launcher |
 | Stubs ignore arguments and return 0 | A stubbed call that must succeed fails silently later | Stubs log the first N calls with RCX/RDX/R8/R9 and the caller RVA; a per-symbol return override file |
 | Windows route for names Windows also has | A console DLL with a desktop namesake binds to a desktop DLL with other semantics | The report marks every `windows` route; a deny-list forces such names to the shim directory |
 
@@ -168,16 +173,26 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
    naming the form. It does not substitute a different shader.
 4. Create the desktop PSO with the translated root signature.
 
-**Performance, honestly.** The converter is Python and DXC is slow; translating at PSO creation would stall the title for
-seconds per pipeline. The path:
+**Performance, honestly.** The converter is Python and DXC is slow to start; one process each per shader cost about
+0.39 s per shader cold on the owner's PC (R3), almost all of it start-up. The path:
 
-- **Now (R3-R5):** translate at creation, synchronously. Acceptable for test programs with a handful of pipelines.
-- **Next:** an ahead-of-time pass. The first run of a title records each pipeline's inputs (bytecode hash and the
-  state the translation needs) in the cache index; `x2w_aot_cache` translates the recorded set offline in parallel
-  processes; later runs hit the cache. Misses still translate synchronously and are logged.
+- **Done: a translator service.** `d3d12_xs.dll` keeps a pool of `tools/pso_service.py` processes
+  (`src/d3d12_xs_translator.h`): each has the converter imported once and DXC's library (`IDxcCompiler3`, the
+  `dxcompiler.dll` beside `dxc.exe`) loaded in process, and takes framed requests over its stdin/stdout. The first is
+  started at device creation; the pool grows while requests wait (at most cores - 1, 8 at most). A pipeline's shaders
+  and pipelines from several title threads translate in parallel. If no service can run, or one fails mid-request, the
+  shim falls back to one `tools/pso_translate.py` process per shader. Output, cache format and keys are unchanged:
+  the paths write byte-identical DXIL and HLSL (`runtime_r3_translator_paths_warp`, `runtime_r3_translator_bench`).
+- **Done: ahead of time.** The shim records every console shader it sees in the title's cache directory
+  (`manifest.txt`, `inputs\`, `translator.json`; `tools/pso_cache.py`). `tools/precompile_cache.py <title>`
+  translates the recorded set on all cores, recomputing each key with the current converter fingerprint, so the next
+  launch is all cache hits (README, "Shader cache for a title"). `X2W_TRANSLATE=defer` records without translating
+  (the pipeline fails), for a fast recording run. Misses still translate at creation.
 - **Later:** port the converter's lowering to C++ inside the graphics shim, checked against the Python converter on the
   whole draw-check suite and corpus (identical HLSL text, or identical bit-exact draws). Only then is creation-time
-  translation fast enough for titles that create pipelines while running.
+  translation of a title that creates pipelines while running free of a process round trip.
+
+Measured numbers are in [experiments.md](../experiments.md#translator-service-and-ahead-of-time-cache-runtime-rung-r3).
 
 ### Console-only features
 
@@ -360,6 +375,13 @@ console's texture upload path is not public, so the default scene uploads linear
 "Textures: detiling") is built and tested, and the scene's `tiled` mode creates its textures from tiled bytes through
 it; hooking it to the title's upload calls waits for an owner log that shows them.
 
+R5 program: `tests/runtime/r5_frames.cpp`: a compute queue moves particles in title memory with a translated gfx1013
+compute program (`r5_cs.s`) and the direct queue draws them with the R3 programs, with cross-queue fences, for 600
+frames (design choices, tests and frame times in
+[experiments.md](../experiments.md#compute-and-a-frame-loop-runtime-rung-r5)). Its exit criteria pass on WARP and
+hardware. The shim's descriptor blocks are recycled once the GPU is done with them, so a long run no longer exhausts
+them.
+
 R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
 `src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
 [experiments.md](../experiments.md#pipeline-time-translation-runtime-rung-r3)). Its shaders come in a console
@@ -412,8 +434,8 @@ source-built program with planted strings and code bytes and fails if any appear
 
 1. **R1 report.** `x2w_launch --report FILE`: JSON import report (per DLL, route, implemented/stub/missing), stubs
    logging their first calls' four argument registers and caller RVA, `x2w_unimplemented()` for shims, the
-   first-unimplemented-call line. Extend `tests/native/launch_check.py` to check the JSON. Then implicit TLS in
-   `pe_map` (turns `cpu_native_tls_value` from expected refusal to match).
+   first-unimplemented-call line. Extend `tests/native/launch_check.py` to check the JSON. Implicit TLS in
+   `pe_map` and the title's module identity are done (`cpu_native_tls_value` now matches Windows).
 2. **Graphics shim skeleton for R2.** A desktop DLL under the graphics name exporting device creation, wrapping
    device/queue/allocator/list/fence/swap chain over desktop D3D12 in public method order with logging thunks for
    unknown slots and IIDs; attaches the device to `era_title_gpu`. Test `tests/runtime/r2_clear.cpp` (clear, present,
