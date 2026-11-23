@@ -89,7 +89,11 @@ constexpr Quad quads[draws] = {
 };
 
 constexpr std::size_t vs_constants_offset = 0x0000;
+// Pixel constants: draw k's 512-byte buffer at + 512 k. r4_ps (draws 0 and 1) reads its tint at + 0x110, past the
+// first 256 bytes (the translation's 288-byte window; the buffer's first float4 is a decoy tint), r6_ps_inline (draw
+// 2) at + 0.
 constexpr std::size_t ps_constants_offset = 0x0400;
+constexpr std::size_t ps_constants_bytes = 512, ps_tint_offset = 0x110;
 constexpr std::size_t vertices_offset = 0x1000;
 constexpr std::size_t indices_offset = 0x1200;
 
@@ -412,12 +416,13 @@ void write_descriptors(ID3D12Device* device, Scene& s, std::uint8_t* title, std:
         if (k == 1) {
             const D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{base + vs_constants_offset + 256 * k, 256};
             device->CreateConstantBufferView(&cbv, {start.ptr + 32 * SIZE_T(table_size * k)});
-            const D3D12_CONSTANT_BUFFER_VIEW_DESC spare{base + ps_constants_offset + 256 * k, 256};
+            const D3D12_CONSTANT_BUFFER_VIEW_DESC spare{base + ps_constants_offset + ps_constants_bytes * k,
+                                                        static_cast<UINT>(ps_constants_bytes)};
             device->CreateConstantBufferView(&spare, {start.ptr + 32 * SIZE_T(spare_slot)});
             std::memcpy(table + 64, s.view(spare_slot), 32);  // the title copies the descriptor's 32 bytes
         } else {
             r6::write_buffer(table, base + vs_constants_offset + 256 * k, 256);
-            r6::write_buffer(table + 64, base + ps_constants_offset + 256 * k, 256);
+            r6::write_buffer(table + 64, base + ps_constants_offset + ps_constants_bytes * k, ps_constants_bytes);
         }
         image(textures, quads[k].texture, tiled, k == 1 ? draw1_sel : identity_sel, wrong_swizzle && quads[k].texture == 0)
             .write(table + 32);
@@ -558,8 +563,14 @@ int scene_check(bool warp, std::string_view mode)
         }
         const float offset[2] = {q.x / 32.0f, -q.y / 32.0f};
         std::memcpy(title + vs_constants_offset + 256 * k, offset, sizeof(offset));
-        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f};
-        std::memcpy(title + ps_constants_offset + 256 * k, tint, sizeof(tint));
+        const float tint[4] = {q.tint[0], q.tint[1], q.tint[2], 1.0f}, decoy[4] = {0.25f, 0.25f, 0.25f, 1.0f};
+        std::uint8_t* constants = title + ps_constants_offset + ps_constants_bytes * k;
+        if (k == 2) {
+            std::memcpy(constants, tint, sizeof(tint));
+        } else {
+            std::memcpy(constants + ps_tint_offset, tint, sizeof(tint));
+            std::memcpy(constants, decoy, sizeof(decoy));
+        }
         std::memcpy(instances + 16 * k, &q.depth, 4);
     }
 
