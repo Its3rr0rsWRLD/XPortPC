@@ -1,0 +1,18 @@
+# Console graphics helper library (texture layout). No public documentation for these two names: see chad.toml.
+# Format: see xgameruntime.toml; `dll` makes tools/shimgen.py --family-dlls generate xg_xs.dll from this file.
+family = "xg"
+dll = "xg_xs.dll"
+undocumented = true
+forward_default = false
+
+[[functions]]
+name = "XGCreateTextureComputer"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XGSuggestSwizzleMode"
+returns = "uint32_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true

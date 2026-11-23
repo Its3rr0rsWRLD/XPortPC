@@ -1,0 +1,60 @@
+# Console audio hardware abstraction. No public documentation: see chad.toml.
+# Format: see xgameruntime.toml; `dll` makes tools/shimgen.py --family-dlls generate acphal.dll from this file.
+family = "acphal"
+dll = "acphal.dll"
+undocumented = true
+forward_default = false
+
+[[functions]]
+name = "AcpHalAllocateShapeContexts"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "AcpHalCreate"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "AcpHalReleaseShapeContexts"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuAlloc"
+returns = "uintptr_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuCreateHeap"
+returns = "uintptr_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuFree"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuIsVirtualAddressValid"
+returns = "BOOL"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuMapApuAddress"
+returns = "uintptr_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "ApuMapVirtualAddress"
+returns = "uintptr_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true

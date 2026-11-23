@@ -35,6 +35,11 @@ def main():
     specs = shimgen.Specs([shimgen.SPEC_DIR])
     sources = "".join(p.read_text(encoding="utf-8") for p in (ROOT / "src" / "gdk").glob("*.cpp"))
     for spec in specs.functions.values():
+        if specs.families[spec.family].get("dll"):
+            # Console libraries without public documentation (tools/shimgen/specs/chad.toml and kin): implemented
+            # in src/gdk/gdk_console.cpp, some through macros, so only the name is looked for.
+            assert spec.impl and spec.name in sources, f"no definition of {spec.name}"
+            continue
         assert spec.doc_url(specs.families).startswith("https://learn.microsoft.com/"), spec.name
         if spec.impl:
             assert re.search(rf"\bx2w_impl_{spec.name}\(", sources), f"no definition of x2w_impl_{spec.name}"

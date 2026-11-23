@@ -15,7 +15,8 @@ skipped unless --include names them. --dll limits the run to the named DLLs; --e
 the names a title asked GetProcAddress for in DLLs it loaded at run time (PC GDK builds reach the Gaming
 Runtime only this way: xgameruntime.lib loads xgameruntime.dll and resolves names). --all-specs DLL adds
 every function of every spec to DLL (used for xgameruntime.dll, whose dynamic name list is not known
-before a run).
+before a run). A family whose spec sets `dll` (console libraries with no public documentation, such as
+chad.dll) is left out of --all-specs; --family-dlls generates each such DLL with its family's functions.
 
 Specs. Each tools/shimgen/specs/*.toml file describes one API family from public documentation (format in
 specs/xgameruntime.toml). For every imported function the generator picks one body:
@@ -170,7 +171,8 @@ class Specs:
             self.load_override(Path(path))
 
     def family_fields(self, data, source):
-        fields = {k: data[k] for k in ("forward_dll", "forward_anchor", "forward_default", "doc_root") if k in data}
+        keys = ("forward_dll", "forward_anchor", "forward_default", "doc_root", "dll", "undocumented")
+        fields = {k: data[k] for k in keys if k in data}
         return fields
 
     def load(self, path):
@@ -350,7 +352,8 @@ def render_dll(dll, plan, specs):
             continue
         call = ", ".join(n for _, n in spec.params)
         url = spec.doc_url(specs.families)
-        cpp += [f"// {symbol}: {body}. {url}", f'extern "C" {spec.signature(internal)}', "{"]
+        cpp += [f"// {symbol}: {body}. {url or 'No public documentation: the signature is an assumption.'}",
+                f'extern "C" {spec.signature(internal)}', "{"]
         cpp += forward_block(spec, specs, call)
         if body == "impl":
             cpp.append(f"    {'return ' if spec.returns != 'void' else ''}x2w_impl_{spec.name}({call});")
@@ -439,6 +442,8 @@ def main(argv=None):
     source.add_argument("--manifest", type=Path, help="JSON object: DLL name -> function names")
     source.add_argument("--run-log", type=Path, help="x2w_launch --log file (dynamic-resolve lines)")
     parser.add_argument("--all-specs", action="append", default=[], help="DLL that exports every spec function")
+    parser.add_argument("--family-dlls", action="store_true",
+                        help="generate each DLL a spec family names with `dll`, with that family's functions")
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "shimgen")
     parser.add_argument("--specs", type=Path, action="append", help="spec directory (default tools/shimgen/specs)")
     parser.add_argument("--override", type=Path, action="append", default=[])
@@ -464,8 +469,8 @@ def main(argv=None):
         write_if_changed(args.impl_header, text)
         print(f"wrote {args.impl_header}")
         return 0
-    if not args.report and not args.manifest and not args.run_log and not args.all_specs:
-        parser.error("give --report, --manifest, --run-log or --all-specs")
+    if not args.report and not args.manifest and not args.run_log and not args.all_specs and not args.family_dlls:
+        parser.error("give --report, --manifest, --run-log, --all-specs or --family-dlls")
     include = {d.lower() for d in args.include}
     if args.report:
         imports = imports_from_report(json.loads(args.report.read_text(encoding="utf-8")), include)
@@ -475,8 +480,13 @@ def main(argv=None):
         imports = imports_from_run_log(args.run_log.read_text(encoding="utf-8", errors="replace"))
     else:
         imports = OrderedDict()
+    family_dll = {f: v["dll"].lower() for f, v in specs.families.items() if v.get("dll")}
     for dll in args.all_specs:
-        imports.setdefault(dll.lower(), []).extend(specs.functions)
+        imports.setdefault(dll.lower(), []).extend(n for n, s in specs.functions.items() if s.family not in family_dll)
+    if args.family_dlls:
+        for name, spec in specs.functions.items():
+            if spec.family in family_dll:
+                imports.setdefault(family_dll[spec.family], []).append(name)
     wanted = {d.lower() for d in args.dll}
     excluded = {d.lower() for d in args.exclude}
     imports = OrderedDict((d, f) for d, f in imports.items() if (not wanted or d in wanted) and d not in excluded)

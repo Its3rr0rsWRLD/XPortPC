@@ -1,0 +1,15 @@
+# DirectStorage entry of the console library xcrdapi.dll. DStorageGetFactory has the public DirectStorage
+# signature (github.com/microsoft/DirectStorage, MIT); it forwards to x2w_sys.dll (src/sys/sys_dstorage.cpp).
+# Format: see xgameruntime.toml; `dll` makes tools/shimgen.py --family-dlls generate xcrdapi.dll from this file.
+family = "xcrdapi"
+dll = "xcrdapi.dll"
+undocumented = false
+forward_default = false
+doc_root = "https://github.com/microsoft/DirectStorage"
+
+[[functions]]
+name = "DStorageGetFactory"
+returns = "HRESULT"
+params = "REFIID riid, void** factory"
+impl = true
+doc = "#readme"
