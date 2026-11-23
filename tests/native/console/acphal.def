@@ -1,0 +1,12 @@
+; Import library for tests/native/console_title.cpp: the console DLL name acphal and the names it imports.
+LIBRARY acphal
+EXPORTS
+    AcpHalAllocateShapeContexts
+    AcpHalCreate
+    AcpHalReleaseShapeContexts
+    ApuAlloc
+    ApuCreateHeap
+    ApuFree
+    ApuIsVirtualAddressValid
+    ApuMapApuAddress
+    ApuMapVirtualAddress

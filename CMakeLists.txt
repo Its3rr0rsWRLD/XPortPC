@@ -108,7 +108,7 @@ add_executable(xmem_title_check tests/xmem_title_check.cpp)
 target_include_directories(xmem_title_check PRIVATE src)
 target_compile_features(xmem_title_check PRIVATE cxx_std_17)
 target_link_libraries(xmem_title_check PRIVATE xmem_shim d3d12 dxgi)
-foreach(scenario IN ITEMS attributes reuse standalone windows reserve hooks physical write_watch large_pages config)
+foreach(scenario IN ITEMS attributes reuse standalone windows reserve hooks physical virtual_scatter write_watch large_pages config)
     add_test(NAME xmem_title_${scenario} COMMAND xmem_title_check ${scenario})
     set_tests_properties(xmem_title_${scenario} PROPERTIES TIMEOUT 60)
 endforeach()
@@ -3357,6 +3357,28 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "${CMAKE_SOURCE_DIR}/tests/native/sys_title_check.py" "$<TARGET_FILE:x2w_launch>"
             "$<TARGET_FILE:x2w_sys_title>" "$<TARGET_FILE:gdeflate_pack>" "${x2w_shim_dir}")
         set_tests_properties(native_launch_sys PROPERTIES TIMEOUT 180)
+        # The console libraries without desktop equivalents (xcrdapi, chad, xapu, acphal, xg_xs) and the newer xmem
+        # names, imported by DLL name and run through x2w_launch (tests/native/console_check.py). The shims come from
+        # tools/shimgen/specs via --family-dlls (cmake/x2w_shimgen.cmake); x2w_gdk_shims puts them in shims/.
+        foreach(console_dll IN ITEMS xcrdapi chad xapu acphal xg_xs xmem_extra)
+            set(console_${console_dll}_lib "${CMAKE_CURRENT_BINARY_DIR}/console_${console_dll}.lib")
+            add_custom_command(OUTPUT "${console_${console_dll}_lib}"
+                COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64 "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/console/${console_dll}.def"
+                    "/OUT:${console_${console_dll}_lib}"
+                DEPENDS tests/native/console/${console_dll}.def VERBATIM)
+            list(APPEND console_libs "${console_${console_dll}_lib}")
+        endforeach()
+        add_custom_target(x2w_console_imports DEPENDS ${console_libs})
+        add_executable(x2w_console_title tests/native/console_title.cpp)
+        add_dependencies(x2w_console_title x2w_console_imports x2w_shims x2w_gdk_shims)
+        target_compile_options(x2w_console_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_console_title PRIVATE /ENTRY:console_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+            /DYNAMICBASE /INCREMENTAL:NO)
+        target_link_libraries(x2w_console_title PRIVATE kernel32 ${console_libs})
+        add_test(NAME native_console_shims COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/console_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_console_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_console_shims PROPERTIES TIMEOUT 180)
         # Dynamic module lookups from a mapped title and a mapped package DLL (GetModuleHandleW + GetProcAddress
         # of kernel32's condition-variable functions, as a C++ runtime does), and every ending of the run log:
         # a handled fault inside Windows, ExitProcess, and a crash with the program's own filter

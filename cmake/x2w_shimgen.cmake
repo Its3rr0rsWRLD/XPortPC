@@ -31,7 +31,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_D
 
 add_library(x2w_gdk SHARED src/gdk/gdk_core.cpp src/gdk/gdk_taskqueue.cpp src/gdk/gdk_async.cpp
     src/gdk/gdk_runtime.cpp src/gdk/gdk_user.cpp src/gdk/gdk_gamesave.cpp src/gdk/gdk_package.cpp
-    src/gdk/gdk_gameui.cpp)
+    src/gdk/gdk_gameui.cpp src/gdk/gdk_console.cpp)
 target_include_directories(x2w_gdk PUBLIC "${CMAKE_SOURCE_DIR}/src/gdk")
 target_compile_features(x2w_gdk PRIVATE cxx_std_17)
 target_compile_definitions(x2w_gdk PRIVATE X2W_GDK_EXPORTS)
@@ -60,7 +60,7 @@ function(x2w_shimgen_generate dir)
     include("${dir}/shims.cmake")
 endfunction()
 
-set(x2w_shimgen_args --all-specs xgameruntime.dll)
+set(x2w_shimgen_args --all-specs xgameruntime.dll --family-dlls)
 foreach(input IN ITEMS REPORT MANIFEST RUN_LOG)
     if(X2W_SHIM_${input})
         string(TOLOWER "${input}" flag)

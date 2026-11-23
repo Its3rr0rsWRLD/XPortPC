@@ -1,0 +1,9 @@
+; Import library for tests/native/console_title.cpp: the console DLL name xmem_extra and the names it imports.
+LIBRARY xmem
+EXPORTS
+    XMemVirtualAlloc
+    XMemTransferMemory
+    XMemMapPhysicalPagesScatter
+    XMemIsToolsMemAvailable
+    XMemAllocatePhysicalPages
+    XMemFreePhysicalPages

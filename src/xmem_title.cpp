@@ -1356,6 +1356,89 @@ extern "C" BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR
     return TRUE;
 }
 
+// XMemVirtualAlloc, XMemMapPhysicalPagesScatter, XMemTransferMemory, XMemIsToolsMemAvailable.
+// The reference pages (devdocs.xbox.com/reference/system/xmem/functions/) are login-gated and were not read past their
+// public one-line descriptions. The contracts below are therefore stated assumptions, not documented behaviour:
+//   XMemVirtualAlloc(address, size, type, protect): VirtualAlloc-like. The Scatter page's one public line says to
+//     reserve with MEM_RESERVE and XMEM_MAPPABLE (64 KiB pages via MEM_64K_PAGES); the values of those two flags are
+//     not public, so any allocation-type bit VirtualAlloc does not define is read as one of them: it is stripped
+//     (logged once), the size is rounded up to 64 KiB and the range is a plain reservation that the first
+//     XMemMapPhysicalPages call adopts as a mapping (mapping_for). Committed memory is plain VirtualAlloc memory:
+//     it is not GPU-visible by itself; GPU visibility comes from XMemAlloc and from physical mappings (register_runs).
+//   XMemMapPhysicalPagesScatter(addresses, count, pages): MapUserPhysicalPagesScatter-like, one 64 KiB page per entry;
+//     a null page array, or a zero entry, unmaps that address. Arguments are validated before anything changes.
+//     Page number 0 therefore cannot be mapped through this call (the pool does hand page 0 out).
+//   XMemTransferMemory: signature unknown. Accepts any arguments, logs them and returns TRUE without moving data.
+//   XMemIsToolsMemAvailable: FALSE (no tools memory on a desktop).
+extern "C" PVOID WINAPI XMemVirtualAlloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect)
+{
+    constexpr DWORD known = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO | MEM_TOP_DOWN | MEM_WRITE_WATCH;
+    const DWORD extra = AllocationType & ~known;
+    DWORD type = AllocationType & known;
+    if (extra)
+        log_once("note", "XMemVirtualAlloc type 0x%lx: bits 0x%lx read as XMEM_MAPPABLE/64K pages and stripped",
+                 AllocationType, extra);
+    if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO))) type |= MEM_RESERVE;
+    if (extra && (type & (MEM_COMMIT | MEM_RESERVE))) {
+        Size = (Size + physical_page - 1) / physical_page * physical_page;
+        if (Address && (reinterpret_cast<std::uintptr_t>(Address) % physical_page)) {
+            SetLastError(ERROR_INVALID_ADDRESS);
+            return nullptr;
+        }
+    }
+    if (!Size) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    {
+        State& s = state();
+        Exclusive guard(s.lock);
+        ensure_configured(s);
+        s.memory_exists = true;
+    }
+    return VirtualAlloc(Address, Size, type, Protect ? Protect : PAGE_READWRITE);
+}
+
+extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
+{
+    if (!VirtualAddressArray || NumberOfPages > (std::uint64_t{1} << 24)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    for (ULONG_PTR i = 0; i < NumberOfPages; ++i) {
+        if (!VirtualAddressArray[i] || (reinterpret_cast<std::uintptr_t>(VirtualAddressArray[i]) % physical_page)) {
+            log_once("unimplemented", "XMemMapPhysicalPagesScatter entry %llu (0x%llx) is null or not 64 KiB aligned",
+                     static_cast<unsigned long long>(i),
+                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(VirtualAddressArray[i])));
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+    for (ULONG_PTR i = 0; i < NumberOfPages; ++i) {
+        ULONG_PTR page = PageArray ? PageArray[i] : 0;
+        const bool unmap = !PageArray || page == 0;
+        if (PageArray && page == 0)
+            log_once("note", "XMemMapPhysicalPagesScatter: a zero page entry unmaps (page number 0 cannot be mapped here)");
+        if (!XMemMapPhysicalPages(VirtualAddressArray[i], 1, unmap ? nullptr : &page)) return FALSE;
+    }
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI XMemTransferMemory(ULONG_PTR a0, ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3)
+{
+    log_once("unimplemented", "XMemTransferMemory(0x%llx, 0x%llx, 0x%llx, 0x%llx): signature unknown; nothing moved, TRUE",
+             static_cast<unsigned long long>(a0), static_cast<unsigned long long>(a1),
+             static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3));
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI XMemIsToolsMemAvailable(void)
+{
+    return FALSE;
+}
+
 extern "C" PVOID WINAPI XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray)
 {
     State& s = state();

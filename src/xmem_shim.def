@@ -11,6 +11,10 @@ EXPORTS
     XMemAllocatePhysicalPages
     XMemMapPhysicalPages
     XMemFreePhysicalPages
+    XMemVirtualAlloc
+    XMemMapPhysicalPagesScatter
+    XMemTransferMemory
+    XMemIsToolsMemAvailable
     X2WXMemConfigure
     X2WXMemGetConfig
     X2WXMemGetStatistics

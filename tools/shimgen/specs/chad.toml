@@ -1,0 +1,37 @@
+# Console audio DSP. No public documentation: signatures are assumptions (docs/design/runtime.md,
+# "Console audio hardware: silent"). Every function takes six register-width arguments and logs the first four.
+# Format: see xgameruntime.toml; `dll` makes tools/shimgen.py --family-dlls generate chad.dll from this file.
+family = "chad"
+dll = "chad.dll"
+undocumented = true
+forward_default = false
+
+[[functions]]
+name = "XDspActivate"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XDspConnectWithMaximumStreamLimit"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XDspDeactivate"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XDspDisconnect"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XDspSubmitCommand"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true

@@ -61,6 +61,12 @@ X2W_XMEM_API BOOL WINAPI XMemAllocatePhysicalPages(DWORD flAllocationType, PULON
 X2W_XMEM_API PVOID WINAPI XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfPages, PULONG_PTR PageArray);
 X2W_XMEM_API BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR NumberOfPages, PULONG_PTR PageArray);
 
+// Assumed contracts (the reference pages are login-gated; see src/xmem_title.cpp above XMemVirtualAlloc).
+X2W_XMEM_API PVOID WINAPI XMemVirtualAlloc(PVOID Address, SIZE_T Size, DWORD AllocationType, DWORD Protect);
+X2W_XMEM_API BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* VirtualAddressArray, ULONG_PTR NumberOfPages, PULONG_PTR PageArray);
+X2W_XMEM_API BOOL WINAPI XMemTransferMemory(ULONG_PTR a0, ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3);
+X2W_XMEM_API BOOL WINAPI XMemIsToolsMemAvailable(void);
+
 // --- XPortPC configuration and introspection ----------------------------------------------------------------------
 typedef enum X2WXMemLayout {
     // GPU-visible allocations are carved from a few large committed arenas, each one desktop GPU alias (one title

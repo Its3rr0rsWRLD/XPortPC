@@ -164,6 +164,45 @@ PC GDK samples are built with /GL + /LTCG, so their code reads implicit TLS as `
 without `_tls_index`; `x2w_launch` therefore aliases slot 0 of every thread to the program's TLS block
 (`tls-slot0` in the run log).
 
+### Console audio hardware: silent
+
+`chad.dll` (XDsp*), `xapu.dll` (XApu*) and `acphal.dll` (AcpHal*, Apu*) drive the console's audio hardware. Nothing
+about them is public, so their shims (specs `tools/shimgen/specs/{chad,xapu,acphal}.toml`, code in `src/gdk/gdk_console.cpp`)
+are logged stubs that make a title carry on without sound; the title's audio then goes through the XAudio2 path in
+`x2w_sys`, or nowhere. Every assumption:
+
+- Each function takes six register-width arguments (only rcx, rdx, r8 and r9 are logged; the first eight calls of each
+  function are logged with their arguments, then one note). The real signatures are unknown; nothing is dereferenced
+  without a `VirtualQuery` check.
+- Return value 0 (`S_OK`). `XApuGetResultCount` returns 0 and `XApuDequeueResult` returns 0 and writes nothing: the
+  hardware never produces a result.
+- `XDspConnectWithMaximumStreamLimit`, `XApuConnect`, `AcpHalCreate` and `AcpHalAllocateShapeContexts` write a fresh
+  non-null handle (a zeroed 256-byte heap block, safe to read as zeros) into the first argument that points to writable
+  memory whose first 8 bytes are zero (an output slot). An argument that is small, null, read-only or already non-zero
+  is never written.
+- `ApuAlloc` and `ApuCreateHeap` return the address of a zeroed `VirtualAlloc` block, tracked in a table; the size is the
+  first argument in (0, 1 GiB] that is not a tracked block (64 KiB when none is). `ApuFree` releases a tracked block
+  named by either of the first two arguments. `ApuIsVirtualAddressValid` is TRUE for an address inside a tracked block.
+  `ApuMapApuAddress` and `ApuMapVirtualAddress` return their first argument (identity map).
+
+`xcrdapi.dll`'s `DStorageGetFactory(REFIID, void**)` has the public DirectStorage signature and forwards to
+`x2w_sys.dll`'s `X2wDStorageGetFactory` (loaded from the shim folder if the launcher has not loaded it), so it returns
+the host DirectStorage factory or the fallback status described in `docs/design/system-libs.md`.
+
+`xg_xs.dll` (texture layout): `XGCreateTextureComputer` writes a logging COM-style object to its second argument
+(assumed `(desc, &out)`, as the public XG address computers): `IUnknown` plus 64 slots, each logging its index and
+arguments and returning `E_NOTIMPL`; `E_POINTER` when the output is not writable. `XGSuggestSwizzleMode` returns 0, taken
+as the linear/standard mode, the one a title can always read back without detiling.
+
+xmem additions (`src/xmem_title.cpp`; the reference pages are login-gated, so these are assumptions too):
+`XMemVirtualAlloc` is `VirtualAlloc`-like, reads any allocation-type bit `VirtualAlloc` lacks as XMEM_MAPPABLE or
+64 KiB pages (stripped, size rounded to 64 KiB) and makes a plain reservation that `XMemMapPhysicalPages` adopts;
+`XMemMapPhysicalPagesScatter(addresses, count, pages)` is `MapUserPhysicalPagesScatter`-like, one 64 KiB page per entry
+(a null array or a zero entry unmaps, so physical page 0 cannot be mapped by it); `XMemTransferMemory` logs its
+arguments and returns TRUE without moving anything; `XMemIsToolsMemAvailable` returns FALSE. GPU-visible memory still
+enters through `XMemAlloc` and physical mappings (the title GPU registry); committed `XMemVirtualAlloc` memory is not
+registered.
+
 ## 3. Graphics: console D3D12 over desktop D3D12
 
 The console D3D12 surface beyond the public desktop API is **not publicly documented**. What we may use:

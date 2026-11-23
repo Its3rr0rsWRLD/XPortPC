@@ -1,0 +1,5 @@
+; Import library for tests/native/console_title.cpp: the console DLL name xg_xs and the names it imports.
+LIBRARY xg_xs
+EXPORTS
+    XGCreateTextureComputer
+    XGSuggestSwizzleMode

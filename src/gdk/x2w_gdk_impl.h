@@ -15,6 +15,31 @@
 
 extern "C" {
 
+// acphal
+X2W_GDK_API HRESULT x2w_impl_AcpHalAllocateShapeContexts(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_AcpHalCreate(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_AcpHalReleaseShapeContexts(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uintptr_t x2w_impl_ApuAlloc(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uintptr_t x2w_impl_ApuCreateHeap(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_ApuFree(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API BOOL x2w_impl_ApuIsVirtualAddressValid(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uintptr_t x2w_impl_ApuMapApuAddress(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uintptr_t x2w_impl_ApuMapVirtualAddress(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+
+// chad
+X2W_GDK_API HRESULT x2w_impl_XDspActivate(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XDspConnectWithMaximumStreamLimit(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XDspDeactivate(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XDspDisconnect(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XDspSubmitCommand(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+
+// xapu
+X2W_GDK_API HRESULT x2w_impl_XApuConnect(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XApuDequeueResult(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XApuDisconnect(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API HRESULT x2w_impl_XApuEnqueueCommand(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uint32_t x2w_impl_XApuGetResultCount(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+
 // xtaskqueue
 X2W_GDK_API HRESULT x2w_impl_XAsyncGetStatus(XAsyncBlock* asyncBlock, bool wait) noexcept;
 X2W_GDK_API HRESULT x2w_impl_XAsyncGetResultSize(XAsyncBlock* asyncBlock, size_t* bufferSize) noexcept;
@@ -24,6 +49,13 @@ X2W_GDK_API HRESULT x2w_impl_XAsyncBegin(XAsyncBlock* asyncBlock, void* context,
 X2W_GDK_API HRESULT x2w_impl_XAsyncSchedule(XAsyncBlock* asyncBlock, uint32_t delayInMs) noexcept;
 X2W_GDK_API void x2w_impl_XAsyncComplete(XAsyncBlock* asyncBlock, HRESULT result, size_t requiredBufferSize) noexcept;
 X2W_GDK_API HRESULT x2w_impl_XAsyncGetResult(XAsyncBlock* asyncBlock, const void* identity, size_t bufferSize, void* buffer, size_t* bufferUsed) noexcept;
+
+// xcrdapi
+X2W_GDK_API HRESULT x2w_impl_DStorageGetFactory(REFIID riid, void** factory) noexcept;
+
+// xg
+X2W_GDK_API HRESULT x2w_impl_XGCreateTextureComputer(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
+X2W_GDK_API uint32_t x2w_impl_XGSuggestSwizzleMode(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5) noexcept;
 
 // xgameruntime
 X2W_GDK_API HRESULT x2w_impl_XGameRuntimeInitialize(void) noexcept;

@@ -13,6 +13,8 @@
 //                                      VirtualAlloc there fails), allocations are carved from it and coalesce back
 //   xmem_title_check hooks             XMemSetAllocationHooks: routing, chaining to the defaults, adoption of hook
 //                                      memory as GPU-visible, refusal of a non-code routine, restoring the defaults
+//   xmem_title_check virtual_scatter   XMemVirtualAlloc, XMemMapPhysicalPagesScatter, XMemTransferMemory,
+//                                      XMemIsToolsMemAvailable (assumed contracts, src/xmem_title.cpp)
 //   xmem_title_check physical          XMemAllocatePhysicalPages / XMemMapPhysicalPages / XMemFreePhysicalPages: two
 //                                      addresses showing one page, remapping, 4 MB runs, adopted reservations,
 //                                      refusals, zeroing on reuse
@@ -511,6 +513,60 @@ bool physical()
     return !failed;
 }
 
+// --- XMemVirtualAlloc, scatter mapping and the two small calls (assumed contracts) ------------------------------------
+bool virtual_scatter()
+{
+    ULONG_PTR pages[4] = {};
+    ULONG_PTR count = 4;
+    expect(XMemAllocatePhysicalPages(MEM_64K_PAGES, &count, pages) && count == 4, "four pages");
+    std::vector<ULONG_PTR> nz;  // the scatter call reads a zero entry as "unmap"
+    for (ULONG_PTR p : pages) if (p) nz.push_back(p);
+    expect(nz.size() >= 3, "three non-zero page numbers");
+    if (nz.size() < 3) return false;
+    // An unknown allocation-type bit is read as the mappable flag: stripped, a 64 KiB aligned plain reservation.
+    constexpr DWORD mappable = 0x40000000;
+    auto* base = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 3 * 64 * KiB + 1, MEM_RESERVE | mappable, PAGE_NOACCESS));
+    expect(base && addr(base) % (64 * KiB) == 0 && logs.has("XMEM_MAPPABLE"), "a mappable reservation");
+    if (!base) return false;
+    MEMORY_BASIC_INFORMATION info{};
+    expect(VirtualQuery(base, &info, sizeof(info)) && info.State == MEM_RESERVE && info.RegionSize >= 4 * 64 * KiB,
+           "reserved, rounded up to 64 KiB pages");
+    PVOID where[2] = {base, base + 2 * 64 * KiB};
+    ULONG_PTR same[2] = {nz[0], nz[0]};
+    expect(XMemMapPhysicalPagesScatter(where, 2, same), "scatter maps");
+    base[7] = 0x5a;
+    expect(base[2 * 64 * KiB + 7] == 0x5a, "two addresses, one page");
+    expect(describe(base).backing == X2W_XMEM_BACKING_PHYSICAL && describe(base).physical_page == nz[0] &&
+               query(base).tail[0] == 1, "described and GPU-registered");
+    // A second page at the middle address, then both unmaps (zero entry, null array).
+    PVOID middle[1] = {base + 64 * KiB};
+    ULONG_PTR other[1] = {nz[1]};
+    expect(XMemMapPhysicalPagesScatter(middle, 1, other) && describe(base + 64 * KiB).physical_page == nz[1], "one more");
+    ULONG_PTR zero[2] = {0, nz[0]};
+    expect(XMemMapPhysicalPagesScatter(where, 2, zero) && describe(base).backing == X2W_XMEM_BACKING_NONE &&
+               describe(base + 2 * 64 * KiB).backing == X2W_XMEM_BACKING_PHYSICAL, "a zero entry unmaps one address");
+    PVOID all[3] = {base, base + 64 * KiB, base + 2 * 64 * KiB};
+    expect(XMemMapPhysicalPagesScatter(all, 3, nullptr) && describe(base + 64 * KiB).backing == X2W_XMEM_BACKING_NONE &&
+               describe(base + 2 * 64 * KiB).backing == X2W_XMEM_BACKING_NONE, "a null page array unmaps all");
+    // Refusals change nothing: a null array, an unaligned address (after a good one), an unallocated page.
+    PVOID unaligned[2] = {base, base + 4096};
+    ULONG_PTR pair[2] = {nz[0], nz[1]};
+    ULONG_PTR unknown[1] = {1u << 30};
+    expect(!XMemMapPhysicalPagesScatter(nullptr, 1, pair) && !XMemMapPhysicalPagesScatter(unaligned, 2, pair) &&
+               describe(base).backing == X2W_XMEM_BACKING_NONE && !XMemMapPhysicalPagesScatter(where, 1, unknown),
+           "refusals");
+    expect(XMemMapPhysicalPagesScatter(where, 0, pair), "zero entries succeed");
+    // Plain committed memory.
+    auto* plain = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 64 * KiB, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    expect(plain && (plain[5] = 1, plain[5] == 1), "committed memory is usable");
+    if (plain) VirtualFree(plain, 0, MEM_RELEASE);
+    expect(XMemVirtualAlloc(nullptr, 0, MEM_RESERVE, PAGE_NOACCESS) == nullptr, "zero size refused");
+    expect(XMemTransferMemory(1, 2, 3, 4) && logs.has("XMemTransferMemory"), "transfer: logged, TRUE");
+    expect(!XMemIsToolsMemAvailable(), "no tools memory");
+    VirtualFree(base, 0, MEM_RELEASE);
+    return !failed;
+}
+
 // --- write watch -------------------------------------------------------------------------------------------------------
 struct Runs {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;
@@ -803,6 +859,7 @@ int main(int argc, char** argv)
     else if (scenario == "reserve") rc = reserve() ? 0 : 1;
     else if (scenario == "hooks") rc = hooks() ? 0 : 1;
     else if (scenario == "physical") rc = physical() ? 0 : 1;
+    else if (scenario == "virtual_scatter") rc = virtual_scatter() ? 0 : 1;
     else if (scenario == "write_watch") rc = write_watch() ? 0 : 1;
     else if (scenario == "large_pages") rc = large_pages() ? 0 : 1;
     else if (scenario == "config") rc = configuration() ? 0 : 1;

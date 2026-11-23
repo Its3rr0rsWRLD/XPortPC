@@ -1,0 +1,36 @@
+# Console audio processing unit. No public documentation: see chad.toml.
+# Format: see xgameruntime.toml; `dll` makes tools/shimgen.py --family-dlls generate xapu.dll from this file.
+family = "xapu"
+dll = "xapu.dll"
+undocumented = true
+forward_default = false
+
+[[functions]]
+name = "XApuConnect"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XApuDequeueResult"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XApuDisconnect"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XApuEnqueueCommand"
+returns = "HRESULT"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
+
+[[functions]]
+name = "XApuGetResultCount"
+returns = "uint32_t"
+params = "uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5"
+impl = true
