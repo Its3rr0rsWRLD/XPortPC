@@ -290,8 +290,11 @@ bool reserve()
     X2WXMemGetWindows(w, 2, &required);
     expect(w[0].begin == 0x300000000000ull && w[0].end == 0x300040000000ull && w[1].begin == 0x310000000000ull,
            "the configured windows");
-    expect(logs.has("graphics [0x300000000000, 0x300040000000) reserved 1073741824 bytes"),
-           "the whole graphics window was reserved and logged");
+    // The reservation ran while xmem.dll loaded (before this test's log sink existed), so check the address space.
+    MEMORY_BASIC_INFORMATION held{};
+    VirtualQuery(reinterpret_cast<void*>(0x300000000000ull), &held, sizeof(held));
+    std::printf("window_state=0x%lx region=%zu\n", held.State, static_cast<std::size_t>(held.RegionSize));
+    expect(held.State == MEM_RESERVE && held.RegionSize == 1 * GiB, "the whole graphics window is one placeholder");
     // Nobody else can take the window now.
     void* foreign = VirtualAlloc(reinterpret_cast<void*>(0x300010000000ull), 64 * KiB, MEM_RESERVE | MEM_COMMIT,
                                  PAGE_READWRITE);
