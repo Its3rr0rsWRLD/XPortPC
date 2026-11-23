@@ -84,8 +84,8 @@ FormatInfo classify(const void* wfx, size_t available) {
     const size_t total = kWfxSize + h.cb_size;
     const bool readable = !available || available >= total;
     if (h.tag == 0xFFFE) {
-        // WAVEFORMATEXTENSIBLE: 22 extra bytes, the sub-format GUID starts at +8; its Data1 low word is the tag.
-        if (h.cb_size >= 22 && readable) info.tag = rd<uint16_t>(p + kWfxSize + 8);
+        // WAVEFORMATEXTENSIBLE: 22 extra bytes, the sub-format GUID starts at +6 (after Samples and the channel mask); its Data1 low word is the tag.
+        if (h.cb_size >= 22 && readable) info.tag = rd<uint16_t>(p + kWfxSize + 6);
         else return info;
     }
     info.format = from_tag(info.tag);

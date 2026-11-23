@@ -67,6 +67,7 @@ int main(int argc, char** argv) {
     CHECK(region != nullptr);
     std::memset(region, 0xEE, 1 << 20);
     std::vector<uint8_t> host_buf(20000, 0xEE);
+    std::vector<uint8_t> scratch(20000, 0);
 
     set_resolver(nullptr);
     register_decompressor(kCustom0, [](const void* in, size_t in_size, void* out, size_t out_size) {
@@ -110,6 +111,7 @@ int main(int argc, char** argv) {
         f.user = 6;
         Request g = a;  // read past the end of the file
         g.offset = kSize - 10;
+        g.dest_memory = scratch.data();
         g.user = 7;
         for (const auto& r : {a, b, c, d, e, f, g}) q.enqueue(r);
         const auto res = q.submit_and_wait();

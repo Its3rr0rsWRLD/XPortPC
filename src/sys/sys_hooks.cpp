@@ -62,12 +62,14 @@ void clean_temp_folder() {
     auto& map = paths::global_map();
     const auto r = map.remap(L"T:\\");
     if (!r.remapped) return;
+    std::wstring path = r.path;
+    while (path.size() > 3 && path.back() == L'\\') path.pop_back();
     const std::wstring expect = map.context().local_app_data + L"\\XPortPC\\" + map.context().title_name + L"\\temp";
-    if (_wcsicmp(r.path.c_str(), expect.c_str()) != 0) return;  // a user rule points T: elsewhere: leave it alone
-    const DWORD a = GetFileAttributesW(r.path.c_str());
+    if (_wcsicmp(path.c_str(), expect.c_str()) != 0) return;  // a user rule points T: elsewhere: leave it alone
+    const DWORD a = GetFileAttributesW(path.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return;
-    remove_tree(r.path);
-    log("paths: cleared temporary storage %s (T: is deleted when a title ends)", narrow(r.path).c_str());
+    remove_tree(path);
+    log("paths: cleared temporary storage %s (T: is deleted when a title ends)", narrow(path).c_str());
 }
 }  // namespace x2w_sys
 

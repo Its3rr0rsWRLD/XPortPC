@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         CHECK(classify(adpcm.data(), adpcm.size()).format == Format::AdPcm);
         auto flt = wfx(3, 1, 48000, 32);
         CHECK(classify(flt.data(), flt.size()).format == Format::Float);
-        // Extensible with a PCM sub-format: tag is the first word of the sub-format GUID (at +8 of the extra bytes).
+        // Extensible with a PCM sub-format: tag is the first word of the sub-format GUID (at +6 of the extra bytes).
         auto ext = wfx(0xFFFE, 6, 48000, 24, 22);
         put<uint16_t>(ext, 24);   // valid bits
         put<uint32_t>(ext, 0x3F); // channel mask
