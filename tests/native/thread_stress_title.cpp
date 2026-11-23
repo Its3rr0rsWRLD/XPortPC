@@ -44,7 +44,8 @@ void NTAPI stress_tls(PVOID, DWORD reason, PVOID) {
         ++callbacks;
         if (t_value != kTemplate || t_pad[0] != 7 || t_local.magic != kMagic || t_local.name != "local") ++failures;
     } else if (reason == DLL_THREAD_DETACH) {
-        if (t_pad[0] != 7 || t_local.magic != kMagic) ++failures;
+        // The runtime's thread_local destructors (an earlier callback) have run; trivial data is still there.
+        if (t_pad[0] != 7) ++failures;
     }
 }
 
