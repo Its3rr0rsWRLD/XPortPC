@@ -1,4 +1,6 @@
-// Draw check for translated vertex shaders (cards V-1 to V-3, docs/design/vertex-stage.md "Testing bit-exactly").
+// Draw check for translated vertex shaders (cards V-1 to V-3, docs/design/vertex-stage.md "Testing bit-exactly"), and
+// for translated vertex and geometry shader pairs (card G-1, docs/design/stages.md): the same case file with a GS
+// output count in header word 20, drawn as a triangle list whose GS output stream output captures.
 // The translated VS runs over a point list with no pixel shader. Stream output captures SV_Position and every
 // TEXCOORDn of each vertex in draw order, and every captured dword is compared bit for bit with the case's reference.
 // The draw is issued with base vertex and start instance 0; the console's base-vertex and start-instance user SGPRs
@@ -19,12 +21,16 @@ namespace {
 //               start instance (b2 word 1), push-word count W (0..32), distance-vector count D (0..2), the D
 //               distance codes in words 17..18 (kind << 8 | semantic index; kind 1 SV_ClipDistance, 2
 //               SV_CullDistance; index 0 or 1), the constant word count C in word 19 (0 for 64, else a multiple of 4
-//               from 64 to 16384: at most 4096 uint4, a D3D12 constant buffer), then zero words; V * I is at most 4096
+//               from 64 to 16384: at most 4096 uint4, a D3D12 constant buffer), the geometry output count G in word
+//               20 (0: a vertex case; else V is a multiple of 3 drawn as a triangle list through the GS, with I 1,
+//               not indexed, no distance vectors, and G records captured, at most 4096), then zero words; V * I is at
+//               most 4096
 //   constants[C]: the b0 words (constant-buffer data)
 //   descriptors[64]: the b4 words (runtime V# words)
 //   push[W]: the b3 words (the rest of the 32 are zero)
 //   indices[V] if indexed: the R32 index buffer, one index per vertex of an instance
-//   expected[V * I * 4 * (1 + D + P)]: per record (instance-major) SV_Position.xyzw, each distance vector's xyzw,
+//   expected[V * I * 4 * (1 + D + P)] (G * 4 * (1 + P) for a geometry case): per record (instance-major, or in GS
+//               append order) SV_Position.xyzw, each distance vector's xyzw,
 //               then each TEXCOORD's xyzw, in header order
 //   mask[same count]: the bits of each dword that are compared (0 for a channel the shader exported as `off`)
 //   then optionally the 'X2WM' title-memory section of tests/pixel_aot_render.cpp.
@@ -42,7 +48,7 @@ struct TitleRangeRecord {
 static_assert(sizeof(TitleRangeRecord) == 24);
 
 struct VertexCase {
-    UINT records = 0, baseVertex = 0, instances = 1, startInstance = 0;
+    UINT records = 0, baseVertex = 0, instances = 1, startInstance = 0, geometryRecords = 0;
     bool indexed = false;
     std::vector<UINT> params, distances;
     std::vector<Word> constants = std::vector<Word>(64), descriptors = std::vector<Word>(64);
@@ -148,7 +154,13 @@ VertexCase read_case(const char* path)
             throw BadCase("Vertex case unused distance code is not zero");
         }
     }
-    for (UINT i = 20; i < headerWords; ++i)
+    c.geometryRecords = header[20];
+    if (c.geometryRecords) {
+        if (c.geometryRecords > maxRecords) throw BadCase("Geometry case output count is above 4096");
+        if (c.records % 3 || c.instances != 1 || c.indexed || distances)
+            throw BadCase("Geometry case is not one non-indexed triangle list without distance vectors");
+    }
+    for (UINT i = 21; i < headerWords; ++i)
         if (header[i]) throw BadCase("Vertex case reserved header words are not zero");
     const UINT constantWords = header[19] ? header[19] : 64;
     if (constantWords < 64 || constantWords > maxConstantWords || constantWords % 4)
@@ -158,14 +170,15 @@ VertexCase read_case(const char* path)
     const auto pushed = words(push, "the push words");
     std::copy(pushed.begin(), pushed.end(), c.push.begin());
     if (c.indexed) c.indices = words(c.records, "the indices");
-    const size_t dwords = size_t(c.records) * c.instances * 4 * (1 + distances + params);
+    const size_t dwords = size_t(c.geometryRecords ? c.geometryRecords : c.records * c.instances) * 4 *
+                          (1 + distances + params);
     c.expected = words(dwords, "the expected outputs");
     c.mask = words(dwords, "the compare mask");
     if (at != bytes.size()) parse_memory(bytes.data() + at, bytes.size() - at, c);
     return c;
 }
 
-ComPtr<ID3D12RootSignature> vertex_root(ID3D12Device* device)
+ComPtr<ID3D12RootSignature> vertex_root(ID3D12Device* device, D3D12_SHADER_VISIBILITY visibility)
 {
     // b0 constants, t2 title ranges, t0..t7 space1 title memory, b1 range count, b2 base vertex and start instance,
     // b3 push words, b4 V# words; visible to the VS.
@@ -185,7 +198,7 @@ ComPtr<ID3D12RootSignature> vertex_root(ID3D12Device* device)
     params[5].Constants = {3, 0, pushWords};
     params[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[6].Descriptor = {4, 0};
-    for (auto& param : params) param.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    for (auto& param : params) param.ShaderVisibility = visibility;
     D3D12_ROOT_SIGNATURE_DESC desc{7, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT};
     ComPtr<ID3DBlob> blob, error;
     if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error))) {
@@ -200,14 +213,26 @@ ComPtr<ID3D12RootSignature> vertex_root(ID3D12Device* device)
 }
 }
 
-void check_translated_vertex(ID3D12Device* device, const char* shader, const char* casePath)
+namespace {
+std::vector<char> read_shader(const char* path, const char* what)
+{
+    std::ifstream file(path, std::ios::binary);
+    std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
+    if (bytes.empty() || file.bad()) throw std::runtime_error(std::string("Cannot read compiled ") + what);
+    return bytes;
+}
+
+void draw_case(ID3D12Device* device, const char* shader, const char* geometry, const char* casePath)
 {
     const VertexCase c = read_case(casePath);
-    std::ifstream file(shader, std::ios::binary);
-    std::vector<char> vs{std::istreambuf_iterator<char>(file), {}};
-    if (vs.empty() || file.bad()) throw std::runtime_error("Cannot read compiled vertex shader");
+    const std::vector<char> vs = read_shader(shader, "vertex shader");
+    std::vector<char> gs;
+    if (geometry) gs = read_shader(geometry, "geometry shader");
+    if (bool(geometry) != bool(c.geometryRecords))
+        throw BadCase("A geometry case needs a geometry shader, and a vertex case none");
 
-    auto root = vertex_root(device);
+    // A geometry case binds the same parameters for both stages (the ES and GS halves read the same user data).
+    auto root = vertex_root(device, geometry ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX);
     std::vector<D3D12_SO_DECLARATION_ENTRY> entries;
     entries.push_back({0, "SV_Position", 0, 0, 4, 0});
     for (UINT code : c.distances)
@@ -217,15 +242,17 @@ void check_translated_vertex(ID3D12Device* device, const char* shader, const cha
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
     desc.pRootSignature = root.Get();
     desc.VS = {vs.data(), vs.size()};
+    if (geometry) desc.GS = {gs.data(), gs.size()};
     desc.StreamOutput = {entries.data(), static_cast<UINT>(entries.size()), &stride, 1, D3D12_SO_NO_RASTERIZED_STREAM};
     desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     desc.RasterizerState.DepthClipEnable = TRUE;
     desc.SampleMask = UINT_MAX;
-    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    desc.PrimitiveTopologyType = geometry ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
     desc.SampleDesc.Count = 1;
     ComPtr<ID3D12PipelineState> pso;
-    check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)), "Translated vertex pipeline");
+    check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)),
+          geometry ? "Translated geometry pipeline" : "Translated vertex pipeline");
 
     // Title memory, bound as in the pixel harness: without a section every slot views one small zero buffer.
     std::vector<TitleRangeRecord> rangeRecords = c.ranges;
@@ -259,7 +286,7 @@ void check_translated_vertex(ID3D12Device* device, const char* shader, const cha
     // Stream-output target: the filled-size counter in the first 256 bytes, then the records. The records start as a
     // pattern no output reproduces by accident, so a record the draw did not write cannot match a reference.
     constexpr UINT64 counterBytes = 256;
-    const UINT64 dataBytes = UINT64(c.records) * c.instances * stride;
+    const UINT64 dataBytes = UINT64(c.geometryRecords ? c.geometryRecords : c.records * c.instances) * stride;
     std::vector<Word> initial((counterBytes + dataBytes) / 4, 0xa5a5a5a5u);
     std::fill(initial.begin(), initial.begin() + counterBytes / 4, 0u);
     auto initialUpload = upload(device, initial);
@@ -291,7 +318,7 @@ void check_translated_vertex(ID3D12Device* device, const char* shader, const cha
     const D3D12_RECT scissor{0, 0, 1, 1};
     list->RSSetViewports(1, &viewport);
     list->RSSetScissorRects(1, &scissor);
-    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+    list->IASetPrimitiveTopology(geometry ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST : D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
     if (c.indexed) {
         const D3D12_INDEX_BUFFER_VIEW ibv{indexBuffer->GetGPUVirtualAddress(), c.records * 4u, DXGI_FORMAT_R32_UINT};
         list->IASetIndexBuffer(&ibv);
@@ -307,7 +334,8 @@ void check_translated_vertex(ID3D12Device* device, const char* shader, const cha
     if (words[0] != dataBytes) {
         std::fprintf(stderr, "vertex_count_mismatch filled_bytes=%u expected_bytes=%llu\n", words[0],
                      static_cast<unsigned long long>(dataBytes));
-        throw std::runtime_error("Stream output did not capture one record per vertex");
+        throw std::runtime_error(geometry ? "Stream output did not capture the expected GS records"
+                                          : "Stream output did not capture one record per vertex");
     }
     const UINT perRecord = stride / 4;
     unsigned mismatches = 0;
@@ -322,5 +350,20 @@ void check_translated_vertex(ID3D12Device* device, const char* shader, const cha
         std::fprintf(stderr, "vertex_mismatches=%u\n", mismatches);
         throw std::runtime_error("Translated vertex outputs differ from the reference");
     }
-    std::printf("records=%u instances=%u dwords=%zu mismatches=0\n", c.records, c.instances, c.expected.size());
+    if (geometry)
+        std::printf("input_vertices=%u gs_records=%u dwords=%zu mismatches=0\n", c.records, c.geometryRecords,
+                    c.expected.size());
+    else
+        std::printf("records=%u instances=%u dwords=%zu mismatches=0\n", c.records, c.instances, c.expected.size());
+}
+}
+
+void check_translated_vertex(ID3D12Device* device, const char* shader, const char* casePath)
+{
+    draw_case(device, shader, nullptr, casePath);
+}
+
+void check_translated_geometry(ID3D12Device* device, const char* shader, const char* geometry, const char* casePath)
+{
+    draw_case(device, shader, geometry, casePath);
 }
