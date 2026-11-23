@@ -3281,6 +3281,10 @@ if(TARGET pe_map AND TARGET xmem_shim)
     target_compile_features(x2w_launch PRIVATE cxx_std_17)
     # No implicit TLS of its own: x2w_launch hands TLS slot 0 to the program (tools/x2w_launch.cpp, "slot 0").
     target_compile_options(x2w_launch PRIVATE /Zc:threadSafeInit-)
+    # The program runs on this process's main thread, and its threads created with a default stack size take this
+    # image's reserve. Console titles expect larger stacks than the desktop's 1 MiB default (a real title overflowed
+    # the main thread at boot), so reserve 64 MiB (address space only; commit grows on demand).
+    target_link_options(x2w_launch PRIVATE /STACK:0x4000000,0x100000)
     add_dependencies(x2w_launch pe_map)
     set(x2w_missing_lib "${CMAKE_CURRENT_BINARY_DIR}/x2w_missing.lib")
     add_custom_command(OUTPUT "${x2w_missing_lib}"
