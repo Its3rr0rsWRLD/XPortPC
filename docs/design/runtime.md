@@ -288,6 +288,23 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
 
 Measured numbers are in [experiments.md](../experiments.md#translator-service-and-ahead-of-time-cache-runtime-rung-r3).
 
+**Pixel input layout.** A pixel program's input VGPRs are set by SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR
+([pixel-bindings.md](pixel-bindings.md#input-vgprs)). Container version 2 (`X2W_SHADER_CONTAINER_VERSION`,
+`src/d3d12_xs_api.h`) lets a pixel container point `stage_info_offset` at an `X2WShaderPixelInfo` record holding both
+words (ADDR 0 meaning equal to ENA); `parse_container` refuses bits above 15 as malformed and leaves the rest of the
+check (ENA a subset of ADDR, a barycentric input) to the translator, which refuses with its reason. The shim adds
+`"ps_input_ena"` (and `"ps_input_addr"` when it differs) to the pixel roles only when the layout is not the default,
+persp_center alone, so the roles, keys and input ids of every container without a record, and of every version 1
+container, are unchanged. The roles are part of the key and of the manifest's input id, so the translator service and
+`tools/precompile_cache.py` receive the layout with them (`tools/pso_translate.py` passes it to `PixelBindings`); the
+converter fingerprint's tag is `x2w-pso-translate-6` in the shim and in `tools/pso_cache.py`. A version 1 container
+with a nonzero pixel `stage_info_offset` is still malformed. Tests: `tests/runtime/psin_scene.cpp` (a pixel program
+reading pos_x, pos_y, pos_z and front_face, two triangles of either facing at depths 0.25 and 0.75 into an
+R32G32B32A32_FLOAT target, bit for bit against a CPU reference; wrong references for the pixel corner, a flipped
+face, z ignored and w for z; refused controls for a version 1 container, an ADDR that also reserves pos_w, a version 1
+record and high bits), `tests/runtime/psin_programs_check.py` (the program and the roles offline). R3 keeps writing
+version 1 containers.
+
 ### The rest of the public desktop surface
 
 Titles query later interface versions and call their methods, so the wrappers cover the public desktop D3D12 surface in

@@ -65,7 +65,8 @@ struct TitleMemory {
 
 // A texture of the 'X2WD' section (tests/pixel_aot_draws/texdims.py, docs/design/pixel-bindings.md): an R8G8B8A8_UNORM
 // 2D array (kind 1), the six faces of a cube as a 2D array (kind 2, bound as the Texture2DArray view a cube T# is
-// translated to) or a 3D texture (kind 3), replacing the view of its texture slot. levels: the mip levels of an array
+// translated to), a 3D texture (kind 3) or the 6 N faces of a cube array as a 2D array (kind 4, cube n at slices
+// 6 n .. 6 n + 5, the Texture2DArray view a cube-array T# is translated to), replacing the view of its texture slot. levels: the mip levels of an array
 // or cube (1 when the header leaves it zero; a 3D texture has one). texels: for each slice, each of its levels from the
 // largest, height rows of width texels (halved per level, at least 1), packed.
 struct ShapedTexture {
@@ -1073,7 +1074,8 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
         }
         // The optional 'X2WD' section of textures of other dimensions (tests/pixel_aot_draws/texdims.py), after the
         // bindings section: magic, a texture count N (1..8) and two zero words, then N headers of eight words (slot
-        // 0..7, kind 1 = 2D array, 2 = cube faces, 3 = 3D, width, height, depth or slice count, the mip level count
+        // 0..7, kind 1 = 2D array, 2 = cube faces, 3 = 3D, 4 = cube-array faces (a multiple of 6), width, height,
+        // depth or slice count, the mip level count
         // (0 or 1: one level; an array or cube may have more) and two zero words), then the R8G8B8A8 texels of each
         // texture in header order (see ShapedTexture).
         if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x44573258u) {
@@ -1093,9 +1095,10 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
                                    shape.depth && shape.depth <= 64;
                 UINT possible = 1;
                 for (UINT longest = (std::max)(shape.width, shape.height); longest > 1; longest >>= 1) ++possible;
-                if (shape.slot > 7 || shape.kind < 1 || shape.kind > 3 || !sized || header[6] || header[7] ||
+                if (shape.slot > 7 || shape.kind < 1 || shape.kind > 4 || !sized || header[6] || header[7] ||
                     shape.levels > possible || (shape.kind == 3 && shape.levels != 1) ||
-                    (shape.kind == 2 && (shape.depth != 6 || shape.width != shape.height)))
+                    (shape.kind == 2 && (shape.depth != 6 || shape.width != shape.height)) ||
+                    (shape.kind == 4 && (shape.depth % 6 || shape.width != shape.height)))
                     throw BadCase("Invalid texture dimension header");
                 for (const auto& other : shaped)
                     if (&other != &shape && other.kind && other.slot == shape.slot)

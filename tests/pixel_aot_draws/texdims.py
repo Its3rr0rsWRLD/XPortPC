@@ -372,7 +372,9 @@ def controls(directory):
             **{**bindings_for("cube").__dict__, "dimensions": {0: (0, 0, 0, k << 28, 0, 0, 0, 0)}})))
     refuses("A texture dimension", CUBE, lambda p: lower(p, bindings=PixelBindings(
         **{**bindings_for("cube").__dict__, "dimensions": {1: "cube"}})))
-    refuses("A texture dimension", CUBE, translate_dim("cube_array"))
+    refuses("A texture dimension", CUBE, translate_dim("cube_arrays"))
+    # "cube_array" (the cube_array family) is the same Texture2DArray binding as "cube".
+    assert translate_dim("cube_array")(CUBE) == cube
     # The corpus derivation reads each T#'s dimension off the instruction that first samples it.
     for program, dimension in ((ARRAY, "2d_array"), (CUBE, "cube"), (VOLUME, "3d")):
         derived = corpus_translate.derive_bindings(program)

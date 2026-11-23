@@ -10,7 +10,11 @@ with libLLVM when --llvm is given, otherwise with tools/gfx_text.py. ROLES.json 
 from the container and the pipeline:
     vertex: {"user_sgprs": {"2": {"role": "inline", "word": 0}, "4": {"role": "base_vertex"},
                             "5": {"role": "start_instance"}, "6": {"role": "descriptors", "set": 0}, ...}}
-    pixel:  {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:2"}}
+    pixel:  {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:2"},
+             "ps_input_ena": 5890, "ps_input_addr": 7938}
+            (ps_input_ena, ps_input_addr: the input-VGPR layout of a version 2 container's X2WShaderPixelInfo,
+            SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR, PixelBindings.ps_input_ena/addr; present only when the layout is
+            not the default persp_center alone, ps_input_addr only when it differs from ps_input_ena)
     compute: {"sgprs": {"s2": "user:0", "s7": "group_id.x"}, "numthreads": [4, 1, 1], "wave": 32, "local_ids": 1}
             (rung R5: tools/compute_aot.py's entry-SGPR roles; user:N is push word N)
 A descriptor-table SGPR (rung R4) holds the low word of the table's address; the program completes the pair with a
@@ -312,11 +316,17 @@ def lower(stage, instructions, roles):
             raise ValueError(f"push words beside {CONSTANT_SLOTS} constant-buffer V#s in a pixel program; the "
                              f"converter's binding description has {CONSTANT_SLOTS} constant slots in all")
     # The pixel stage's V# words follow the vertex stage's in the one descriptor-words buffer.
+    inputs = {}
+    for name in ("ps_input_ena", "ps_input_addr"):
+        if name in roles:
+            if not isinstance(roles[name], int) or isinstance(roles[name], bool):
+                raise ValueError(f"{name} must be an integer (SPI_PS_INPUT_ENA/ADDR)")
+            inputs[name] = roles[name]
     description = PixelBindings(sgprs=sgprs, textures=textures, samplers=samplers, constant_buffers=constants,
                                 push_constants=push, buffers={k: w + PIXEL_BUFFER_WORDS for k, w in buffers.items()},
                                 buffer_words="vsharp_words",
                                 constant_sizes=dict(derived.constant_sizes) if tables else {},
-                                **({"descriptor_high": high} if high is not None else {}))
+                                **({"descriptor_high": high} if high is not None else {}), **inputs)
     description.check()
     refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(textures.items())]
     refs += [("sampler", slot, key // SET_STRIDE, key % SET_STRIDE, 0)

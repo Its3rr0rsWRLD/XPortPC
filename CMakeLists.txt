@@ -181,6 +181,13 @@ target_include_directories(r3_triangle PRIVATE src)
 target_compile_features(r3_triangle PRIVATE cxx_std_17)
 target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
+# The runtime pixel input layout (tests/runtime/psin_scene.cpp, psin_ps.s, psin_programs.h): a pixel program that
+# reads SV_Position and the front face from a version 2 container's X2WShaderPixelInfo.
+add_executable(psin_scene tests/runtime/psin_scene.cpp)
+target_include_directories(psin_scene PRIVATE src)
+target_compile_features(psin_scene PRIVATE cxx_std_17)
+target_link_libraries(psin_scene PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+
 # GFX10/GFX10.3 texture detiling (src/gfx10_addr.h, src/gfx10_detile.h; docs/design/runtime.md, "Textures:
 # detiling"), ported from AMD's addrlib in Mesa (MIT). No D3D12 dependency; checked against addrlib itself on Linux
 # by tests/gfx10_addr_oracle_check.py. gfx10_detile_roundtrip: tile/detile round trips and controls, CPU only.
@@ -2874,6 +2881,23 @@ if(EXISTS "${INTAKE_PYTHON}")
             endif()
         endforeach()
     endforeach()
+    # The runtime pixel input layout (tests/runtime/psin_scene.cpp): cold first (empties the cache), then the wrong
+    # references from the cache; the refused controls on WARP.
+    add_test(NAME runtime_psin_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/psin_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(psin_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/psin_cache_${adapter}")
+        add_test(NAME runtime_psin_scene_cold_${adapter} COMMAND psin_scene ${adapter} cold)
+        add_test(NAME runtime_psin_wrong_reference_${adapter} COMMAND psin_scene ${adapter} wrong_reference)
+        set_tests_properties(runtime_psin_scene_cold_${adapter} PROPERTIES FIXTURES_SETUP psin_cache_${adapter})
+        set_tests_properties(runtime_psin_wrong_reference_${adapter} PROPERTIES FIXTURES_REQUIRED psin_cache_${adapter})
+        set_tests_properties(runtime_psin_scene_cold_${adapter} runtime_psin_wrong_reference_${adapter} PROPERTIES
+            TIMEOUT 120 SKIP_RETURN_CODE 77 ENVIRONMENT "${psin_environment}" RUN_SERIAL TRUE)
+    endforeach()
+    add_test(NAME runtime_psin_refused_warp COMMAND psin_scene warp refused)
+    set_tests_properties(runtime_psin_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/psin_cache_refused")
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
