@@ -2,7 +2,7 @@
 import struct
 import subprocess
 
-from .common import byte, must_reject, translate, ubyte, with_constants
+from .common import DrawBatch, byte, must_reject, translate, ubyte, with_constants
 
 
 # Raw 32-bit words through the constant buffer, moves, selects and sign-bit operations. The constant buffer is declared
@@ -72,32 +72,25 @@ def raw_word_constants(word):
 
 
 def check_raw_word_draws(directory, compiler, renderer, backend):
-    case = directory / "raw.case"
     for index, (name, body, model, bugs) in enumerate(RAW_WORD_PROGRAMS):
         source = directory / f"raw{index}.hlsl"
         shader = directory / f"raw{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "raw")
         separated = {bug: False for bug in bugs}
         for word in RAW_WORDS:
             constants = raw_word_constants(word)
             expected = [float(byte(model(word), n)) for n in range(4)]
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode == 77:  # no adapter: a skip, reported by pixel_aot_check.py
-                raise subprocess.CalledProcessError(77, draw, result.stdout, result.stderr)
-            if result.returncode:
-                raise AssertionError(f"raw word {word:#010x} through {name} is not bit-exact on {backend}: "
-                                     f"{result.stdout}{result.stderr}")
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"raw word {word:#010x} through {name} is not bit-exact on {backend}")
             for bug, wrong in bugs.items():
                 if wrong(word) == model(word):
                     continue
                 separated[bug] = True
-                case.write_bytes(constants + struct.pack("<4f", *[float(byte(wrong(word), n)) for n in range(4)]) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"Wrong reference {bug} escaped detection in {name}, word {word:#010x}")
+                batch.add(constants + struct.pack("<4f", *[float(byte(wrong(word), n)) for n in range(4)]) * 64, "mismatch",
+                          f"Wrong reference {bug} escaped detection in {name}, word {word:#010x}")
+        batch.flush()
         assert all(separated.values()), (name, separated)
 
 

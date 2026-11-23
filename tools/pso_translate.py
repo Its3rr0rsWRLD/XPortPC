@@ -2,7 +2,7 @@
 
 d3d12_xs.dll runs this out of process on a cache miss:
 
-    python -B tools/pso_translate.py --stage vertex|pixel --code CODE.bin --roles ROLES.json --dxc DXC
+    python -B tools/pso_translate.py --stage vertex|pixel|compute --code CODE.bin --roles ROLES.json --dxc DXC
                                      --output OUT.dxil --bindings OUT.bind [--llvm LIBLLVM] [--hlsl OUT.hlsl]
 
 CODE.bin is the raw code of one program (the shim cut it out of the console bytecode container). It is disassembled
@@ -11,6 +11,8 @@ from the container and the pipeline:
     vertex: {"user_sgprs": {"2": {"role": "inline", "word": 0}, "4": {"role": "base_vertex"},
                             "5": {"role": "start_instance"}, "6": {"role": "descriptors", "set": 0}, ...}}
     pixel:  {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:2"}}
+    compute: {"sgprs": {"s2": "user:0", "s7": "group_id.x"}, "numthreads": [4, 1, 1], "wave": 32, "local_ids": 1}
+            (rung R5: tools/compute_aot.py's entry-SGPR roles; user:N is push word N)
 A descriptor-table SGPR (rung R4) holds the low word of the table's address; the program completes the pair with a
 constant high word. Which descriptors the program reads from each table, and as what, is read off the program
 (corpus_translate.derive_bindings: a T# where an image instruction names it, an S# where it is the sampler, a
@@ -36,6 +38,9 @@ The translated HLSL may declare only the bindings the shim fills at draw time, a
     vertex       b0 the constant buffer of a descriptor table (b0 space1000), b2 base vertex and start instance
     pixel        textures t0, t1, t3..t8 (-> space1002, one table), samplers s0..s3 (-> space1002), constant slots 0
                  to 3 (-> b0..b3 space1003), the push-word slot (-> b3 space1000, the vertex stage's push words)
+    compute      u0..u7 space1 title_memory, read-write (-> space1001, the UAV half of the title-memory table); its
+                 constant words (params, b0) are the 32 push words (-> b3 space1000), and a program that reads a
+                 word past them is refused; descriptor tables are not read by compute translations yet
 Any other declaration (storage images) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
@@ -78,6 +83,7 @@ WRITABLE_MEMORY = "RWByteAddressBuffer title_memory[8] : register(u0, space1);"
 BUFFER_CALLS = {"buffer_load32(": 0, "buffer_load_sub(": 0, "buffer_load_format(": TYPED, "buffer_store32(": STORED,
                 "buffer_store_sub(": STORED, "buffer_store_format(": TYPED | STORED}
 VSHARP_WORD = re.compile(r"vsharp_words\[(\d+)\]\.([xyzw])")
+COMPUTE_BOUND = BOUND  # u0..u7 space1, writable title memory, is in BOUND since rung R4b
 REGISTER = re.compile(r"register\(\s*([btsu])(\d+)\s*(?:,\s*space(\d+)\s*)?\)")
 CBUFFER = re.compile(r"cbuffer (\w+) : register\(b(\d+)\) \{ uint4 (\w+)\[(\d+)\]; \};")
 LOOKUP_CALL = "TitleLookup(title_ranges, title_range_count,"
@@ -161,10 +167,33 @@ def buffer_flags(source, first_word):
     return flags
 
 
+def lower_compute(instructions, roles):
+    """Rung R5: tools/compute_aot.py's lowering, without its offline root signature, its constant words moved onto
+    the push words."""
+    import compute_aot
+    numthreads = roles.get("numthreads")
+    if not isinstance(numthreads, list) or len(numthreads) != 3:
+        raise ValueError("the compute entry contract has no workgroup size")
+    source = compute_aot.lower_compute(instructions, numthreads=tuple(numthreads), wave=roles.get("wave"),
+                                       sgprs=dict(roles.get("sgprs", {})), local_ids=roles.get("local_ids", 3))
+    source, embedded = re.subn(r'^\[RootSignature\("[^"]*"\)\]\n', "", source, flags=re.M)
+    constants = "cbuffer Constants : register(b0) { uint4 params[16]; };"
+    if embedded != 1 or source.count(constants) != 1:
+        raise ValueError("compute_aot output without its root signature or constant window")
+    reads = re.findall(r"\bparams\[([^\]]*)\]", source.replace(constants, ""))
+    if any(not re.fullmatch(r"\d+", index) or int(index) >= PUSH_WORDS // 4 for index in reads):
+        raise ValueError("the program reads a constant word past the 32 push words (a descriptor-set or constant-buffer "
+                         "window is not bound by the runtime yet)")
+    source = source.replace(constants, f"cbuffer PushWords : register(b3) {{ uint4 params[{PUSH_WORDS // 4}]; }};")
+    return source, {"numthreads": numthreads}, []
+
+
 def lower(stage, instructions, roles):
     """(HLSL in converter registers, layout, descriptor-table reads [(kind, slot, set, offset, flags)])."""
     from pixel_aot_ops.bindings import SET_STRIDE
     lines = [line for line in instructions]
+    if stage == "compute":
+        return lower_compute(lines, roles)
     if stage == "vertex":
         import vertex_aot
         user = dict(roles.get("user_sgprs", {}))
@@ -285,7 +314,8 @@ def place_in_runtime_spaces(source, stage="vertex", layout=None):
             return m[0]  # already placed (a cbuffer above, the miss counter)
         if stage == "pixel" and space == 0 and (kind == "t" and number != 2 or kind == "s"):
             return f"register({kind}{number}, space{TEXTURE_SPACE})"
-        if (f"{kind}{number}", space) not in (VERTEX_BOUND if stage == "vertex" else BOUND):
+        allowed = {"vertex": VERTEX_BOUND, "compute": COMPUTE_BOUND}.get(stage, BOUND)
+        if (f"{kind}{number}", space) not in allowed:
             raise ValueError(f"the translation declares {kind}{number}" + (f", space{space}" if space else "")
                              + ", a binding the runtime does not fill yet")
         return f"register({kind}{number}, space{RUNTIME_SPACES[space]})"
@@ -314,7 +344,7 @@ def bindings_text(refs, writes=False, reads=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stage", choices=("vertex", "pixel"), required=True)
+    parser.add_argument("--stage", choices=("vertex", "pixel", "compute"), required=True)
     parser.add_argument("--code", type=Path, required=True)
     parser.add_argument("--roles", type=Path, required=True)
     parser.add_argument("--dxc", required=True)
@@ -341,7 +371,9 @@ def main():
         args.hlsl.write_text(source, encoding="utf-8")
     # The compile flags of the draw checks: IEEE strictness, and for the pixel stage binary32 denormals preserved at
     # ps_6_2 (tests/pixel_aot_draws/common.py), which also covers GetAttributeAtVertex (shader model 6.1).
-    profile = ["-T", "vs_6_0"] if args.stage == "vertex" else ["-denorm", "preserve", "-T", "ps_6_2"]
+    # The compute stage compiles as tests/compute_aot_check.py's draws do (cs_6_0).
+    profile = {"vertex": ["-T", "vs_6_0"], "compute": ["-T", "cs_6_0"]}.get(args.stage,
+                                                                         ["-denorm", "preserve", "-T", "ps_6_2"])
     with tempfile.TemporaryDirectory(dir=args.output.parent) as tmp:
         hlsl = Path(tmp) / "shader.hlsl"
         hlsl.write_text(source, encoding="utf-8")

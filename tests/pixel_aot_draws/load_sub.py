@@ -4,7 +4,7 @@ import subprocess
 import pixel_aot
 import pixel_memory_check as titlemem
 
-from .common import M32, byte, half_rtz, lower, move, must_reject, translate, with_constants
+from .common import M32, DrawBatch, byte, half_rtz, lower, move, must_reject, translate, with_constants
 from .load import (BASE0, BASE1, LOAD_MEMORY, RANGES, ZERO, effective, global_program, load_program, readback,
                    translate_loads, vsharp)
 
@@ -155,12 +155,11 @@ def channels(word):
 
 
 def run_rows(directory, compiler, renderer, backend, table, stem):
-    case = directory / f"{stem}.case"
     for index, (name, body, sets, model, flaws) in enumerate(table):
         source, shader = directory / f"{stem}{index}.hlsl", directory / f"{stem}{index}.cso"
         source.write_text(translate_loads(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, stem)
         separated = dict.fromkeys(flaws, False)
         for inputs, sharps in sets:
             words = [0] * 64
@@ -169,17 +168,16 @@ def run_rows(directory, compiler, renderer, backend, table, stem):
             expected = channels_of(model(inputs, sharps))
             for value in expected:
                 assert half_rtz(value) == value, value
-            case.write_bytes(titlemem.case_file(words, expected, LOAD_MEMORY))
-            subprocess.run(draw, check=True)
+            batch.add(titlemem.case_file(words, expected, LOAD_MEMORY), "pass",
+                      f"{name} gives a load result other than {expected} for inputs {inputs}")
             for flaw in flaws:
                 wrong = channels_of(model(inputs, sharps, {flaw}))
                 if wrong == expected or separated[flaw]:
                     continue
                 separated[flaw] = True
-                case.write_bytes(titlemem.case_file(words, wrong, LOAD_MEMORY))
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong load result escaped detection in {name}, flaw {flaw}")
+                batch.add(titlemem.case_file(words, wrong, LOAD_MEMORY), "mismatch",
+                          f"A wrong load result escaped detection in {name}, flaw {flaw}")
+        batch.flush()
         assert all(separated.values()), (name, separated)
 
 

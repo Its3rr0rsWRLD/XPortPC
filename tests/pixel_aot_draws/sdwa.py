@@ -4,7 +4,7 @@ import math
 import struct
 import subprocess
 
-from .common import half_rtz, half_value, must_reject, sdwa_readback, translate, with_constants
+from .common import DrawBatch, half_rtz, half_value, must_reject, sdwa_readback, translate, with_constants
 
 
 # SDWA moves and half widening. In SDWA_PRESERVE_BODY each move writes a 16-bit field into WORD_0 of a register
@@ -56,25 +56,23 @@ def check_sdwa_draw(directory, compiler, renderer, backend):
         shader = directory / f"{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-    case = directory / "sdwa.case"
+    batches = {name: DrawBatch(directory, renderer, backend, directory / f"{name}.cso", name) for name in ("sdwa_preserve", "sdwa_pad")}
     for body, words, expected, wrongs in SDWA_SETS:
         assert sdwa_reference(body, words) == expected, (words, expected)
-        shader = directory / ("sdwa_preserve.cso" if body is SDWA_PRESERVE_BODY else "sdwa_pad.cso")
+        batch = batches["sdwa_preserve" if body is SDWA_PRESERVE_BODY else "sdwa_pad"]
         constants = bytearray(256)
         struct.pack_into("<3I", constants, 12, *words)
         for x in (*expected, *(value for _, value in wrongs)):
             assert half_rtz(x) == x, x
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
-        case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-        subprocess.run(draw, check=True)
+        batch.add(constants + struct.pack("<4f", *expected) * 64, "pass", f"The SDWA selection draw for {words} gives a result other than {expected}")
         for channel, value in wrongs:
             assert value != expected[channel]
             wrong_values = list(expected)
             wrong_values[channel] = value
-            case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                raise AssertionError(f"A wrong SDWA selection escaped detection for {words} in channel {channel}")
+            batch.add(constants + struct.pack("<4f", *wrong_values) * 64, "mismatch",
+                      f"A wrong SDWA selection escaped detection for {words} in channel {channel}")
+    for batch in batches.values():
+        batch.flush()
 
 
 # Table-driven SDWA forms (integer, binary16, ubyte, narrowing). Each row is one instruction with its
@@ -394,7 +392,6 @@ def row_program(row):
 
 
 def check_sdwa_word_draws(directory, compiler, renderer, backend):
-    case = directory / "sdwa_word.case"
     for index, row in enumerate(word_rows()):
         source = directory / f"sdwa_word{index}.hlsl"
         shader = directory / f"sdwa_word{index}.cso"
@@ -402,19 +399,18 @@ def check_sdwa_word_draws(directory, compiler, renderer, backend):
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
         constants = bytearray(256)
         struct.pack_into("<4I", constants, 12, *row[5])
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "sdwa_word")
         checks = {row_expected(row): "right"}
         for label, word in row_wrongs(row):
             checks.setdefault(word, label)
         for word, label in checks.items():
             channels = [float((word >> 8 * n) & 255) for n in range(4)]
-            case.write_bytes(constants + struct.pack("<4f", *channels) * 64)
             if label == "right":
-                subprocess.run(draw, check=True)
-                continue
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                raise AssertionError(f"A wrong SDWA reference ({label}) escaped detection for {row[:5]}")
+                batch.add(constants + struct.pack("<4f", *channels) * 64, "pass", f"SDWA word row {row[:5]} gives a result other than {word:#010x}")
+            else:
+                batch.add(constants + struct.pack("<4f", *channels) * 64, "mismatch",
+                          f"A wrong SDWA reference ({label}) escaped detection for {row[:5]}")
+        batch.flush()
 
 
 # v_cvt_pkrtz_f16_f32_sdwa with whole-dword selections is the packing of the export tail: the tail's two packs are
@@ -434,19 +430,15 @@ def pack_program():
 def check_sdwa_pack_draw(directory, compiler, renderer, backend):
     source = directory / "sdwa_pack.hlsl"
     shader = directory / "sdwa_pack.cso"
-    case = directory / "sdwa_pack.case"
     source.write_text(translate(pack_program()), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
     values = [1.5, -0.25, 3.0, 0.125]
     constants = bytearray(256)
     struct.pack_into("<4f", constants, 12, *values)
-    draw = [renderer, backend, "--check-pixel-case", shader, case]
-    case.write_bytes(constants + struct.pack("<4f", *values) * 64)
-    subprocess.run(draw, check=True)
-    case.write_bytes(constants + struct.pack("<4f", values[1], values[0], *values[2:]) * 64)
-    result = subprocess.run(draw, capture_output=True, text=True)
-    if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-        raise AssertionError("Swapped packed halves escaped detection")
+    with DrawBatch(directory, renderer, backend, shader, "sdwa_pack") as batch:
+        batch.add(constants + struct.pack("<4f", *values) * 64, "pass", "The packed halves differ from the reference")
+        batch.add(constants + struct.pack("<4f", values[1], values[0], *values[2:]) * 64, "mismatch",
+                  "Swapped packed halves escaped detection")
 
 
 def controls(directory):

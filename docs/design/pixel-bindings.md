@@ -1,7 +1,7 @@
 # Pixel stage: binding descriptions
 
-Status: implemented (`tools/pixel_aot_ops/bindings.py`, `lower(bindings=...)`), checked by the `bindings` draw family
-(`tests/pixel_aot_draws/bindings.py`) and used for every corpus pixel shader by `tools/corpus_translate.py`.
+Status: implemented (`tools/pixel_aot_ops/bindings.py`, `lower(bindings=...)`), checked by the `bindings` and
+`texdims` draw families (`tests/pixel_aot_draws/bindings.py`, `tests/pixel_aot_draws/texdims.py`) and used for every corpus pixel shader by `tools/corpus_translate.py`.
 
 ## The problem
 
@@ -27,6 +27,7 @@ contract.
 | `buffers` | key of a buffer V# -> index of its first word in `params` (as `buffer_descriptors` of the fixed contract) |
 | `storage_images` | key of a storage-image T# -> (slot, format), as `storage_images` of the fixed contract |
 | `descriptor_high` | the high word the program completes a pointer with (default RADV's 0xffff8000) |
+| `dimensions` | texture slot -> `2d`, `2d_array`, `cube` or `3d`, or the T#'s eight words when they are known (see "Texture dimensions"); a slot not listed is 2D |
 
 A key is the byte offset in set 0, or `SET_STRIDE * N + offset` in set N, as in the compute stage. `check()` refuses a
 malformed description: an unknown or repeated role, a slot used twice, a key that is not 16-byte aligned, two
@@ -43,6 +44,66 @@ HLSL names and registers (bound by `tests/pixel_aot_render.cpp`; `tests/pixel_ao
 
 t2 and b1 stay the title ranges and their count. The harness's samplers are all point samplers with clamp addressing;
 a title's S# words are memory the translator does not see, so a sampler is named, not interpreted.
+
+## Texture dimensions
+
+Each T# declares its dimension. When the descriptor's eight words are known, the dimension is their TYPE field (word
+3, bits 28..31; AMD's `SQ_RSRC_IMG_*` values 9 2D, 10 3D, 11 cube, 13 2D array, `bindings.type_dimension`; 1D and
+MSAA types are refused); otherwise it is the name the description gives. A texture is declared, and bound by the
+harness, as:
+
+| Dimension | HLSL type | Harness view ('X2WD' case section, `tests/pixel_aot_render.cpp`) |
+|---|---|---|
+| `2d` | `Texture2D<float4>` | `TEXTURE2D` (the existing textures) |
+| `2d_array` | `Texture2DArray<float4>` | `TEXTURE2DARRAY` of its slices |
+| `cube` | `Texture2DArray<float4>` | `TEXTURE2DARRAY` of its six faces, slices 0..5 = +X, -X, +Y, -Y, +Z, -Z |
+| `3d` | `Texture3D<float4>` | `TEXTURE3D` |
+
+An image instruction's `dim:` must be the dimension its texture is bound with, and the 2D-only forms (the explicit-level
+samples, loads, level queries and gathers) refuse a texture of another dimension. `image_sample` of each dimension
+(`forms/mimg.py`, `dimensioned_coordinate`) reads a three-word address (a range or an NSA list) and lowers as follows.
+
+- **3D**: `tex.Sample(samp, float3(s, t, r))`. r is normalized like s and t (RDNA addresses a 3D image with three
+  normalized coordinates); all three enter the implicit level, so each must be an affine helper-lane value, as a 2D
+  coordinate must.
+- **2D array**: `tex.Sample(samp, float3(s, t, slice))`. The slice is an unnormalized index. Whether the texture
+  unit rounds or truncates a fractional slice is not established here (Mesa rounds it to even in the shader under
+  its `lower_array_layer_round_even` option, which the corpus programs show as a `v_rndne_f32` before the sample,
+  and Mesa's older radeonsi fix rounded it only on some generations), and an S# is named, not interpreted, so the
+  slice must be an integer value: a `v_rndne`, `v_floor`, `v_ceil` or
+  `v_trunc` result (no output modifier), a `v_cvt_f32_i32`/`u32` result, an integral immediate or a copy of one
+  (`Lowering.integral`). Such a slice reads the same slice under either rule, and under Direct3D's rounded index; a
+  slice beyond the array is clamped to [0, size - 1] by both (Vulkan requires it and RADV emits no clamp). Any other
+  slice is refused ("An array slice must be an integer value").
+- **Cube**: the program computes AMD's face coordinates with `v_cubeid`, `v_cubesc`, `v_cubetc` and `v_cubema` (the
+  `cube` family checks those): s = sc / |ma| + 1.5 and t = tc / |ma| + 1.5, with `v_cubema` returning 2 ma, lie in
+  [1, 2] on the face, and the face is the `v_cubeid` result. Two lowerings are possible: rebuild a direction from
+  (s, t, face) for `TextureCube.Sample`, or sample a `Texture2DArray` view of the six faces at (s - 1, t - 1, face).
+  The second is the bit-exact one and is what is emitted
+  (`precise float3 faceN = float3(s - 1.0f, t - 1.0f, face); tex.Sample(samp, faceN)`): the face is the program's
+  own, so a tie between two major axes keeps `v_cubeid`'s rule (z, then y, then x), which a desktop cube projection
+  need not follow; the face coordinate is the program's value, where a projection would divide again with its own
+  rounding; and the implicit level comes from the derivatives of the face coordinates, as on the console, not of
+  the direction. s - 1 and t - 1 are exact for s and t in [0.5, 2], and the face index is an integer, so Direct3D's
+  rounded slice is exactly it. The face must be a `v_cubeid` result without clamp, or a copy of one
+  (`Lowering.cube_faces`). s and t are quotients, not affine in the interpolated coordinate, so they need only be
+  helper-lane values: any whole-quad VALU result whose VGPR operands are helper-lane values (`Lowering.quad_defined`,
+  `valu_f32.helper_defined`). How an adapter takes their derivatives (coarse or fine) is then not proven, and the
+  draws use one-level textures. Not modelled: a face coordinate outside [1, 2] (s = 2 or a coordinate pushed past an
+  edge by rounding), where the hardware's seamless cube addressing may read the neighbouring face and this lowering
+  reads the clamped edge of the face, and bilinear footprints that straddle a face edge.
+  The [1, 2] range and the 1.5 offset are the convention of Mesa's and LLVM's AMD cube lowering; the console's
+  texture unit was not measured.
+
+The `texdims` draw family (`tests/pixel_aot_draws/texdims.py`) checks the three dimensions with programs shaped as
+RADV writes them and Python references: an 8x8 array of four slices read at integral, rounded (2.7, ties 1.5 and
+2.5) and clamped (-0.6, 9.0) slices; the six faces of an 8x8 cube read through directions on every face (major
+coordinate 0.5, 1 and 4) and through the two kinds of tie at a face edge; an 8x8x4 3D texture read at the centre of
+each depth slice, below and above the texture and with two coordinates exchanged through an NSA address; and a
+bilinear read of each dimension at texel centres through the harness's bilinear sampler (s4), where the filter
+weights are exactly 1 and 0. Wrong references (the slice truncated, a tie rounded up, the face swapped with its
+opposite, a tie broken toward the other axis, r read as a slice index, the axis order ignored, a neighbouring texel
+for the bilinear reads) must each be reported as mismatches.
 
 ## Resolution
 
@@ -72,4 +133,8 @@ The remaining refusals were forms, not bindings: other image dimensions and dmas
 rule does not prove, and a few dynamic descriptor indices ("Scalar load offset register must hold a known constant").
 With 2D samples of any dmask and the wider helper-lane rule (immediates, copies, v_sub/v_mul/v_mad/v_mad*k and flat
 attributes under whole-quad execution, also after a sample; the `sample_shapes` draw family), 140 translate and compile.
-Cube, 2D-array and 3D samples (21 shaders) need a texture dimension in the description and the harness, and stay refused.
+With texture dimensions (each T#'s dimension is the `dim:` of the image instruction that first uses it, as the
+layout's image view type would give it), 158 translate and all 158 compile with DXC; the 140 keep byte-identical
+HLSL. Of the 23 shaders that stopped at a cube, 2D-array or 3D `image_sample`, 18 translate; the other five stop
+elsewhere: two irradiance-cube programs and the spherical environment map sample at loop-carried or non-affine
+coordinates ("Unsupported texture coordinate"), and two more at unrelated forms.

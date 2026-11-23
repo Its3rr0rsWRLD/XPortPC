@@ -5,7 +5,7 @@ import random
 import struct
 import subprocess
 
-from .common import assembly, half_rtz, half_value, must_reject, translate, ubyte, with_constants
+from .common import DrawBatch, assembly, half_rtz, half_value, must_reject, translate, ubyte, with_constants
 
 
 # Mixed-precision fused multiply-add (v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16). The reference is independent of
@@ -376,29 +376,27 @@ def check_fma_mix_models() -> None:
 
 def check_fma_mix_draws(directory, compiler, renderer, backend):
     check_fma_mix_models()
-    case = directory / "fma_mix.case"
     for name, body, model, sets, bugs, _ in FMA_MIX_PROGRAMS:
         source = directory / f"fma_mix_{name}.hlsl"
         shader = directory / f"fma_mix_{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "fma_mix")
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = model(words, None)
             for x in expected:
                 assert half_rtz(x) == x, x
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Mixed-precision fma {name} gives a result other than {expected} for words {words}")
             for bug in bugs:
                 wrong = model(words, bug)
                 if wrong == expected:
                     continue
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A mixed-precision fma lowering bug ({bug}) escaped detection in {name} for words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A mixed-precision fma lowering bug ({bug}) escaped detection in {name} for words {words}")
+        batch.flush()
 
 
 def check_fma_mix_controls() -> None:

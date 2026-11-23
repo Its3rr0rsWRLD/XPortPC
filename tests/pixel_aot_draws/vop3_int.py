@@ -17,7 +17,7 @@ import struct
 import subprocess
 
 from .arith import copy
-from .common import M32, assembly, byte, half_rtz, must_reject, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, assembly, byte, half_rtz, must_reject, signed, translate, ubyte, with_constants
 
 M64 = (1 << 64) - 1
 SETUP = {"x": copy(18, "s44"), "y": copy(23, "s45"), "z": copy(24, "s46"), "w": copy(25, "s47")}
@@ -335,13 +335,12 @@ assert [row for run in RUNS for row in run] == ROWS and all(RUNS)
 
 
 def check_vop3_int_draws(directory, compiler, renderer, backend, rows=None):
-    case = directory / "vop3_int.case"
     for index, (name, body, reads, reference, sets, bugs) in enumerate(RUNS[0] if rows is None else rows):
         source = directory / f"vop3_int{index}.hlsl"
         shader = directory / f"vop3_int{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "vop3_int")
         separated = {label: False for label in bugs}
         for constants_words in sets:
             constants = bytearray(256)
@@ -349,8 +348,8 @@ def check_vop3_int_draws(directory, compiler, renderer, backend, rows=None):
             expected = [float(v) for v in read(reads, reference(*constants_words))]
             for x in expected:
                 assert half_rtz(x) == x, x
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"{name}: words {constants_words} give a result other than {expected}")
             for label, buggy in bugs.items():
                 values = [float(v) for v in read(reads, buggy(*constants_words))]
                 for channel, value in enumerate(values):
@@ -359,10 +358,9 @@ def check_vop3_int_draws(directory, compiler, renderer, backend, rows=None):
                     separated[label] = True
                     wrong = list(expected)
                     wrong[channel] = value
-                    case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                    result = subprocess.run(draw, capture_output=True, text=True)
-                    if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                        raise AssertionError(f"A wrong {name} result ({label}) escaped detection, channel {channel}, words {constants_words}")
+                    batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                              f"A wrong {name} result ({label}) escaped detection, channel {channel}, words {constants_words}")
+        batch.flush()
         assert all(separated.values()), (name, separated)
 
 

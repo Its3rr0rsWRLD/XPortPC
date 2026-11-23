@@ -26,7 +26,12 @@ What exists (`tools/x2w_launch.cpp`, `tools/pe_map.cpp`, test `tests/native/laun
 
 - `pe_map` maps an x64 image away from its preferred base, applies DIR64/HIGHLOW relocations, binds ordinary and delay
   imports through a host resolver, sets section protections, registers `.pdata` with `RtlAddFunctionTable` (so SEH and
-  unwinding work through mapped frames) and runs TLS callbacks in order. Title code runs unchanged.
+  unwinding work through mapped frames), gives implicit TLS data (`__declspec(thread)`, `thread_local`) a loader-owned
+  index through a carrier DLL, and runs TLS callbacks in order, for a started EXE also on thread attach and detach and
+  on process detach. Title code runs unchanged.
+- The title sees itself as the process image: `x2w_launch` binds its `GetModuleHandle{A,W,ExA,ExW}` and
+  `GetModuleFileName{A,W}` imports to replacements that answer for the mapped images, and sets
+  `PEB->ImageBaseAddress` to the title while it runs (`--host-identity` turns both off).
 - Import resolution order, per `dll!symbol`, first hit wins:
   1. `DIR\<dll>` in a `--shims` directory, loaded with `LoadLibrary` (our desktop implementation of a console library).
      If the shim DLL exists but lacks the symbol, the import becomes a stub ("stub (not in shim)").
@@ -39,8 +44,8 @@ Known gaps, all measured by existing tests and to be closed in this order as tit
 
 | Gap | Effect on a title | Fix |
 |---|---|---|
-| Implicit TLS (`__declspec(thread)`): `pe_map` refuses a non-empty TLS template (`cpu_native_tls_value`) | Any CRT-linked title fails to map | Allocate the index, fill each thread's TLS slot from the template, run callbacks on thread attach |
-| `GetModuleHandle(NULL)`, PEB image base, module list still name the host | Resource loads and self-lookup go to `x2w_launch.exe` | Patch PEB `ImageBaseAddress` and add a loader-list entry, or hook the few kernel32 calls |
+| Closed: implicit TLS data (`native_launch_tls`, `native_launch_tls_crt`, `cpu_native_tls_value`) | Was: any title with `thread_local` data failed to map | Carrier DLL per image: ntdll owns the index and every thread's block (`docs/experiments.md`, "Implicit TLS data and module identity under x2w_launch") |
+| Closed for the title's imports: `GetModuleHandle(NULL)`, `GetModuleFileName(NULL)`, PEB image base (`native_launch_identity`) | Was: resource loads and self-lookup went to `x2w_launch.exe` | Import replacements plus PEB `ImageBaseAddress`; the loader's module list, `GetProcAddress`ed pointers to these functions and `GetCommandLine` still name the launcher |
 | Stubs ignore arguments and return 0 | A stubbed call that must succeed fails silently later | Stubs log the first N calls with RCX/RDX/R8/R9 and the caller RVA; a per-symbol return override file |
 | Windows route for names Windows also has | A console DLL with a desktop namesake binds to a desktop DLL with other semantics | The report marks every `windows` route; a deny-list forces such names to the shim directory |
 
@@ -241,8 +246,12 @@ Title CPU code runs natively, so most threading is just Windows. Differences to 
   shim remaps affinity masks and thread ideal processors onto the host's cores (modulo the host count, keeping
   distinct threads on distinct cores where possible) and logs each remap.
 - **CPU features.** The console CPU is Zen 2. Instructions a host CPU lacks (for example AMD-only ones on an Intel host,
-  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler records the RVA and the instruction's
-  mnemonic (not its bytes) for the report. This is where the CPU lifters can fit (below).
+  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler in `x2w_launch`
+  (`tools/x2w_cpu_trap.h`) performs a fixed set on the faulting thread's CONTEXT and resumes after the instruction:
+  SHA-NI, CLZERO, RDPID, MONITORX/MWAITX (as a pause), SSE4a, RDPRU (MPERF and APERF read the TSC) and CLWB (as
+  CLFLUSH). For anything else it records the module+RVA and the instruction's mnemonic (not its bytes) and lets the
+  title crash. The run log lists the Zen 2 features the host lacks at startup and a count per trapped instruction at
+  the end, since each trap costs an exception round trip. This is where the CPU lifters can fit (below).
 - **Timers.** QPC frequency, GPU timestamp frequency and refresh rate differ; titles read them through APIs, which we
   answer with the host's values. Hard-coded assumptions show up as wrong pacing and are logged, not patched.
 - **CPU-GPU synchronization.** Fences map 1:1. A title that polls memory the GPU writes works under aliasing (section
@@ -291,6 +300,13 @@ criteria pass on WARP and hardware except "textures created from tiled bytes": t
 not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
 R4b (`tests/runtime/r4b_scene.cpp`) adds vertex fetch through buffer V#s from descriptor tables, pixel constant slots
 2 and 3 and pixel stores to title memory through a UAV's V# ([experiments.md](../experiments.md#buffer-vs-from-descriptor-tables-four-pixel-constant-slots-pixel-stores-runtime-rung-r4b)).
+
+R5 program: `tests/runtime/r5_frames.cpp`: a compute queue moves particles in title memory with a translated gfx1013
+compute program (`r5_cs.s`) and the direct queue draws them with the R3 programs, with cross-queue fences, for 600
+frames (design choices, tests and frame times in
+[experiments.md](../experiments.md#compute-and-a-frame-loop-runtime-rung-r5)). Its exit criteria pass on WARP and
+hardware. The shim's descriptor blocks are recycled once the GPU is done with them, so a long run no longer exhausts
+them.
 
 R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
 `src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
@@ -344,8 +360,8 @@ source-built program with planted strings and code bytes and fails if any appear
 
 1. **R1 report.** `x2w_launch --report FILE`: JSON import report (per DLL, route, implemented/stub/missing), stubs
    logging their first calls' four argument registers and caller RVA, `x2w_unimplemented()` for shims, the
-   first-unimplemented-call line. Extend `tests/native/launch_check.py` to check the JSON. Then implicit TLS in
-   `pe_map` (turns `cpu_native_tls_value` from expected refusal to match).
+   first-unimplemented-call line. Extend `tests/native/launch_check.py` to check the JSON. Implicit TLS in
+   `pe_map` and the title's module identity are done (`cpu_native_tls_value` now matches Windows).
 2. **Graphics shim skeleton for R2.** A desktop DLL under the graphics name exporting device creation, wrapping
    device/queue/allocator/list/fence/swap chain over desktop D3D12 in public method order with logging thunks for
    unknown slots and IIDs; attaches the device to `era_title_gpu`. Test `tests/runtime/r2_clear.cpp` (clear, present,

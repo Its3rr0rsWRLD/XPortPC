@@ -18,7 +18,7 @@ import math
 import struct
 import subprocess
 
-from .common import M32, half_value, must_reject, translate, with_constants
+from .common import M32, DrawBatch, half_value, must_reject, translate, with_constants
 from .f16_cmp import class16_ref, class32_ref, cmp_words, relation_ref
 from .predicate import INT_PREDICATES, PREDICATES
 
@@ -259,34 +259,28 @@ def const16_programs():
 
 def check_vopc_table_draws(directory, compiler, renderer, backend):
     check_models()
-    case = directory / "vopc_table.case"
     for name, body, model, sets, bugs in drawn_programs():
         source = directory / f"vopc_table_{name}.hlsl"
         shader = directory / f"vopc_table_{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "vopc_table")
         drawn = dict.fromkeys(bugs, 0)
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = model(words, None)
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            try:
-                subprocess.run(draw, check=True)
-            except subprocess.CalledProcessError as error:
-                error.add_note(f"VOPC table draw {name} on {backend}, words {[hex(w) for w in words]}")
-                raise
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"VOPC table draw {name} on {backend}, words {[hex(w) for w in words]}")
             for bug in bugs:
                 wrong = model(words, bug)
                 # One exposing set per bug establishes that the renderer notices it.
                 if wrong == expected or drawn[bug] == 1:
                     continue
                 drawn[bug] += 1
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A comparison bug ({bug}) escaped detection in {name} for words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A comparison bug ({bug}) escaped detection in {name} for words {words}")
+        batch.flush()
         assert all(count > 0 for count in drawn.values()), (name, drawn)
 
 

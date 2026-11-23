@@ -2,7 +2,7 @@
 import struct
 import subprocess
 
-from .common import M32, assembly, byte, half_rtz, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, assembly, byte, half_rtz, signed, translate, ubyte, with_constants
 
 
 # Control flow, CF-1 (docs/design/control-flow.md): labels, uniform branches on SCC, if, if-else and loops with one back
@@ -229,13 +229,12 @@ CF_PROGRAMS = (
 
 def check_cf_uniform_draws(directory, compiler, renderer, backend, programs=CF_PROGRAMS, name="cf", build=with_constants):
     """Draw each (body, reference, sets, bugs) of `programs`, built into a full program by `build`."""
-    case = directory / f"{name}.case"
     for index, (body, reference, sets, bugs) in enumerate(programs):
         source = directory / f"{name}{index}.hlsl"
         shader = directory / f"{name}{index}.cso"
         source.write_text(translate(build(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, f"{name}")
         separated = [False] * len(bugs)
         for words in sets:
             constants = bytearray(256)
@@ -243,8 +242,8 @@ def check_cf_uniform_draws(directory, compiler, renderer, backend, programs=CF_P
             expected = [float(value) for value in reference(*words)]
             for x in expected:
                 assert half_rtz(x) == x, x
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Program {index} gives a result other than {expected} for words {words}")
             for k, (channel, buggy) in enumerate(bugs):
                 value = float(buggy(*words))
                 if value == expected[channel]:
@@ -253,10 +252,9 @@ def check_cf_uniform_draws(directory, compiler, renderer, backend, programs=CF_P
                 assert half_rtz(value) == value, value
                 wrong_values = list(expected)
                 wrong_values[channel] = value
-                case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong control-flow result escaped detection in program {index}, channel {channel}, words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong_values) * 64, "mismatch",
+                          f"A wrong control-flow result escaped detection in program {index}, channel {channel}, words {words}")
+        batch.flush()
         assert all(separated), (index, separated)
 
 

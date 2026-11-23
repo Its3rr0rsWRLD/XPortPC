@@ -18,7 +18,7 @@ import math
 import struct
 import subprocess
 
-from .common import must_reject, translate, with_constants
+from .common import DrawBatch, must_reject, translate, with_constants
 from .sdwa import M32, S, Z, float_bits, half_bits, half_of, model_field, model_place, signed32
 from .sdwa_int import BASE_INT, INIT, OTHER_SEL, candidates, f32_of
 
@@ -236,28 +236,26 @@ def row_plans():
 
 
 def draw(directory, compiler, renderer, backend):
-    case = directory / "sdwa_conv.case"
     for index, (row, (inputs, wrongs, _)) in enumerate(zip(ROWS, row_plans())):
         source, shader = directory / f"sdwa_conv{index}.hlsl", directory / f"sdwa_conv{index}.cso"
         source.write_text(translate(row_program(row)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        command = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "sdwa_conv")
         shown = set()
         for a, _ in inputs:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, a, 0, INIT, 0)
             right = row_word(row, a)
-            case.write_bytes(constants + struct.pack("<4f", *[float((right >> 8 * n) & 255) for n in range(4)]) * 64)
-            subprocess.run(command, check=True)
+            batch.add(constants + struct.pack("<4f", *[float((right >> 8 * n) & 255) for n in range(4)]) * 64, "pass",
+                      f"SDWA conversion row {row} gives a result other than {right:#010x} for input {a:#x}")
             for label, wrong in wrongs.items():
                 word = row_word(wrong, a)
                 if label in shown or word == right:
                     continue
-                case.write_bytes(constants + struct.pack("<4f", *[float((word >> 8 * n) & 255) for n in range(4)]) * 64)
-                result = subprocess.run(command, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong SDWA reference ({label}) escaped detection for {row}")
+                batch.add(constants + struct.pack("<4f", *[float((word >> 8 * n) & 255) for n in range(4)]) * 64, "mismatch",
+                          f"A wrong SDWA reference ({label}) escaped detection for {row}")
                 shown.add(label)
+        batch.flush()
 
 
 def controls(directory):

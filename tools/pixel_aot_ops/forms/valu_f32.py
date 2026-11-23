@@ -1,5 +1,7 @@
 """Binary32 vector arithmetic in the VOP1, VOP2 and VOP3 encodings, moves and v_cube*."""
+import math
 import re
+import struct
 
 from ..dispatch import form
 from ..hlsl import SALU_HELPERS
@@ -73,6 +75,46 @@ SALU_HELPERS["med3_f32"] = (
 )
 
 
+def _value_name(value):
+    """The HLSL name a tracked VGPR value carries: a float name, or the name of a raw word ("uint", name)."""
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
+        value = value[1]
+    return value if isinstance(value, str) else None
+
+
+def helper_defined(st, tokens):
+    """Whether, under whole-quad execution with every lane active, every VGPR the operand tokens read holds a value
+    defined on the helper lanes (Lowering.quad_values or Lowering.quad_defined): then the result of any VALU operation
+    on them is defined there too, as on the hardware (the desktop's helper invocations run the same code). Scalar and
+    immediate operands are the same on every lane. Unlike quad_values, the result need not be affine in the
+    interpolated coordinate, so its derivatives depend on how the adapter takes them (coarse or fine): only a cube
+    sample reads such a value (forms/mimg.py, docs/design/pixel-bindings.md)."""
+    if not (st.wqm and st.ex == "true"):
+        return False
+    for token in tokens:
+        m = re.fullmatch(r"-?(?:\|(v\d+)\||abs\((v\d+)\)|(v\d+))", token)
+        if m:
+            name = _value_name(st.vector.get(next(g for g in m.groups() if g)))
+            if name is None or (name not in st.quad_values and name not in st.quad_defined):
+                return False
+    return True
+
+
+def immediate_value(token):
+    """The binary32 value of an immediate operand (an inline float constant, an integer inline constant or a literal
+    word, both read as bit patterns), or None for a register or modified operand."""
+    if re.fullmatch(r"-?\d+\.\d+", token):
+        return float(token)
+    if re.fullmatch(r"0x[0-9a-f]{1,8}|-?\d+", token):
+        return struct.unpack("<f", struct.pack("<I", int(token, 0) & 0xffffffff))[0]
+    return None
+
+
+def integral_immediate(token):
+    value = immediate_value(token)
+    return value is not None and math.isfinite(value) and value == int(value)
+
+
 @form(r"v_cube(id|sc|tc|ma)_f32(?:_e64)? (v\d+), ([^,]+), ([^,]+), ([^,]+?)( clamp)?")
 def cube(st, i, m):
     # LLVM ConstantFoldAMDGCNCubeIntrinsic: z, then y, then x is the major axis; a face is negative
@@ -93,6 +135,10 @@ def cube(st, i, m):
     }[op]
     if clamp:
         expression = f"saturate({expression})"
+    if helper_defined(st, tokens):
+        st.quad_defined.add(f"alu{i}")
+    if op == "id" and not clamp:
+        st.cube_faces.add(f"alu{i}")
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = {expression};")
 
@@ -116,6 +162,8 @@ def literal_fma(st, i, m):
         varying = [st.quad_values.get(v, False) for v in sources]
         if not all(varying[:2]):  # S0 * K or S0 * S1
             st.quad_values[f"alu{i}"] = any(varying)
+    if f"alu{i}" not in st.quad_values and helper_defined(st, tokens):
+        st.quad_defined.add(f"alu{i}")
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = {ALU[op[:3]][1].format(*values)};")
 
@@ -130,6 +178,14 @@ def move(st, i, m):
     # immediate (the same on every lane) is defined on the helper lanes too, so an implicit-level sample may read it.
     # An SGPR copy and a copy written under the entry mask or while the lane may be inactive do not join the set.
     quad = st.wqm and st.ex == "true"
+    source_name = _value_name(st.vector.get(src)) if src.startswith("v") else None
+    name = f"movw{i}" if raw_source(src, st.scalar, st.vector) else f"alu{i}"
+    if integral_immediate(src) or source_name in st.integral:
+        st.integral.add(name)
+    if source_name in st.cube_faces:
+        st.cube_faces.add(name)
+    if quad and source_name in st.quad_defined:
+        st.quad_defined.add(name)
     if raw_source(src, st.scalar, st.vector):
         # A raw word is copied as an unsigned integer. It never takes a float type, so the compiler or the
         # driver has no float semantics (NaN canonicalization, denormal flushing) to apply to it.
@@ -188,6 +244,10 @@ def arithmetic(st, i, m):
             quad = False
     if quad:
         st.quad_values[f"alu{i}"] = any(varying)
+    elif helper_defined(st, tokens):
+        st.quad_defined.add(f"alu{i}")
+    if op in ("rndne", "floor", "ceil", "trunc") and not omod:
+        st.integral.add(f"alu{i}")
     expression = template.format(*values)
     if op == "med3":
         st.helpers.add("med3_f32")
