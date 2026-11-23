@@ -313,7 +313,10 @@ std::size_t image_size(const void* base) {
 
 // "module+0xRVA" for an address: the program or a mapped package DLL, a launcher stub, a module the Windows
 // loader knows, or the bare address.
+void* trace_target(std::uintptr_t at);
 void describe(const void* address, char* out, std::size_t capacity) {
+    // A recent-calls thunk (a thread start, say) is named as the function it calls.
+    if (void* target = trace_target(reinterpret_cast<std::uintptr_t>(address))) address = target;
     const auto at = reinterpret_cast<std::uintptr_t>(address);
     for (const auto& region : regions) {
         if (at >= region.base && at - region.base < region.size) {
@@ -717,6 +720,22 @@ bool in_trace_page(std::uintptr_t at) {
         if (at >= start && at - start < kTracePage) return true;
     }
     return false;
+}
+
+// The function a thunk calls, for the start address of a thunk, else null.
+void* trace_target(std::uintptr_t at) {
+    if (!trace_body || !TryAcquireSRWLockShared(&trace_lock)) return nullptr;
+    void* target = nullptr;
+    for (const auto* page : trace_pages) {
+        const auto start = reinterpret_cast<std::uintptr_t>(page);
+        if (at >= start && at - start < kTracePage && (at - start) % kTraceThunk == 0 && page[at - start] == 0x49) {
+            std::uint64_t desc = 0;
+            std::memcpy(&desc, page + (at - start) + 2, 8);
+            target = reinterpret_cast<const TraceDesc*>(desc)->target;
+        }
+    }
+    ReleaseSRWLockShared(&trace_lock);
+    return target;
 }
 
 // The thunk the program gets for dll!symbol at address, or address itself when it is not wrapped.
