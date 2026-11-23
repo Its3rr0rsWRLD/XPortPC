@@ -2796,7 +2796,7 @@ PC results (RTX 4070 Ti PC, i7-9700F, 8 cores; `xl_bench.py`, 7 services or proc
 | Pool of 7 services (start-up included) | | | 4.0 (202 in 0.81 s) | 250 |
 | `precompile_cache` on 7 processes (start-up included) | | | 6.6 (202 in 1.34 s) | 151 |
 
-`r3_triangle` `pso_create_ms` for its one pipeline (2 shaders) on WARP: process path 825 ms, service 913 ms on the first start (the service's start-up, not hidden by the short gap after device creation, dominates), warm 14.1 ms, after precompile 16.2 ms. The R3 programs are the first a fresh service translates, so their 24 ms includes the converter's first-call costs; the batch's 8.7 ms is the steady state.
+`r3_triangle` `pso_create_ms` for its one pipeline (2 shaders, cold): before, 788 ms WARP and 779 ms RTX 4070 Ti. With the service and its bytecode cached (every launch after the first): 292 ms WARP and 258 ms RTX 4070 Ti, i.e. about 0.13-0.15 s per shader, nearly all the service's start-up (0.21-0.24 s), which the short gap after device creation in this test does not hide. On a service's very first start (bytecode not yet cached) 914-1074 ms. Warm: 14-16 ms, also after `precompile_cache`. The R3 programs are the first a fresh service translates, so their 24-30 ms includes the converter's first-call costs; the batch's 8.7-9.7 ms is the steady state.
 
 
 The warm time includes the once-per-process converter fingerprint (a directory walk of `tools/`) and the desktop pipeline compile. The cold time is about 0.39 s per shader, almost all of it Python start-up and DXC. That is acceptable for R3-R5 test programs. It is not acceptable for titles, which is the case for the ahead-of-time pass in runtime.md, section 3.
