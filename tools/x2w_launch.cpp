@@ -835,14 +835,6 @@ std::string throw_site(const CONTEXT* start) {
 void log_cpp_throw(EXCEPTION_POINTERS* info) {
     InterlockedIncrement(&cpp_throws);
     const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord);
-    if (std::getenv("X2W_CPP_THROW_DEBUG")) {  // numbers only, on stderr, never in the run log
-        const EXCEPTION_RECORD* r = info->ExceptionRecord;
-        const Region* region = region_at(static_cast<std::uintptr_t>(r->NumberParameters > 2 ? r->ExceptionInformation[2] : 0));
-        std::fprintf(stderr, "[x2w] cpp-throw-debug parameters=%lu magic=0x%llx info=0x%llx base=0x%llx region=0x%llx\n",
-                     r->NumberParameters, (unsigned long long)r->ExceptionInformation[0],
-                     (unsigned long long)r->ExceptionInformation[2], (unsigned long long)r->ExceptionInformation[3],
-                     (unsigned long long)(region ? region->base : 0));
-    }
     AcquireSRWLockExclusive(&cpp_lock);
     const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
     ReleaseSRWLockExclusive(&cpp_lock);
@@ -852,20 +844,28 @@ void log_cpp_throw(EXCEPTION_POINTERS* info) {
 }
 
 // The runtime's _CxxThrowException fills ExceptionInformation[3] with RtlPcToFileHeader(ThrowInfo), which
-// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped; the frame
-// handlers would then read every catchable type at its bare RVA and crash. Before any frame handler runs,
-// this handler sets the base of the mapped image that holds the ThrowInfo (whichever C runtime threw it).
-// It is registered whether or not there is a run log.
+// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped. With no base
+// it also changes the magic number to the /clr:pure one (0x01994000), which native catch blocks ignore, so
+// the throw would go unhandled. Before any frame handler runs, this handler gives a throw whose ThrowInfo lies
+// in a mapped image that image's base and, unless the ThrowInfo itself is marked pure (TI_IsPure, 0x8), the
+// native magic number back (whichever C runtime threw it). It is registered whether or not there is a run log.
 LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
     EXCEPTION_RECORD* record = info->ExceptionRecord;
     if (record->ExceptionCode != cpp_exception || record->NumberParameters < 4) return EXCEPTION_CONTINUE_SEARCH;
     const ULONG_PTR magic = record->ExceptionInformation[0];
-    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return EXCEPTION_CONTINUE_SEARCH;
-    if (std::getenv("X2W_CPP_THROW_DEBUG"))
-        std::fprintf(stderr, "[x2w] cpp-throw-debug runtime base=0x%llx\n",
-                     (unsigned long long)record->ExceptionInformation[3]);
-    if (const Region* region = region_at(static_cast<std::uintptr_t>(record->ExceptionInformation[2])))
-        record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
+    const bool native = magic == 0x19930520 || magic == 0x19930521 || magic == 0x19930522;
+    if (!native && magic != 0x01994000) return EXCEPTION_CONTINUE_SEARCH;
+    const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[2]);
+    const Region* region = region_at(address);
+    if (!region || record->ExceptionInformation[3] == region->base) return EXCEPTION_CONTINUE_SEARCH;
+    if (!native) {
+        // Pure magic with no base is the runtime's fallback; a real pure throw has TI_IsPure set.
+        if (record->ExceptionInformation[3] != 0 || !readable(reinterpret_cast<const void*>(address), 4) ||
+            (*reinterpret_cast<const std::uint32_t*>(address) & 0x8))
+            return EXCEPTION_CONTINUE_SEARCH;
+        record->ExceptionInformation[0] = 0x19930520;
+    }
+    record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
