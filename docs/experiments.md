@@ -232,6 +232,18 @@ cmake --build --preset dev --target x2w_launch x2w_shims x2w_rung1_title
 ctest --preset dev --no-tests=error -R '^native_(launch_fake_title|report_synthetic|report_rung1|run_log_rung1)$' -V
 ```
 
+## Zen 2 instructions the host lacks
+
+Scarlett titles are x64 code for Zen 2 and run natively under `x2w_launch`. A vectored handler ([`tools/x2w_cpu_trap.h`](../tools/x2w_cpu_trap.h)) catches `STATUS_ILLEGAL_INSTRUCTION` in the program's mapped images and performs SHA-NI (`sha1rnds4`, `sha1nexte`, `sha1msg1`, `sha1msg2`, `sha256rnds2`, `sha256msg1`, `sha256msg2`), CLZERO, RDPID (TSC_AUX through RDTSCP), MONITORX and MWAITX (no wait), SSE4a (`extrq`, `insertq`, `movntsd`, `movntss`), RDPRU (MPERF and APERF both read the TSC; other registers return 0 with CF clear) and CLWB (as CLFLUSH) on the CONTEXT, then resumes after the instruction. The decoder handles the legacy prefixes, REX, ModRM, SIB, disp8/disp32, RIP-relative operands and a GS override. Any other #UD is logged as `cpu-unhandled MNEMONIC at module+RVA` (a mnemonic or family such as `ud2`, `avx-256`, `pdep`, `fma3`, never bytes) and crashes as before. The run log gains `cpu-host-missing emulated=... unhandled=... silent=...` (CPUID against the Zen 2 user-mode set; `silent` is LZCNT, which an older CPU runs as BSR), one `cpu-trap first` line per instruction and a `cpu-traps` count line before each summary, because each trap is an exception round trip and a hot loop of them is slow.
+
+`native_cpu_traps` runs a CRT-free program ([`tests/native/cpu_trap_title.cpp`](../tests/native/cpu_trap_title.cpp), [`cpu_trap_ops.asm`](../tests/native/cpu_trap_ops.asm)) four times. It computes SHA-1 and SHA-256 of the FIPS 180 examples with the SHA-NI instructions and checks them against a scalar implementation and the published digests, compares random vectors per instruction with references built from the FIPS round functions and the APM's bit-field definitions (bit by bit), and checks the effects of the rest. `--force-cpu-traps` overwrites the 30 sites the program exports with UD2 and keeps their bytes in a side table, so the handler runs every instruction on any CPU and the trap counts must equal the program's own counts. The wrong-reference control must fail all 33 cases; the UD2 control must log `cpu-unhandled ud2` and crash at the same RVA.
+
+On the i7-9700F (Coffee Lake) the host lacks `clwb,sha,rdpid,sse4a,mwaitx,clzero,rdpru` and nothing else of the Zen 2 set. All 17 instructions fault natively there (CLWB and MOVNTSS are not run as XSAVEOPT or MOVNTPS), so the natural run trapped 513 of 513 instructions and all 33 cases passed in both runs.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^native_(cpu_traps|run_log_rung1)$' -V
+```
+
 ## Pipeline readiness from shader manifests
 
 `tools/pso_readiness.py` joins the native SHA-256 and stage in the shader extraction manifest with explicit pipeline references. It counts archive records, records with a native hash and unique stage/hash pairs separately. Multiple archive records can refer to the same native code. A hash from one stage does not establish coverage in another stage.

@@ -231,8 +231,12 @@ Title CPU code runs natively, so most threading is just Windows. Differences to 
   shim remaps affinity masks and thread ideal processors onto the host's cores (modulo the host count, keeping
   distinct threads on distinct cores where possible) and logs each remap.
 - **CPU features.** The console CPU is Zen 2. Instructions a host CPU lacks (for example AMD-only ones on an Intel host,
-  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler records the RVA and the instruction's
-  mnemonic (not its bytes) for the report. This is where the CPU lifters can fit (below).
+  or AVX2 on an old CPU) fault with `STATUS_ILLEGAL_INSTRUCTION`. A vectored handler in `x2w_launch`
+  (`tools/x2w_cpu_trap.h`) performs a fixed set on the faulting thread's CONTEXT and resumes after the instruction:
+  SHA-NI, CLZERO, RDPID, MONITORX/MWAITX (as a pause), SSE4a, RDPRU (MPERF and APERF read the TSC) and CLWB (as
+  CLFLUSH). For anything else it records the module+RVA and the instruction's mnemonic (not its bytes) and lets the
+  title crash. The run log lists the Zen 2 features the host lacks at startup and a count per trapped instruction at
+  the end, since each trap costs an exception round trip. This is where the CPU lifters can fit (below).
 - **Timers.** QPC frequency, GPU timestamp frequency and refresh rate differ; titles read them through APIs, which we
   answer with the host's values. Hard-coded assumptions show up as wrong pacing and are logged, not patched.
 - **CPU-GPU synchronization.** Fences map 1:1. A title that polls memory the GPU writes works under aliasing (section

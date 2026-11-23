@@ -16,7 +16,7 @@ Live status: <https://xportpc.3rr0r.cc>
 
 | Part | State |
 |---|---|
-| Native launcher | `x2w_launch.exe` maps a program with `pe_map` and resolves each import from a shim directory, a DLL beside the program, Windows, or a generated stub that logs its first call. `--log` records startup milestones and the first crash, and `tools/x2w_report.py` classifies a title's imports without running it. Tested with source-built programs. |
+| Native launcher | `x2w_launch.exe` maps a program with `pe_map` and resolves each import from a shim directory, a DLL beside the program, Windows, or a generated stub that logs its first call. `--log` records startup milestones and the first crash, Zen 2 instructions the host CPU lacks (SHA-NI, SSE4a, CLZERO, RDPID, RDPRU, MONITORX/MWAITX, CLWB) are performed by a #UD handler and counted, and `tools/x2w_report.py` classifies a title's imports without running it. Tested with source-built programs. |
 | Console library shims | Desktop `xmem.dll` (graphics and heap memory). |
 | Shader converter | Texture sampling, constants, binary32 arithmetic and comparisons, SDWA selections, 32-bit integer bitwise ops, shifts and byte converts, and scalar ALU. Coverage is in the badge above. |
 | GPU memory | Pixel draws can bind title memory: 64-bit title addresses resolve at runtime to desktop buffers. Buffer and global loads are in progress. |
