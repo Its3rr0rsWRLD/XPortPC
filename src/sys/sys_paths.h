@@ -68,6 +68,10 @@ void apply_config_line(const std::string& key, const std::string& value);
 void log_summary();
 // For a handle the title opened through the hooks and has not closed: "opened-as NAME flags=(...) type-at-open=T".
 bool describe_handle(void* handle, std::string* out);
+// Handles another module opened and gives to the title (DirectStorage's console GetHandle): kept in the same table, so
+// the title's synchronous ReadFile/WriteFile on an overlapped one is issued overlapped. forget_handle before closing.
+void register_handle(void* handle, const std::wstring& path, unsigned long flags);
+void forget_handle(void* handle);
 
 // Hook table for sys_hooks.cpp: (symbol, replacement) pairs, kernel32 signatures.
 struct HookEntry {

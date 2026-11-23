@@ -543,6 +543,27 @@ const HookEntry kHooks[] = {
 
 }  // namespace
 
+void register_handle(void* handle, const std::wstring& path, unsigned long flags) {
+    if (!handle || handle == INVALID_HANDLE_VALUE) return;
+    OpenInfo info;
+    info.flags = flags;
+    info.name = shown_name(path);
+    info.type = GetFileType(static_cast<HANDLE>(handle));
+    AcquireSRWLockExclusive(&g_handles_lock);
+    if (!g_handles) g_handles = new std::unordered_map<HANDLE, OpenInfo>;
+    (*g_handles)[static_cast<HANDLE>(handle)] = info;
+    g_handle_count.store(static_cast<long>(g_handles->size()), std::memory_order_relaxed);
+    ReleaseSRWLockExclusive(&g_handles_lock);
+}
+
+void forget_handle(void* handle) {
+    if (g_handle_count.load(std::memory_order_relaxed) == 0) return;
+    AcquireSRWLockExclusive(&g_handles_lock);
+    if (g_handles && g_handles->erase(static_cast<HANDLE>(handle)))
+        g_handle_count.store(static_cast<long>(g_handles->size()), std::memory_order_relaxed);
+    ReleaseSRWLockExclusive(&g_handles_lock);
+}
+
 bool describe_handle(void* handle, std::string* out) {
     OpenInfo info;
     if (!find_open(static_cast<HANDLE>(handle), &info)) return false;

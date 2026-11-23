@@ -2,12 +2,12 @@
 
 Usage: stall_check.py x2w_launch.exe x2w_stall_title.exe SHIMS_DIR
 
-  stall    the title (with --shims, --log, --timeout) exits 0: its ReadFile/WriteFile calls with lpOverlapped null on a
+  stall    the title (with --shims and --log, no --timeout) exits 0: its ReadFile/WriteFile calls with lpOverlapped null on a
            FILE_FLAG_OVERLAPPED file give the right bytes (stderr: "sync-read-on-async-handle" and
            "sync-write-on-async-handle"); its file-open lines name the file's flags (OVERLAPPED) and type disk, and the
            pipe by its device name with type pipe; the run log has one "stalled thread N(main) in
            kernel32.dll!ReadFile(...)" line with handle-type pipe and overlapped-handle=no, the handle being the one
-           the pipe's file-open line gave.
+           the pipe's file-open line gave, and the writer thread's WaitForSingleObject as also-pending.
   quick    X2W_STALL_MS=200: the read waits less than 2 s and no stall line is written.
 Every log line must match run_log_check.py's grammar.
 """
@@ -34,7 +34,8 @@ def run(launcher, title, shims, label, stall_ms=None):
         if stall_ms is not None:
             env["X2W_STALL_MS"] = str(stall_ms)
         env["LOCALAPPDATA"] = scratch
-        result = subprocess.run([launcher, "--shims", shims, "--log", str(log), "--timeout", "60", title],
+        # No --timeout: the stall detector runs with every --log.
+        result = subprocess.run([launcher, "--shims", shims, "--log", str(log), title],
                                 capture_output=True, text=True, timeout=120, env=env)
         text = log.read_text(encoding="utf-8")
     code = result.returncode & 0xFFFFFFFF
@@ -70,8 +71,10 @@ def main():
     match = re.search(r"-> handle (0x[0-9a-f]+) access=0x80000000 share=0x0 disp=OPEN_EXISTING flags=\(\) type=pipe",
                       pipe[0]) if pipe else None
     expect(match is not None, f"stall: no pipe file-open line with type=pipe: {pipe}")
-    stalls = [STALL.fullmatch(l) for l in lines if l.startswith("stalled thread")]
-    expect(len(stalls) == 1 and stalls[0] is not None, f"stall: expected one stalled line, got {len(stalls)}")
+    every = [STALL.fullmatch(l) for l in lines if l.startswith("stalled thread")]
+    expect(all(every), "stall: a stalled line outside the pattern")
+    stalls = [m for m in every if m and m[3] == "kernel32.dll!ReadFile"]
+    expect(len(stalls) == 1, f"stall: expected one stalled ReadFile line, got {len(stalls)}")
     if stalls and stalls[0]:
         m = stalls[0]
         expect(m[2] == "main", f"stall: thread {m[2]}, expected main")
@@ -83,6 +86,9 @@ def main():
         expect(" handle-type pipe " in m[6], f"stall: no handle-type pipe: {m[6]!r}")
         expect("overlapped-handle=no" in m[6] or "overlapped-handle=busy" in m[6],
                f"stall: overlapped-handle: {m[6]!r}")
+        expect(re.search(r" also-pending \d+\(program\) kernel32\.dll!WaitForSingleObject\(0x[0-9a-f]+,0x[0-9a-f]+,"
+                         r"0x[0-9a-f]+,0x[0-9a-f]+\) for \d+s", m[6]) is not None,
+               f"stall: the writer's wait is not also-pending: {m[6]!r}")
         expect("opened-as \\\\.\\pipe\\x2w_stall_check flags=() type-at-open=pipe" in m[6],
                f"stall: no opened-as fields: {m[6]!r}")
 

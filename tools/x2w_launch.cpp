@@ -85,9 +85,10 @@
 // call in a per-thread 64-entry ring (name, caller, first four integer arguments, RAX on return). A crash, a
 // first-chance line and the first breakpoint lines are followed by that thread's last 32 calls; a crash also by the
 // main thread's. Lines: "trace-calls on", "recent-calls thread ...", "recent N: ..." (see "recent-calls trace" below).
-// With --log and --timeout the watchdog also scans those rings once a second: a call pending for more than 2 s gets one
+// With --log the watchdog also scans those rings once a second: a call pending for more than 2 s gets one
 // "stalled thread TID(main|program) in dll!NAME(...) for Ns caller=..." line, with the handle's type, name and mode
-// for file calls and the object type (and the shim that made it) for waits (see "stall detector" below).
+// for file calls, the object type (and the shim that made it) for waits, and every other thread's pending call as
+// " also-pending TID(main|program) dll!NAME(...) for Ns" (see "stall detector" below).
 //
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
@@ -295,7 +296,7 @@ int err_printf(const char* format, ...) {
 
 void log_line(const char* format, ...) {
     if (log_file == INVALID_HANDLE_VALUE) return;
-    char line[1024];
+    char line[4096];  // stall lines carry every other pending call
     va_list args;
     va_start(args, format);
     int length = std::vsnprintf(line, sizeof line - 1, format, args);
@@ -825,7 +826,8 @@ void trace_dump_main() {
 }
 
 // ---------------------------------------------------------------- stall detector
-// With --log and --timeout the watchdog scans every thread's recent-calls ring once a second. A thread whose newest
+// With --log the watchdog (with or without --timeout) scans every thread's recent-calls ring once a second. A thread
+// whose newest
 // call has been pending for more than 2 s (the same call seen pending in scans at least 2 s apart) is logged once:
 // "stalled thread TID(main|program) in dll!NAME(a1,a2,a3,a4) for Ns caller=module+RVA", then for file calls
 // (ReadFile, WriteFile, ReadFileEx, GetOverlappedResult, DeviceIoControl, ...) " handle 0x.. handle-type T name N
@@ -1007,7 +1009,8 @@ bool stall_file_call(const char* symbol) {
     return false;
 }
 
-void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const std::uint64_t* args, ULONGLONG ms) {
+void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const std::uint64_t* args, ULONGLONG ms,
+                  const std::string& others) {
     if (InterlockedIncrement(&stall_lines) > kStallLines) {
         if (stall_lines == kStallLines + 1) log_line("stalled-threads more are not logged");
         return;
@@ -1035,6 +1038,7 @@ void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const 
             for (std::uint64_t i = 0; i < count; ++i) extra += handle_fields(handles[i], false);
         if (args[0] > 4) extra += " more-handles " + std::to_string(args[0] - 4);
     }
+    extra += others;
     log_line("stalled thread %lu(%s) in %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus caller=%s%s", tid,
              tid == trace_main_tid ? "main" : "program", desc->name, static_cast<unsigned long long>(args[0]),
              static_cast<unsigned long long>(args[1]), static_cast<unsigned long long>(args[2]),
@@ -1042,11 +1046,22 @@ void stall_report(DWORD tid, const TraceDesc* desc, std::uint64_t caller, const 
              extra.c_str());
 }
 
-// One scan of every ring (the watchdog, once a second).
+// One scan of every ring (the watchdog, once a second). First every ring's newest call is noted (pending since when),
+// then each newly stalled one is logged with every other pending call ("also-pending").
+struct PendingCall {
+    DWORD tid;
+    const TraceDesc* desc;
+    std::uint64_t caller;
+    std::uint64_t args[4];
+    ULONGLONG ms;
+    bool report;
+};
 void stall_scan() {
     if (!trace_body || !stall_seen) return;
     const long used = trace_pool_used < kTraceRings ? trace_pool_used : kTraceRings;
     const ULONGLONG now = GetTickCount64();
+    static PendingCall pending[256];  // only the watchdog scans
+    int found = 0;
     for (long i = 0; i < used; ++i) {
         const TraceRing& ring = trace_pool[i];
         StallSeen& seen = stall_seen[i];
@@ -1058,20 +1073,40 @@ void stall_scan() {
             seen.seq = 0;
             continue;
         }
-        const TraceDesc* desc = entry.desc;
-        const std::uint64_t caller = entry.caller;
-        std::uint64_t args[4];
-        for (int a = 0; a < 4; ++a) args[a] = entry.args[a];
-        if (entry.seq != seq || !desc) continue;
+        PendingCall call{ring.tid, entry.desc, entry.caller, {}, 0, false};
+        for (int a = 0; a < 4; ++a) call.args[a] = entry.args[a];
+        if (entry.seq != seq || !call.desc) continue;
         if (seen.seq != seq) {
             seen.seq = seq;
             seen.since = now;
             seen.logged = false;
-            continue;
         }
-        if (seen.logged || now - seen.since < kStallMs) continue;
-        seen.logged = true;
-        stall_report(ring.tid, desc, caller, args, now - seen.since);
+        call.ms = now - seen.since;
+        if (!seen.logged && call.ms >= kStallMs) {
+            seen.logged = true;
+            call.report = true;
+        }
+        if (found < 256) pending[found++] = call;
+    }
+    for (int i = 0; i < found; ++i) {
+        if (!pending[i].report) continue;
+        std::string others;
+        for (int j = 0; j < found; ++j) {
+            if (j == i) continue;
+            const PendingCall& o = pending[j];
+            char text[256];
+            std::snprintf(text, sizeof text, " also-pending %lu(%s) %s(0x%llx,0x%llx,0x%llx,0x%llx) for %llus", o.tid,
+                          o.tid == trace_main_tid ? "main" : "program", o.desc->name,
+                          static_cast<unsigned long long>(o.args[0]), static_cast<unsigned long long>(o.args[1]),
+                          static_cast<unsigned long long>(o.args[2]), static_cast<unsigned long long>(o.args[3]),
+                          static_cast<unsigned long long>(o.ms / 1000));
+            if (others.size() + std::strlen(text) > 2400) {
+                others += " also-pending-more";
+                break;
+            }
+            others += text;
+        }
+        stall_report(pending[i].tid, pending[i].desc, pending[i].caller, pending[i].args, pending[i].ms, others);
     }
 }
 
@@ -2825,8 +2860,8 @@ DWORD WINAPI watchdog(void* seconds) {
     const auto limit = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(seconds));
     set_phase(PHASE_WATCHDOG);
     SetEvent(watchdog_ready);
-    // Once a second: the stall detector (see "stall detector").
-    const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(limit) * 1000;
+    // Once a second: the stall detector (see "stall detector"). Without --timeout (limit 0) it never ends the run.
+    const ULONGLONG end = limit ? GetTickCount64() + static_cast<ULONGLONG>(limit) * 1000 : ~0ull;
     for (ULONGLONG now = GetTickCount64(); now < end; now = GetTickCount64()) {
         Sleep(static_cast<DWORD>(end - now < 1000 ? end - now : 1000));
         stall_scan();
@@ -3077,7 +3112,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     // Regions are appended by dynamic loads while other threads read them: no reallocation after this.
     regions.reserve(1024);
-    if (log_file != INVALID_HANDLE_VALUE && timeout) {
+    if (log_file != INVALID_HANDLE_VALUE) {  // the stall detector runs with every --log; --timeout adds the kill timer
         // Suspended until its ID is known, so the thread callback can tell it from the program's threads; the
         // launcher then waits until it runs, before mapping anything (see watchdog).
         watchdog_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);

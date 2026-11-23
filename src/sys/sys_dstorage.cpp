@@ -26,20 +26,37 @@ Stats g_stats;
 std::map<uint32_t, Decompressor> g_decoders;
 Resolver g_resolver;
 
+// Every file handle of ours is opened overlapped (open_ours): Windows serializes synchronous I/O on one file object, so
+// a synchronous read of ours could hold up anyone else using the handle (the console GetHandle slot gives it to the
+// title), and theirs ours. Each read has its own event and offset and is waited for here.
 bool read_exact(HANDLE file, uint64_t offset, void* buf, uint32_t size) {
     uint8_t* p = static_cast<uint8_t*>(buf);
     uint32_t done = 0;
+    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!event) return false;
+    bool ok = true;
     while (done < size) {
         OVERLAPPED ov{};
         const uint64_t at = offset + done;
         ov.Offset = static_cast<DWORD>(at);
         ov.OffsetHigh = static_cast<DWORD>(at >> 32);
+        ov.hEvent = event;
+        ResetEvent(event);
         DWORD got = 0;
-        if (!ReadFile(file, p + done, size - done, &got, &ov) || got == 0) return false;
+        if (!ReadFile(file, p + done, size - done, nullptr, &ov) && GetLastError() != ERROR_IO_PENDING) { ok = false; break; }
+        if (!GetOverlappedResult(file, &ov, &got, TRUE) || got == 0) { ok = false; break; }
         done += got;
     }
-    return true;
+    CloseHandle(event);
+    return ok;
 }
+
+// Read-only, overlapped, sharing everything: the title may hold the same archive open with any share mode.
+HANDLE open_ours(const std::wstring& path, DWORD extra_flags) {
+    return CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | extra_flags, nullptr);
+}
+
 }  // namespace
 
 Stats& stats() { return g_stats; }
@@ -108,8 +125,7 @@ Result run_request(const Request& r) {
     const paths::Result mapped = paths::global_map().remap(r.path);
     if (mapped.remapped)
         log_once("ds:path:" + narrow(mapped.path), "directstorage: path remap %s -> %s", narrow(r.path).c_str(), narrow(mapped.path).c_str());
-    HANDLE file = CreateFileW(mapped.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    HANDLE file = open_ours(mapped.path, FILE_FLAG_SEQUENTIAL_SCAN);
     if (file == INVALID_HANDLE_VALUE) return fail(HRESULT_FROM_WIN32(GetLastError()));
     bool ok;
     if (r.compression == kNone) {
@@ -660,7 +676,10 @@ void release_obj(Obj* o) {
     switch (o->kind) {
     case Kind::file: {
         auto* f = static_cast<File*>(o);
-        if (f->h != INVALID_HANDLE_VALUE) CloseHandle(f->h);
+        if (f->h != INVALID_HANDLE_VALUE) {
+            paths::forget_handle(f->h);
+            CloseHandle(f->h);
+        }
         delete f;
         break;
     }
@@ -940,8 +959,7 @@ HRESULT open_file(Abi abi, const wchar_t* path, const GUID* riid, void** ppv) {
     const paths::Result mapped = paths::global_map().remap(p);
     if (mapped.remapped)
         log_once("ds:path:" + narrow(mapped.path), "directstorage: path remap %s -> %s", narrow(p).c_str(), narrow(mapped.path).c_str());
-    HANDLE h = CreateFileW(mapped.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = open_ours(mapped.path, 0);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD e = GetLastError();
         log_once("dsx:open:" + narrow(p), "directstorage: OpenFile %s failed (win32 %lu)", narrow(p).c_str(), e);
@@ -1345,7 +1363,12 @@ U file_call(File* f, int slot, U a1, U a2, U a3, U a4) {
             return GetFileInformationByHandle(f->h, info) ? S_OK : static_cast<uint32_t>(HRESULT_FROM_WIN32(GetLastError()));
         }
         log_once("dsx:file:handle", "directstorage: console file slot 4 served as GetHandle (args %s)", hex_args(a1, a2, a3, a4).c_str());
-        if (mem_ok(reinterpret_cast<void*>(a1), sizeof(HANDLE), true)) *reinterpret_cast<HANDLE*>(a1) = f->h;
+        if (mem_ok(reinterpret_cast<void*>(a1), sizeof(HANDLE), true)) {
+            // The title gets our overlapped handle: its synchronous ReadFile/WriteFile on it are issued overlapped
+            // by the file hooks (sys_paths.cpp, sync_io_on_async).
+            paths::register_handle(f->h, f->path, FILE_FLAG_OVERLAPPED);
+            *reinterpret_cast<HANDLE*>(a1) = f->h;
+        }
         return S_OK;
     }
     log_once("dsx:file:unk:" + std::to_string(slot), "directstorage: file slot %d not implemented (args %s); E_NOTIMPL", slot,

@@ -4,7 +4,7 @@
 //      one 2-byte read with lpOverlapped null (the hooks issue each with a private OVERLAPPED and wait), then a read
 //      at the end, which returns TRUE with 0 bytes, as a synchronous handle's would;
 //   2. makes an outbound named pipe, opens its client end for reading with CreateFileW (synchronous) and blocks the
-//      main thread in ReadFile on it; a second thread writes 4 bytes after X2W_STALL_MS milliseconds (default 3500),
+//      main thread in ReadFile on it; a second thread waits X2W_STALL_MS milliseconds (default 3500) on an unset event, then writes 4 bytes,
 //      so the launcher's watchdog sees the ReadFile pending for more than 2 s.
 // Exit 0 when every step gave the right result, else 10 + the first wrong step.
 #include <windows.h>
@@ -24,7 +24,10 @@ static DWORD parse_ms()
 
 static DWORD WINAPI writer(void* ms)
 {
-    Sleep(static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(ms)));
+    // Waits on an event nobody sets, so the stall line of the main thread's ReadFile shows this wait as also-pending.
+    HANDLE never = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    WaitForSingleObject(never, static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(ms)));
+    CloseHandle(never);
     DWORD done = 0;
     WriteFile(g_server, "pipe", 4, &done, nullptr);
     return 0;
