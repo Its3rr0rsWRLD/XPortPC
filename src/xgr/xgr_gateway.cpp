@@ -442,7 +442,9 @@ void* fallback_function(long hr)
 bool slot_answer_override(const std::string& name, unsigned slot, long& hr)
 {
     char buffer[2048];
+    const DWORD error = GetLastError();  // an unset variable sets ERROR_ENVVAR_NOT_FOUND; the title's value is kept
     const DWORD n = GetEnvironmentVariableA("X2W_XGR_SLOT_ANSWER", buffer, sizeof buffer);
+    SetLastError(error);
     // Defaults when the variable is unset, from real-title traces (args only, nothing written):
     //   IXUserImpl slot 33 is called with (queue, context, callback, token*), the shape of
     //   XUserRegisterForChangeEvent; registering succeeds (no events are ever raised offline).
@@ -492,9 +494,19 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
     if (!target && slot >= 3) known = false;
 
     bool log = false;
+    bool unknown_log = false;
     {
         std::lock_guard<std::mutex> hold(state().lock);
         ++state().calls[std::make_tuple(self->name, slot)];
+        // An unnamed slot's lines carry its argument values and caller, so each call can be a new line: the first
+        // 8 per slot are logged (a hot slot would otherwise grow the log and the seen set without bound).
+        if (!known) {
+            unsigned& lines = state().lines[std::make_tuple(self->name, slot, ~uintptr_t{0})];
+            if (lines < 8) {
+                ++lines;
+                unknown_log = true;
+            }
+        }
         if (slot >= 3 && known) {
             unsigned& lines = state().lines[std::make_tuple(self->name, slot, reinterpret_cast<uintptr_t>(caller))];
             if (lines < state().call_lines) {
@@ -508,23 +520,30 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
         const bool ours = current == Mode::ours;
         long answer = self->fallback_hr;
         const bool overridden = ours && slot_answer_override(self->name, slot, answer);
-        if (overridden)
+        if (overridden && !fallback_function(answer) && answer != static_cast<long>(0x80004001L)) {
+            emit_once("xgr-slot-answer", self->name, format("slot %u: X2W_XGR_SLOT_ANSWER value 0x%08lx is not one of "
+                                                             "0, 1, 0x80004005, 0x8000000a, 0x89245106; E_NOTIMPL", slot,
+                                                             static_cast<unsigned long>(answer)));
+            answer = static_cast<long>(0x80004001L);
+        } else if (overridden)
             emit_once("xgr-slot-answer", self->name, format("slot %u answers 0x%08lx (X2W_XGR_SLOT_ANSWER)", slot,
                                                              static_cast<unsigned long>(answer)));
-        emit_once("xgr-unknown-slot", self->name,
-                  format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx%s%s%s caller=%s", slot,
-                         (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
-                         (unsigned long long)args[4], ours ? static_cast<unsigned long>(answer) : 0x80004001ul,
-                         guess ? " (inferred " : "", guess ? guess : "", guess ? ", not served)" : "",
-                         where(caller).c_str()));
+        if (unknown_log)
+            emit_once("xgr-unknown-slot", self->name,
+                      format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx%s%s%s caller=%s", slot,
+                             (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
+                             (unsigned long long)args[4], ours ? static_cast<unsigned long>(answer) : 0x80004001ul,
+                             guess ? " (inferred " : "", guess ? guess : "", guess ? ", not served)" : "",
+                             where(caller).c_str()));
         if (current == Mode::ours) return fallback_function(answer);  // null: E_NOTIMPL
         if (current != Mode::record) return nullptr;
         // record: also an xgr-call line, so the argument shapes of every new slot are seen.
-        emit("xgr-call", self->name,
-             format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx -> E_NOTIMPL caller=%s", slot,
-                    (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
-                    (unsigned long long)args[4], (unsigned long long)args[5], (unsigned long long)args[6],
-                    where(caller).c_str()));
+        if (unknown_log)
+            emit("xgr-call", self->name,
+                 format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx -> E_NOTIMPL caller=%s", slot,
+                        (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
+                        (unsigned long long)args[4], (unsigned long long)args[5], (unsigned long long)args[6],
+                        where(caller).c_str()));
         return nullptr;
     }
     std::string text;
