@@ -29,7 +29,7 @@ SETS = ((1, 2), (5, 2), (3, 3), (0, 0xffffffff))
 def model(a, b, bug=None):
     bit = a <= b if bug == "le" else a < b
     x, y = CLEAR & 0xff, SET & 0xff
-    first, second = (x, y) if bit else (y, x)
+    first, second = (y, x) if bit else (x, y)  # v_cndmask picks the set word for a set bit
     if bug == "inverted":
         first, second = second, first
     third, fourth = (x, y) if bug == "constants_swapped" else (y, x)
