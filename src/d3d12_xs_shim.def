@@ -9,4 +9,5 @@ EXPORTS
     X2WGfxCreateSwapChainForHwnd
     X2WGfxSetLogSink
     X2WGfxGetCounters
+    X2WGfxUnwrap
     X2WGfxUnknownExport

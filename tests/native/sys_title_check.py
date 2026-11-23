@@ -108,7 +108,7 @@ def main():
         print(f"default: exit {code:#x}\n{out}", end="")
         if code != 0x7f:
             raise AssertionError(f"default exit {code:#x} != 0x7f\n{err}")
-        expected = (f"files=14\nfactory=a2570002\nraw={size} fnv={expected_hash}\n"
+        expected = (f"files=14\nfactory=0\nraw={size} fnv={expected_hash}\n"
                     f"gdeflate={size} fnv={expected_hash} same=1\ntemp=1 scratch=1\nname=1\n"
                     f"procs={procs} active={active} qpf={qpf}\n")
         if out != expected:

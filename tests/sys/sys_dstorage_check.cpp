@@ -17,23 +17,29 @@ int main(int argc, char** argv) {
     chk::capture();
     reset_for_test();
 
-    // ---- forwarding to a stand-in runtime ---------------------------------------------------------------
+    // ---- forwarding to a stand-in runtime: only the public IDStorageFactory riid is forwarded ------------------
     {
         CHECK(resolve_get_factory(argv[1]) != nullptr);
         void* out = nullptr;
+        CHECK(X2wDStorageGetFactory(pc::IID_Factory, &out) == S_OK);
+        CHECK_EQ(reinterpret_cast<uintptr_t>(out), 0x6924ea0cu);
+        CHECK(X2wDStorageGetFactory(pc::IID_Factory, nullptr) == E_POINTER);
+        // Any other riid (the console's interfaces) is served by our own factory even with a runtime present.
         const IID iid = {0xCAFE0001, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}};
-        CHECK(X2wDStorageGetFactory(iid, &out) == S_OK);
-        CHECK_EQ(reinterpret_cast<uintptr_t>(out), 0xCAFE0001u);
-        CHECK(X2wDStorageGetFactory(iid, nullptr) == E_POINTER);
+        void* own = nullptr;
+        CHECK(X2wDStorageGetFactory(iid, &own) == S_OK && own != nullptr && reinterpret_cast<uintptr_t>(own) != 0xCAFE0001u);
+        CHECK_EQ(chk::count("dstorage-factory iid=cafe0001-0000-0000-0000-000000000000 served-as IDStorageFactory"), 1);
     }
-    // ---- no runtime: the fallback status ---------------------------------------------------------------
+    // ---- no runtime: our own factory, also for the public riid ----------------------------------------------
     reset_for_test();
     {
         CHECK(resolve_get_factory("off") == nullptr);
-        void* out = reinterpret_cast<void*>(1);
+        void* out = nullptr;
+        CHECK(X2wDStorageGetFactory(pc::IID_Factory, &out) == S_OK);
+        CHECK(out != nullptr);
         const IID iid = {};
-        CHECK(X2wDStorageGetFactory(iid, &out) == X2W_E_DSTORAGE_FALLBACK);
-        CHECK(out == nullptr);
+        void* own = nullptr;
+        CHECK(X2wDStorageGetFactory(iid, &own) == S_OK && own != nullptr && own != out);
     }
 
     // ---- fallback queue over a real file -------------------------------------------------------------------

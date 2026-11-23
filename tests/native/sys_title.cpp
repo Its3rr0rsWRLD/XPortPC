@@ -6,13 +6,13 @@
 // Files under G:\data (the title folder): hello.txt ("hello from G:\n"), blob.bin (BLOB_BYTES bytes) and blob.gds
 // (the same bytes as one GDeflate stream made by the reference encoder). Standard output, one line each:
 //   files=<n>        hello.txt through CreateFileW and GetFileAttributesExW (size n)
-//   factory=<hex>    X2wDStorageGetFactory with no runtime to forward to
+//   factory=<hex>    X2wDStorageGetFactory for a console riid: x2w_sys's own factory (status 0)
 //   raw=<n> fnv=<h>  X2wDStorageFallbackRead of blob.bin: size and FNV-1a 32 of the bytes
 //   gdeflate=<n> fnv=<h> same=<0|1>  the same through blob.gds with compression format 1, and whether it equals raw
 //   temp=<0|1> scratch=<0|1>  a write and read back under T:\ and D:\
 //   name=<0|1>       GetModuleFileNameW(NULL) still names this title
 //   procs=<n> active=<n> qpf=<n>  GetSystemInfo, GetActiveProcessorCount and QueryPerformanceFrequency answers
-// Exit code bits: 1 files, 2 factory status is the fallback code, 4 raw read, 8 GDeflate read equals the raw one,
+// Exit code bits: 1 files, 2 the own factory is returned (S_OK, non-null, released), 4 raw read, 8 GDeflate read equals the raw one,
 // 0x10 T: round trip, 0x20 D: round trip, 0x40 module file name. 0x7f when everything works.
 #include <windows.h>
 
@@ -126,7 +126,7 @@ extern "C" DWORD sys_entry(void*) {
         put("\n");
         if (ok) code |= 1;
     }
-    // 2: no DirectStorage runtime to forward to.
+    // 2: a console riid is served by x2w_sys's own factory.
     {
         IID iid = {};
         void* factory = reinterpret_cast<void*>(1);
@@ -134,7 +134,11 @@ extern "C" DWORD sys_entry(void*) {
         put("factory=");
         put_number(static_cast<unsigned>(hr), 16);
         put("\n");
-        if (static_cast<unsigned>(hr) == 0xA2570002u && !factory) code |= 2;
+        if (hr == 0 && factory) {
+            using Release = unsigned long(__stdcall*)(void*);
+            (*reinterpret_cast<Release* const*>(factory))[2](factory);
+            code |= 2;
+        }
     }
     // 3, 4: plain and GDeflate fallback reads.
     unsigned raw_size = 0, gds_size = 0;

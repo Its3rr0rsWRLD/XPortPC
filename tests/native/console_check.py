@@ -6,7 +6,7 @@ The title imports every name of xcrdapi.dll, chad.dll, xapu.dll, acphal.dll, xg_
 (XMemVirtualAlloc, XMemTransferMemory, XMemMapPhysicalPagesScatter, XMemIsToolsMemAvailable) by DLL name. The launcher
 must route each to a shim (no "stub", no "missing"), the program exits 0 after every step passes, and the shims log
 their first calls. Run twice: DirectStorage forced off (X2W_DSTORAGE_DLL=off: xcrdapi's DStorageGetFactory must
-return x2w_sys.dll's fallback status, proving the forward) and with the machine's own DirectStorage.
+return x2w_sys.dll's own factory, proving the forward) and with the machine's own DirectStorage.
 """
 import os
 from pathlib import Path

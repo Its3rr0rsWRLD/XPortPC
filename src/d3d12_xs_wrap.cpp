@@ -2939,3 +2939,9 @@ HRESULT create_swap_chain_for_hwnd(IUnknown* queue, HWND window, const DXGI_SWAP
 }
 
 }  // namespace d3d12_xs
+
+extern "C" X2W_GFX_API IUnknown* WINAPI X2WGfxUnwrap(IUnknown* object)
+{
+    return object ? d3d12_xs::real_of(object) : nullptr;
+}
+

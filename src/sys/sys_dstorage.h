@@ -7,13 +7,15 @@
 // destinations are ordinary addresses (title memory is real virtual memory), and requests whose destination is a
 // GPU resource are rewritten by the graphics wrappers before they reach this layer.
 //
-// Fallback. With no dstorage.dll, X2wDStorageGetFactory returns X2W_E_DSTORAGE_FALLBACK and the gateway uses the
-// Queue below: plain ReadFile on a worker thread, memory or title-address destinations (a resolver turns a title
-// address into a host pointer; GPU resources go through the graphics wrappers' staging memory), and a pluggable
-// decompressor per compression format. GDeflate decoding is Microsoft's public reference decoder
+// Our own implementation. When X2wDStorageGetFactory does not forward (no dstorage.dll, the runtime disabled, or an
+// riid other than the public IDStorageFactory: the console's xcrdapi.dll entry), it returns our factory ("Our own
+// DirectStorage" below). The flat Queue/run_request path remains for gateways and stand-ins: plain ReadFile on a
+// worker thread, memory or title-address destinations (a resolver turns a title address into a host pointer), and a
+// pluggable decompressor per compression format. GDeflate decoding is Microsoft's public reference decoder
 // (Apache-2.0, over NVIDIA's libdeflate fork) vendored in third_party/gdeflate; X2WSysInit registers it for format 1
-// (sys_gdeflate.h). Without X2WSysInit (the library alone) nothing is registered: register_decompressor() takes any
-// implementation, and a request for an unregistered format completes with an unsupported-format error, logged once.
+// (sys_gdeflate.h). Without X2WSysInit (the library alone) the flat path has nothing registered: register_decompressor()
+// takes any implementation, and a request for an unregistered format completes with an unsupported-format error,
+// logged once. Our factory's queues fall back to the built-in GDeflate and zlib decoders.
 #pragma once
 
 #include <condition_variable>
@@ -28,6 +30,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <d3d12.h>
 
 namespace x2w_sys::ds {
 
@@ -97,6 +100,100 @@ using GetFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
 GetFactoryFn resolve_get_factory(const char* override_dll = nullptr);
 void reset_for_test();
 void apply_config_line(const std::string& key, const std::string& value);
+
+// ---- Our own DirectStorage ------------------------------------------------------------------------------------
+// X2wDStorageGetFactory serves it whenever it does not forward (no dstorage.dll, X2W_DSTORAGE_DLL=off, or an riid
+// other than the public IDStorageFactory, which is what the console's xcrdapi.dll entry asks for). Two ABIs:
+//  pc       the public dstorage.h 1.x layout (riid == pc::IID_Factory): vtables and structures below.
+//  console  the GDK dstorage_xs.h layout (IDStorageFactoryX..X2, IDStorageQueueX..X2, IDStorageFileX,
+//           IDStorageStatusArrayX, learn.microsoft.com/gaming/gdk/docs/reference/system/dstorage). The public
+//           reference lists each interface's methods alphabetically, not in vtable order, so console calls are
+//           classified by their argument shapes where the public order is ambiguous (sys_dstorage.cpp, "console
+//           slots"), and every first use of a slot is logged with its arguments and what it was served as.
+// Requests run on one worker thread per queue (memory destinations of one batch on the thread pool); GPU
+// destinations (pc only: buffer, texture region, multiple subresources) go through an upload heap and a copy queue
+// on the queue's device (a d3d12_xs wrapper is unwrapped through d3d12_xs.dll's X2WGfxUnwrap). Compression: none,
+// GDeflate (pc format 1), zlib (console ZlibDecompress), or a register_decompressor() format.
+enum class Abi : uint32_t { pc = 0, console = 1 };
+HRESULT get_own_factory(Abi abi, REFIID iid, void** out);
+std::string guid_string(const GUID& g);
+// Live objects of our implementation (factories excluded), for leak checks.
+long own_object_count();
+
+namespace pc {
+// GUIDs from the public dstorage.h (Microsoft.Direct3D.DirectStorage 1.x).
+inline constexpr GUID IID_Factory = {0x6924ea0c, 0xc3cd, 0x4826, {0xb1, 0x0a, 0xf6, 0x4f, 0x4e, 0xd9, 0x27, 0xc1}};
+inline constexpr GUID IID_File = {0x5de95e7b, 0x955a, 0x4868, {0xa7, 0x3c, 0x24, 0x3b, 0x29, 0xf4, 0xb8, 0xda}};
+inline constexpr GUID IID_Queue = {0xcfdbd83f, 0x9e06, 0x4fda, {0x8e, 0xa5, 0x69, 0x04, 0x21, 0x37, 0xf4, 0x9b}};
+inline constexpr GUID IID_Queue1 = {0xdd2f482c, 0x5eff, 0x41e8, {0x9c, 0x9e, 0xd2, 0x37, 0x4b, 0x27, 0x81, 0x28}};
+inline constexpr GUID IID_Queue2 = {0xb1c9d643, 0x3a49, 0x44a2, {0xb4, 0x6f, 0x65, 0x36, 0x49, 0x47, 0x0d, 0x18}};
+inline constexpr GUID IID_StatusArray = {0x82397587, 0x7cd5, 0x453b, {0xa0, 0x2e, 0x31, 0x37, 0x9b, 0xd6, 0x46, 0x56}};
+
+enum : uint8_t { kDestMemory = 0, kDestBuffer = 1, kDestTextureRegion = 2, kDestMultipleSubresources = 3, kDestTiles = 4 };
+enum : uint8_t { kSourceFile = 0, kSourceMemory = 1 };
+
+struct QueueDesc {
+    uint64_t SourceType;
+    uint16_t Capacity;
+    int8_t Priority;
+    const char* Name;
+    ID3D12Device* Device;
+};
+struct RequestOptions {
+    uint8_t CompressionFormat;
+    uint8_t Reserved1[7];
+    uint64_t SourceType : 1;
+    uint64_t DestinationType : 7;
+    uint64_t Reserved : 56;
+};
+struct SourceFile { IUnknown* Source; uint64_t Offset; uint32_t Size; };
+struct SourceMemory { const void* Source; uint32_t Size; };
+struct DestMemory { void* Buffer; uint32_t Size; };
+struct DestBuffer { ID3D12Resource* Resource; uint64_t Offset; uint32_t Size; };
+struct DestTexture { ID3D12Resource* Resource; UINT SubresourceIndex; D3D12_BOX Region; };
+struct DestMultiple { ID3D12Resource* Resource; UINT FirstSubresource; };
+struct DestTiles { ID3D12Resource* Resource; D3D12_TILED_RESOURCE_COORDINATE Coordinate; D3D12_TILE_REGION_SIZE Size; };
+struct Request {
+    RequestOptions Options;
+    union { SourceMemory Memory; SourceFile File; } Source;
+    union { DestMemory Memory; DestBuffer Buffer; DestTexture Texture; DestMultiple MultipleSubresources; DestTiles Tiles; } Destination;
+    uint32_t UncompressedSize;
+    uint64_t CancellationTag;
+    const char* Name;
+};
+static_assert(sizeof(RequestOptions) == 16 && sizeof(Request) == 104, "public DSTORAGE_REQUEST layout");
+struct QueueInfo { QueueDesc Desc; uint16_t EmptySlotCount; uint16_t RequestCountUntilAutoSubmit; };
+
+// The public vtable orders (IUnknown first).
+struct IFile : IUnknown {
+    virtual void STDMETHODCALLTYPE Close() = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetFileInformation(BY_HANDLE_FILE_INFORMATION* info) = 0;
+};
+struct IStatusArray : IUnknown {
+    virtual bool STDMETHODCALLTYPE IsComplete(UINT32 index) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) = 0;
+};
+struct IQueue : IUnknown {
+    virtual void STDMETHODCALLTYPE EnqueueRequest(const Request* request) = 0;
+    virtual void STDMETHODCALLTYPE EnqueueStatus(IStatusArray* array, UINT32 index) = 0;
+    virtual void STDMETHODCALLTYPE EnqueueSignal(ID3D12Fence* fence, UINT64 value) = 0;
+    virtual void STDMETHODCALLTYPE Submit() = 0;
+    virtual void STDMETHODCALLTYPE CancelRequestsWithTag(UINT64 mask, UINT64 value) = 0;
+    virtual void STDMETHODCALLTYPE Close() = 0;
+    virtual HANDLE STDMETHODCALLTYPE GetErrorEvent() = 0;
+    virtual void STDMETHODCALLTYPE RetrieveErrorRecord(void* record) = 0;  // DSTORAGE_ERROR_RECORD
+    virtual void STDMETHODCALLTYPE Query(QueueInfo* info) = 0;
+    virtual void STDMETHODCALLTYPE EnqueueSetEvent(HANDLE event) = 0;     // IDStorageQueue1
+    virtual uint32_t STDMETHODCALLTYPE GetCompressionSupport(uint8_t format) = 0;  // IDStorageQueue2
+};
+struct IFactory : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE CreateQueue(const QueueDesc* desc, REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OpenFile(const WCHAR* path, REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateStatusArray(UINT32 capacity, const char* name, REFIID riid, void** ppv) = 0;
+    virtual void STDMETHODCALLTYPE SetDebugFlags(UINT32 flags) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetStagingBufferSize(UINT32 size) = 0;
+};
+}  // namespace pc
 
 }  // namespace x2w_sys::ds
 

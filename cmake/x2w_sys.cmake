@@ -73,6 +73,13 @@ foreach(check IN ITEMS gameinput audio dstorage)
     set_tests_properties(sys_${check} PROPERTIES TIMEOUT 60)
 endforeach()
 
+# Our own DirectStorage over a temporary file, with a WARP device for fences and GPU destinations.
+add_executable(sys_dstorage_factory_check tests/sys/sys_dstorage_factory_check.cpp)
+target_include_directories(sys_dstorage_factory_check PRIVATE tests/sys)
+target_link_libraries(sys_dstorage_factory_check PRIVATE x2w_sys_lib d3d12 dxgi)
+add_test(NAME sys_dstorage_factory COMMAND sys_dstorage_factory_check)
+set_tests_properties(sys_dstorage_factory PROPERTIES TIMEOUT 120)
+
 # GDeflate: decoder checks against streams made by the reference encoder, and the packer tool that tests use to
 # create fixtures (tests/sys/gdeflate_pack.cpp: gdeflate_pack IN OUT [LEVEL]).
 add_executable(gdeflate_pack tests/sys/gdeflate_pack.cpp)

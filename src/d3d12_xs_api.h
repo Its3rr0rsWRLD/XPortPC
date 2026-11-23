@@ -97,6 +97,11 @@ typedef enum X2WGfxTitleGpuState {
 // Returns FALSE when counters is null or counters->size is too small.
 X2W_GFX_API BOOL WINAPI X2WGfxGetCounters(X2WGfxCounters* counters);
 
+// The desktop object behind one of this shim's wrappers (device, queue, list, fence, resource, heap, ...), with no
+// reference added; null when `object` is not a wrapper. Other system layers (x2w_sys's DirectStorage) use it to
+// record GPU work on the desktop device a wrapped object stands for.
+X2W_GFX_API IUnknown* WINAPI X2WGfxUnwrap(IUnknown* object);
+
 // The shim-owned present path: IDXGIFactory2::CreateSwapChainForHwnd on the desktop factory with
 // the desktop queue behind a wrapped command queue, returned as a wrapped swap chain (public
 // IDXGISwapChain3 method order) through riid. A queue that is not a shim queue is refused with
