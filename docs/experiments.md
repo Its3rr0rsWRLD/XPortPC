@@ -2878,7 +2878,7 @@ The warm time includes the once-per-process converter fingerprint (a directory w
 
 PC results at the R4 tip (RTX 4070 Ti and WARP): all R2, R3 and R4 cases, the `d3d12_xs_shim_*` cases and `pixel_aot_controls`/`vertex_aot_controls` pass (30 of 30).
 
-Not covered yet: textures from console tiled bytes (the console's texture upload path is not public; the scene uploads rows through `CopyTextureRegion`), descriptor words written to title memory (descriptor-block recycling and compute came with R5).
+Not covered yet: textures from the title's own upload calls (the console's texture upload path is not public; the default scene uploads rows through `CopyTextureRegion`, and the R4 `tiled` mode in the detiling section below detiles synthetic tiled bytes), descriptor words written to title memory (descriptor-block recycling and compute came with R5).
 
 #### Compute and a frame loop (runtime rung R5)
 
@@ -2916,6 +2916,24 @@ Frame time, from a diagnostic run of the same code (`r5_frames`, debug layer on,
 Pipeline creation: cold 0.60 s for compute and 1.0 to 1.9 s for vertex + pixel; warm 15 to 31 ms for compute and 2 to 10 ms for graphics. WARP's maximum (about 0.2 to 0.3 s, one frame per run) and its heavier p99 tail are single stalls of the software rasterizer. Churn costs about 0.6 to 0.8 ms per frame on top of warm: an `XMemAlloc` (`OpenExistingHeapFromAddress` plus a placed buffer), a free and new view descriptors every frame.
 
 Not covered yet: compute descriptor tables in title heaps, LDS and barriers in the runtime path (C-6), global stores (C-5). The converter parameters still take 46 of 64 root DWORDs, 32 of them push words; a per-draw upload ring for push words would free most of that.
+
+#### GFX10/GFX10.3 texture detiling
+
+A port of AMD's addrlib (Mesa 26.2.6, `src/amd/addrlib`, MIT) for GFX10.1 and GFX10.3 colour surfaces, and a CPU detiler with one entry point, `x2w::gfx10::DetileToFootprints` (design, coverage and assumptions: [runtime.md](design/runtime.md), section 4, "Textures: detiling"). Static library `x2w_gfx10_detile`; nothing in the shim calls it yet.
+
+| Test | Inputs and checks |
+|---|---|
+| `tests/gfx10_addr_oracle_check.py` (Linux/macOS, not in ctest) | Downloads the pinned tarball (sha256 `b9436b3e…3b2f`), checks that `src/gfx10_swizzle_pattern.h` holds lines 24-5370 of addrlib's `gfx10SwizzlePattern.h` unchanged, builds addrlib (`-DDEBUG=0`, no SIMD) and `tests/gfx10_addr_oracle/oracle.cpp`. 21 configurations x 2D/3D x 17 modes x 12 formats x 16 sizes x 1/3/full mips: 199,563 cases, 155,137 layouts compared, 44,426 rejected by both; 61,165,600 element addresses; 663,098 subresources tiled and detiled against `Addr2CopyMemToSurface`/`Addr2CopySurfaceToMem` (14.1 GB). 0 mismatches. 3D `SW_64KB_D_X` with 8/16-byte elements on RB+ has no addrlib equation and is checked by copies only; 248 surfaces whose Z-order patterns overflow addrlib's copy lookup tables, and the `SW_VAR_*` modes (no addrlib copy), are checked by addresses only. Negative control: the wrong RB+ setting gives 97 mismatches. `--quick`: 7.9 million addresses, 16 s. |
+| `gfx10_detile_roundtrip` | `tests/gfx10_detile_check.cpp`, CPU: 4,492 surfaces (3 configurations, 17 modes, 7 element shapes, 2D/3D, 1 and full mips) through D3D12-shaped footprints, 115.5 million elements: tile then detile is the identity, tiled bytes equal an `ElementOffset` reference, addresses are distinct; one flipped tiled byte changes one output byte; a wrong footprint width, a short tiled buffer, a missing footprint, `SW_4KB_R_X`, `SW_VAR_R_X` on GFX10.1 and a Z-order BC7 surface are refused. |
+| `runtime_r4_scene_tiled_*` | `r4_scene … tiled`: both textures written to title memory (`XMemAlloc`) in GFX10.3 layouts (16 pipes, 16 packers): texture 0 `SW_64KB_R_X`, 4 mips (mip 0 in the mip tail), pipe/bank XOR 0x8b; texture 1 `SW_4KB_S_X`, XOR 0x6. Detiled into the desktop textures' `GetCopyableFootprints`, copied per mip, sampled by the R4 draws: both frames equal the CPU reference, with the other R4 requirements. |
+| `runtime_r4_wrong_swizzle_*` | Control: texture 0 detiled as `SW_64KB_S_X`; both frames must differ from the reference. |
+| `runtime_r4_detile_upload_*` | `tests/runtime/r4_detile_upload.cpp`: 11 surfaces (RGBA8 `SW_64KB_R_X` 300x200 full chain; BC1 array of 3 `SW_4KB_S_X`; BC7 `SW_64KB_S_X`; R8 1000x7 `SW_64KB_D_X`; RGBA16 array of 6 `SW_64KB_Z_X`; RGBA32 `SW_256B_S`; RG16 linear; 3D RGBA8 `SW_64KB_S` 37x19x23, R16 `SW_64KB_D_X`, BC4 `SW_4KB_S_X`, RGBA8 `SW_64KB_R_X`) tiled from random data into title memory, detiled, uploaded through the shim, read back: every element equal. Control: a wrong pipe/bank XOR must differ. |
+
+PC results: pending.
+
+```bash
+python3 -B tests/gfx10_addr_oracle_check.py            # or --quick, or --tarball PATH
+```
 
 ### Attribute words at xmem call sites
 
