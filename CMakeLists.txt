@@ -134,6 +134,18 @@ target_link_libraries(gfx10_detile_check PRIVATE x2w_gfx10_detile)
 add_test(NAME gfx10_detile_roundtrip COMMAND gfx10_detile_check)
 set_tests_properties(gfx10_detile_roundtrip PROPERTIES TIMEOUT 300)
 
+# GFX10.3 hardware descriptor words (src/gfx10_descriptors.h): T#, S# and V# decoding and the desktop texture, SRV
+# and sampler that match them, for descriptors a title writes into descriptor memory itself. No D3D12 dependency;
+# tests/gfx10_descriptors_fields_check.py compares its field table with Mesa's register database on Linux.
+add_library(x2w_gfx10_descriptors STATIC src/gfx10_descriptors.cpp)
+target_include_directories(x2w_gfx10_descriptors PUBLIC src)
+target_compile_features(x2w_gfx10_descriptors PUBLIC cxx_std_17)
+target_link_libraries(x2w_gfx10_descriptors PUBLIC x2w_gfx10_detile)
+add_executable(gfx10_descriptors_check tests/gfx10_descriptors_check.cpp)
+target_link_libraries(gfx10_descriptors_check PRIVATE x2w_gfx10_descriptors)
+add_test(NAME gfx10_descriptors_decode COMMAND gfx10_descriptors_check)
+set_tests_properties(gfx10_descriptors_decode PROPERTIES TIMEOUT 60)
+
 # Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
 # r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3. Modes tiled/wrong_swizzle
 # create its textures from GFX10.3 tiled bytes in title memory through the detiler.
