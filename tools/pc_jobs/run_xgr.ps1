@@ -52,6 +52,7 @@ public static class XgrSym {
     [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)] static extern bool SymCleanup(IntPtr process);
     [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)] static extern ulong SymLoadModuleExW(IntPtr process, IntPtr file, string image, string module, ulong baseOfDll, uint size, IntPtr data, uint flags);
     [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)] static extern bool SymFromAddrW(IntPtr process, ulong address, out ulong displacement, ref SYMBOL_INFOW info);
+    [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)] static extern bool SymFromNameW(IntPtr process, string name, ref SYMBOL_INFOW info);
     [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)] static extern bool SymEnumSymbolsW(IntPtr process, ulong baseOfDll, string mask, EnumCallback callback, IntPtr context);
 
     static IntPtr process = new IntPtr(0x5851);  // any unique value identifies the dbghelp session
@@ -86,6 +87,31 @@ public static class XgrSym {
             Array.Copy(file, raw, image, rva, Math.Min(rawSize, Math.Min(vsize == 0 ? rawSize : vsize, sizeOfImage - rva)));
             sections.Add(new uint[] { rva, Math.Max(vsize, rawSize), flags });
         }
+    }
+
+    // The TLS directory: template range, zero fill, characteristics, the template's bytes (at most 64: the
+    // C runtime's own thread-local words) and where dbghelp puts _Init_thread_epoch.
+    public static string Tls(string exe) {
+        byte[] file = File.ReadAllBytes(exe);
+        int pe = BitConverter.ToInt32(file, 0x3c);
+        ulong imageBase = BitConverter.ToUInt64(file, pe + 24 + 24);
+        uint dirRva = BitConverter.ToUInt32(file, pe + 24 + 112 + 9 * 8);
+        if (dirRva == 0) return "no TLS directory";
+        ulong start = BitConverter.ToUInt64(image, (int)dirRva), end = BitConverter.ToUInt64(image, (int)dirRva + 8);
+        ulong index = BitConverter.ToUInt64(image, (int)dirRva + 16), callbacks = BitConverter.ToUInt64(image, (int)dirRva + 24);
+        uint zeroFill = BitConverter.ToUInt32(image, (int)dirRva + 32), chars = BitConverter.ToUInt32(image, (int)dirRva + 36);
+        var text = new StringBuilder();
+        text.Append("template=0x" + (start - imageBase).ToString("x") + "..0x" + (end - imageBase).ToString("x") +
+                    " size=" + (end - start) + " zerofill=" + zeroFill + " chars=0x" + chars.ToString("x") +
+                    " index=0x" + (index - imageBase).ToString("x") + " callbacks=0x" + (callbacks == 0 ? "0" : (callbacks - imageBase).ToString("x")) + " bytes=");
+        for (ulong i = 0; i < Math.Min(end - start, 64UL); i++) text.Append(image[(int)(start - imageBase + i)].ToString("x2"));
+        var info = new SYMBOL_INFOW();
+        info.SizeOfStruct = 88;
+        info.MaxNameLen = 1024;
+        if (SymFromNameW(process, "_Init_thread_epoch", ref info))
+            text.Append(" _Init_thread_epoch: address=0x" + info.Address.ToString("x") + " flags=0x" + info.Flags.ToString("x") + " size=" + info.Size);
+        else text.Append(" _Init_thread_epoch: not found");
+        return text.ToString();
     }
 
     static bool InData(long rva, int length) {
@@ -156,6 +182,16 @@ public static class XgrSym {
                             indirect.Add((op == 2 ? "call " : "jmp ") + Regs[rm + ((rex & 1) != 0 ? 8 : 0)] + "+0x" + disp.ToString("x") + "@+0x" + (o - start).ToString("x"));
                     }
                 }
+                // mov r64, [reg+disp]: REX.W (48/49/4C/4D) 8B modrm(mod=01|10, rm!=100). With CFG the vtable
+                // slot is loaded into rax and called through _guard_dispatch_icall.
+                if ((b0 & 0xF8) == 0x48 && (b0 & 0x2) == 0 && b1 == 0x8B && o + 3 < end) {
+                    int mod = b2 >> 6, rm = b2 & 7, reg = ((b2 >> 3) & 7) + ((b0 & 4) != 0 ? 8 : 0);
+                    if ((mod == 1 || mod == 2) && rm != 4) {
+                        long disp = mod == 1 ? (sbyte)image[o + 3] : (o + 7 <= end ? BitConverter.ToInt32(image, (int)o + 3) : -1);
+                        if (disp >= 0 && disp % 8 == 0 && disp < 0x800)
+                            indirect.Add("ld " + Regs[reg] + "<-" + Regs[rm + ((b0 & 1) != 0 ? 8 : 0)] + "+0x" + disp.ToString("x") + "@+0x" + (o - start).ToString("x"));
+                    }
+                }
                 // call rel32
                 if (b0 == 0xE8 && o + 5 <= end) {
                     long target = o + 5 + BitConverter.ToInt32(image, (int)o + 1);
@@ -187,6 +223,29 @@ function Exe-Of($name) {
     $dir = Join-Path $Samples $name
     if (-not (Test-Path $dir)) { return $null }
     return Get-ChildItem -File -Path $dir -Filter *.exe | Select-Object -First 1
+}
+
+# 0. Magic statics in a /MD title of our own, under Windows and under x2w_launch.
+$statics = Join-Path $Build "x2w_xgr_statics_title.exe"
+if (Test-Path $statics) {
+    $rows = @()
+    foreach ($how in "windows", "x2w_launch") {
+        $file = Join-Path $Out "statics-$how.txt"
+        if ($how -eq "windows") {
+            $p = Start-Process -FilePath $statics -WindowStyle Hidden -PassThru -RedirectStandardOutput $file
+        } else {
+            $p = Start-Process -FilePath $launcher -WindowStyle Hidden -PassThru -RedirectStandardOutput $file `
+                -RedirectStandardError (Join-Path $Out "statics-launch-err.txt") `
+                -ArgumentList @("--shims", "`"$shims`"", "--log", "`"$(Join-Path $Out 'statics-run.log')`"", "--timeout", "20", "`"$statics`"")
+        }
+        $null = $p.Handle
+        if (-not $p.WaitForExit(40000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+        $rows += "$how exit=0x$('{0:x}' -f $p.ExitCode) $((Get-Content $file -ErrorAction SilentlyContinue) -join ' ')"
+    }
+    $opened = [XgrSym]::Open($statics)
+    $rows += "tls $([XgrSym]::Tls($statics))"
+    $rows | Set-Content (Join-Path $Out "statics.txt")
+    $rows | ForEach-Object { Write-Output "statics $_" }
 }
 
 $summary = @("sample`tmode`texit`tseconds`tlast-lines")
@@ -240,7 +299,7 @@ foreach ($name in $Scan.Split(",")) {
     $exe = Exe-Of $name
     if (-not $exe) { continue }
     $opened = [XgrSym]::Open($exe.FullName)
-    $rows = @("# $opened", "function`trva`tsize`tleas`tindirect`tdirect")
+    $rows = @("# $opened", "# tls $([XgrSym]::Tls($exe.FullName))", "function`trva`tsize`tleas`tindirect`tdirect")
     try { $rows += [XgrSym]::Scan() } catch { $rows += "# scan failed: $_" }
     $rows | Set-Content (Join-Path $Out "thunks-$name.tsv")
     Write-Output "thunks $name $($rows.Count - 2) $opened"

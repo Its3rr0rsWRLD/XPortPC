@@ -23,3 +23,9 @@ add_dependencies(x2w_gdk_shims x2w_xgr)
 
 add_test(NAME xgr_table COMMAND "${x2w_shimgen_python}" -B "${CMAKE_SOURCE_DIR}/tools/xgr_gen.py" --check)
 set_tests_properties(xgr_table PROPERTIES TIMEOUT 60)
+
+# Magic statics in a /MD title, run by tools/pc_jobs/run_xgr.ps1 under Windows and under x2w_launch.
+add_executable(x2w_xgr_statics_title tests/xgr/statics_title.cpp)
+target_compile_features(x2w_xgr_statics_title PRIVATE cxx_std_17)
+target_link_options(x2w_xgr_statics_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+set_target_properties(x2w_xgr_statics_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
