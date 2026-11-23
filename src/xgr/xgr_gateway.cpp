@@ -123,6 +123,28 @@ LaunchLog launch_log()
     return fn;
 }
 
+// x2w_launch's heap guard validates the process heap at each of these (tools/x2w_launch.cpp, "heap guard").
+using HeapMilestone = void(__cdecl*)(const char* name);
+void heap_milestone(const char* fmt, ...)
+{
+    static HeapMilestone fn = [] {
+        auto found = reinterpret_cast<HeapMilestone>(GetProcAddress(GetModuleHandleW(nullptr), "x2w_launch_heap_milestone"));
+        if (!found)
+            if (HMODULE launcher = GetModuleHandleW(L"x2w_launch.exe"))
+                found = reinterpret_cast<HeapMilestone>(GetProcAddress(launcher, "x2w_launch_heap_milestone"));
+        return found;
+    }();
+    if (!fn) return;
+    const DWORD error = GetLastError();
+    char name[200];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(name, sizeof name, fmt, args);
+    va_end(args);
+    fn(name);
+    SetLastError(error);
+}
+
 std::string format(const char* fmt, ...)
 {
     char buffer[1024];
@@ -407,6 +429,7 @@ void* fallback_function(long hr)
 // ---------------------------------------------------------------- the thunks' C half (xgr_thunks.asm)
 extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* caller)
 {
+    if (slot >= 3) heap_milestone("xgr-call %s.%u", self->name.c_str(), slot);
     const Mode current = mode();
     void* target = nullptr;
     bool known = true;
@@ -470,8 +493,9 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
     return target;
 }
 
-extern "C" uintptr_t xgr_slot_leave(Object* self, unsigned /*slot*/, uintptr_t result, void* caller)
+extern "C" uintptr_t xgr_slot_leave(Object* self, unsigned slot, uintptr_t result, void* caller)
 {
+    if (slot >= 3) heap_milestone("xgr-return %s.%u", self->name.c_str(), slot);
     if (pending.empty()) return result;
     Pending call = std::move(pending.back());
     pending.pop_back();
@@ -563,6 +587,7 @@ HRESULT WINAPI UninitializeApiImpl(void)
 HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
 {
     void* caller = _ReturnAddress();
+    heap_milestone("xgr-query %s", label(clsid, iid).c_str());
     if (!out) return E_POINTER;
     *out = nullptr;
     HRESULT hr = S_OK;

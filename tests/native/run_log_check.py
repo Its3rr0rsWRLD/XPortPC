@@ -58,6 +58,12 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"fastfail RaiseFailFastException code 0x[0-9a-f]{{8}} at {WHERE} flags 0x[0-9a-f]+ last-stub {LAST}",
            rf"minidump requested by the program type 0x[0-9a-f]+ (?:no exception|{EXCEPTION}{CALLERS}) last-stub {LAST}",
            r"console-event \d+ \((?:ctrl-c|ctrl-break|close|logoff|shutdown)\)",
+           # The heap guard (tools/x2w_launch.cpp, "heap guard"): on by default, --no-heap-guard turns it off.
+           r"heap-guard on", r"heap-guard more invalid pointers are counted only",
+           rf"heap-guard invalid [A-Za-z_]+ ptr=0x[0-9a-f]+ heap=0x[0-9a-f]+ owner=[a-z\-]+(?:\([^)]*\))?"
+           rf"(?: callers {WHERE}(?: from {WHERE})*| callers\? {WHERE}(?: {WHERE})* \(stack-scan\)| callers none) not-forwarded",
+           r"heap-guard corrupted-before .+ after .+",
+           r"heap-guard summary invalid=\d+ corrupted=(?:yes|no) last-check=.+",
            rf"cpu-host-missing emulated={FEATURES} unhandled={FEATURES} silent={FEATURES}",
            rf"cpu-trap first {MNEMONIC} at {WHERE}", rf"cpu-unhandled {MNEMONIC} at {WHERE}",
            rf"cpu-traps total=\d+(?: {MNEMONIC}=\d+)*", r"cpu-trap-forced sites \d+",

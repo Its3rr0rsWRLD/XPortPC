@@ -1,6 +1,6 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
-// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
+// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity] [--no-heap-guard]
 //                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name]
 //                   [--continue-breakpoints|--stop-on-breakpoints] program.exe
 //
@@ -73,6 +73,12 @@
 // of these. GetProcAddress on a Windows DLL applies the same order. Sys-hooked imports log as
 // "windows (x2w sys hook)" and count as windows in the run log.
 //
+// Heap guard (diagnostic, on by default for now; --no-heap-guard turns it off). The heap-releasing functions of
+// Windows and of the C runtime check each pointer against the heap it is handed to and refuse (log, leak) a pointer
+// that is not one of its blocks, instead of letting ntdll end the process with 0xc0000374; the process heap is
+// validated at milestones to bracket a write that corrupts it. Lines: "heap-guard on", "heap-guard invalid ...",
+// "heap-guard corrupted-before M after P", and "heap-guard summary ..." before the final summary. See "heap guard" below.
+//
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
 // leaves them naming the launcher, for comparison.
@@ -100,6 +106,7 @@
 #include <vector>
 
 #include "x2w_cpu_trap.h"
+#include "../src/xmem_title_api.h"  // X2WXMemDescribe's and X2WXMemGetWindows' types, looked up at run time
 
 namespace {
 
@@ -170,9 +177,14 @@ std::vector<Region> regions;  // the program first, then each mapped package DLL
 struct Watch {
     std::string dll;
     std::string symbol;
+    bool d3d12;  // a d3d12* import (the first-d3d12-call milestone, and a heap-guard check on every call)
     volatile long calls = 0;
 };
-std::vector<Watch*> watches;
+
+// Heap guard (on unless --no-heap-guard; see "Heap guard" in the header comment).
+bool heap_guard = true;
+void heap_milestone(const char* name);
+void guard_tick(const char* kind, const std::string& dll, const std::string& symbol, long calls);
 
 // Instructions performed by the #UD handler, and the forced sites (--force-cpu-traps) with their original bytes.
 volatile long trap_counts[x2w_cpu::kOpCount];
@@ -358,10 +370,13 @@ void write_summary(const char* how) {
 // The final summary, written once however the run ends: the entry point returning ("exit"), the program
 // calling ExitProcess ("exit") or TerminateProcess on itself ("terminate"), an unhandled exception ("crash"),
 // --timeout ("timeout"), or, as a last resort, the launcher's own process-detach callback ("process-exit").
+void heap_guard_summary();
 void log_summary(const char* how) {
     if (InterlockedExchange(&summary_written, 1) != 0) return;
     log_cpu_traps();
     if (breakpoints_continued) log_line("breakpoints continued %ld", breakpoints_continued);
+    heap_milestone(how);
+    heap_guard_summary();
     write_summary(how);
 }
 
@@ -397,11 +412,13 @@ std::uint8_t* reserve_thunk(std::size_t bytes) {
 extern "C" std::uint64_t x2w_stub_call(std::uint64_t index) {
     Stub* stub = stubs[static_cast<std::size_t>(index)];
     InterlockedExchange(&last_stub, static_cast<long>(index + 1));
-    if (InterlockedIncrement(&stub->calls) == 1) {
+    const long calls = InterlockedIncrement(&stub->calls);
+    if (calls == 1) {
         err_printf( "[x2w] call stub %s!%s\n", stub->dll.c_str(), stub->symbol.c_str());
         log_line("first-call %s %s!%s", stub->missing ? "missing" : "stub", stub->dll.c_str(), stub->symbol.c_str());
         if (stub->d3d12) d3d12_milestone(stub->dll, stub->symbol, stub->missing ? "missing" : "stub");
     }
+    if (heap_guard) guard_tick(stub->d3d12 ? "d3d12-call" : "stub-call", stub->dll, stub->symbol, calls);
     return 0;
 }
 
@@ -423,9 +440,14 @@ void* make_stub(const std::string& dll, const std::string& symbol, bool missing)
     return thunk;
 }
 
-extern "C" void x2w_watch_call(std::uint64_t index) {
-    Watch* watch = watches[static_cast<std::size_t>(index)];
-    if (InterlockedIncrement(&watch->calls) == 1) d3d12_milestone(watch->dll, watch->symbol, "bound");
+// RCX is the Watch itself (not an index into a vector that a dynamic load may be growing on another thread).
+extern "C" void x2w_watch_call(std::uint64_t pointer) {
+    Watch* watch = reinterpret_cast<Watch*>(pointer);
+    const DWORD error = GetLastError();
+    const long calls = InterlockedIncrement(&watch->calls);
+    if (watch->d3d12 && calls == 1) d3d12_milestone(watch->dll, watch->symbol, "bound");
+    if (heap_guard) guard_tick(watch->d3d12 ? "d3d12-call" : "shim-call", watch->dll, watch->symbol, calls);
+    SetLastError(error);
 }
 
 // A watched import runs a thunk that records the call and then jumps to the bound function with the caller's
@@ -434,7 +456,7 @@ extern "C" void x2w_watch_call(std::uint64_t index) {
 // the home space at [RSP, RSP+0x20) and the XMM saves above it. Assembled with llvm-mc from:
 //   push rcx; push rdx; push r8; push r9; sub rsp, 0x68
 //   movdqu [rsp+0x20..0x50], xmm0..xmm3
-//   mov rcx, <index>; mov rax, <x2w_watch_call>; call rax
+//   mov rcx, <Watch*>; mov rax, <x2w_watch_call>; call rax
 //   movdqu xmm0..xmm3, [rsp+0x20..0x50]; add rsp, 0x68; pop r9; pop r8; pop rdx; pop rcx
 //   mov rax, <target>; jmp rax
 constexpr std::uint8_t kWatchCode[] = {
@@ -452,8 +474,7 @@ static_assert(kWatchCode[kWatchHandler - 1] == 0xb8 && kWatchCode[kWatchTarget -
 void* make_watch(const std::string& dll, const std::string& symbol, void* target) {
     std::uint8_t* thunk = reserve_thunk(kWatchBytes);
     if (!thunk) return target;
-    const std::uint64_t index = watches.size();
-    watches.push_back(new Watch{dll, symbol});
+    const auto index = reinterpret_cast<std::uint64_t>(new Watch{dll, symbol, dll.rfind("d3d12", 0) == 0});
     const auto handler = reinterpret_cast<std::uint64_t>(&x2w_watch_call);
     const auto destination = reinterpret_cast<std::uint64_t>(target);
     std::memcpy(thunk, kWatchCode, sizeof kWatchCode);
@@ -467,9 +488,11 @@ void* make_watch(const std::string& dll, const std::string& symbol, void* target
 void* report(const std::string& dll, const std::string& symbol, const char* route, const char* kind, void* address) {
     err_printf( "[x2w] import %s!%s -> %s\n", dll.c_str(), symbol.c_str(), route);
     ++route_counts[kind];
-    // Watch the program's d3d12* imports for the run log; stubs record their own first call.
-    if (log_file != INVALID_HANDLE_VALUE && address && std::strncmp(kind, "stub", 4) != 0
-        && std::strcmp(kind, "missing") != 0 && dll.rfind("d3d12", 0) == 0)
+    // Watch the program's d3d12* imports for the run log and the heap guard, and (heap guard) every shim import, so
+    // the guard can check the process heap at those calls; stubs record their own calls.
+    const bool bound = address && std::strncmp(kind, "stub", 4) != 0 && std::strcmp(kind, "missing") != 0;
+    const bool d3d12 = dll.rfind("d3d12", 0) == 0;
+    if (bound && ((d3d12 && (log_file != INVALID_HANDLE_VALUE || heap_guard)) || (heap_guard && std::strcmp(kind, "shim") == 0)))
         return make_watch(dll, symbol, address);
     return address;
 }
@@ -817,6 +840,8 @@ std::string shim_name_of(HMODULE module) {
 void* map_package(const std::string& key);
 void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal);
 void* crash_hook(const std::string& dll, const char* name);
+void* heap_hook(const std::string& dll, const char* name);
+void* package_heap_hook(const std::string& dll, void* base, const char* name);
 
 // True for a load request naming a file in the program's folder: a bare name, or a path whose folder is it.
 bool package_request(const std::wstring& request) {
@@ -951,6 +976,9 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
             address = reinterpret_cast<FARPROC>(map_export_resolved ? map_export_resolved(reinterpret_cast<void*>(region->base), name, resolve)
                                                                     : map_export(reinterpret_cast<void*>(region->base), name));
         route = address ? "mapped" : "mapped-missing";
+        if (address && !by_ordinal)
+            if (void* heap = package_heap_hook(region->name, reinterpret_cast<void*>(region->base), name))
+                address = reinterpret_cast<FARPROC>(heap);
         error = address ? ERROR_SUCCESS : ERROR_PROC_NOT_FOUND;
     } else {
         address = GetProcAddress(module, name);
@@ -963,6 +991,7 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
         if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
         else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
         else if (void* crash = crash_hook(dll, name)) address = reinterpret_cast<FARPROC>(crash);
+        else if (void* heap = heap_hook(dll, name)) address = reinterpret_cast<FARPROC>(heap);
         else if (void* sys = sys_hook(dll, name)) address = reinterpret_cast<FARPROC>(sys);
     }
     log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " + route);
@@ -1145,6 +1174,370 @@ void* crash_hook(const std::string& dll, const char* name) {
     return nullptr;
 }
 
+// ---------------------------------------------------------------- heap guard
+// The program's and its package DLLs' HeapFree, HeapReAlloc, HeapSize, LocalFree and GlobalFree (kernel32, kernelbase,
+// api-ms-win-core-heap-*) and the C runtime's free, _free_base, realloc, _realloc_base, _aligned_free, _aligned_realloc,
+// _msize and _msize_base (ucrtbase.dll, api-ms-win-crt-heap-*, or a ucrtbase.dll mapped from the package), imported
+// or found with GetProcAddress, bind to the hooks below. Each checks that the pointer is a block of the heap it is
+// handed to (HeapValidate(heap, 0, p); for the C runtime the runtime's _get_heap_handle()) before forwarding. A
+// pointer that is not ("heap-guard invalid API ptr=P heap=H owner=O callers ...") is not forwarded: a free or size is
+// skipped (the block leaks), a realloc gets a new block with the bytes that are known to be readable copied. The
+// owner says what the pointer is: xmem-alloc / xmem-virtual (xmem.dll's records and address windows), image,
+// stack, other-heap(H) (a block of another heap), aligned-block(H) (an _aligned_malloc block given to plain free),
+// or unknown(...). The first 50 are logged, the rest counted.
+// heap_milestone() validates the whole process heap at the first thread, each xgr query and call (the gateway calls
+// x2w_launch_heap_milestone), each d3d12 import call and every 256th stub or shim call; the first failure is
+// logged as "heap-guard corrupted-before M after P", P being the last milestone that passed, which brackets the
+// call that corrupted it.
+constexpr long kHeapGuardLines = 50;
+volatile long heap_invalid;       // invalid pointers seen
+volatile long heap_corrupt;       // a milestone check failed
+volatile long heap_guard_ticks;   // stub and shim calls
+volatile long heap_first_thread;
+SRWLOCK milestone_lock = SRWLOCK_INIT;
+char last_good_milestone[200] = "launch";
+
+std::string mapped_frames(const CONTEXT* start, int limit);
+std::string stack_scan(const CONTEXT* context, int limit);
+
+void heap_guard_line(const std::string& text) {
+    err_printf("[x2w] %s\n", text.c_str());
+    log_line("%s", text.c_str());
+}
+
+// HeapValidate under SEH: a handle that is no heap at all faults inside ntdll.
+bool heap_block_ok(HANDLE heap, const void* block) {
+    __try {
+        return heap && HeapValidate(heap, 0, block) != FALSE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool copy_guarded(void* to, const void* from, std::size_t bytes) {
+    __try {
+        std::memcpy(to, from, bytes);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// _aligned_malloc keeps the heap block's address in the pointer-sized slot below the aligned pointer it returns.
+void* aligned_base(const void* p) {
+    const auto slot = (reinterpret_cast<std::uintptr_t>(p) & ~std::uintptr_t{7}) - sizeof(void*);
+    if (!readable(reinterpret_cast<const void*>(slot), sizeof(void*))) return nullptr;
+    void* base = *reinterpret_cast<void* const*>(slot);
+    const auto at = reinterpret_cast<std::uintptr_t>(base);
+    return at && at < reinterpret_cast<std::uintptr_t>(p) && reinterpret_cast<std::uintptr_t>(p) - at < 0x10000 ? base : nullptr;
+}
+
+using XMemDescribeFn = HRESULT(WINAPI*)(const void*, X2WXMemAllocationInfo*);
+using XMemWindowsFn = HRESULT(WINAPI*)(X2WXMemWindow*, uint32_t, uint32_t*);
+
+// What a pointer the guard refused is, and how many of its bytes are known to be readable (for a realloc's copy).
+std::string pointer_owner(const void* p, HANDLE heap, std::size_t* known) {
+    char text[96];
+    const auto at = reinterpret_cast<std::uintptr_t>(p);
+    *known = 0;
+    if (HMODULE xmem = GetModuleHandleW(L"xmem.dll")) {
+        if (auto describe_fn = reinterpret_cast<XMemDescribeFn>(GetProcAddress(xmem, "X2WXMemDescribe"))) {
+            X2WXMemAllocationInfo info{};
+            info.size = sizeof info;
+            if (describe_fn(p, &info) == S_OK) {
+                if (at - info.base < info.bytes) *known = static_cast<std::size_t>(info.bytes - (at - info.base));
+                return info.backing == X2W_XMEM_BACKING_PHYSICAL ? "xmem-virtual" : "xmem-alloc";
+            }
+        }
+        if (auto windows_fn = reinterpret_cast<XMemWindowsFn>(GetProcAddress(xmem, "X2WXMemGetWindows"))) {
+            X2WXMemWindow windows[X2W_XMEM_WINDOW_KINDS] = {};
+            uint32_t count = 0;
+            if (SUCCEEDED(windows_fn(windows, X2W_XMEM_WINDOW_KINDS, &count)))
+                for (uint32_t i = 0; i < count && i < X2W_XMEM_WINDOW_KINDS; ++i)
+                    if (at >= windows[i].begin && at < windows[i].end) return "xmem-virtual";
+        }
+    }
+    if (region_at(at)) return "image";
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(p), &module) && module)
+        return "image";
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    if (at >= low && at < high) {
+        *known = static_cast<std::size_t>(high - at);
+        return "stack";
+    }
+    HANDLE heaps[256];
+    const DWORD count = GetProcessHeaps(256, heaps);
+    for (DWORD i = 0; i < count && i < 256; ++i) {
+        if (heaps[i] == heap || !heap_block_ok(heaps[i], p)) continue;
+        *known = HeapSize(heaps[i], 0, p);
+        if (*known == static_cast<SIZE_T>(-1)) *known = 0;
+        if (heaps[i] == GetProcessHeap()) return "other-heap(process)";
+        std::snprintf(text, sizeof text, "other-heap(0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heaps[i])));
+        return text;
+    }
+    if (void* base = aligned_base(p)) {
+        for (DWORD i = 0; i < count && i < 256; ++i) {
+            if (!heap_block_ok(heaps[i], base)) continue;
+            const SIZE_T size = HeapSize(heaps[i], 0, base);
+            const std::size_t skip = static_cast<std::size_t>(at - reinterpret_cast<std::uintptr_t>(base));
+            if (size != static_cast<SIZE_T>(-1) && size > skip) *known = size - skip;
+            std::snprintf(text, sizeof text, "aligned-block(0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heaps[i])));
+            return text;
+        }
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(p, &info, sizeof info)) return "unknown(unmapped)";
+    if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+        *known = static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize - at);
+    std::snprintf(text, sizeof text, "unknown(%s %s)",
+                  info.State == MEM_FREE ? "free" : info.State == MEM_RESERVE ? "reserved" : "committed",
+                  info.Type == MEM_IMAGE ? "image" : info.Type == MEM_MAPPED ? "mapped" : info.Type == MEM_PRIVATE ? "private" : "none");
+    return text;
+}
+
+// The frames in mapped images that called the hook, as the crash lines give them.
+std::string guard_callers() {
+    CONTEXT context{};
+    RtlCaptureContext(&context);
+    const std::string frames = mapped_frames(&context, 3);
+    if (!frames.empty()) return " callers " + frames;
+    const std::string scanned = stack_scan(&context, 3);
+    if (!scanned.empty()) return " callers? " + scanned + " (stack-scan)";
+    return " callers none";
+}
+
+// Logs a refused pointer; returns the bytes known to be readable at it.
+std::size_t guard_refuse(const char* api, const void* p, HANDLE heap) {
+    const DWORD error = GetLastError();
+    std::size_t known = 0;
+    const long count = InterlockedIncrement(&heap_invalid);
+    if (count <= kHeapGuardLines) {
+        const std::string owner = pointer_owner(p, heap, &known);
+        char text[256];
+        std::snprintf(text, sizeof text, "heap-guard invalid %s ptr=0x%llx heap=0x%llx owner=%s", api,
+                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)),
+                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heap)), owner.c_str());
+        heap_guard_line(text + guard_callers() + " not-forwarded");
+        if (count == kHeapGuardLines) heap_guard_line("heap-guard more invalid pointers are counted only");
+    } else {
+        pointer_owner(p, heap, &known);
+    }
+    SetLastError(error);
+    return known;
+}
+
+void heap_milestone(const char* name) {
+    if (!heap_guard || heap_corrupt) return;
+    const DWORD error = GetLastError();
+    const bool ok = heap_block_ok(GetProcessHeap(), nullptr);
+    AcquireSRWLockExclusive(&milestone_lock);
+    if (ok) {
+        std::snprintf(last_good_milestone, sizeof last_good_milestone, "%s", name);
+        ReleaseSRWLockExclusive(&milestone_lock);
+    } else if (InterlockedExchange(&heap_corrupt, 1) == 0) {
+        const std::string previous = last_good_milestone;
+        ReleaseSRWLockExclusive(&milestone_lock);
+        heap_guard_line(std::string("heap-guard corrupted-before ") + name + " after " + previous);
+        log_flush();
+    } else {
+        ReleaseSRWLockExclusive(&milestone_lock);
+    }
+    SetLastError(error);
+}
+
+// d3d12 calls are checked every time, other stub and shim calls every 256th call over all of them.
+void guard_tick(const char* kind, const std::string& dll, const std::string& symbol, long calls) {
+    const bool d3d12 = std::strcmp(kind, "d3d12-call") == 0;
+    const long tick = d3d12 ? 0 : InterlockedIncrement(&heap_guard_ticks);
+    if (heap_corrupt || (!d3d12 && (tick & 255) != 0)) return;
+    char name[200];
+    std::snprintf(name, sizeof name, "%s %s!%s #%ld", kind, dll.c_str(), symbol.c_str(), calls);
+    heap_milestone(name);
+}
+
+void heap_guard_summary() {
+    if (!heap_guard) return;
+    AcquireSRWLockShared(&milestone_lock);
+    const std::string last = last_good_milestone;
+    ReleaseSRWLockShared(&milestone_lock);
+    log_line("heap-guard summary invalid=%ld corrupted=%s last-check=%s", heap_invalid, heap_corrupt ? "yes" : "no",
+             last.c_str());
+}
+
+// Windows' heap functions.
+BOOL WINAPI guard_HeapFree(HANDLE heap, DWORD flags, LPVOID p) {
+    if (p && !heap_block_ok(heap, p)) {
+        guard_refuse("HeapFree", p, heap);
+        return TRUE;
+    }
+    return HeapFree(heap, flags, p);
+}
+
+LPVOID WINAPI guard_HeapReAlloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T bytes) {
+    if (!p || heap_block_ok(heap, p)) return HeapReAlloc(heap, flags, p, bytes);
+    const std::size_t known = guard_refuse("HeapReAlloc", p, heap);
+    if (flags & HEAP_REALLOC_IN_PLACE_ONLY) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return nullptr;
+    }
+    void* fresh = HeapAlloc(heap, flags & (HEAP_GENERATE_EXCEPTIONS | HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY), bytes);
+    if (fresh && known) copy_guarded(fresh, p, known < bytes ? known : bytes);
+    return fresh;
+}
+
+SIZE_T WINAPI guard_HeapSize(HANDLE heap, DWORD flags, LPCVOID p) {
+    if (heap_block_ok(heap, p)) return HeapSize(heap, flags, p);
+    guard_refuse("HeapSize", p, heap);
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return static_cast<SIZE_T>(-1);
+}
+
+// A moveable LocalAlloc/GlobalAlloc handle is a handle-table entry, 8 mod 16, never a heap block: forwarded unchecked.
+bool movable_handle(const void* handle) { return (reinterpret_cast<std::uintptr_t>(handle) & 0xf) == 8; }
+
+HLOCAL WINAPI guard_LocalFree(HLOCAL handle) {
+    if (!handle || movable_handle(handle) || heap_block_ok(GetProcessHeap(), handle)) return LocalFree(handle);
+    guard_refuse("LocalFree", handle, GetProcessHeap());
+    return nullptr;
+}
+
+HGLOBAL WINAPI guard_GlobalFree(HGLOBAL handle) {
+    if (!handle || movable_handle(handle) || heap_block_ok(GetProcessHeap(), handle)) return GlobalFree(handle);
+    guard_refuse("GlobalFree", handle, GetProcessHeap());
+    return nullptr;
+}
+
+// The C runtime's heap functions, for Windows' ucrtbase.dll (instance 0) and a package ucrtbase.dll (instance 1).
+enum CrtFn { kFree, kFreeBase, kRealloc, kReallocBase, kAlignedFree, kAlignedRealloc, kMsize, kMsizeBase, kMalloc,
+             kAlignedMalloc, kCrtFns };
+constexpr const char* kCrtNames[kCrtFns] = {"free",  "_free_base", "realloc", "_realloc_base", "_aligned_free",
+                                            "_aligned_realloc", "_msize", "_msize_base", "malloc", "_aligned_malloc"};
+struct Crt {
+    void* fn[kCrtFns];
+    HANDLE heap;
+    volatile long ready;
+};
+Crt crts[2];
+
+using FreeFn = void(__cdecl*)(void*);
+using ReallocFn = void*(__cdecl*)(void*, std::size_t);
+using AlignedReallocFn = void*(__cdecl*)(void*, std::size_t, std::size_t);
+using MsizeFn = std::size_t(__cdecl*)(void*);
+using MallocFn = void*(__cdecl*)(std::size_t);
+using AlignedMallocFn = void*(__cdecl*)(std::size_t, std::size_t);
+using HeapHandleFn = std::intptr_t(__cdecl*)();
+
+// Fills an instance from an export lookup; false when the runtime lacks the functions the hooks forward to.
+template <typename Lookup>
+bool crt_init(int instance, Lookup lookup) {
+    Crt& crt = crts[instance];
+    if (crt.ready) return crt.ready > 0;
+    for (int i = 0; i < kCrtFns; ++i) crt.fn[i] = lookup(kCrtNames[i]);
+    const auto heap_handle = reinterpret_cast<HeapHandleFn>(lookup("_get_heap_handle"));
+    crt.heap = heap_handle ? reinterpret_cast<HANDLE>(heap_handle()) : GetProcessHeap();
+    if (!crt.heap) crt.heap = GetProcessHeap();
+    const bool ok = crt.fn[kFree] && crt.fn[kRealloc] && crt.fn[kMalloc];
+    InterlockedExchange(&crt.ready, ok ? 1 : -1);
+    return ok;
+}
+
+template <int I, int F>
+void __cdecl guard_crt_free(void* p) {
+    if (p && !heap_block_ok(crts[I].heap, p)) {
+        guard_refuse(kCrtNames[F], p, crts[I].heap);
+        return;
+    }
+    reinterpret_cast<FreeFn>(crts[I].fn[F])(p);
+}
+
+template <int I, int F>
+void* __cdecl guard_crt_realloc(void* p, std::size_t bytes) {
+    if (!p || heap_block_ok(crts[I].heap, p)) return reinterpret_cast<ReallocFn>(crts[I].fn[F])(p, bytes);
+    const std::size_t known = guard_refuse(kCrtNames[F], p, crts[I].heap);
+    if (!bytes) return nullptr;
+    void* fresh = reinterpret_cast<MallocFn>(crts[I].fn[kMalloc])(bytes);
+    if (fresh && known) copy_guarded(fresh, p, known < bytes ? known : bytes);
+    return fresh;
+}
+
+template <int I, int F>
+std::size_t __cdecl guard_crt_msize(void* p) {
+    if (heap_block_ok(crts[I].heap, p)) return reinterpret_cast<MsizeFn>(crts[I].fn[F])(p);
+    guard_refuse(kCrtNames[F], p, crts[I].heap);
+    return static_cast<std::size_t>(-1);
+}
+
+template <int I>
+bool aligned_ok(void* p) {
+    void* base = aligned_base(p);
+    return base && heap_block_ok(crts[I].heap, base);
+}
+
+template <int I>
+void __cdecl guard_crt_aligned_free(void* p) {
+    if (p && !aligned_ok<I>(p)) {
+        guard_refuse("_aligned_free", p, crts[I].heap);
+        return;
+    }
+    reinterpret_cast<FreeFn>(crts[I].fn[kAlignedFree])(p);
+}
+
+template <int I>
+void* __cdecl guard_crt_aligned_realloc(void* p, std::size_t bytes, std::size_t alignment) {
+    if (!p || aligned_ok<I>(p))
+        return reinterpret_cast<AlignedReallocFn>(crts[I].fn[kAlignedRealloc])(p, bytes, alignment);
+    const std::size_t known = guard_refuse("_aligned_realloc", p, crts[I].heap);
+    if (!bytes || !crts[I].fn[kAlignedMalloc]) return nullptr;
+    void* fresh = reinterpret_cast<AlignedMallocFn>(crts[I].fn[kAlignedMalloc])(bytes, alignment);
+    if (fresh && known) copy_guarded(fresh, p, known < bytes ? known : bytes);
+    return fresh;
+}
+
+template <int I>
+void* crt_hook(const char* name) {
+    void* const hooks[] = {
+        reinterpret_cast<void*>(&guard_crt_free<I, kFree>),           reinterpret_cast<void*>(&guard_crt_free<I, kFreeBase>),
+        reinterpret_cast<void*>(&guard_crt_realloc<I, kRealloc>),     reinterpret_cast<void*>(&guard_crt_realloc<I, kReallocBase>),
+        reinterpret_cast<void*>(&guard_crt_aligned_free<I>),          reinterpret_cast<void*>(&guard_crt_aligned_realloc<I>),
+        reinterpret_cast<void*>(&guard_crt_msize<I, kMsize>),         reinterpret_cast<void*>(&guard_crt_msize<I, kMsizeBase>)};
+    for (int i = 0; i < kMalloc; ++i)
+        if (std::strcmp(kCrtNames[i], name) == 0) return crts[I].fn[i] ? hooks[i] : nullptr;
+    return nullptr;
+}
+
+bool is_ucrt(const std::string& dll) {
+    return dll == "ucrtbase.dll" || dll.rfind("api-ms-win-crt-heap-", 0) == 0;
+}
+
+// The heap guard's replacement for dll!name when the import goes to Windows, or null.
+void* heap_hook(const std::string& dll, const char* name) {
+    if (!heap_guard || !name) return nullptr;
+    if (dll == "kernel32.dll" || dll == "kernelbase.dll" || dll.rfind("api-ms-win-core-heap", 0) == 0) {
+        const std::pair<const char*, void*> hooks[] = {
+            {"HeapFree", reinterpret_cast<void*>(&guard_HeapFree)},
+            {"HeapReAlloc", reinterpret_cast<void*>(&guard_HeapReAlloc)},
+            {"HeapSize", reinterpret_cast<void*>(&guard_HeapSize)},
+            {"LocalFree", reinterpret_cast<void*>(&guard_LocalFree)},
+            {"GlobalFree", reinterpret_cast<void*>(&guard_GlobalFree)},
+        };
+        for (const auto& [hooked, address] : hooks)
+            if (std::strcmp(hooked, name) == 0) return address;
+        return nullptr;
+    }
+    if (is_ucrt(dll) && crts[0].ready > 0) return crt_hook<0>(name);
+    return nullptr;
+}
+
+// The same for a ucrtbase.dll mapped from the package folder.
+void* package_heap_hook(const std::string& dll, void* base, const char* name) {
+    if (!heap_guard || !name || dll != "ucrtbase.dll" || !base) return nullptr;
+    if (!crt_init(1, [base](const char* symbol) { return map_export(base, symbol); })) return nullptr;
+    return crt_hook<1>(name);
+}
+
 void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) {
     const std::string key = lower(dll);
     const std::string symbol = name ? std::string(name) : "#" + std::to_string(ordinal);
@@ -1163,7 +1556,11 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
     if (is_file(local)) {
         void* base = map_package(key);
         if (base && name)
-            if (void* address = map_export(base, name)) return report(key, symbol, "package", "package", address);
+            if (void* address = map_export(base, name)) {
+                if (void* hook = package_heap_hook(key, base, name))
+                    return report(key, symbol, "package (x2w heap guard)", "package", hook);
+                return report(key, symbol, "package", "package", address);
+            }
         return report(key, symbol, "stub (package)", "stub", make_stub(key, symbol, false));
     }
     // GetModuleHandleA/W have both hooks: the shim lookup first, then the title identity answer.
@@ -1174,6 +1571,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
             if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
             if (void* hook = crash_hook(key, name)) return report(key, symbol, "windows (x2w crash hook)", "windows", hook);
+            if (void* hook = heap_hook(key, name)) return report(key, symbol, "windows (x2w heap guard)", "windows", hook);
             if (void* hook = sys_hook(key, name)) return report(key, symbol, "windows (x2w sys hook)", "windows", hook);
             return report(key, symbol, "windows", "windows", address);
         }
@@ -1197,6 +1595,7 @@ void __cdecl observe_run(int event, std::uint32_t index, void* address) {
         InterlockedExchange(&entry_reached, 1);
         describe(address, where, sizeof where);
         log_line("milestone entry-reached %s", where);
+        heap_milestone("entry");
         break;
     default:
         break;
@@ -1599,8 +1998,9 @@ void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
         if (reason == DLL_THREAD_ATTACH) slot0_alias(current_tls_vector(), GetCurrentThreadId());
         if (reason == DLL_THREAD_DETACH) slot0_restore(current_tls_vector(), GetCurrentThreadId());
     }
-    if (reason != DLL_THREAD_ATTACH || !armed || log_file == INVALID_HANDLE_VALUE) return;
-    if (GetCurrentThreadId() == watchdog_id) return;
+    if (reason != DLL_THREAD_ATTACH || !armed || GetCurrentThreadId() == watchdog_id) return;
+    if (heap_guard && InterlockedExchange(&heap_first_thread, 1) == 0) heap_milestone("first-thread");
+    if (log_file == INVALID_HANDLE_VALUE) return;
     void* start = nullptr;
     if (query_thread) query_thread(GetCurrentThread(), 9 /* ThreadQuerySetWin32StartAddress */, &start, sizeof start,
                                    nullptr);
@@ -1649,6 +2049,11 @@ extern "C" __declspec(dllexport) void __cdecl x2w_launch_log_shim(const char* ki
     log_line("shim-%s %s %s", kind ? kind : "?", symbol ? symbol : "?", detail ? detail : "");
 }
 
+// The xgr gateway (and any shim) calls this at its own milestones: the heap guard validates the process heap there.
+extern "C" __declspec(dllexport) void __cdecl x2w_launch_heap_milestone(const char* name) {
+    heap_milestone(name ? name : "shim");
+}
+
 #pragma section(".CRT$XLB", long, read)
 extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch_tls = launch_tls;
 #pragma comment(linker, "/include:x2w_launch_tls")
@@ -1677,6 +2082,10 @@ int wmain(int argc, wchar_t** argv) {
             breakpoint_mode = 1;
         } else if (argument == L"--stop-on-breakpoints") {
             breakpoint_mode = 0;
+        } else if (argument == L"--no-heap-guard") {
+            heap_guard = false;
+        } else if (argument == L"--heap-guard") {
+            heap_guard = true;
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
         } else if (argument == L"--xgr" && i + 1 < argc) {
@@ -1706,7 +2115,7 @@ int wmain(int argc, wchar_t** argv) {
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
+                     "[--host-identity] [--no-heap-guard] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
                      "[--continue-breakpoints|--stop-on-breakpoints] program.exe\n");
         return 2;
     }
@@ -1770,6 +2179,12 @@ int wmain(int argc, wchar_t** argv) {
     log_line("x2w-run-log 1");
     log_line("program %s", show_program_name ? program_name.c_str() : kHiddenProgram);
     if (xgr_gateway_on()) log_line("xgr %s", xgr_mode.c_str());
+    if (heap_guard) {
+        // Windows' C runtime, whose heap functions the guard forwards to (the launcher itself links it).
+        HMODULE ucrt = LoadLibraryW(L"ucrtbase.dll");
+        if (ucrt) crt_init(0, [ucrt](const char* symbol) { return reinterpret_cast<void*>(GetProcAddress(ucrt, symbol)); });
+        log_line("heap-guard on");
+    }
     {
         std::wstring stem = file_of(full);
         const auto dot = stem.find_last_of(L'.');

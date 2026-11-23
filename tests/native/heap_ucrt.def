@@ -1,0 +1,6 @@
+; Import library for tests/native/heap_title.cpp: the C runtime's malloc and free from ucrtbase.dll, as a title
+; built with the DLL runtime imports them.
+LIBRARY ucrtbase
+EXPORTS
+    malloc
+    free

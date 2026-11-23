@@ -3442,6 +3442,25 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "${CMAKE_SOURCE_DIR}/tests/native/resolve_check.py" "$<TARGET_FILE:x2w_launch>"
             "$<TARGET_FILE:x2w_resolve_title>" "$<TARGET_FILE:x2w_resolve_pkg>" "${x2w_shim_dir}")
         set_tests_properties(native_launch_resolve PROPERTIES TIMEOUT 180)
+        # The heap guard (tools/x2w_launch.cpp, "heap guard"): an XMemAlloc pointer given to free(), stack buffers
+        # given to HeapFree/HeapSize/HeapReAlloc and a heap block given to XMemFree are refused and logged, and the
+        # title exits 0 (tests/native/heap_guard_check.py).
+        set(x2w_heap_ucrt_lib "${CMAKE_CURRENT_BINARY_DIR}/heap_ucrt.lib")
+        add_custom_command(OUTPUT "${x2w_heap_ucrt_lib}"
+            COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64 "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/heap_ucrt.def"
+                "/OUT:${x2w_heap_ucrt_lib}"
+            DEPENDS tests/native/heap_ucrt.def VERBATIM)
+        add_custom_target(x2w_heap_ucrt_import DEPENDS "${x2w_heap_ucrt_lib}")
+        add_executable(x2w_heap_title tests/native/heap_title.cpp)
+        add_dependencies(x2w_heap_title x2w_heap_ucrt_import x2w_shims)
+        target_compile_options(x2w_heap_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_heap_title PRIVATE /ENTRY:heap_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE /DYNAMICBASE
+            /INCREMENTAL:NO)
+        target_link_libraries(x2w_heap_title PRIVATE kernel32 xmem_shim "${x2w_heap_ucrt_lib}")
+        add_test(NAME native_heap_guard COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/heap_guard_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_heap_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_heap_guard PROPERTIES TIMEOUT 240)
         foreach(rung1_def IN ITEMS xmem missing)
             set(rung1_${rung1_def}_lib "${CMAKE_CURRENT_BINARY_DIR}/rung1_${rung1_def}.lib")
             add_custom_command(OUTPUT "${rung1_${rung1_def}_lib}"

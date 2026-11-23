@@ -928,9 +928,16 @@ void free_default(PVOID address, ULONGLONG attributes) noexcept
     Exclusive guard(s.lock);
     auto it = s.records.find(reinterpret_cast<std::uintptr_t>(address));
     if (it == s.records.end()) {
-        log_once("unimplemented", "XMemFree of 0x%llx, which XMemAllocDefault did not return; passed to the ERA heap",
-                 static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)));
-        era_heap::release_with_attributes(address, attributes);
+        // Not ours: handing it to a heap or VirtualFree could corrupt whatever owns it (a heap block of another
+        // allocator, a stack or image address). Logged and ignored; the memory stays as it was.
+        static std::atomic<unsigned> foreign{0};
+        const unsigned n = foreign.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 32)
+            log_line("unimplemented", "XMemFree of 0x%llx (attributes 0x%llx), which XMemAlloc did not return; ignored "
+                     "(foreign free %u)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(address)),
+                     static_cast<unsigned long long>(attributes), n);
+        else if (!(n & (n - 1)))
+            log_line("unimplemented", "XMemFree: %u foreign frees ignored so far", n);
         return;
     }
     Record r = it->second;
