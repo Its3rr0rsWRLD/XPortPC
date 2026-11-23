@@ -115,6 +115,9 @@ def fp_operand(token, scalar, vector, pending, sample_pending, *, quad_values=No
     if negated := re.fullmatch(r"neg\((\d+)\)", token):
         # LLVM's spelling of the neg modifier on an integer inline constant: the sign bit of its word flipped.
         return f"asfloat({(int(negated[1]) ^ 0x80000000) & 0xffffffff}u)"
+    if negated := re.fullmatch(r"neg\((\d+\.\d+)\)", token):
+        # The neg modifier on a floating-point inline constant (neg(0.5) is -0.5, as v_mad_f32 v2, s2, neg(0.5), v2).
+        return f"(-{negated[1]}f)"
     if token.startswith("-"):
         if token.startswith("--"):
             raise ValueError(f"Malformed modifier {token}")
