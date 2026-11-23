@@ -183,6 +183,7 @@ def check_rejections(image, sink_path, mapper_path):
     with pefile.PE(str(image)) as pe:
         tls = pe.DIRECTORY_ENTRY_TLS.struct
         zero_fill = tls.get_field_absolute_offset("SizeOfZeroFill")
+        template_end = tls.get_field_absolute_offset("EndAddressOfRawData")
         characteristics = pe.FILE_HEADER.get_field_absolute_offset("Characteristics")
         flags = pe.FILE_HEADER.Characteristics
         entry = pe.OPTIONAL_HEADER.get_field_absolute_offset("AddressOfEntryPoint")
@@ -201,7 +202,8 @@ def check_rejections(image, sink_path, mapper_path):
         data_unreadable = data.Characteristics & no_access
         callbacks_unreadable = callback_section.Characteristics & no_access
     controls = (
-        ("<I", zero_fill, 16, "unsupported", "TLS data", False),
+        # pe_map gives TLS data a carrier DLL (a zero fill alone maps, below), but not a template past the image.
+        ("<Q", template_end, image_base + image_size + 0x1000, "format", "TLS template outside image", True),
         ("<I", entry, data.VirtualAddress, "format", "entry point outside executable section", False),
         ("<Q", first_callback, data_va, "format", "TLS callback outside executable section", True),
         # Section protections are applied before the TLS directory and list are read.
@@ -226,7 +228,7 @@ def check_rejections(image, sink_path, mapper_path):
             raise AssertionError(f"{message} control: {base=} {status=} {detail=} {requests=}")
         if calls(sink):
             raise AssertionError(f"{message} control: notifications were sent: {calls(sink)}")
-    print("rejected without notifications: a TLS zero-fill size, an entry point in .data, a TLS callback "
+    print("rejected without notifications: a TLS template past the image, an entry point in .data, a TLS callback "
           "pointing into .data, an unreadable TLS directory, an unreadable callback list, a TLS "
           "index past the image and a TLS index in read-only .rdata")
 
@@ -263,6 +265,23 @@ def check_rejections(image, sink_path, mapper_path):
             f"alternate writable TLS index: mapped={base} {status} {detail} {mapped_attach}")
     print("alternate writable TLS index (.data+4, unaligned): Windows and pe_map run the TLS "
           "callback and the entry point")
+
+    # TLS data made of a zero fill only (16 bytes, empty template): pe_map loads a carrier for it and the image
+    # gets the usual attach notifications, as under Windows.
+    copy = bytearray(Path(image).read_bytes())
+    struct.pack_into("<I", copy, zero_fill, 16)
+    sink.sink_clear()
+    with TemporaryDirectory() as temp:
+        filled = Path(temp) / Path(image).name
+        filled.write_bytes(copy)
+        base, status, detail, _ = mapper(filled, {Path(sink_path).name.casefold(): sink})
+        filled_attach = calls(sink, base) if base else None
+        if base:
+            mapper.release(base)
+    if not base or status != STATUS["ok"] or filled_attach != expected:
+        raise AssertionError(f"TLS zero fill of 16 bytes: mapped={base} {status} {detail} {filled_attach}")
+    print("TLS zero fill of 16 bytes with an empty template: pe_map maps it and runs the TLS callback and the "
+          "entry point")
 
     # LoadLibrary sends nothing to a non-DLL image (for an EXE the entry point is the program).
     # Clearing IMAGE_FILE_DLL must leave both the TLS callback and the entry point silent.

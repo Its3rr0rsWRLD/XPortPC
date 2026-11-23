@@ -1,6 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
-// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] program.exe
+// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
+//        program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -41,6 +42,10 @@
 // --force-cpu-traps is for tests: it overwrites each address listed by the program's export
 // x2w_cpu_trap_sites (a null-terminated array of code addresses) with UD2 and keeps the original bytes in a
 // side table, so the handler's path runs on every host, whether or not the CPU has the instruction.
+//
+// The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
+// ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
+// leaves them naming the launcher, for comparison.
 #include <windows.h>
 
 #include <cctype>
@@ -97,9 +102,10 @@ DWORD watchdog_id;
 std::map<std::string, unsigned> route_counts;
 
 struct Region {
-    std::string name;
+    std::string name;  // lower-case file name
     std::uintptr_t base;
     std::size_t size;
+    std::wstring path;  // full path the image was mapped from
 };
 std::vector<Region> regions;  // the program first, then each mapped package DLL
 
@@ -329,6 +335,39 @@ void* report(const std::string& dll, const std::string& symbol, const char* rout
     return address;
 }
 
+// Module identity. A title finds its own resources and files through GetModuleHandle(NULL),
+// GetModuleFileName(NULL) and the PEB's ImageBaseAddress, which in this process name x2w_launch.exe. The
+// launcher therefore (1) binds the title's and its package DLLs' imports of the library-loader functions
+// below to replacements that answer for the mapped images and forward everything else to Windows, and (2)
+// sets PEB->ImageBaseAddress to the title's base while the title runs (start_identity). The loader's module
+// list is left alone: its entries are linked into ntdll's lists, hash table and base-address tree, which have
+// no public API, and an entry without them is not found. Not covered: a function pointer the title gets from
+// GetProcAddress (it reaches Windows directly; with the PEB set, GetModuleHandle(NULL) is still right),
+// GetCommandLine, the PSAPI and Toolhelp module lists, and debuggers, which still show the launcher.
+// --host-identity turns both off.
+bool keep_host_identity;
+
+const Region* region_at(std::uintptr_t address) {
+    for (const auto& region : regions)
+        if (address >= region.base && address - region.base < region.size) return &region;
+    return nullptr;
+}
+
+const Region* region_of(HMODULE module) {
+    for (const auto& region : regions)
+        if (reinterpret_cast<std::uintptr_t>(module) == region.base) return &region;
+    return nullptr;
+}
+
+// A mapped image by the name GetModuleHandle accepts: a file name, with ".dll" assumed without an extension,
+// or a full path. Case is ignored, as by Windows.
+const Region* region_named(const wchar_t* name) {
+    const std::wstring text = name;
+    const bool has_path = text.find_first_of(L"\\/") != std::wstring::npos;
+    std::string file = lower(narrow(file_of(text)));
+    if (file.find('.') == std::string::npos) file += ".dll";
+    for (const auto& region : regions) {
+        if (has_path ? _wcsicmp(region.path.c_str(), text.c_str()) == 0 : region.name == file) return &region;
 // ---------------------------------------------------------------- dynamic loads (see the header comment)
 SRWLOCK dynamic_lock = SRWLOCK_INIT;
 std::set<std::string> dynamic_logged;
@@ -366,6 +405,141 @@ HMODULE shim_for(const std::string& name) {
     return nullptr;
 }
 
+std::wstring from_ansi(const char* text) {
+    const int size = MultiByteToWideChar(CP_ACP, 0, text, -1, nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring out(static_cast<std::size_t>(size - 1), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, text, -1, out.data(), size);
+    return out;
+}
+
+HMODULE title_module() { return reinterpret_cast<HMODULE>(regions.empty() ? 0 : regions[0].base); }
+
+HMODULE WINAPI identity_GetModuleHandleW(LPCWSTR name) {
+    if (!name) return title_module();
+    if (const Region* region = region_named(name)) return reinterpret_cast<HMODULE>(region->base);
+    return GetModuleHandleW(name);
+}
+
+HMODULE WINAPI identity_GetModuleHandleA(LPCSTR name) {
+    if (!name) return title_module();
+    const std::wstring wide = from_ansi(name);
+    if (const Region* region = region_named(wide.c_str())) return reinterpret_cast<HMODULE>(region->base);
+    return GetModuleHandleA(name);
+}
+
+// Mapped images keep no reference count, so the PIN and UNCHANGED_REFCOUNT flags change nothing for them.
+BOOL identity_handle_ex(DWORD flags, const void* name, bool wide, HMODULE* out) {
+    if (!out) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    const Region* region = nullptr;
+    if (flags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) {
+        region = region_at(reinterpret_cast<std::uintptr_t>(name));
+    } else if (!name) {
+        region = regions.empty() ? nullptr : &regions[0];
+    } else {
+        region = wide ? region_named(static_cast<const wchar_t*>(name))
+                      : region_named(from_ansi(static_cast<const char*>(name)).c_str());
+    }
+    if (region) {
+        *out = reinterpret_cast<HMODULE>(region->base);
+        return TRUE;
+    }
+    return wide ? GetModuleHandleExW(flags, static_cast<LPCWSTR>(name), out)
+                : GetModuleHandleExA(flags, static_cast<LPCSTR>(name), out);
+}
+
+BOOL WINAPI identity_GetModuleHandleExW(DWORD flags, LPCWSTR name, HMODULE* out) {
+    return identity_handle_ex(flags, name, true, out);
+}
+
+BOOL WINAPI identity_GetModuleHandleExA(DWORD flags, LPCSTR name, HMODULE* out) {
+    return identity_handle_ex(flags, name, false, out);
+}
+
+// Windows semantics for a short buffer: the copy is cut to size - 1 characters and terminated, the
+// function returns size and sets ERROR_INSUFFICIENT_BUFFER.
+template <typename Char>
+DWORD copy_name(const std::basic_string<Char>& name, Char* buffer, DWORD size) {
+    if (!buffer || !size) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    if (name.size() < size) {
+        std::memcpy(buffer, name.c_str(), (name.size() + 1) * sizeof(Char));
+        return static_cast<DWORD>(name.size());
+    }
+    std::memcpy(buffer, name.data(), (size - 1) * sizeof(Char));
+    buffer[size - 1] = 0;
+    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    return size;
+}
+
+const Region* region_for_file_name(HMODULE module) {
+    if (!module) return regions.empty() ? nullptr : &regions[0];
+    return region_of(module);
+}
+
+DWORD WINAPI identity_GetModuleFileNameW(HMODULE module, LPWSTR buffer, DWORD size) {
+    if (const Region* region = region_for_file_name(module)) return copy_name(region->path, buffer, size);
+    return GetModuleFileNameW(module, buffer, size);
+}
+
+DWORD WINAPI identity_GetModuleFileNameA(HMODULE module, LPSTR buffer, DWORD size) {
+    if (const Region* region = region_for_file_name(module)) {
+        const int length = WideCharToMultiByte(CP_ACP, 0, region->path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string ansi(length > 0 ? static_cast<std::size_t>(length - 1) : 0, '\0');
+        if (length > 0) WideCharToMultiByte(CP_ACP, 0, region->path.c_str(), -1, ansi.data(), length, nullptr, nullptr);
+        return copy_name(ansi, buffer, size);
+    }
+    return GetModuleFileNameA(module, buffer, size);
+}
+
+struct IdentityHook {
+    const char* symbol;
+    void* replacement;
+};
+const IdentityHook identity_hooks[] = {
+    {"GetModuleHandleW", reinterpret_cast<void*>(&identity_GetModuleHandleW)},
+    {"GetModuleHandleA", reinterpret_cast<void*>(&identity_GetModuleHandleA)},
+    {"GetModuleHandleExW", reinterpret_cast<void*>(&identity_GetModuleHandleExW)},
+    {"GetModuleHandleExA", reinterpret_cast<void*>(&identity_GetModuleHandleExA)},
+    {"GetModuleFileNameW", reinterpret_cast<void*>(&identity_GetModuleFileNameW)},
+    {"GetModuleFileNameA", reinterpret_cast<void*>(&identity_GetModuleFileNameA)},
+};
+
+// The replacement for dll!name when the import would go to Windows, or null. The functions live in kernel32
+// (forwarded to kernelbase) and in the library-loader API sets.
+void* identity_hook(const std::string& dll, const char* name) {
+    if (keep_host_identity || !name) return nullptr;
+    if (dll != "kernel32.dll" && dll != "kernelbase.dll" && dll.rfind("api-ms-win-core-libraryloader-", 0) != 0)
+        return nullptr;
+    for (const auto& hook : identity_hooks)
+        if (std::strcmp(hook.symbol, name) == 0) return hook.replacement;
+    return nullptr;
+}
+
+// PEB->ImageBaseAddress (gs:[0x60] + 0x10). While it holds the title's base, Windows functions that take a
+// null module (FindResource, LoadString, the default stack size of new threads) use the title's image. The
+// launcher no longer asks Windows for its own module after this point.
+void** peb_image_base() {
+    auto* peb = reinterpret_cast<std::uint8_t*>(__readgsqword(0x60));
+    return reinterpret_cast<void**>(peb + 0x10);
+}
+
+void* host_image_base;
+
+void start_identity(void* title) {
+    if (keep_host_identity) return;
+    host_image_base = InterlockedExchangePointer(peb_image_base(), title);
+}
+
+void end_identity() {
+    if (host_image_base) InterlockedExchangePointer(peb_image_base(), host_image_base);
+}
+
 std::string shim_name_of(HMODULE module) {
     AcquireSRWLockShared(&dynamic_lock);
     auto it = shim_names.find(module);
@@ -375,14 +549,6 @@ std::string shim_name_of(HMODULE module) {
             if (handle == module) name = key;
     ReleaseSRWLockShared(&dynamic_lock);
     return name;
-}
-
-std::wstring from_ansi(LPCSTR text) {
-    if (!text) return {};
-    const int size = MultiByteToWideChar(CP_ACP, 0, text, -1, nullptr, 0);
-    std::wstring out(size > 0 ? static_cast<std::size_t>(size - 1) : 0, L'\0');
-    if (size > 1) MultiByteToWideChar(CP_ACP, 0, text, -1, out.data(), size);
-    return out;
 }
 
 HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
@@ -416,10 +582,10 @@ HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
         ReleaseSRWLockShared(&dynamic_lock);
         if (shim) return shim;
     }
-    return GetModuleHandleW(request);
+    return identity_GetModuleHandleW(request);
 }
 HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
-    if (!request) return GetModuleHandleA(request);
+    if (!request) return identity_GetModuleHandleA(request);
     return hook_GetModuleHandleW(from_ansi(request).c_str());
 }
 
@@ -438,8 +604,10 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
         const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
         dll = length ? lower(narrow(file_of(std::wstring(path, length)))) : "?";
         // A dynamic lookup of a hooked loader function gets the hook too.
-        if (address && !by_ordinal)
+        if (address && !by_ordinal) {
             if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
+            else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
+        }
     }
     log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
                      (!shim.empty() ? (address ? "shim" : "missing") : (address ? "windows" : "missing")));
@@ -492,7 +660,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
                 std::fprintf(stderr, "[x2w] cannot map %s: status %u %s\n", key.c_str(), status, detail);
                 log_line("package-map-failed %s status %u %s", key.c_str(), status, detail);
             } else {
-                regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base)});
+                regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base), local});
             }
         }
         if (base && name)
@@ -501,8 +669,10 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
     }
     if (void* hook = hook_for(key, name)) return report(key, symbol, "windows (x2w hook)", "windows", hook);
     if (HMODULE module = LoadLibraryA(dll)) {
-        if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup)))
+        if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
+            if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
             return report(key, symbol, "windows", "windows", address);
+        }
         return report(key, symbol, "stub (not in windows)", "stub", make_stub(key, symbol, false));
     }
     return report(key, symbol, "stub", "missing", make_stub(key, symbol, true));
@@ -707,6 +877,8 @@ int wmain(int argc, wchar_t** argv) {
             shim_dirs.push_back(argv[++i]);
         } else if (argument == L"--log" && i + 1 < argc) {
             log_path = argv[++i];
+        } else if (argument == L"--host-identity") {
+            keep_host_identity = true;
         } else if (argument == L"--timeout" && i + 1 < argc) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--force-cpu-traps") {
@@ -719,7 +891,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (program.empty() || usage) {
         std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "program.exe\n");
+                     "[--host-identity] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -777,7 +949,8 @@ int wmain(int argc, wchar_t** argv) {
         log_line("map-failed status %u %s", status, detail);
         return 3;
     }
-    regions.insert(regions.begin(), Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base)});
+    regions.insert(regions.begin(),
+                   Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full});
     unsigned missing_stubs = 0;
     for (const Stub* stub : stubs) missing_stubs += stub->missing;
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
@@ -800,7 +973,10 @@ int wmain(int argc, wchar_t** argv) {
     std::fflush(stderr);
     std::uint32_t exit_code = 0;
     InterlockedExchange(&armed, 1);
-    if (!map_run(base, &exit_code, log_file != INVALID_HANDLE_VALUE ? observe_run : nullptr)) {
+    start_identity(base);
+    const int ran = map_run(base, &exit_code, log_file != INVALID_HANDLE_VALUE ? observe_run : nullptr);
+    end_identity();
+    if (!ran) {
         std::fprintf(stderr, "[x2w] %ls has no runnable entry point\n", full);
         log_line("error no runnable entry point");
         return 4;
