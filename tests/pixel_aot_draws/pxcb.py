@@ -39,22 +39,27 @@ def buffer_words(slot, count):
     return [word(slot, i) for i in range(count)]
 
 
-def case_bytes(rows, buffers):
+def case_bytes(rows, buffers, pixels=False):
     """A --check-pixel-case case on the integer target: the 64 words of params (slot 0's first 64, or zeros), 64 uint4
-    rows (one per texel, row-major), the 'X2WF' section selecting the R32G32B32A32_UINT target, then the 'X2WK'
-    section with {slot: words} (each at least 64 words, a multiple of 4)."""
+    rows (row-major), then the 'X2WK' section with {slot: words} (each at least 64 words, a multiple of 4). Without
+    `pixels` the 'X2WF' section before it selects the R32G32B32A32_UINT target and each row covers an 8x8 block of the
+    64x64 target; with `pixels` the case trailer after it does (flags: integer target, viewport) with an 8x8 viewport
+    at the origin, so each row is one target pixel, as the input-VGPR draws need (SV_Position is per pixel)."""
     rows = [rows] * 64 if len(rows) == 4 and isinstance(rows[0], int) else list(rows)
     assert len(rows) == 64
     head = buffers.get(0, [0] * 64)[:64]
     data = bytearray(struct.pack("<64I", *head))
     for row in rows:
         data += struct.pack("<4I", *(w & 0xffffffff for w in row))
-    data += struct.pack("<II", FLOAT_MODE_MAGIC, 1) + bytes(64)
+    if not pixels:
+        data += struct.pack("<II", FLOAT_MODE_MAGIC, 1) + bytes(64)
     if buffers:
         data += struct.pack("<4I", WINDOWS_MAGIC, len(buffers), 0, 0)
         for slot, words in sorted(buffers.items()):
             assert len(words) >= 64 and len(words) % 4 == 0
             data += struct.pack("<II", slot, len(words)) + struct.pack(f"<{len(words)}I", *words)
+    if pixels:
+        data += struct.pack("<B4I", 3, 0, 0, 8, 8)
     return bytes(data)
 
 
@@ -180,7 +185,7 @@ GAP = ["v_mov_b32_e32 v12, v4", "v_mov_b32_e32 v13, v5", "v_mad_f32 v14, 2.0, v4
        *EXPORT]
 GAP_ENA, GAP_ADDR = ena("pos_z", "pos_w"), ena("pos_x", "pos_y", "pos_z", "pos_w")
 
-PIXELS = [(x, y) for y in range(8) for x in range(8)]
+PIXELS = [(x, y) for y in range(8) for x in range(8)]  # the 8x8 target of a `pixels` case
 DEPTH, CLIP_W = 0.0, 1.0  # tests/pixel_aot_vs.hlsl: z 0 and w 1 at every vertex
 
 
@@ -248,13 +253,14 @@ def compile_draw(directory, compiler, name, program, description):
     return shader
 
 
-def add_with_flaws(batch, name, reference, flaws, buffers):
+def add_with_flaws(batch, name, reference, flaws, buffers, pixels=False):
     right = reference()
-    batch.add(case_bytes(right, buffers), "pass", f"pxcb {name}: the reference does not match")
+    batch.add(case_bytes(right, buffers, pixels), "pass", f"pxcb {name}: the reference does not match")
     for flaw in flaws:
         wrong = reference(flaw)
         assert wrong != right, (name, flaw)
-        batch.add(case_bytes(wrong, buffers), "mismatch", f"pxcb {name}: the {flaw} reference escaped detection")
+        batch.add(case_bytes(wrong, buffers, pixels), "mismatch",
+                  f"pxcb {name}: the {flaw} reference escaped detection")
 
 
 def draw(directory, compiler, renderer, backend):
@@ -278,7 +284,7 @@ def draw(directory, compiler, renderer, backend):
     for name, program, description, reference, flaws in INPUT_DRAWS:
         shader = compile_draw(directory, compiler, name, program, description)
         with DrawBatch(directory, renderer, backend, shader, f"pxcb_{name}") as batch:
-            add_with_flaws(batch, name, reference, flaws, {})
+            add_with_flaws(batch, name, reference, flaws, {}, pixels=True)
 
 
 # --- controls -----------------------------------------------------------------------------------------------------
