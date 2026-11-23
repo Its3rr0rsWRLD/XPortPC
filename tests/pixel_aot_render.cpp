@@ -65,11 +65,13 @@ struct TitleMemory {
 
 // A texture of the 'X2WD' section (tests/pixel_aot_draws/texdims.py, docs/design/pixel-bindings.md): an R8G8B8A8_UNORM
 // 2D array (kind 1), the six faces of a cube as a 2D array (kind 2, bound as the Texture2DArray view a cube T# is
-// translated to) or a 3D texture (kind 3), one level, replacing the view of its texture slot. texels: depth slices of
-// height rows of width texels, packed.
+// translated to) or a 3D texture (kind 3), replacing the view of its texture slot. levels: the mip levels of an array
+// or cube (1 when the header leaves it zero; a 3D texture has one). texels: for each slice, each of its levels from the
+// largest, height rows of width texels (halved per level, at least 1), packed.
 struct ShapedTexture {
     UINT slot, kind, width, height, depth;
     std::vector<BYTE> texels;
+    UINT levels = 1;
 };
 
 struct PixelInput {
@@ -306,7 +308,8 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         auto shapeDesc = texture_desc(shape.width, shape.height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE);
         if (shape.kind == 3) shapeDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
         shapeDesc.DepthOrArraySize = static_cast<UINT16>(shape.depth);
-        const UINT subresources = shape.kind == 3 ? 1 : shape.depth;
+        shapeDesc.MipLevels = static_cast<UINT16>(shape.levels);
+        const UINT subresources = shape.kind == 3 ? 1 : shape.depth * shape.levels;
         auto& res = shapedResources[n];
         res.layouts.resize(subresources);
         std::vector<UINT> shapeRows(subresources);
@@ -315,16 +318,21 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
         device->GetCopyableFootprints(&shapeDesc, 0, subresources, 0, res.layouts.data(), shapeRows.data(),
                                       shapeRowBytes.data(), &shapeBytes);
         std::vector<BYTE> packed(shapeBytes);
-        const size_t row = size_t(shape.width) * 4;
+        size_t consumed = 0;
         for (UINT sub = 0; sub < subresources; ++sub) {
+            // Subresource index = level + slice * levels: the texels are stored in that order.
             const auto& footprint = res.layouts[sub].Footprint;
+            const UINT level = shape.kind == 3 ? 0 : sub % shape.levels;
+            const UINT levelWidth = (std::max)(1u, shape.width >> level), levelHeight = (std::max)(1u, shape.height >> level);
+            const size_t row = size_t(levelWidth) * 4;
             for (UINT z = 0; z < footprint.Depth; ++z) {
-                for (UINT y = 0; y < shape.height; ++y) {
-                    const size_t from = ((size_t(sub) + z) * shape.height + y) * row;
+                for (UINT y = 0; y < levelHeight; ++y) {
+                    const size_t from = consumed + (size_t(z) * levelHeight + y) * row;
                     const size_t to = res.layouts[sub].Offset + (size_t(z) * shapeRows[sub] + y) * footprint.RowPitch;
                     std::memcpy(packed.data() + to, shape.texels.data() + from, row);
                 }
             }
+            consumed += size_t(footprint.Depth) * levelHeight * row;
         }
         res.staging = upload(device, packed);
         res.texture = resource(device, shapeDesc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -373,7 +381,7 @@ void draw_verified(ID3D12Device* device, const char* path, const std::vector<Pix
             shaped.Texture3D.MipLevels = 1;
         } else {
             shaped.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-            shaped.Texture2DArray.MipLevels = 1;
+            shaped.Texture2DArray.MipLevels = shape.levels;
             shaped.Texture2DArray.ArraySize = shape.depth;
         }
         auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
@@ -1034,8 +1042,9 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
         }
         // The optional 'X2WD' section of textures of other dimensions (tests/pixel_aot_draws/texdims.py), after the
         // bindings section: magic, a texture count N (1..8) and two zero words, then N headers of eight words (slot
-        // 0..7, kind 1 = 2D array, 2 = cube faces, 3 = 3D, width, height, depth or slice count, three zero words), then
-        // the R8G8B8A8 texels of each texture in header order (see ShapedTexture).
+        // 0..7, kind 1 = 2D array, 2 = cube faces, 3 = 3D, width, height, depth or slice count, the mip level count
+        // (0 or 1: one level; an array or cube may have more) and two zero words), then the R8G8B8A8 texels of each
+        // texture in header order (see ShapedTexture).
         if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x44573258u) {
             if (bytes.size() - at < 16) throw BadCase("Texture dimension section is truncated");
             const UINT count = readWord(bytes.data() + at + 4);
@@ -1048,18 +1057,24 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
                 std::array<UINT, 8> header{};
                 std::memcpy(header.data(), bytes.data() + at, sizeof(header));
                 at += sizeof(header);
-                shape = {header[0], header[1], header[2], header[3], header[4], {}};
+                shape = {header[0], header[1], header[2], header[3], header[4], {}, header[5] ? header[5] : 1u};
                 const bool sized = shape.width && shape.width <= 64 && shape.height && shape.height <= 64 &&
                                    shape.depth && shape.depth <= 64;
-                if (shape.slot > 7 || shape.kind < 1 || shape.kind > 3 || !sized || header[5] || header[6] ||
-                    header[7] || (shape.kind == 2 && (shape.depth != 6 || shape.width != shape.height)))
+                UINT possible = 1;
+                for (UINT longest = (std::max)(shape.width, shape.height); longest > 1; longest >>= 1) ++possible;
+                if (shape.slot > 7 || shape.kind < 1 || shape.kind > 3 || !sized || header[6] || header[7] ||
+                    shape.levels > possible || (shape.kind == 3 && shape.levels != 1) ||
+                    (shape.kind == 2 && (shape.depth != 6 || shape.width != shape.height)))
                     throw BadCase("Invalid texture dimension header");
                 for (const auto& other : shaped)
                     if (&other != &shape && other.kind && other.slot == shape.slot)
                         throw BadCase("Two textures of the dimension section share a slot");
             }
             for (auto& shape : shaped) {
-                const size_t size = size_t(shape.width) * shape.height * shape.depth * 4;
+                size_t texelsPerSlice = 0;
+                for (UINT level = 0; level < shape.levels; ++level)
+                    texelsPerSlice += size_t((std::max)(1u, shape.width >> level)) * (std::max)(1u, shape.height >> level);
+                const size_t size = texelsPerSlice * shape.depth * 4;
                 if (bytes.size() - at < size) throw BadCase("Texture dimension section is truncated in its texels");
                 shape.texels.assign(bytes.data() + at, bytes.data() + at + size);
                 at += size;

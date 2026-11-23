@@ -54,6 +54,31 @@ STATUS = ROOT / "site" / "status.json"
 SUMMARY = ROOT / "docs" / "coverage" / "corpus-translate.tsv"
 
 
+def restore_mix_literal(text, raw):
+    """v_fma_mix_*: the disassembler prints a literal as its low 16 bits, so a binary32 source (op_sel_hi 0, the default
+    that is not printed) whose literal dword is 0x3eb33333 reads "0x3333". When the line carries the literal dword (a
+    third hex word), the source is written with the whole 32-bit word, which is what the form lowers; a binary16
+    source (op_sel_hi 1) keeps the printed low half."""
+    if not text.startswith("v_fma_mix") or ";" not in raw:
+        return text
+    words = raw.split(";", 1)[1].split()
+    if len(words) != 3:
+        return text
+    mnemonic, operands = text.split(" ", 1)
+    parts = operands.split(", ")
+    if len(parts) != 4:
+        return text
+    sources, suffix = parts[1:3] + parts[3].split(" ", 1)[:1], (parts[3].split(" ", 1) + [""])[1]
+    hi = re.search(r"op_sel_hi:\[(\d),(\d),(\d)\]", suffix)
+    high = [int(x) for x in hi.groups()] if hi else [0, 0, 0]
+    for k, token in enumerate(sources):
+        core = re.fullmatch(r"(?:neg\(|-\||-|\|)?(0x[0-9a-f]{1,4})(?:\)|\|)?", token)
+        if core and not high[k]:
+            sources[k] = token.replace(core[1], f"0x{int(words[2], 16):08x}")
+    parts[1:3], parts[3] = sources[:2], " ".join([sources[2], suffix]).strip()
+    return f"{mnemonic} {', '.join(parts)}"
+
+
 def read_dump(path):
     """The instruction text of one RADV dump, as lower() takes it."""
     program = []
@@ -66,6 +91,7 @@ def read_dump(path):
         text = " ".join(raw.split(";", 1)[0].split())
         if not text:
             continue
+        text = restore_mix_literal(text, raw)
         if rep := re.fullmatch(r"\(then repeated (\d+) times?\)", text):
             if not program or program[-1].endswith(":"):
                 raise ValueError(f"{path}: repeat marker without an instruction")
