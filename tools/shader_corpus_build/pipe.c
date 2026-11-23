@@ -11,13 +11,13 @@ static uint32_t *rd(const char*p,size_t*sz){FILE*f=fopen(p,"rb");if(!f)return 0;
 int main(int argc,char**argv){
  FILE*sp=fopen(argv[1],"r"); if(!sp)return 1;
  char line[1024]; Bind binds[256]; int nb=0; uint32_t push=0; int comp=0;
- struct{VkShaderStageFlagBits st;char path[900];}stg[6]; int ns=0;
+ struct{VkShaderStageFlagBits st;char path[900];}stg[8]; int mesh=0; int ns=0;
  struct{uint32_t loc;char t;}vin[40]; int nv=0, fo[16]; char fot[16]; int nf=0; int depth=0, rastdisc=0;
  while(fgets(line,sizeof line,sp)){
   char k[32]; char a[900]; unsigned x,y,z,w;
   if(sscanf(line,"stage %31s %899s",k,a)==2){
-    VkShaderStageFlagBits s=!strcmp(k,"vert")?VK_SHADER_STAGE_VERTEX_BIT:!strcmp(k,"tesc")?VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:!strcmp(k,"tese")?VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:!strcmp(k,"geom")?VK_SHADER_STAGE_GEOMETRY_BIT:!strcmp(k,"frag")?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_COMPUTE_BIT;
-    if(s==VK_SHADER_STAGE_COMPUTE_BIT)comp=1; stg[ns].st=s; strcpy(stg[ns].path,a); ns++;
+    VkShaderStageFlagBits s=!strcmp(k,"vert")?VK_SHADER_STAGE_VERTEX_BIT:!strcmp(k,"tesc")?VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:!strcmp(k,"tese")?VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:!strcmp(k,"geom")?VK_SHADER_STAGE_GEOMETRY_BIT:!strcmp(k,"frag")?VK_SHADER_STAGE_FRAGMENT_BIT:!strcmp(k,"mesh")?VK_SHADER_STAGE_MESH_BIT_EXT:!strcmp(k,"task")?VK_SHADER_STAGE_TASK_BIT_EXT:VK_SHADER_STAGE_COMPUTE_BIT;
+    if(s==VK_SHADER_STAGE_COMPUTE_BIT)comp=1; if(s==VK_SHADER_STAGE_MESH_BIT_EXT)mesh=1; stg[ns].st=s; strcpy(stg[ns].path,a); ns++;
   } else if(sscanf(line,"bind %u %u %u %u",&x,&y,&z,&w)==4){binds[nb++]=(Bind){x,y,z,w};}
   else if(sscanf(line,"push %u",&x)==1)push=x;
   else if(sscanf(line,"vin %u %31s",&x,k)==2){vin[nv].loc=x;vin[nv].t=k[0];nv++;}
@@ -31,14 +31,16 @@ int main(int argc,char**argv){
  uint32_t n=1; VkPhysicalDevice pd; CK(vkEnumeratePhysicalDevices(in,&n,&pd));
  float pr=1; VkDeviceQueueCreateInfo qi={VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qi.queueCount=1;qi.pQueuePriorities=&pr;
  VkPhysicalDeviceVulkan13Features f13={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};f13.dynamicRendering=1;f13.subgroupSizeControl=1;f13.computeFullSubgroups=1;
- VkPhysicalDeviceFeatures2 f2={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};f2.pNext=&f13;
+ VkPhysicalDeviceMeshShaderFeaturesEXT fm={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+ VkPhysicalDeviceFeatures2 f2={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};f2.pNext=&f13; if(getenv("PIPE_MESH"))f13.pNext=&fm;
  vkGetPhysicalDeviceFeatures2(pd,&f2); f13.dynamicRendering=1;
- VkDeviceCreateInfo di={VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};di.pNext=&f2;di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
+ const char*mext[1]={VK_EXT_MESH_SHADER_EXTENSION_NAME};
+ VkDeviceCreateInfo di={VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; if(getenv("PIPE_MESH")){di.enabledExtensionCount=1;di.ppEnabledExtensionNames=mext;}di.pNext=&f2;di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
  VkDevice dev; CK(vkCreateDevice(pd,&di,0,&dev));
  /* layouts */
  uint32_t maxset=0; for(int i=0;i<nb;i++) if(binds[i].set>maxset)maxset=binds[i].set;
  VkDescriptorSetLayout sl[32]; if(maxset>=31)return 4;
- VkShaderStageFlags all=comp?VK_SHADER_STAGE_COMPUTE_BIT:VK_SHADER_STAGE_ALL_GRAPHICS;
+ VkShaderStageFlags all=comp?VK_SHADER_STAGE_COMPUTE_BIT:VK_SHADER_STAGE_ALL_GRAPHICS|(mesh?VK_SHADER_STAGE_MESH_BIT_EXT|VK_SHADER_STAGE_TASK_BIT_EXT:0);
  for(uint32_t s=0;s<=maxset;s++){
   VkDescriptorSetLayoutBinding b[128]; int c=0;
   for(int i=0;i<nb;i++) if(binds[i].set==s){b[c]=(VkDescriptorSetLayoutBinding){binds[i].binding,binds[i].type,binds[i].count,all,0};c++;}
@@ -49,7 +51,7 @@ int main(int argc,char**argv){
  VkPipelineLayoutCreateInfo pl={VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pl.setLayoutCount=nb?maxset+1:0;pl.pSetLayouts=sl;
  if(push){pl.pushConstantRangeCount=1;pl.pPushConstantRanges=&pcr;}
  VkPipelineLayout lay; CK(vkCreatePipelineLayout(dev,&pl,0,&lay));
- VkPipelineShaderStageCreateInfo ss[6];
+ VkPipelineShaderStageCreateInfo ss[8];
  for(int i=0;i<ns;i++){size_t sz;uint32_t*code=rd(stg[i].path,&sz);if(!code){fprintf(stderr,"cannot read\n");return 5;}
   VkShaderModuleCreateInfo mi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};mi.codeSize=sz;mi.pCode=code;
   VkShaderModule m; CK(vkCreateShaderModule(dev,&mi,0,&m));
@@ -73,7 +75,7 @@ int main(int argc,char**argv){
   VkPipelineColorBlendStateCreateInfo cb={VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};cb.attachmentCount=nc;cb.pAttachments=ba;
   VkDynamicState dyn[2]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};VkPipelineDynamicStateCreateInfo dsn={VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dsn.dynamicStateCount=2;dsn.pDynamicStates=dyn;
   VkPipelineRenderingCreateInfo ri={VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};ri.colorAttachmentCount=nc;ri.pColorAttachmentFormats=cf;ri.depthAttachmentFormat=depth?VK_FORMAT_D32_SFLOAT:VK_FORMAT_UNDEFINED;
-  VkGraphicsPipelineCreateInfo gp={VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};gp.pNext=&ri;gp.stageCount=ns;gp.pStages=ss;gp.pVertexInputState=&vi;gp.pInputAssemblyState=&ia;if(tess)gp.pTessellationState=&ts;gp.pViewportState=&vp;gp.pRasterizationState=&rs;gp.pMultisampleState=&ms;
+  VkGraphicsPipelineCreateInfo gp={VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};gp.pNext=&ri;gp.stageCount=ns;gp.pStages=ss;if(!mesh){gp.pVertexInputState=&vi;gp.pInputAssemblyState=&ia;}if(tess)gp.pTessellationState=&ts;gp.pViewportState=&vp;gp.pRasterizationState=&rs;gp.pMultisampleState=&ms;
   if(!rastdisc){gp.pDepthStencilState=&ds;gp.pColorBlendState=&cb;}gp.pDynamicState=&dsn;gp.layout=lay;
   CK(vkCreateGraphicsPipelines(dev,0,1,&gp,0,&pipe));
  }
