@@ -643,8 +643,8 @@ bool physical_reserve()
     expect(plain && (plain[9] = 3, plain[9] == 3), "committed memory with MEM_PHYSICAL is usable");
     if (plain) VirtualFree(plain, 0, MEM_RELEASE);
     // XMemAlloc / XMemFree are logged too.
-    void* small = XMemAlloc(256, word(1, 0, 0));
-    XMemFree(small, word(1, 0, 0));
+    void* tiny = XMemAlloc(256, word(1, 0, 0));
+    XMemFree(tiny, word(1, 0, 0));
     expect(logs.has("call XMemAlloc(size=0x100") && logs.has("call XMemFree(addr="), "XMemAlloc/XMemFree logged");
     // Control: a log check that looks for a line nobody wrote must fail.
     expect(!logs.has("call XMemVirtualAlloc(addr=0x0 size=0x41000000"), "control: an unseen call is not found");
