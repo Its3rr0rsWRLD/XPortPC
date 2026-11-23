@@ -44,9 +44,11 @@ The translated HLSL may declare only the bindings the shim fills at draw time, a
 Any other declaration (storage images) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
-"x2w-bindings 2": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word> <set> <byte offset>
-<flags>", and the line "memory rw" when the program writes title memory ("memory ro" when it only reads it). The
-shim caches it beside the DXIL.
+"x2w-bindings 3": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word> <set> <byte offset>
+<flags>", for a constant buffer whose window is larger than 256 bytes (PixelBindings.constant_sizes: the program
+reads past its first 16 uint4) a sixth field, the window's bytes, which the root CBV must cover, and the line
+"memory rw" when the program writes title memory ("memory ro" when it only reads it). The shim caches it beside the
+DXIL.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
@@ -235,7 +237,8 @@ def lower(stage, instructions, roles):
         source, layout = vertex_aot.lower_with_layout(lines, vertex_aot.parse_role_map(user))
         flags = buffer_flags(source, 0)
         refs = [(*ref[:4], flags.get(ref[1], 0)) if ref[0] == "buffer" else ref for ref in refs]
-        return source, {"params": layout["params"], "instance_id": layout["instance_id"]}, refs
+        return source, {"params": layout["params"], "instance_id": layout["instance_id"]}, with_windows(refs, source,
+                                                                                                         "vertex")
     from pixel_aot_ops.bindings import PixelBindings, CONSTANT_SLOTS
     from pixel_aot_ops.lowering import lower as lower_pixel
     sgprs = dict(roles.get("sgprs", {}))
@@ -271,6 +274,7 @@ def lower(stage, instructions, roles):
     description = PixelBindings(sgprs=sgprs, textures=textures, samplers=samplers, constant_buffers=constants,
                                 push_constants=push, buffers={k: w + PIXEL_BUFFER_WORDS for k, w in buffers.items()},
                                 buffer_words="vsharp_words",
+                                constant_sizes=dict(derived.constant_sizes) if tables else {},
                                 **({"descriptor_high": high} if high is not None else {}))
     description.check()
     refs = [("texture", slot, key // SET_STRIDE, key % SET_STRIDE, 0) for key, slot in sorted(textures.items())]
@@ -280,7 +284,23 @@ def lower(stage, instructions, roles):
     flags = buffer_flags(source, PIXEL_BUFFER_WORDS)
     refs += [("buffer", w + PIXEL_BUFFER_WORDS, key // SET_STRIDE, key % SET_STRIDE,
               flags.get(w + PIXEL_BUFFER_WORDS, 0)) for key, w in sorted(buffers.items())]
-    return source, {"push_slot": push}, refs
+    return source, {"push_slot": push}, with_windows(refs, source, "pixel")
+
+
+def with_windows(refs, source, stage):
+    """refs (kind, slot, set, offset, flags) with the bytes of each constant buffer's window appended where the translation declares more than the
+    default 16 uint4 (PixelBindings.constant_sizes; vertex_aot sizes params the same way): the shim binds the root CBV
+    over that many bytes of title memory (src/d3d12_xs_pipeline.cpp, TableRef::window). A ref of 16 uint4 is unchanged,
+    so its sidecar line is the same as before windows were recorded."""
+    declared = {m[3]: int(m[4]) for m in CBUFFER.finditer(source)}
+    out = []
+    for ref in refs:
+        if ref[0] == "constants":
+            array = "params" if stage == "vertex" or ref[1] == 0 else f"params{ref[1]}"
+            if declared.get(array, 16) > 16:
+                ref = (*ref, 16 * declared[array])
+        out.append(ref)
+    return out
 
 
 def place_in_runtime_spaces(source, stage="vertex", layout=None):
@@ -344,8 +364,8 @@ def writable_memory(source, roles):
 
 
 def bindings_text(refs, writes=False, reads=False):
-    return ("x2w-bindings 2\n" + "".join(f"{kind} {slot} {table} {offset} {flags}\n"
-                                         for kind, slot, table, offset, flags in refs)
+    """The sidecar: one line per ref (kind, slot, set, offset, flags[, window]) and the title-memory line."""
+    return ("x2w-bindings 3\n" + "".join(" ".join(str(field) for field in ref) + "\n" for ref in refs)
             + ("memory rw\n" if writes else "memory ro\n" if reads else ""))
 
 

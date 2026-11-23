@@ -29,8 +29,9 @@
 // owns, a ranges buffer and their count, the base vertex and start instance, and the descriptors the shader reads
 // from title descriptor tables: textures and samplers copied into blocks of the shim's shader-visible heaps (one
 // block per distinct set of descriptor contents), constant buffers as root CBVs at the aliases of their title
-// addresses, and buffer V#s as descriptor words (the V# each buffer view was encoded with, d3d12_xs_descriptors.h)
-// in an upload block per distinct set of words, bound as one root CBV. A table read that finds no view of the
+// addresses, each over the window the translation declares (256 bytes, or the larger window of a program that reads
+// past its first 16 uint4: the sixth field of a constants line in the bindings sidecar), and buffer V#s as descriptor words (the V# each
+// buffer view was encoded with, d3d12_xs_descriptors.h) in an upload block per distinct set of words, bound as one root CBV. A table read that finds no view of the
 // expected kind is a TextureLookup miss: counted, logged once, and bound to a null SRV, a point sampler, a zero buffer
 // or a zero V# (num_records 0), so the shader reads zero and stores nothing. A typed access through a buffer view
 // whose format the converter does not lower exactly (anything but R32_UINT and R32_SINT) skips the draw (logged).
@@ -102,6 +103,7 @@ struct TableRef {
     std::uint8_t parameter;  // the table's root parameter in the title's root signature
     std::uint32_t offset;    // byte offset in the table
     std::uint8_t flags;      // buffer: ref_typed, ref_stored
+    std::uint32_t window;    // constants: bytes of title memory the root CBV covers (256, or the sidecar's window)
 };
 
 struct PsoInfo {

@@ -343,6 +343,20 @@ MIP_PROGRAMS = (
       per_pixel(off(1, 1, -1, 0), off(1, -2, 1, 1), off(1, 2, -2, 0), off(1, 2, -2, 2)),
       per_pixel(off(2, -1, 1, 0), off(1, 2, -1, 1), off(0, -2, 2, 0), off(0, -2, 2, 2)),
       per_pixel(off(2, -1, 1, 0), off(1, 1, -2, 1), off(0, -2, 2, 0), off(0, -2, 2, 2))]),
+    # image_sample_o: the implicit level (exactly 1 at 4x4 pixels, read as the quad's derivatives give it) and an offset
+    # in texels of that level: (+2, -2), (+3, +1) as a list and (-1, +3) through a range whose first VGPR is the offset.
+    # The offsets clamp at the edges of the 4x4 level. The wrong references: no offset, every offset negated, the offsets
+    # taken in level-0 texels (half as many level-1 texels), and level 0 read with the offset.
+    ("o", ["v_mov_b32_e32 v20, s44", "v_mov_b32_e32 v21, s45", "v_mov_b32_e32 v7, s46",
+           sample_line("o", "v12", "[v20, v8, v9]", 0x1), sample_line("o", "v13", "[v21, v8, v9]", 0x2),
+           sample_line("o", "v[14:15]", "v[7:9]", 0x5), "s_waitcnt vmcnt(0)"],
+     (pack_offset(2, -2), pack_offset(3, 1), pack_offset(-1, 3), 0),
+     per_pixel(off(1, 2, -2, 0), off(1, 3, 1, 1), off(1, -1, 3, 0), off(1, -1, 3, 2)),
+     [per_pixel(off(1, 0, 0, 0), off(1, 0, 0, 1), off(1, 0, 0, 0), off(1, 0, 0, 2)),
+      per_pixel(off(1, -2, 2, 0), off(1, -3, -1, 1), off(1, 1, -3, 0), off(1, 1, -3, 2)),
+      per_pixel(off_scaled(1, 2, -2, 0), off_scaled(1, 3, 1, 1), off_scaled(1, -1, 3, 0), off_scaled(1, -1, 3, 2)),
+      per_pixel(off(0, 2, -2, 0), off(0, 3, 1, 1), off(0, -1, 3, 0), off(0, -1, 3, 2)),
+      per_pixel(off(1, -2, 2, 0), off(1, 1, 3, 1), off(1, 3, -1, 0), off(1, 3, -1, 2))]),
     # Explicit gradients: each of the four gradient VGPRs alone sets the level (0.5 -> 2, 1.0 -> 3, 0.25 -> 1, 1.0 -> 3,
     # in units of the 8-texel base level). The wrong references: the implicit level, the second gradient dropped (levels
     # 0 for the two last samples), the first dropped.
@@ -542,6 +556,11 @@ def check_offset_level_d16_controls():
     assert "asint(packed << 26u) >> 26" in source and "asint((packed >> 8u) << 26u) >> 26" in source, source
     source = translate(with_constants([*ready, smp("l_o", "v[12:15]", "v[18:21]", 0xf), wait]))
     assert "image_level(tex, " in source and "t.GetDimensions(uint(level)" in source, source
+    # The implicit-level offset form: the level of the coordinate's derivatives (a helper-lane coordinate), then the offset.
+    source = translate(with_constants([*ready, smp("o", "v[12:15]", "[v20, v8, v9]", 0xf), wait]))
+    assert "CalculateLevelOfDetail(samp, float2(uv.x, uv.y))" in source and "image_offset_uv(tex, float2(" in source, source
+    must_reject(translate, with_constants([*ready, smp("o", "v[12:15]", "[v20, v18, v19]", 0xf), wait]))  # not the interpolated uv
+    must_reject(translate, with_constants([*ready, smp("o", "v[12:15]", "[v8, v9]", 0xf), wait]))
     source = translate(with_constants([*ready, smp("d", "v[12:15]", "[v18, v19, v20, v21, v8, v9]", 0xf), wait]))
     assert "tex.SampleGrad(samp, float2(uv.x, uv.y), float2(" in source, source
     source = translate(with_constants([*ready, smp("lz", "v[20:21]", "v[18:19]", 0xf, " d16"), wait]))
@@ -552,7 +571,7 @@ def check_offset_level_d16_controls():
     # comparisons (the sampler is not a comparison sampler), clamped and derivative variants, the offset and level
     # gathers other than lz_o (Gather always reads the most detailed level), and the other dimensions.
     d = "dmask:0xf dim:SQ_RSRC_IMG_2D"
-    for op, regs, gathers in (("o", "v[18:20]", 0), ("b_o", "v[18:21]", 0), ("d_o", "v[18:24]", 0), ("cl", "v[18:20]", 0),
+    for op, regs, gathers in (("b_o", "v[18:21]", 0), ("d_o", "v[18:24]", 0), ("cl", "v[18:20]", 0),
                               ("b_cl", "v[18:21]", 0), ("c", "v[18:20]", 0), ("c_lz", "v[18:20]", 0), ("c_l", "v[18:21]", 0),
                               ("c_lz_o", "v[18:21]", 0), ("c_l_o", "v[18:22]", 0), ("c_o", "v[18:21]", 0), ("c_b", "v[18:21]", 0),
                               ("c_d", "v[18:24]", 0), ("cd", "v[18:23]", 0), ("d_cl", "v[18:24]", 0), ("d_g16", "v[18:21]", 0),

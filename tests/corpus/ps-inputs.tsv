@@ -1,0 +1,29 @@
+# SPI_PS_INPUT_ENA of the corpus pixel shaders whose input VGPRs are not persp_center alone (tools/corpus_translate.py
+# reads it; docs/design/pixel-bindings.md, "Input VGPRs"). The dumps do not print the register, so it is reconstructed:
+# ACO enables persp_center for the v_interp barycentrics (and, as the hardware needs one barycentric input, for a
+# program that interpolates nothing), pos_x..pos_w for each gl_FragCoord component the program reads as a float,
+# pos_fixed_pt for ivec2(gl_FragCoord.xy) (an integer pixel coordinate), front_face for gl_FrontFacing and ancillary
+# for gl_ShadingRateEXT; SPI_PS_INPUT_ADDR equals ENA. The builtins are read off each shader's GLSL source at the
+# commit tests/corpus/README.md names; the dump confirms the layout (an a16 image address reads pos_fixed_pt, the
+# depth comparisons read pos_z, a z / gl_FragCoord.w is a product with pos_w). Every other corpus shader is lowered
+# with 0x2, persp_center alone: its program reads no input VGPR past v1.
+# Columns: shader, SPI_PS_INPUT_ENA, enabled inputs in VGPR order, the GLSL builtins they come from.
+sascha__dynamicrenderinglocalread__scene.frag.s	0x402	persp_center pos_z	gl_FragCoord.z
+sascha__offscreen__mirror.frag.s	0x1002	persp_center front_face	gl_FrontFacing
+sascha__oit__color.frag.s	0x8002	persp_center pos_fixed_pt	ivec2(gl_FragCoord.xy)
+sascha__oit__geometry.frag.s	0x8402	persp_center pos_z pos_fixed_pt	ivec2(gl_FragCoord.xy), gl_FragCoord.z
+sascha__ssao__gbuffer.frag.s	0x402	persp_center pos_z	gl_FragCoord.z
+sascha__subpasses__gbuffer.frag.s	0x402	persp_center pos_z	gl_FragCoord.z
+sascha__terraintessellation__terrain.frag.s	0xc02	persp_center pos_z pos_w	gl_FragCoord.z / gl_FragCoord.w
+sascha__variablerateshading__scene.frag.s	0x2002	persp_center ancillary	gl_ShadingRateEXT
+vksamples__dynamic_rendering_local_read__glsl__scene_opaque.frag.s	0x402	persp_center pos_z	gl_FragCoord.z
+vksamples__fragment_shading_rate__glsl__scene.frag.s	0x2002	persp_center ancillary	gl_ShadingRateEXT
+vksamples__fragment_shading_rate_dynamic__scene.frag.s	0xa002	persp_center ancillary pos_fixed_pt	gl_ShadingRateEXT, ivec2(gl_FragCoord)
+vksamples__oit_depth_peeling__gather.frag.s	0x8402	persp_center pos_z pos_fixed_pt	ivec2(gl_FragCoord.xy), gl_FragCoord.z
+vksamples__oit_linked_lists__combine.frag.s	0x8002	persp_center pos_fixed_pt	ivec2(gl_FragCoord.xy)
+vksamples__oit_linked_lists__gather.frag.s	0x8402	persp_center pos_z pos_fixed_pt	ivec2(gl_FragCoord.xy), gl_FragCoord.z
+vksamples__postprocessing__outline.frag.s	0x8002	persp_center pos_fixed_pt	ivec2(gl_FragCoord.xy)
+vksamples__postprocessing__outline_ms_depth.frag.s	0x8002	persp_center pos_fixed_pt	ivec2(gl_FragCoord.xy)
+vksamples__shader_object__terrain.frag.s	0xc02	persp_center pos_z pos_w	gl_FragCoord.z / gl_FragCoord.w
+vksamples__swapchain_present_timing__glsl__circle.frag.s	0x302	persp_center pos_x pos_y	gl_FragCoord.xy
+vksamples__terrain_tessellation__glsl__terrain.frag.s	0xc02	persp_center pos_z pos_w	gl_FragCoord.z / gl_FragCoord.w

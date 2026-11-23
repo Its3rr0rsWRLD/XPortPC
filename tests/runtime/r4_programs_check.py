@@ -33,10 +33,12 @@ VS_ROLES = {"user_sgprs": {"2": {"role": "inline", "word": 0}, "3": {"role": "in
                            "6": {"role": "descriptors", "set": 0},
                            "8": {"role": "inline", "word": 2}, "9": {"role": "inline", "word": 3}}}
 PS_ROLES = {"sgprs": {"s2": "interp", "s3": "descriptors", "s4": "descriptors.1", "s5": "push:4"}}
-# Descriptor-table reads (kind, slot, set, byte offset): the scene's per-draw CBV/SRV/UAV table holds the vertex
-# constants at 0x00, the texture at 0x20 and the pixel constants at 0x40; its sampler table the sampler at 0.
+# Descriptor-table reads (kind, slot, set, byte offset, flags[, window]): the scene's per-draw CBV/SRV/UAV table holds the vertex
+# constants at 0x00, the texture at 0x20 and the pixel constants at 0x40; its sampler table the sampler at 0. The pixel
+# program reads its tint at byte 0x110, so its constant buffer's window is 0x120 bytes (the sixth field; the fifth is
+# the buffer flags, 0 for every other kind).
 EXPECTED = {"r4_vs": [("constants", 0, 0, 0, 0)],
-            "r4_ps": [("texture", 0, 0, 0x20, 0), ("sampler", 0, 1, 0, 0), ("constants", 0, 0, 0x40, 0)]}
+            "r4_ps": [("texture", 0, 0, 0x20, 0), ("sampler", 0, 1, 0, 0), ("constants", 0, 0, 0x40, 0, 0x120)]}
 # Forms the runtime does not bind yet, as one-line changes of the pixel or vertex program, and the reason they give.
 REFUSED = [
     ("r4_ps", "s_load_dwordx4 s[32:35], s[22:23], null", ["s_mov_b32 s32, 0", "s_mov_b32 s33, 0", "s_mov_b32 s34, 0",
@@ -54,6 +56,7 @@ FORMS = [
     "s_load_dwordx8 s[24:31], s[20:21], 0x20", "s_load_dwordx8 s[24:31], s[20:21], null",
     "s_buffer_load_dword s16, s[12:15], null", "s_buffer_load_dword s16, s[12:15], 0x14",
     "s_buffer_load_dwordx2 s[16:17], s[12:15], null", "s_buffer_load_dwordx4 s[40:43], s[36:39], 0x10",
+    "s_buffer_load_dwordx4 s[40:43], s[36:39], 0x110",
     "v_add_nc_u32_e32 v1, s4, v0", "v_add_nc_u32_e32 v1, v2, v0", "v_add_f32_e32 v4, s16, v4",
     "v_mul_f32_e32 v12, s40, v12", "v_mul_f32_e32 v12, 0.5, v12", "v_mov_b32_e32 v9, 1.0",
     "v_interp_p1_f32_e32 v8, v0, attr0.x", "v_interp_p2_f32_e32 v9, v1, attr2.w",
@@ -108,6 +111,12 @@ def check(assembler=None, objcopy=None):
             raise AssertionError(f"{name}: descriptor-table reads {refs}, expected {EXPECTED[name]}")
         if name == "r4_vs" and "CountedTitleLookup(title_ranges" not in source:
             raise AssertionError("r4_vs: title-memory loads do not count TitleLookup misses")
+        if name == "r4_ps":
+            # The window: params grows to the uint4 the program reads (18), and the sidecar gives the shim its bytes.
+            if "cbuffer Constants : register(b0, space1003) { uint4 params[18]; };" not in source:
+                raise AssertionError("r4_ps: the constant window is not declared as params[18] in space1003")
+            if "constants 0 0 64 0 288\n" not in pso_translate.bindings_text(refs):
+                raise AssertionError("r4_ps: the bindings sidecar lacks the constant window")
         print(f"{name}: {len(program)} instructions decode to the source text and translate; reads {refs}")
     for name, line, replacement, reason in REFUSED:
         program = source_lines(name)

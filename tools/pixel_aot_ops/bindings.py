@@ -11,7 +11,10 @@ covers is refused.
 HLSL names and registers of the pixel stage (the harness binds them, tests/pixel_aot_render.cpp):
     texture k   tex (t0), tex1 (t1), tex2..tex7 (t3..t8; t2 is the title ranges)
     sampler k   samp (s0), samp1..samp3 (s1..s3)
-    constants k params (b0), params1..params3 (b2..b4; b1 is the title range count), 64 words each
+    constants k params (b0), params1..params3 (b2..b4; b1 is the title range count), 64 words each unless
+                constant_sizes gives slot k a larger window
+    inputs      the SPI_PS_INPUT_ENA layout of the input VGPRs (input_vgprs): persp_center as v0, v1 (bary_i, bary_j);
+                positions, front face and pixel coordinate from SV_Position and SV_IsFrontFace
 """
 from dataclasses import dataclass, field
 import re
@@ -23,6 +26,41 @@ SET_STRIDE = 0x100000
 # (its address32_hi on gfx10).
 RADV_DESCRIPTOR_HIGH = 0xffff8000
 TEXTURE_SLOTS, SAMPLER_SLOTS, CONSTANT_SLOTS = 8, 4, 4
+# The bytes of a constant slot's window without constant_sizes (16 uint4), and the most one may have: a D3D12 constant
+# buffer view is at most 4096 uint4 (D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT).
+CONSTANT_WINDOW, MAX_CONSTANT_WINDOW = 256, 4096 * 16
+
+# The pixel input VGPRs (docs/design/pixel-bindings.md, "Input VGPRs"): the inputs of SPI_PS_INPUT_ENA and
+# SPI_PS_INPUT_ADDR in bit order (AMD's register layout, Mesa sid.h S_0286CC_*_ENA) and the VGPRs each takes. The
+# hardware gives VGPRs to the inputs whose ADDR bit is set, in bit order from v0, and loads those whose ENA bit is set
+# too (ENA is a subset of ADDR); ACO sets ADDR equal to ENA. Of the barycentric inputs only persp_center is lowered:
+# the desktop interpolates at the pixel centre, which is what v_interp reads from it (bary_i, bary_j).
+PS_INPUTS = (("persp_sample", 2), ("persp_center", 2), ("persp_centroid", 2), ("persp_pull_model", 3),
+             ("linear_sample", 2), ("linear_center", 2), ("linear_centroid", 2), ("line_stipple", 1),
+             ("pos_x", 1), ("pos_y", 1), ("pos_z", 1), ("pos_w", 1), ("front_face", 1), ("ancillary", 1),
+             ("sample_coverage", 1), ("pos_fixed_pt", 1))
+PS_INPUT_BITS = {name: bit for bit, (name, _) in enumerate(PS_INPUTS)}
+PERSP_CENTER = 1 << PS_INPUT_BITS["persp_center"]
+# The tracked value of each lowered input VGPR: the barycentrics, and the words main computes from SV_Position and
+# SV_IsFrontFace (lowering.INPUT_WORDS) for the others.
+LOWERED_INPUTS = {("persp_center", 0): "bary_i", ("persp_center", 1): "bary_j",
+                  **{(f"pos_{c}", 0): ("uint", f"psin_{c}") for c in "xyzw"},
+                  ("front_face", 0): ("uint", "psin_face"), ("pos_fixed_pt", 0): ("uint", "psin_pixel")}
+
+
+def input_vgprs(ena, addr=None):
+    """{"vN": (input name, component)} of every VGPR the inputs occupy under SPI_PS_INPUT_ENA `ena` and
+    SPI_PS_INPUT_ADDR `addr` (None: equal to ena, as ACO sets it), and the set of those whose input is enabled."""
+    addr = ena if addr is None else addr
+    layout, enabled, at = {}, set(), 0
+    for bit, (name, width) in enumerate(PS_INPUTS):
+        if addr >> bit & 1:
+            for k in range(width):
+                layout[f"v{at}"] = (name, k)
+                if ena >> bit & 1:
+                    enabled.add(f"v{at}")
+                at += 1
+    return layout, enabled
 
 # Texture dimensions a T# may declare, with the HLSL type each is bound as (docs/design/pixel-bindings.md): a cube is
 # bound as a Texture2DArray view of its six faces (slices 0..5 = +X, -X, +Y, -Y, +Z, -Z), sampled at the face
@@ -124,7 +162,12 @@ class PixelBindings:
     storage_images: {key of a storage-image T#: (slot 0..3, format)} (forms/image_writes.py).
     descriptor_high: the high word the program completes a descriptor-set pointer with.
     dimensions: {texture slot: "2d", "2d_array", "cube" or "3d", or the T#'s eight words when they are known, whose
-        TYPE field (type_dimension) gives it}; a slot not listed is 2D."""
+        TYPE field (type_dimension) gives it}; a slot not listed is 2D.
+    constant_sizes: {constant slot: bytes of the window the runtime binds for that constant-buffer V#, a multiple of 16
+        from 256 to 65536}; a slot not listed binds 256. A read past the window is refused; params<k>[] is declared
+        with the uint4 up to the highest word read (16 at least), or the whole window for a run-time offset.
+    ps_input_ena, ps_input_addr: SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR (input_vgprs; addr None is ena). The default,
+        persp_center alone, is the v0, v1 barycentrics every description had before."""
     sgprs: dict
     textures: dict = field(default_factory=dict)
     samplers: dict = field(default_factory=dict)
@@ -135,6 +178,9 @@ class PixelBindings:
     descriptor_high: int = RADV_DESCRIPTOR_HIGH
     buffer_words: str = "params"
     dimensions: dict = field(default_factory=dict)
+    constant_sizes: dict = field(default_factory=dict)
+    ps_input_ena: int = PERSP_CENTER
+    ps_input_addr: int = None
 
     def dimension(self, slot):
         """The dimension of texture slot `slot`: the declared name, the TYPE field of declared T# words, else 2D."""
@@ -198,6 +244,15 @@ class PixelBindings:
                  *((k, 16) for k in self.buffers), *((k, 16) for k in self.samplers.values() if isinstance(k, int))]
         if len({k for k, _ in spans}) != len(spans) or overlap(spans):
             raise ValueError("Descriptor-table entries overlap")
+        for slot, size in self.constant_sizes.items():
+            if slot not in self.constant_buffers.values() or not isinstance(size, int) or size % 16 \
+                    or not CONSTANT_WINDOW <= size <= MAX_CONSTANT_WINDOW:
+                raise ValueError("A constant window needs a constant-buffer slot and 256 to 65536 bytes, a multiple of 16")
+        addr = self.ps_input_ena if self.ps_input_addr is None else self.ps_input_addr
+        if not all(isinstance(w, int) and 0 <= w < 1 << 16 for w in (self.ps_input_ena, addr)) \
+                or self.ps_input_ena & ~addr or not self.ps_input_ena & 0x7f:
+            raise ValueError("SPI_PS_INPUT_ENA needs a barycentric input (bits 0 to 6) and its bits set in "
+                             "SPI_PS_INPUT_ADDR (16 bits each)")
         if self.push_constants == 0 and self.buffers and not own:
             pushed = {int(r[5:]) for r in roles if r.startswith("push:")}
             if any(w <= u < w + 4 for u in pushed for w in self.buffers.values()):
@@ -219,6 +274,11 @@ class PixelBindings:
         out += [f"{describe_key(k)}: buffer V# in {self.buffer_words} words {w}..{w + 3}"
                 for k, w in sorted(self.buffers.items())]
         out += [f"{describe_key(k)}: storage image {e[0]} ({e[1]})" for k, e in sorted(self.storage_images.items())]
+        out += [f"{constant_array(s)}: {size} bytes" for s, size in sorted(self.constant_sizes.items())]
+        if self.ps_input_ena != PERSP_CENTER or self.ps_input_addr not in (None, PERSP_CENTER):
+            layout, enabled = input_vgprs(self.ps_input_ena, self.ps_input_addr)
+            out += [f"{reg}: {name}{f'.{k}' if dict(PS_INPUTS)[name] > 1 else ''}{'' if reg in enabled else ' (unloaded)'}"
+                    for reg, (name, k) in layout.items()]
         return out
 
 

@@ -12,7 +12,7 @@ The manifest and inputs are local to the machine (they hold the title's shader c
 
 The key (src/d3d12_xs_pipeline.cpp, translated_shader) is SHA-256 over the converter's fingerprint (32 bytes), the
 stage (u32), the roles text (u32 length, bytes), the code size (u32) and the code. The fingerprint is SHA-256 over
-"x2w-pso-translate-3", the name, size and write time of every converter source (tools/*.py and two directory levels
+"x2w-pso-translate-4", the name, size and write time of every converter source (tools/*.py and two directory levels
 below, sorted by name, __pycache__ skipped), of src/title_va_lookup.hlsli and of DXC, then the DXC and LLVM paths as
 the shim was configured. An input id is the same hash without the fingerprint, with "x2w-pso-input-1" in front, so it
 survives a converter change: tools/precompile_cache.py recomputes every key from the inputs with the current
@@ -80,7 +80,7 @@ def fingerprint(tools, dxc, llvm=""):
     """The shim's converter fingerprint (load_config in src/d3d12_xs_pipeline.cpp) for these configuration strings."""
     tools, dxc, llvm = windows_path(tools), windows_path(dxc), windows_path(llvm or "")
     sha = hashlib.sha256()
-    _text(sha, "x2w-pso-translate-3")
+    _text(sha, "x2w-pso-translate-4")
     _tree(sha, tools, 2)
     for path in (os.path.join(tools, "..", "src", "title_va_lookup.hlsli"), dxc):
         try:

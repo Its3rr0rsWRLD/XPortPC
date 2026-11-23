@@ -262,7 +262,7 @@ BOOL CALLBACK load_config(PINIT_ONCE, PVOID, PVOID*)
         for (wchar_t& ch : *path)
             if (ch == L'/') ch = L'\\';
     Sha256 sha;
-    sha.update_text("x2w-pso-translate-3");
+    sha.update_text("x2w-pso-translate-4");
     fingerprint_tree(sha, config->tools, 2);
     const std::wstring header = config->tools + L"\\..\\src";
     WIN32_FIND_DATAW found;
@@ -864,7 +864,7 @@ const char* table_problem(const RootInfo& root, const X2WShaderBinding& b)
 const char* add_refs(const std::string& text, std::uint32_t stage, const std::vector<UINT>& tables, PsoInfo& info)
 {
     std::size_t at = text.find('\n');
-    if (text.compare(0, at, "x2w-bindings 2") != 0) return "the translator's bindings have an unknown format";
+    if (text.compare(0, at, "x2w-bindings 3") != 0) return "the translator's bindings have an unknown format";
     while (at != std::string::npos && at + 1 < text.size()) {
         const std::size_t next = text.find('\n', at + 1);
         const std::string line = text.substr(at + 1, next == std::string::npos ? std::string::npos : next - at - 1);
@@ -875,9 +875,11 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         }
         if (line == "memory ro") continue;  // reads title memory through SRVs
         char kind[16] = {};
-        unsigned slot = 0, set = 0, offset = 0, flags = 0;
-        if (std::sscanf(line.c_str(), "%15s %u %u %u %u", kind, &slot, &set, &offset, &flags) != 5)
-            return "malformed bindings line";
+        unsigned slot = 0, set = 0, offset = 0, flags = 0, window = 256;
+        char rest = 0;
+        const int fields = std::sscanf(line.c_str(), "%15s %u %u %u %u %u %c", kind, &slot, &set, &offset, &flags,
+                                       &window, &rest);
+        if (fields != 5 && fields != 6) return "malformed bindings line";
         TableRef ref{};
         ref.stage = static_cast<std::uint8_t>(stage);
         if (!std::strcmp(kind, "texture")) ref.kind = RefKind::texture;
@@ -893,6 +895,11 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         } else if (flags) {
             return "flags on a descriptor that is not a buffer";
         }
+        // A constant buffer's window (tools/pso_translate.py with_windows): more than 256 bytes, a multiple of 16, at
+        // most a D3D12 constant buffer view (4096 uint4).
+        if (fields == 6 && (ref.kind != RefKind::constants || window <= 256 || window % 16 ||
+                            window > D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16))
+            return "a bindings window that is not a constant buffer's 272 to 65536 bytes";
         const unsigned slots = ref.kind == RefKind::texture   ? 8
                                : ref.kind == RefKind::sampler ? sampler_table
                                : ref.kind == RefKind::buffer  ? buffer_words
@@ -910,6 +917,7 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
         ref.parameter = static_cast<std::uint8_t>(tables[set]);
         ref.offset = offset;
         ref.flags = static_cast<std::uint8_t>(flags);
+        ref.window = window;
         info.refs[info.ref_count++] = ref;
     }
     return nullptr;
@@ -1183,8 +1191,8 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
     const std::string& bindings = shader.bindings;
     // Compute programs read and write title memory through the UAV half of the title-memory table (the same alias
     // UAVs a storing pixel program uses); their bindings may say so, and must name no descriptor-table read.
-    if (bindings != "x2w-bindings 2\n" && bindings != "x2w-bindings 2\nmemory rw\n" &&
-        bindings != "x2w-bindings 2\nmemory ro\n")
+    if (bindings != "x2w-bindings 3\n" && bindings != "x2w-bindings 3\nmemory rw\n" &&
+        bindings != "x2w-bindings 3\nmemory ro\n")
         return refuse_cs(key, "the translation reads descriptor tables, which compute pipelines do not bind yet");
     D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
     copy.CS = {dxil.data(), dxil.size()};
@@ -1899,7 +1907,8 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
             any_words = true;
         } else {
             const unsigned at = ref.stage == X2W_SHADER_STAGE_VERTEX ? 0 : 1 + ref.slot;
-            constants[at] = found.found ? translate_address(found.cbv_address, 256) : views->zero_buffer();
+            // The zero buffer is 65536 bytes, the largest window.
+            constants[at] = found.found ? translate_address(found.cbv_address, ref.window) : views->zero_buffer();
             any_constants[at] = true;
         }
     }

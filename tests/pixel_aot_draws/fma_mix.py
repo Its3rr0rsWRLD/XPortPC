@@ -136,6 +136,7 @@ def fmx_word(low, high):
 
 
 FMX_WORD = [ubyte(n, 12 + n, "v18", "e32") for n in range(4)]
+FMX_ENTRY = [ubyte(n, 12 + n, "v1", "e32") for n in range(4)]  # the word of v1, the entry register of the interpolation base
 
 
 def fmx_pair(first, second):
@@ -226,6 +227,23 @@ def fmx_model_round(words, bug):
     return fmx_bytes(fmx_lo(words[3], fmx_fma(a, b, c, False, bug), bug))
 
 
+def fmx_model_literal(words, bug):
+    """Two binary32 sources that are 32-bit literals (the words the instruction's literal dword holds): the disassembly
+    prints only their low 16 bits (0x3333, 0x7ae2), which a lowering must not take for a binary16 value or a denormal."""
+    first, second = LITERALS
+    if bug == "lit_as_half":
+        first, second = (half_value(w & 0xffff) for w in LITERALS)
+    elif bug == "lit_low_bits":
+        first, second = (struct.unpack("<f", struct.pack("<I", w & 0xffff))[0] for w in LITERALS)
+    else:
+        first, second = (struct.unpack("<f", struct.pack("<I", w))[0] for w in LITERALS)
+    b, c = fmx_source(words[1], False, 0, bug=bug), fmx_source(words[2], False, 0, bug=bug)
+    low = fmx_fma(first, b, c, False, bug)
+    high = fmx_fma(b, second, c, False, bug)
+    return fmx_bytes(fmx_hi(fmx_lo(0, low, bug), high, bug))
+
+
+LITERALS = (0x3eb33333, 0xbf147ae2)  # 0.35 and -0.58 in binary32; the text shows 0x3333 and 0x7ae2
 MARKER = 0xa5c31d2e
 FMX_ONE_12 = fmx_f32(1 + 2.0 ** -12)
 FMX_TIE = fmx_f32(1 + 2.0 ** -11)
@@ -265,6 +283,31 @@ FMA_MIX_PROGRAMS = (
       (FMX_TIE, fmx_f32(1.0), fmx_f32(-1.0), fmx_f32(2.0 ** -40))],
      ("unfused", "double", "wrong_dst", "low_zero"),
      (1, [0x01, 0x00, 0x00, 0x8c])),
+    # The pair into the entry register v1 (the interpolation base, not data): the first write leaves the other half
+    # undefined and the second completes the word, in either order.
+    ("pair_entry", ["v_mov_b32_e32 v19, s44", "v_fma_mixlo_f16 v1, v19, s45, s47", "v_fma_mixhi_f16 v1, v19, s46, s47", *FMX_ENTRY],
+     fmx_model_pair,
+     [(fmx_f32(1.5), fmx_f32(2.25), fmx_f32(-0.1), fmx_f32(0.33333334)),
+      (FMX_ONE_12, FMX_ONE_12, fmx_f32(1.0), fmx_f32(-(1 + 2.0 ** -11))),
+      (FMX_TIE, fmx_f32(1.0), fmx_f32(-1.0), fmx_f32(2.0 ** -40))],
+     ("unfused", "double", "wrong_dst", "low_zero"),
+     (1, [0x01, 0x00, 0x00, 0x8c])),
+    ("pair_entry_hi_first", ["v_mov_b32_e32 v19, s44", "v_fma_mixhi_f16 v1, v19, s46, s47", "v_fma_mixlo_f16 v1, v19, s45, s47", *FMX_ENTRY],
+     fmx_model_pair,
+     [(fmx_f32(1.5), fmx_f32(2.25), fmx_f32(-0.1), fmx_f32(0.33333334)),
+      (FMX_ONE_12, FMX_ONE_12, fmx_f32(1.0), fmx_f32(-(1 + 2.0 ** -11))),
+      (FMX_TIE, fmx_f32(1.0), fmx_f32(-1.0), fmx_f32(2.0 ** -40))],
+     ("unfused", "double", "wrong_dst"),
+     (1, [0x01, 0x00, 0x00, 0x8c])),
+    ("literal32", ["v_mov_b32_e32 v20, s45",
+                   f"v_fma_mixlo_f16 v18, {LITERALS[0]:#x}, v20, s46", f"v_fma_mixhi_f16 v18, v20, {LITERALS[1]:#x}, s46",
+                   *FMX_WORD],
+     fmx_model_literal,
+     # b and c are binary32. 0.35 and -0.58 come from literal dwords whose low halves read as 0.2 (binary16) and a large
+     # binary16 value, or as binary32 denormals (about zero): each wrong reading changes a byte on every set.
+     [(0, fmx_f32(1.5), fmx_f32(-0.25), 0), (0, fmx_f32(-3.0), fmx_f32(0.75), 0), (0, fmx_f32(0.125), fmx_f32(2.0), 0)],
+     ("lit_as_half", "lit_low_bits", "wrong_dst", "low_zero"),
+     None),
     ("mixed", ["v_mov_b32_e32 v19, s45", "v_fma_mix_f32 v18, s44, v19, s46 op_sel:[0,0,1] op_sel_hi:[1,0,1]", *FMX_WORD],
      fmx_model_mixed,
      # The spelling in the corpus: a is the low half of s44, b the binary32 s45 and c the high half of s46. The first
@@ -412,7 +455,18 @@ def check_fma_mix_controls() -> None:
     main = translate(with_constants([*prefix, "v_fma_mixlo_f16 v18, v19, v20, v21", "v_fma_mixhi_f16 v18, v19, v20, v21"])).split("float4 main")[1]
     assert "asfloat(0u | fma_mix_round(" in main, main
     assert "(asuint(alu" in main and " & 0xffffu) | (fma_mix_round(" in main, main
+    # A 32-bit literal is a binary32 source: its whole word is the value (the corpus tool restores it from the hex words).
+    main = translate(with_constants([*prefix, "v_fma_mixlo_f16 v18, 0x3eb33333, v20, v21"])).split("float4 main")[1]
+    assert "fma_mix_round(0x3eb33333u, " in main, main
+    # The pair into the entry register v1: each half is a uint word until the pair completes it.
+    entry = [*prefix, "v_fma_mixlo_f16 v1, v19, v20, v21", "v_fma_mixhi_f16 v1, v19, v20, v21"]
+    main = translate(with_constants(entry)).split("float4 main")[1]
+    assert "uint halfw" in main and "(halfw" in main and "& 0xffffu) | (fma_mix_round(" in main, main
+    translate(with_constants([*prefix, entry[-1], entry[-2], "v_mov_b32_e32 v18, v1"]))
+    translate(with_constants([*prefix, "v_fma_mixhi_f16 v0, v19, v20, v21", "v_fma_mixlo_f16 v0, v19, v20, v21"]))
     rejected = (
+        # A 32-bit literal of a binary16 source, and a literal of a width LLVM does not print.
+        "v_fma_mixlo_f16 v18, 0x3eb33333, v20, v21 op_sel_hi:[1,0,0]", "v_fma_mixlo_f16 v18, 0x123456789, v20, v21",
         # Output modifiers, DPP and SDWA are not part of the form.
         "v_fma_mixlo_f16 v18, v19, v20, v21 mul:2", "v_fma_mixlo_f16 v18, v19, v20, v21 div:2",
         "v_fma_mix_f32 v18, v19, v20, v21 row_shl:1", "v_fma_mixlo_f16_dpp v18, v19, v20, v21 row_shl:1",
@@ -433,6 +487,11 @@ def check_fma_mix_controls() -> None:
     )
     for line in rejected:
         must_reject(translate, with_constants([*prefix, line]))
+    # A half-written entry register has no value to read, nor a second write of the same half, nor a 16-bit write of another kind.
+    half = [*prefix, "v_fma_mixlo_f16 v1, v19, v20, v21"]
+    for line in ("v_mov_b32_e32 v18, v1", "v_add_f32_e32 v18, v1, v19", "v_fma_mixlo_f16 v1, v19, v20, v21",
+                 "v_cvt_f16_f32_e32 v1, v19", "v_fma_mix_f32 v18, v1, v20, v21"):
+        must_reject(translate, with_constants([*half, line]))
     # A sample result is not readable, and its register is not writable, before the wait.
     program = assembly(False)
     wait = program.index("s_waitcnt vmcnt(0)")
@@ -446,8 +505,10 @@ def controls(directory):
 
 def binary_fixtures():
     """(program, translator) pairs that `pixel_aot_check.py binary` assembles, disassembles and lowers."""
+    # literal32 is not assembled: llvm-mc encodes a mix literal as a 16-bit dword and the disassembler prints the low half
+    # of a binary32 one, so it does not round-trip; the draw is its check, the corpus tool restores the word (controls).
     return [
-        *((with_constants(body), translate) for _, body, *_ in FMA_MIX_PROGRAMS),
+        *((with_constants(body), translate) for name, body, *_ in FMA_MIX_PROGRAMS if name != "literal32"),
     ]
 
 

@@ -1,0 +1,66 @@
+# XAsync and XAsyncProvider. Signatures: public libHttpClient Include/XAsync.h and Include/XAsyncProvider.h
+# (MIT) and https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasync/xasync_members
+# Forwarding shares the task queue family's switch: async blocks carry task queue handles.
+# Format: see xgameruntime.toml.
+family = "xtaskqueue"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XTaskQueueCreate"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasync/functions/"
+
+[[functions]]
+name = "XAsyncGetStatus"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, bool wait"
+doc = "xasyncgetstatus"
+impl = true
+
+[[functions]]
+name = "XAsyncGetResultSize"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, size_t* bufferSize"
+doc = "xasyncgetresultsize"
+impl = true
+out = ["bufferSize"]
+
+[[functions]]
+name = "XAsyncCancel"
+returns = "void"
+params = "XAsyncBlock* asyncBlock"
+doc = "xasynccancel"
+impl = true
+
+[[functions]]
+name = "XAsyncRun"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, XAsyncWork* work"
+doc = "xasyncrun"
+impl = true
+
+[[functions]]
+name = "XAsyncBegin"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, void* context, const void* identity, const char* identityName, XAsyncProvider* provider"
+doc = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasyncprovider/functions/xasyncbegin"
+impl = true
+
+[[functions]]
+name = "XAsyncSchedule"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, uint32_t delayInMs"
+doc = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasyncprovider/functions/xasyncschedule"
+impl = true
+
+[[functions]]
+name = "XAsyncComplete"
+returns = "void"
+params = "XAsyncBlock* asyncBlock, HRESULT result, size_t requiredBufferSize"
+doc = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasyncprovider/functions/xasynccomplete"
+impl = true
+
+[[functions]]
+name = "XAsyncGetResult"
+returns = "HRESULT"
+params = "XAsyncBlock* asyncBlock, const void* identity, size_t bufferSize, void* buffer, size_t* bufferUsed"
+doc = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xasyncprovider/functions/xasyncgetresult"
+impl = true
