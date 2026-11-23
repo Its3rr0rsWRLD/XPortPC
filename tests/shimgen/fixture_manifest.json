@@ -1,0 +1,10 @@
+{
+  "x2w_shimgen_fixture.dll": [
+    "XUserGetTokenAndSignatureAsync",
+    "X2WFixtureUnknown",
+    "#7",
+    "X2WFixtureOverridden",
+    "X2WFixtureForwarded",
+    "XGameRuntimeInitialize"
+  ]
+}

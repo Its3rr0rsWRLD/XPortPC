@@ -18,6 +18,20 @@
 // crash (code, module + RVA, last stub called) and the exit code. Each line is written with its own
 // WriteFile call, so the log survives a crash. Addresses are given as module+RVA. --timeout ends a run that
 // is still going after that many seconds with exit code 124, after logging how far it got.
+//
+// Dynamic loads. The program's imports of LoadLibraryA/W, LoadLibraryExA/W, GetModuleHandleA/W and
+// GetProcAddress (from kernel32, kernelbase or the libraryloader API set) bind to hooks here, because PC
+// GDK titles reach the Gaming Runtime only that way (xgameruntime.lib loads xgameruntime.dll and resolves
+// names at run time). A load whose file name is in a --shims directory loads that shim; anything else goes
+// to the Windows loader unchanged. GetProcAddress on a shim answers from the shim's exports and returns
+// null for a name it lacks, as Windows would. Each distinct load and resolve is logged once, as
+// "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|missing|windows", on
+// stderr and in the run log; tools/shimgen.py --run-log turns those lines into shims.
+// Shims are loaded with LOAD_WITH_ALTERED_SEARCH_PATH, so DLLs beside a shim (x2w_gdk.dll) resolve.
+// The program's environment gets X2W_TITLE (its file name without extension) and X2W_TITLE_DIR (its
+// folder) unless they are set; the generated shims use them for save folders and the package path.
+// Shims report their own unimplemented paths through the exported x2w_launch_log_shim, as
+// "shim-<kind> SYMBOL DETAIL" lines in the run log.
 #include <windows.h>
 
 #include <cctype>
@@ -281,6 +295,142 @@ void* report(const std::string& dll, const std::string& symbol, const char* rout
     return address;
 }
 
+// ---------------------------------------------------------------- dynamic loads (see the header comment)
+SRWLOCK dynamic_lock = SRWLOCK_INIT;
+std::set<std::string> dynamic_logged;
+std::map<HMODULE, std::string> shim_names;  // shim modules loaded by a dynamic load, by handle
+
+void log_dynamic_once(const std::string& line) {
+    AcquireSRWLockExclusive(&dynamic_lock);
+    const bool first = dynamic_logged.insert(line).second;
+    ReleaseSRWLockExclusive(&dynamic_lock);
+    if (!first) return;
+    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    log_line("%s", line.c_str());
+}
+
+// "name.dll" for a load request: the file component, lower case, with ".dll" when it has no extension.
+std::string dll_file_name(const std::wstring& request) {
+    std::string name = lower(narrow(file_of(request)));
+    if (name.find('.') == std::string::npos) name += ".dll";
+    return name;
+}
+
+// The shim for a DLL name from a --shims directory, loading it if needed, or null.
+HMODULE shim_for(const std::string& name) {
+    for (const auto& directory : shim_dirs) {
+        const std::wstring path = directory + L"\\" + widen(name);
+        if (!is_file(path)) continue;
+        AcquireSRWLockExclusive(&dynamic_lock);
+        HMODULE& module = shim_modules[name];
+        if (!module) module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (module) shim_names[module] = name;
+        HMODULE result = module;
+        ReleaseSRWLockExclusive(&dynamic_lock);
+        return result;
+    }
+    return nullptr;
+}
+
+std::string shim_name_of(HMODULE module) {
+    AcquireSRWLockShared(&dynamic_lock);
+    auto it = shim_names.find(module);
+    std::string name = it == shim_names.end() ? std::string() : it->second;
+    if (name.empty())
+        for (const auto& [key, handle] : shim_modules)
+            if (handle == module) name = key;
+    ReleaseSRWLockShared(&dynamic_lock);
+    return name;
+}
+
+std::wstring from_ansi(LPCSTR text) {
+    if (!text) return {};
+    const int size = MultiByteToWideChar(CP_ACP, 0, text, -1, nullptr, 0);
+    std::wstring out(size > 0 ? static_cast<std::size_t>(size - 1) : 0, L'\0');
+    if (size > 1) MultiByteToWideChar(CP_ACP, 0, text, -1, out.data(), size);
+    return out;
+}
+
+HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
+    if (!request) return LoadLibraryExW(request, file, flags);
+    const std::string name = dll_file_name(request);
+    if (!(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE))) {
+        if (HMODULE shim = shim_for(name)) {
+            log_dynamic_once("dynamic-load " + name + " -> shim");
+            return shim;
+        }
+    }
+    HMODULE module = LoadLibraryExW(request, file, flags);
+    const DWORD error = GetLastError();
+    log_dynamic_once("dynamic-load " + name + (module ? " -> loader" : " -> failed"));
+    SetLastError(error);
+    return module;
+}
+HMODULE WINAPI hook_LoadLibraryW(LPCWSTR request) { return hook_LoadLibraryExW(request, nullptr, 0); }
+HMODULE WINAPI hook_LoadLibraryExA(LPCSTR request, HANDLE file, DWORD flags) {
+    if (!request) return LoadLibraryExA(request, file, flags);
+    return hook_LoadLibraryExW(from_ansi(request).c_str(), file, flags);
+}
+HMODULE WINAPI hook_LoadLibraryA(LPCSTR request) { return hook_LoadLibraryExA(request, nullptr, 0); }
+
+HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
+    if (request) {
+        const std::string name = dll_file_name(request);
+        AcquireSRWLockShared(&dynamic_lock);
+        auto it = shim_modules.find(name);
+        HMODULE shim = it == shim_modules.end() ? nullptr : it->second;
+        ReleaseSRWLockShared(&dynamic_lock);
+        if (shim) return shim;
+    }
+    return GetModuleHandleW(request);
+}
+HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
+    if (!request) return GetModuleHandleA(request);
+    return hook_GetModuleHandleW(from_ansi(request).c_str());
+}
+
+void* hook_for(const std::string& dll, const char* name);
+
+FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
+    const bool by_ordinal = (reinterpret_cast<std::uintptr_t>(name) >> 16) == 0;
+    const std::string symbol = by_ordinal ? "#" + std::to_string(reinterpret_cast<std::uintptr_t>(name))
+                                          : std::string(name ? name : "(null)");
+    const std::string shim = shim_name_of(module);
+    FARPROC address = GetProcAddress(module, name);
+    const DWORD error = GetLastError();
+    std::string dll = shim;
+    if (dll.empty()) {
+        wchar_t path[MAX_PATH];
+        const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
+        dll = length ? lower(narrow(file_of(std::wstring(path, length)))) : "?";
+        // A dynamic lookup of a hooked loader function gets the hook too.
+        if (address && !by_ordinal)
+            if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
+    }
+    log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
+                     (!shim.empty() ? (address ? "shim" : "missing") : (address ? "windows" : "missing")));
+    SetLastError(error);
+    return address;
+}
+
+void* hook_for(const std::string& dll, const char* name) {
+    if (!name) return nullptr;
+    if (dll != "kernel32.dll" && dll != "kernelbase.dll" && dll.rfind("api-ms-win-core-libraryloader", 0) != 0)
+        return nullptr;
+    static const std::pair<const char*, void*> hooks[] = {
+        {"LoadLibraryA", reinterpret_cast<void*>(&hook_LoadLibraryA)},
+        {"LoadLibraryW", reinterpret_cast<void*>(&hook_LoadLibraryW)},
+        {"LoadLibraryExA", reinterpret_cast<void*>(&hook_LoadLibraryExA)},
+        {"LoadLibraryExW", reinterpret_cast<void*>(&hook_LoadLibraryExW)},
+        {"GetModuleHandleA", reinterpret_cast<void*>(&hook_GetModuleHandleA)},
+        {"GetModuleHandleW", reinterpret_cast<void*>(&hook_GetModuleHandleW)},
+        {"GetProcAddress", reinterpret_cast<void*>(&hook_GetProcAddress)},
+    };
+    for (const auto& [hooked, address] : hooks)
+        if (std::strcmp(hooked, name) == 0) return address;
+    return nullptr;
+}
+
 void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) {
     const std::string key = lower(dll);
     const std::string symbol = name ? std::string(name) : "#" + std::to_string(ordinal);
@@ -289,7 +439,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
         const std::wstring path = directory + L"\\" + widen(key);
         if (!is_file(path)) continue;
         HMODULE& module = shim_modules[key];
-        if (!module) module = LoadLibraryW(path.c_str());
+        if (!module) module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (module)
             if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup)))
                 return report(key, symbol, "shim", "shim", address);
@@ -315,6 +465,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
             if (void* address = map_export(base, name)) return report(key, symbol, "package", "package", address);
         return report(key, symbol, "stub (package)", "stub", make_stub(key, symbol, false));
     }
+    if (void* hook = hook_for(key, name)) return report(key, symbol, "windows (x2w hook)", "windows", hook);
     if (HMODULE module = LoadLibraryA(dll)) {
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup)))
             return report(key, symbol, "windows", "windows", address);
@@ -417,6 +568,12 @@ DWORD WINAPI watchdog(void* seconds) {
 
 }  // namespace
 
+// Shims (x2w_gdk.dll) find this with GetProcAddress(GetModuleHandle(nullptr), ...) and log through it.
+extern "C" __declspec(dllexport) void __cdecl x2w_launch_log_shim(const char* kind, const char* symbol,
+                                                                  const char* detail) {
+    log_line("shim-%s %s %s", kind ? kind : "?", symbol ? symbol : "?", detail ? detail : "");
+}
+
 #pragma section(".CRT$XLB", long, read)
 extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch_tls = launch_tls;
 #pragma comment(linker, "/include:x2w_launch_tls")
@@ -480,6 +637,14 @@ int wmain(int argc, wchar_t** argv) {
     const std::string program_name = lower(narrow(file_of(full)));
     log_line("x2w-run-log 1");
     log_line("program %s", program_name.c_str());
+    {
+        std::wstring stem = file_of(full);
+        const auto dot = stem.find_last_of(L'.');
+        if (dot != std::wstring::npos) stem = stem.substr(0, dot);
+        if (!GetEnvironmentVariableW(L"X2W_TITLE", nullptr, 0)) SetEnvironmentVariableW(L"X2W_TITLE", stem.c_str());
+        if (!GetEnvironmentVariableW(L"X2W_TITLE_DIR", nullptr, 0))
+            SetEnvironmentVariableW(L"X2W_TITLE_DIR", package_dir.c_str());
+    }
     std::uint32_t status = 0;
     char detail[512] = {};
     void* base = map_image(full, resolve, &status, detail, sizeof detail);

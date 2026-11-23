@@ -39,6 +39,9 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"first-chance {EXCEPTION} last-stub {LAST}", rf"crash {EXCEPTION} last-stub {LAST}",
            r"exit code 0x[0-9a-f]+ \(\d+\); stubs \d+ \(missing \d+\), stub calls \d+",
            r"timeout still running after \d+ s",
+           rf"dynamic-load {NAME} -> (?:shim|loader|failed)",
+           rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|missing|windows)",
+           rf"shim-(?:unimplemented|note|forward) {SYMBOL} .*",
            rf"summary (?:exit|crash|timeout): tls-callbacks=(?:done|not-done) entry=(?:reached|not-reached) "
            rf"first-thread=(?:yes|no) d3d12-call=(?:yes|no) crash=(?:yes|no) last-stub={LAST}"]
 

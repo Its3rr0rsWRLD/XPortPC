@@ -2954,3 +2954,6 @@ if(TARGET pe_map AND TARGET xmem_shim)
     endif()
 endif()
 
+
+# System-library shims: x2w_gdk.dll and the DLLs tools/shimgen.py generates (cmake/x2w_shimgen.cmake).
+include(cmake/x2w_shimgen.cmake)
