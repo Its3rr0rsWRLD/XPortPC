@@ -206,11 +206,28 @@ const char* tls_callbacks(const Image& image, const IMAGE_NT_HEADERS64* nt, std:
 // order, then the entry point, with a null reserved argument. Returns the entry point's result.
 // Measured on Windows 11 build 26300: LoadLibrary sends nothing to a non-DLL image, neither TLS
 // callbacks nor the entry point (for an EXE the entry point is the program itself).
+// Thread observer (pe_map_thread_observer): told on every thread attach and detach that pe_map forwards, before
+// the first mapped image is notified (PE_MAP_THREAD_BEGIN), before an image's TLS callbacks and before its entry
+// point (PE_MAP_THREAD_TLS_CALLBACKS, PE_MAP_THREAD_ENTRY, with the image's base) and after the last one
+// (PE_MAP_THREAD_END). A host that shares TLS state with the mapped images (x2w_launch's slot-0 alias) sets it up
+// at BEGIN of an attach and takes it down at END of a detach, so no guest callback runs without it.
+enum ThreadPhase : int { PE_MAP_THREAD_BEGIN = 0, PE_MAP_THREAD_TLS_CALLBACKS = 1, PE_MAP_THREAD_ENTRY = 2,
+                         PE_MAP_THREAD_END = 3 };
+using ThreadObserver = void(__cdecl*)(DWORD reason, int phase, void* base);
+ThreadObserver volatile thread_observer = nullptr;
+
+void observe_thread(DWORD reason, int phase, void* base) {
+    if (reason != DLL_THREAD_ATTACH && reason != DLL_THREAD_DETACH) return;
+    if (ThreadObserver observer = thread_observer) observer(reason, phase, base);
+}
+
 BOOL notify(const Image& image, const IMAGE_NT_HEADERS64* nt, const std::vector<PIMAGE_TLS_CALLBACK>& callbacks,
             DWORD reason) {
     if (!(nt->FileHeader.Characteristics & IMAGE_FILE_DLL)) return TRUE;
+    if (!callbacks.empty()) observe_thread(reason, PE_MAP_THREAD_TLS_CALLBACKS, image.base);
     for (auto callback : callbacks) callback(image.base, reason, nullptr);
     if (!nt->OptionalHeader.AddressOfEntryPoint) return TRUE;
+    observe_thread(reason, PE_MAP_THREAD_ENTRY, image.base);
     using Entry = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
     const auto entry = reinterpret_cast<Entry>(image.base + nt->OptionalHeader.AddressOfEntryPoint);
     return entry(reinterpret_cast<HINSTANCE>(image.base), reason, nullptr);
@@ -577,6 +594,7 @@ void notify_mapped(const Mapped* record, DWORD reason) {
     if (dll) {
         notify(image, nt, callbacks, reason);
     } else {
+        if (!callbacks.empty()) observe_thread(reason, PE_MAP_THREAD_TLS_CALLBACKS, base);
         for (auto callback : callbacks) callback(base, reason, nullptr);
     }
 }
@@ -618,6 +636,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved) {
         return TRUE;
     }
     if (reason == DLL_THREAD_ATTACH || reason == DLL_THREAD_DETACH) {
+        observe_thread(reason, PE_MAP_THREAD_BEGIN, nullptr);
+        struct End {
+            DWORD reason;
+            ~End() { observe_thread(reason, PE_MAP_THREAD_END, nullptr); }
+        } end{reason};
         std::vector<Mapped*> snapshot;
         {
             const SharedLock hold;
@@ -644,6 +667,12 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved) {
         }
     }
     return TRUE;
+}
+
+// Sets the thread observer (see ThreadPhase); null removes it. Returns the previous one.
+extern "C" __declspec(dllexport) void* pe_map_thread_observer(void* observer) {
+    return InterlockedExchangePointer(reinterpret_cast<void* volatile*>(const_cast<ThreadObserver*>(&thread_observer)),
+                                      observer);
 }
 
 extern "C" __declspec(dllexport) void* pe_map_image(const wchar_t* path, Resolver resolve,

@@ -81,7 +81,8 @@ def main():
         print(f"native_launch_gameinput fastfail: logged with the final summary (exit {code:#x})")
 
         code, out, err, lines = run(launcher, folder, shims, mode="thread")
-        assert has(lines, r"crash exception 0xc0000005 at ntdll\.dll\+0x[0-9a-f]+ .* callers none thread-start ntdll\.dll\+0x[0-9a-f]+"), \
+        assert has(lines, r"crash exception 0xc0000005 at ntdll\.dll\+0x[0-9a-f]+ .* callers none thread-start ntdll\.dll\+0x[0-9a-f]+"
+                   r"(?: thread-init-phase [a-z\-]+(?: fn [a-z0-9_.\-]+\+0x[0-9a-f]+)?)?"), \
             "the crash on a Windows thread does not name the thread's start"
         assert has(lines, r"summary crash: .*"), "no crash summary"
         print("native_launch_gameinput thread: a fault on a thread outside the mapped images names the thread start")

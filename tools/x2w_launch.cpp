@@ -726,7 +726,13 @@ void end_identity() {
 // pe_map gives the program a carrier DLL's index N whose block the loader fills from the program's
 // template on every thread, so the launcher makes entry 0 of each thread's TLS vector point at that same
 // block: on every thread that exists when the program is mapped, and in its own TLS callback on each new
-// thread's attach; on thread detach it puts its own entry back, so ntdll frees each block once. The
+// thread's attach; on thread detach it puts its own entry back, so ntdll frees each block once. The alias for a
+// new thread is made by pe_map's thread observer (thread_observer below) before pe_map hands the attach to any
+// mapped image, and taken down after the last mapped image's detach: Windows calls the launcher's own TLS callback
+// (an EXE's) after every DLL's thread attach and before every DLL's thread detach, so a title TLS callback or
+// thread_local initializer or destructor compiled for slot 0 otherwise ran with the launcher's empty block in
+// entry 0 and wrote the title's TLS data over whatever heap block followed it (seen as faults inside ntdll's
+// LdrpInitializeThread walking a module list whose entries had been overwritten). The
 // launcher keeps no implicit TLS data of its own (no thread_local, and it is built with
 // /Zc:threadSafeInit-, so function-local statics do not use _Init_thread_epoch), so none of its code reads
 // entry 0. The run log gets "tls-slot0 index N threads T".
@@ -778,6 +784,15 @@ void slot0_start(void* base) {
     const auto query = reinterpret_cast<QueryInfo>(
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
     unsigned threads = slot0_alias(current_tls_vector(), GetCurrentThreadId()) ? 1 : 0;
+    // Other threads' vectors are written under the loader lock: ntdll replaces a thread's vector (a later DLL
+    // with TLS) and builds a new thread's vector under that lock, so the vector read here is the live one.
+    using LockLoader = LONG(NTAPI*)(ULONG, ULONG*, PVOID*);
+    using UnlockLoader = LONG(NTAPI*)(ULONG, PVOID);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto lock_loader = reinterpret_cast<LockLoader>(GetProcAddress(ntdll, "LdrLockLoaderLock"));
+    const auto unlock_loader = reinterpret_cast<UnlockLoader>(GetProcAddress(ntdll, "LdrUnlockLoaderLock"));
+    PVOID cookie = nullptr;
+    const bool locked = lock_loader && unlock_loader && lock_loader(0, nullptr, &cookie) >= 0;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snapshot != INVALID_HANDLE_VALUE && query) {
         THREADENTRY32 entry{};
@@ -795,7 +810,119 @@ void slot0_start(void* base) {
         }
     }
     if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    if (locked) unlock_loader(0, cookie);
     log_line("tls-slot0 index %lu threads %u", static_cast<unsigned long>(index), threads);
+}
+
+// ---------------------------------------------------------------- thread initialization
+// pe_map tells the launcher about every thread attach and detach it forwards to the mapped images
+// (pe_map_thread_observer): before the first image, before each image's TLS callbacks and entry point, and after
+// the last. At the start of an attach the slot-0 alias is made; at the end of a detach it is taken down. Each
+// thread's phase is kept in a dynamic TLS slot (TlsAlloc; the launcher has no implicit TLS) for the fault lines'
+// " thread-init-phase ..." part. For the first 8 threads after mapping, "thread-init tid N tls-ok images K" (or
+// "tls-missing IMAGE index I") says whether every mapped image with TLS data has its block on that thread and,
+// with an alias, entry 0 points at the program's block, checked before any mapped image is notified.
+enum PhaseCode : std::uintptr_t { PHASE_NONE = 0, PHASE_ATTACH = 1, PHASE_TLS_CALLBACK = 2, PHASE_DLLMAIN = 3,
+                                  PHASE_ATTACHED = 4, PHASE_DETACH = 5, PHASE_MAIN = 6, PHASE_WATCHDOG = 7 };
+DWORD phase_slot = TLS_OUT_OF_INDEXES;
+volatile long mapping_done, thread_init_lines;
+constexpr long kThreadInitLines = 8;
+
+void set_phase(PhaseCode code, const void* base = nullptr) {
+    if (phase_slot != TLS_OUT_OF_INDEXES)
+        TlsSetValue(phase_slot, reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(base) | code));
+}
+
+// The image's TLS index (as pe_map wrote it) when it has TLS data, else -1.
+long long image_tls_index(std::uintptr_t base) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(bytes + reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes)->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (!dir.VirtualAddress) return -1;
+    const auto* tls = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(bytes + dir.VirtualAddress);
+    if (tls->StartAddressOfRawData == tls->EndAddressOfRawData && !tls->SizeOfZeroFill) return -1;
+    return *reinterpret_cast<const DWORD*>(tls->AddressOfIndex);
+}
+
+void log_thread_init() {
+    if (!InterlockedCompareExchange(&mapping_done, 0, 0) || log_file == INVALID_HANDLE_VALUE) return;
+    if (InterlockedIncrement(&thread_init_lines) > kThreadInitLines) return;
+    void** vector = current_tls_vector();
+    const DWORD tid = GetCurrentThreadId();
+    unsigned images = 0;
+    const std::size_t count = regions.size();
+    for (std::size_t i = 0; i < count; ++i) {
+        const long long index = image_tls_index(regions[i].base);
+        if (index < 0) continue;
+        ++images;
+        if (!vector || !vector[index]) {
+            log_line("thread-init tid %lu tls-missing %s index %lld", static_cast<unsigned long>(tid),
+                     regions[i].label.c_str(), index);
+            return;
+        }
+        if (i == 0 && slot0_index && vector[0] != vector[index]) {
+            log_line("thread-init tid %lu tls-missing %s slot0", static_cast<unsigned long>(tid), regions[i].label.c_str());
+            return;
+        }
+    }
+    log_line("thread-init tid %lu tls-ok images %u", static_cast<unsigned long>(tid), images);
+}
+
+void __cdecl thread_observer(DWORD reason, int phase, void* base) {
+    if (reason == DLL_THREAD_ATTACH) {
+        if (phase == 0) {
+            set_phase(PHASE_ATTACH);
+            if (slot0_index) slot0_alias(current_tls_vector(), GetCurrentThreadId());
+            log_thread_init();
+        } else if (phase == 1) {
+            set_phase(PHASE_TLS_CALLBACK, base);
+        } else if (phase == 2) {
+            set_phase(PHASE_DLLMAIN, base);
+        } else {
+            set_phase(PHASE_ATTACHED);
+        }
+    } else if (reason == DLL_THREAD_DETACH) {
+        if (phase == 1) set_phase(PHASE_TLS_CALLBACK, base);
+        else if (phase == 2) set_phase(PHASE_DLLMAIN, base);
+        else set_phase(PHASE_DETACH);
+        if (phase == 3 && slot0_index) slot0_restore(current_tls_vector(), GetCurrentThreadId());
+    }
+}
+bool observer_set;
+
+// " thread-init-phase P fn MODULE+0xRVA" for a fault outside the mapped images on a thread that is starting or
+// ending (or has not reached mapped code): P is loader-before-attach (no attach forwarded yet: ntdll's own
+// thread initialization), attach-begin, tls-callback-of IMAGE, dllmain-of IMAGE, before-thread-fn (every attach
+// done; the thread's own function has not left a mapped frame) or detach; fn is the start of the faulting
+// function from its unwind data.
+std::string thread_init_text(const EXCEPTION_POINTERS* info, const std::string& chain) {
+    const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+    if (region_at(at) || phase_slot == TLS_OUT_OF_INDEXES) return {};
+    const auto value = reinterpret_cast<std::uintptr_t>(TlsGetValue(phase_slot));
+    const auto code = static_cast<PhaseCode>(value & 7);
+    const auto image = value & ~std::uintptr_t{7};
+    if (code == PHASE_MAIN || code == PHASE_WATCHDOG) return {};
+    if (code == PHASE_ATTACHED && chain.rfind(" callers ", 0) == 0) return {};
+    std::string phase;
+    switch (code) {
+    case PHASE_NONE: phase = "loader-before-attach"; break;
+    case PHASE_ATTACH: phase = "attach-begin"; break;
+    case PHASE_ATTACHED: phase = "before-thread-fn"; break;
+    case PHASE_DETACH: phase = "detach"; break;
+    default: {
+        const Region* region = region_at(image);
+        phase = std::string(code == PHASE_TLS_CALLBACK ? "tls-callback-of " : "dllmain-of ")
+            + (region ? region->label : std::string("unknown"));
+    }
+    }
+    std::string text = " thread-init-phase " + phase;
+    DWORD64 module = 0;
+    if (const auto* function = RtlLookupFunctionEntry(static_cast<DWORD64>(at), &module, nullptr)) {
+        char where[160];
+        describe(reinterpret_cast<const void*>(module + function->BeginAddress), where, sizeof where);
+        text += std::string(" fn ") + where;
+    }
+    return text;
 }
 
 // The Windows DLL of a shim's name (the loader's search path, then System32), loaded by full path so it is
@@ -1933,8 +2060,9 @@ LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
             InterlockedExchange(&first_exception, 1);
             char text[512];
             exception_text(info->ExceptionRecord, text, sizeof text);
-            log_line("first-chance %s last-stub %s%s%s", text, last_stub_name().c_str(), caller_chain(info).c_str(),
-                     register_text(info).c_str());
+            const std::string chain = caller_chain(info);
+            log_line("first-chance %s last-stub %s%s%s%s", text, last_stub_name().c_str(), chain.c_str(),
+                     thread_init_text(info, chain).c_str(), register_text(info).c_str());
             log_provisional_summary();
         }
     }
@@ -1948,8 +2076,9 @@ LONG WINAPI unhandled(EXCEPTION_POINTERS* info) {
     if (InterlockedExchange(&crashed, 1) == 0) {
         char text[512];
         exception_text(info->ExceptionRecord, text, sizeof text);
-        log_line("crash %s last-stub %s%s%s", text, last_stub_name().c_str(), caller_chain(info).c_str(),
-                 register_text(info).c_str());
+        const std::string chain = caller_chain(info);
+        log_line("crash %s last-stub %s%s%s%s", text, last_stub_name().c_str(), chain.c_str(),
+                 thread_init_text(info, chain).c_str(), register_text(info).c_str());
         log_summary("crash");
     }
     // The program's own filter (hook_SetUnhandledExceptionFilter) runs after the log is written.
@@ -2052,7 +2181,8 @@ void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
     }
     if (slot0_index) {
         if (reason == DLL_THREAD_ATTACH) slot0_alias(current_tls_vector(), GetCurrentThreadId());
-        if (reason == DLL_THREAD_DETACH) slot0_restore(current_tls_vector(), GetCurrentThreadId());
+        // With pe_map's observer the alias comes down after the mapped images' detach (thread_observer).
+        if (reason == DLL_THREAD_DETACH && !observer_set) slot0_restore(current_tls_vector(), GetCurrentThreadId());
     }
     if (reason != DLL_THREAD_ATTACH || !armed || GetCurrentThreadId() == watchdog_id) return;
     if (heap_guard && InterlockedExchange(&heap_first_thread, 1) == 0) heap_milestone("first-thread");
@@ -2088,6 +2218,7 @@ HANDLE watchdog_ready;
 // package DLL ever runs on it. (Created later, it raced the program's own process attach.)
 DWORD WINAPI watchdog(void* seconds) {
     const auto limit = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(seconds));
+    set_phase(PHASE_WATCHDOG);
     SetEvent(watchdog_ready);
     Sleep(limit * 1000);
     log_line("timeout still running after %lu s", limit);
@@ -2218,6 +2349,13 @@ int wmain(int argc, wchar_t** argv) {
         map_export = reinterpret_cast<MapExport>(GetProcAddress(pe_map, "pe_map_export"));
         map_export_resolved = reinterpret_cast<MapExportResolved>(GetProcAddress(pe_map, "pe_map_export_resolved"));
         map_run = reinterpret_cast<MapRunTraced>(GetProcAddress(pe_map, "pe_map_run_traced"));
+        using SetObserver = void* (*)(void*);
+        phase_slot = TlsAlloc();
+        set_phase(PHASE_MAIN);
+        if (const auto set_observer = reinterpret_cast<SetObserver>(GetProcAddress(pe_map, "pe_map_thread_observer"))) {
+            set_observer(reinterpret_cast<void*>(&thread_observer));
+            observer_set = true;
+        }
     }
     if (!map_image || !map_export || !map_run) {
         err_printf( "[x2w] pe_map.dll is missing beside x2w_launch.exe\n");
@@ -2319,6 +2457,7 @@ int wmain(int argc, wchar_t** argv) {
                    Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full,
                           show_program_name ? program_name : std::string(kHiddenProgram)});
     slot0_start(base);
+    InterlockedExchange(&mapping_done, 1);
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
     log_line("imports shim=%u package=%u windows=%u stub=%u missing=%u", route_counts["shim"],
              route_counts["package"], route_counts["windows"], route_counts["stub"], route_counts["missing"]);

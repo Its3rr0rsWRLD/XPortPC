@@ -31,6 +31,10 @@ LAST = rf"(?:{SYMBOL}|none)"
 # Unwound frames, else a stack scan's candidates, else the thread's start address (tools/x2w_launch.cpp caller_chain).
 CALLERS = (rf"(?: callers {WHERE}(?: from {WHERE}){{0,2}}| callers\? {WHERE}(?: {WHERE}){{0,2}} \(stack-scan\)"
            rf"| callers none thread-start {WHERE})?")
+# The thread's phase for a fault outside the mapped images on a starting or ending thread (tools/x2w_launch.cpp
+# thread_init_text), with the faulting function's start.
+INIT_PHASE = (rf"(?: thread-init-phase (?:loader-before-attach|attach-begin|before-thread-fn|detach"
+              rf"|(?:tls-callback|dllmain)-of {NAME})(?: fn {WHERE})?)?")
 # General registers (values only) on a crash, first-chance or breakpoint line for an exception in a mapped image.
 REGS = r"(?: regs(?: (?:r[a-ds]x|r[sd]i|r(?:8|9|1[0-5])|rbp|rsp)=0x[0-9a-f]+){16})?"
 FEATURES = r"(?:none|[a-z0-9.\-]+(?:,[a-z0-9.\-]+)*)"
@@ -43,13 +47,14 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"milestone first-program-thread start {WHERE}",
            rf"milestone first-d3d12-call {SYMBOL} \((?:bound|stub|missing)\)",
            rf"first-call (?:stub|missing) {SYMBOL}",
-           rf"first-chance {EXCEPTION} last-stub {LAST}{CALLERS}{REGS}", rf"crash {EXCEPTION} last-stub {LAST}{CALLERS}{REGS}",
+           rf"first-chance {EXCEPTION} last-stub {LAST}{CALLERS}{INIT_PHASE}{REGS}", rf"crash {EXCEPTION} last-stub {LAST}{CALLERS}{INIT_PHASE}{REGS}",
            rf"breakpoint continued at {WHERE} count \d+{REGS}", r"breakpoint \d+ lines logged; later breakpoints are counted only",
            r"breakpoints continued \d+",
            r"exit code 0x[0-9a-f]+ \(\d+\); stubs \d+ \(missing \d+\), stub calls \d+",
            r"timeout still running after \d+ s",
            rf"dynamic-load {NAME} -> (?:shim|loader|failed|mapped|package|gateway \((?:ours|trace|record)\))",
            rf"dynamic-handle {NAME} -> {NAME}", r"unhandled-filter program filter kept behind the launcher's", r"xgr (?:ours|trace|record)", r"tls-slot0 index \d+ threads \d+",
+           rf"thread-init tid \d+ (?:tls-ok images \d+|tls-missing {NAME} (?:index \d+|slot0))",
            r"shim-xgr-[a-z\-]+ \S+ .*",
            rf"cpp-throw [A-Za-z0-9_.?@$]+ at {WHERE}(?: from {WHERE})?",
            rf"dynamic-resolve {NAME}![A-Za-z0-9_#@?$]+ -> (?:shim|gateway|windows-fallback|missing|windows|mapped|mapped-missing)",
