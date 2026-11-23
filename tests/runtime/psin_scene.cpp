@@ -52,8 +52,9 @@ constexpr float clear_value = -2.0f;
 constexpr std::uint32_t psin_ena = 0x1702;
 constexpr std::uint32_t pos_w_bit = 1u << 11;
 // Vertices in pixels (y down), integer so exact under any subpixel snapping. Triangle 0 is clockwise on screen (front
-// facing under FrontCounterClockwise = FALSE), triangle 1 counter-clockwise (back facing).
-constexpr int vertices[2][3][2] = {{{3, 2}, {40, 7}, {6, 34}}, {{61, 28}, {30, 61}, {60, 60}}};
+// facing under FrontCounterClockwise = FALSE; R3's triangle), triangle 1 counter-clockwise (back facing). Every pixel
+// centre is off every edge line and in at most one triangle (checked by reference()).
+constexpr int vertices[2][3][2] = {{{9, 5}, {57, 19}, {16, 53}}, {{62, 30}, {34, 62}, {60, 61}}};
 constexpr float depths[2] = {0.25f, 0.75f};
 constexpr std::size_t constants_offset = 0;
 constexpr std::size_t positions_offset = 256;
