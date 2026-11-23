@@ -317,4 +317,170 @@ int main() {
     return finish("sys_dstorage_factory");
 }
 
-void gpu_checks(pc::IFactory*, ID3D12Device*, pc::IFile*, uint64_t, uint64_t, uint32_t, const std::vector<uint8_t>&) {}
+namespace {
+ID3D12Resource* make_resource(ID3D12Device* dev, D3D12_HEAP_TYPE heap, const D3D12_RESOURCE_DESC& d, D3D12_RESOURCE_STATES state) {
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = heap;
+    ID3D12Resource* r = nullptr;
+    dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr, IID_PPV_ARGS(&r));
+    return r;
+}
+D3D12_RESOURCE_DESC buffer_desc(uint64_t n) {
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = n;
+    d.Height = 1;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return d;
+}
+D3D12_RESOURCE_DESC tex_desc(UINT w, UINT h, UINT16 mips, DXGI_FORMAT f) {
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = w;
+    d.Height = h;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = mips;
+    d.Format = f;
+    d.SampleDesc.Count = 1;
+    return d;
+}
+// Copies `src` (a buffer, or every subresource of a texture in its footprint layout) into a readback buffer.
+std::vector<uint8_t> read_back(ID3D12Device* dev, ID3D12Resource* src, std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>* fps) {
+    const D3D12_RESOURCE_DESC d = src->GetDesc();
+    uint64_t total = d.Width;
+    UINT n = 0;
+    if (d.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+        n = d.MipLevels;
+        fps->resize(n);
+        dev->GetCopyableFootprints(&d, 0, n, 0, fps->data(), nullptr, nullptr, &total);
+    }
+    ID3D12Resource* rb = make_resource(dev, D3D12_HEAP_TYPE_READBACK, buffer_desc(total), D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12CommandQueue* q = nullptr;
+    ID3D12CommandAllocator* a = nullptr;
+    ID3D12GraphicsCommandList* l = nullptr;
+    ID3D12Fence* f = nullptr;
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q));
+    dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a));
+    dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a, nullptr, IID_PPV_ARGS(&l));
+    dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f));
+    std::vector<uint8_t> out;
+    if (!rb || !q || !a || !l || !f) return out;
+    if (!n) {
+        l->CopyBufferRegion(rb, 0, src, 0, total);
+    } else {
+        for (UINT i = 0; i < n; ++i) {
+            D3D12_TEXTURE_COPY_LOCATION s{}, t{};
+            s.pResource = src;
+            s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            s.SubresourceIndex = i;
+            t.pResource = rb;
+            t.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            t.PlacedFootprint = (*fps)[i];
+            l->CopyTextureRegion(&t, 0, 0, 0, &s, nullptr);
+        }
+    }
+    l->Close();
+    ID3D12CommandList* lists[] = {l};
+    q->ExecuteCommandLists(1, lists);
+    q->Signal(f, 1);
+    if (wait_fence(f, 1)) {
+        void* p = nullptr;
+        if (SUCCEEDED(rb->Map(0, nullptr, &p))) {
+            out.assign(static_cast<uint8_t*>(p), static_cast<uint8_t*>(p) + total);
+            rb->Unmap(0, nullptr);
+        }
+    }
+    f->Release();
+    l->Release();
+    a->Release();
+    q->Release();
+    rb->Release();
+    return out;
+}
+}  // namespace
+
+// Buffer (GDeflate), texture region (tightly packed rows) and multiple subresources (footprint layout) on WARP.
+void gpu_checks(pc::IFactory* factory, ID3D12Device* dev, pc::IFile* file, uint64_t raw_at, uint64_t gd_at, uint32_t gd_size,
+                const std::vector<uint8_t>& text) {
+    pc::QueueDesc desc{};
+    desc.SourceType = pc::kSourceFile;
+    desc.Capacity = 128;
+    desc.Device = dev;
+    pc::IQueue* q = nullptr;
+    CHECK(factory->CreateQueue(&desc, pc::IID_Queue, reinterpret_cast<void**>(&q)) == S_OK && q);
+    ID3D12Fence* fence = nullptr;
+    dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    ID3D12Resource* buf = make_resource(dev, D3D12_HEAP_TYPE_DEFAULT, buffer_desc(512 * 1024), D3D12_RESOURCE_STATE_COMMON);
+    ID3D12Resource* tex = make_resource(dev, D3D12_HEAP_TYPE_DEFAULT, tex_desc(64, 64, 1, DXGI_FORMAT_R8G8B8A8_UNORM), D3D12_RESOURCE_STATE_COMMON);
+    ID3D12Resource* mips = make_resource(dev, D3D12_HEAP_TYPE_DEFAULT, tex_desc(16, 16, 2, DXGI_FORMAT_R8_UNORM), D3D12_RESOURCE_STATE_COMMON);
+    CHECK(q && fence && buf && tex && mips);
+    if (!q || !fence || !buf || !tex || !mips) return;
+
+    pc::Request b{};
+    b.Options.CompressionFormat = kGDeflate;
+    b.Options.SourceType = pc::kSourceFile;
+    b.Options.DestinationType = pc::kDestBuffer;
+    b.Source.File = {file, gd_at, gd_size};
+    b.Destination.Buffer = {buf, 256, static_cast<uint32_t>(text.size())};
+    b.UncompressedSize = static_cast<uint32_t>(text.size());
+    q->EnqueueRequest(&b);
+    // Region (8,8)-(40,24): 32x16 texels of 4 bytes, tightly packed: 2048 bytes from file offset 5000.
+    pc::Request t{};
+    t.Options.SourceType = pc::kSourceFile;
+    t.Options.DestinationType = pc::kDestTextureRegion;
+    t.Source.File = {file, raw_at + 5000, 2048};
+    t.Destination.Texture.Resource = tex;
+    t.Destination.Texture.SubresourceIndex = 0;
+    t.Destination.Texture.Region = {8, 8, 0, 40, 24, 1};
+    t.UncompressedSize = 2048;
+    q->EnqueueRequest(&t);
+    // Both mips of a 16x16 R8 texture in the footprint layout.
+    D3D12_RESOURCE_DESC md = mips->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT mfp[2];
+    UINT64 mtotal = 0;
+    dev->GetCopyableFootprints(&md, 0, 2, 0, mfp, nullptr, nullptr, &mtotal);
+    pc::Request m{};
+    m.Options.SourceType = pc::kSourceFile;
+    m.Options.DestinationType = pc::kDestMultipleSubresources;
+    m.Source.File = {file, raw_at + 70000, static_cast<uint32_t>(mtotal)};
+    m.Destination.MultipleSubresources = {mips, 0};
+    m.UncompressedSize = static_cast<uint32_t>(mtotal);
+    q->EnqueueRequest(&m);
+    q->EnqueueSignal(fence, 1);
+    q->Submit();
+    CHECK(wait_fence(fence, 1));
+    HANDLE err = q->GetErrorEvent();
+    CHECK(WaitForSingleObject(err, 0) == WAIT_TIMEOUT);
+
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fps;
+    const std::vector<uint8_t> bb = read_back(dev, buf, &fps);
+    CHECK(bb.size() == 512 * 1024 && std::memcmp(bb.data() + 256, text.data(), text.size()) == 0 && bb[255] == 0);
+    const std::vector<uint8_t> tb = read_back(dev, tex, &fps);
+    bool ok = !tb.empty();
+    for (uint32_t y = 0; ok && y < 16; ++y)
+        for (uint32_t x = 0; x < 128; ++x) ok &= tb[fps[0].Offset + (8 + y) * fps[0].Footprint.RowPitch + 32 + x] == pattern(raw_at + 5000 + y * 128 + x);
+    CHECK(ok);
+    CHECK(!tb.empty() && tb[fps[0].Offset + 8 * fps[0].Footprint.RowPitch + 28] == 0);  // left of the region
+    const std::vector<uint8_t> mb = read_back(dev, mips, &fps);
+    ok = !mb.empty();
+    for (UINT i = 0; ok && i < 2; ++i) {
+        const UINT w = 16 >> i;
+        for (UINT y = 0; y < w; ++y)
+            for (UINT x = 0; x < w; ++x)
+                ok &= mb[fps[i].Offset + y * fps[i].Footprint.RowPitch + x] ==
+                      pattern(raw_at + 70000 + mfp[i].Offset + y * mfp[i].Footprint.RowPitch + x);
+    }
+    CHECK(ok);
+    CHECK_EQ(chk::count("texture data taken as tightly packed rows"), 1);
+    q->Close();
+    q->Release();
+    mips->Release();
+    tex->Release();
+    buf->Release();
+    fence->Release();
+}
