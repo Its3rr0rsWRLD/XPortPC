@@ -34,7 +34,8 @@ set_target_properties(x2w_xgr_statics_title PROPERTIES MSVC_RUNTIME_LIBRARY Mult
 # TLS through slot 0 directly (x2w_launch's "slot 0" alias).
 add_executable(x2w_xgr_statics_ltcg_title tests/xgr/statics_title.cpp)
 target_compile_features(x2w_xgr_statics_ltcg_title PRIVATE cxx_std_17)
-target_compile_options(x2w_xgr_statics_ltcg_title PRIVATE /GL /O2)
+# /O2 conflicts with the Debug preset's /RTC1 (D8016); /GL + /LTCG alone still builds the title with whole-program codegen.
+target_compile_options(x2w_xgr_statics_ltcg_title PRIVATE /GL)
 target_link_options(x2w_xgr_statics_ltcg_title PRIVATE /LTCG /DYNAMICBASE /INCREMENTAL:NO)
 set_target_properties(x2w_xgr_statics_ltcg_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
 add_dependencies(x2w_xgr_statics_title x2w_xgr)
