@@ -780,17 +780,17 @@ bool readable(const void* address, std::size_t size) {
 }
 
 std::string thrown_type(const EXCEPTION_RECORD* record) {
-    if (record->NumberParameters < 4) return "unknown";
+    if (record->NumberParameters < 4) return "unknown_parameters";
     const ULONG_PTR magic = record->ExceptionInformation[0];
-    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown";
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown_magic";
     const auto base = static_cast<std::uintptr_t>(record->ExceptionInformation[3]);
     const auto* throw_info = reinterpret_cast<const std::int32_t*>(record->ExceptionInformation[2]);
     if (!throw_info) return "rethrow";  // "throw;": the runtime takes the type from the exception in flight
-    if (!readable(throw_info, 16)) return "unknown";
+    if (!readable(throw_info, 16)) return "unknown_throw_info";
     const auto* types = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(throw_info[3]));
-    if (!readable(types, 8) || types[0] < 1) return "unknown";
+    if (!readable(types, 8) || types[0] < 1) return "unknown_type_array";
     const auto* catchable = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(types[1]));
-    if (!readable(catchable, 8)) return "unknown";
+    if (!readable(catchable, 8)) return "unknown_catchable_type";
     const char* name = reinterpret_cast<const char*>(base + static_cast<std::uint32_t>(catchable[1]) + 16);
     std::string out;
     for (std::size_t i = 0; i < 160 && readable(name + i, 1) && name[i]; ++i) {
@@ -799,7 +799,7 @@ std::string thrown_type(const EXCEPTION_RECORD* record) {
                         c == '.' || c == '?' || c == '@' || c == '$';
         out += ok ? c : '_';
     }
-    return out.empty() ? "unknown" : out;
+    return out.empty() ? "unknown_name" : out;
 }
 
 // The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
@@ -835,6 +835,14 @@ std::string throw_site(const CONTEXT* start) {
 void log_cpp_throw(EXCEPTION_POINTERS* info) {
     InterlockedIncrement(&cpp_throws);
     const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord);
+    if (std::getenv("X2W_CPP_THROW_DEBUG")) {  // numbers only, on stderr, never in the run log
+        const EXCEPTION_RECORD* r = info->ExceptionRecord;
+        const Region* region = region_at(static_cast<std::uintptr_t>(r->NumberParameters > 2 ? r->ExceptionInformation[2] : 0));
+        std::fprintf(stderr, "[x2w] cpp-throw-debug parameters=%lu magic=0x%llx info=0x%llx base=0x%llx region=0x%llx\n",
+                     r->NumberParameters, (unsigned long long)r->ExceptionInformation[0],
+                     (unsigned long long)r->ExceptionInformation[2], (unsigned long long)r->ExceptionInformation[3],
+                     (unsigned long long)(region ? region->base : 0));
+    }
     AcquireSRWLockExclusive(&cpp_lock);
     const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
     ReleaseSRWLockExclusive(&cpp_lock);
@@ -853,6 +861,9 @@ LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
     if (record->ExceptionCode != cpp_exception || record->NumberParameters < 4) return EXCEPTION_CONTINUE_SEARCH;
     const ULONG_PTR magic = record->ExceptionInformation[0];
     if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return EXCEPTION_CONTINUE_SEARCH;
+    if (std::getenv("X2W_CPP_THROW_DEBUG"))
+        std::fprintf(stderr, "[x2w] cpp-throw-debug runtime base=0x%llx\n",
+                     (unsigned long long)record->ExceptionInformation[3]);
     if (const Region* region = region_at(static_cast<std::uintptr_t>(record->ExceptionInformation[2])))
         record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
     return EXCEPTION_CONTINUE_SEARCH;

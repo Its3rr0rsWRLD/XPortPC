@@ -24,6 +24,7 @@ throw     tests/native/throw_title.cpp: C++ exceptions of three types thrown and
           throwing function's .pdata entry, and every log line within the run log grammar.
 """
 import ctypes
+import os
 import re
 import shutil
 import struct
@@ -147,7 +148,9 @@ def check_throw(launcher, title):
     name = Path(title).name.lower()
     with tempfile.TemporaryDirectory() as folder:
         log = Path(folder) / "run.log"
+        os.environ["X2W_CPP_THROW_DEBUG"] = "1"
         code, out, err = run([launcher, "--log", log, "--timeout", "60", title])
+        del os.environ["X2W_CPP_THROW_DEBUG"]
         lines = log.read_text(encoding="utf-8").splitlines()
     print(f"--log: exit {code:#x}")
     print("\n".join(line for line in err.splitlines() if "import " not in line))
