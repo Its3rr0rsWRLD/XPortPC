@@ -747,9 +747,20 @@ struct Gpu {
     std::vector<UINT64> row_size;
     uint64_t total = 0;
     bool tight = false;
+    // A copy that did not complete in time may still be running: its allocator, list and upload buffer are never
+    // reset or released while it might be (later GPU requests fail instead).
+    bool stuck = false;
 };
 void destroy_gpu(Gpu* g) {
     if (!g) return;
+    if (g->fence && g->event && g->fence->GetCompletedValue() < g->value) {
+        g->fence->SetEventOnCompletion(g->value, g->event);
+        WaitForSingleObject(g->event, 2000);
+    }
+    if (g->fence && g->fence->GetCompletedValue() < g->value) {
+        log_once("dsx:gpu:leak", "directstorage: a GPU copy is still running at queue release; its buffers are kept");
+        return;  // the GPU may still read them
+    }
     if (g->upload) g->upload->Release();
     if (g->list) g->list->Release();
     if (g->alloc) g->alloc->Release();
@@ -815,6 +826,7 @@ HRESULT gpu_staging(Queue* q, Op& op, uint8_t** out, uint64_t* cap) {
     HRESULT hr = gpu_init(q);
     if (FAILED(hr)) return hr;
     Gpu* g = q->gpu;
+    if (g->stuck) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
     g->fp.clear();
     g->rows.clear();
     g->row_size.clear();
@@ -859,7 +871,7 @@ HRESULT gpu_staging(Queue* q, Op& op, uint8_t** out, uint64_t* cap) {
         }
     }
     // Tightly packed data is decoded at the end of the buffer and laid out at the start.
-    const uint64_t need = g->tight ? g->total + op.out_size : std::max<uint64_t>(g->total, op.out_size);
+    const uint64_t need = g->tight ? ((g->total + 255) & ~255ull) + op.out_size : std::max<uint64_t>(g->total, op.out_size);
     hr = gpu_upload(q, need);
     if (FAILED(hr)) return hr;
     *out = g->tight ? g->mapped + ((g->total + 255) & ~255ull) : g->mapped;
@@ -908,6 +920,7 @@ HRESULT run_gpu(Queue* q, Op& op, const uint8_t* data) {
         g->fence->SetEventOnCompletion(g->value, g->event);
         if (WaitForSingleObject(g->event, 30000) != WAIT_OBJECT_0) {
             log_once("dsx:gpu:timeout", "directstorage: a GPU copy did not complete in 30 s");
+            g->stuck = true;
             return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         }
     }
