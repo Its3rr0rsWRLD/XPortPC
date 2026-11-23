@@ -399,6 +399,8 @@ int main(int argc, char** argv)
         if (argc < 6) return 2;
     } else if ((operation == "--depth-mask" || operation == "--depth-mask-swapped")) {
         if (argc != 6) return 2;
+    } else if (operation == "--check-geometry-case") {
+        if (argc != 6) return 2;
     } else if (operation == "--compute-root-file" || operation == "--ffx-immediate-conversion" ||
                operation == "--spirv-address-window" || operation == "--spirv-sampler-views") {
         if (argc != 4) return 2;
@@ -561,6 +563,8 @@ int main(int argc, char** argv)
             check_pixel_quad_lod(device.Get(), argv[3]);
         } else if (argc == 5 && operation == "--check-vertex-case") {
             check_translated_vertex(device.Get(), argv[3], argv[4]);
+        } else if (argc == 6 && operation == "--check-geometry-case") {
+            check_translated_geometry(device.Get(), argv[3], argv[4], argv[5]);
         } else if (operation == "--check-pixel") {
             if (argc != 5 || (std::string_view(argv[4]) != "rgba" && std::string_view(argv[4]) != "bgra"))
                 throw std::runtime_error("Expected --check-pixel <pixel.cso> rgba|bgra");
