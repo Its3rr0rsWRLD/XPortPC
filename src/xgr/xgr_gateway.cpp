@@ -443,8 +443,12 @@ bool slot_answer_override(const std::string& name, unsigned slot, long& hr)
 {
     char buffer[2048];
     const DWORD n = GetEnvironmentVariableA("X2W_XGR_SLOT_ANSWER", buffer, sizeof buffer);
-    if (!n || n >= sizeof buffer) return false;
-    const std::string spec(buffer, n), key = name + ":" + std::to_string(slot) + "=";
+    // Defaults when the variable is unset, from real-title traces (args only, nothing written):
+    //   IXUserImpl slot 33 is called with (queue, context, callback, token*), the shape of
+    //   XUserRegisterForChangeEvent; registering succeeds (no events are ever raised offline).
+    static const char kDefaults[] = "IXUserImpl:33=0";
+    if (n >= sizeof buffer) return false;
+    const std::string spec = n ? std::string(buffer, n) : std::string(kDefaults), key = name + ":" + std::to_string(slot) + "=";
     std::size_t at = 0;
     while (at < spec.size()) {
         std::size_t end = spec.find(';', at);
