@@ -196,6 +196,34 @@ assumption that the first owner logs test: every slot past the public ones, and 
 goes through a logging thunk (interface, slot index, caller RVA, four argument registers). A title calling a slot we
 have not implemented stops with that line as its first unimplemented call.
 
+### Console device creation
+
+A real title imports `d3d12_xs.dll!D3D12XboxCreateDevice` and `d3d12_xs.dll!D3D12ConfigureVirtualMemoryX` by name.
+Neither is publicly documented, so their contracts are **assumptions**, kept in one file
+(`src/d3d12_xs_xbox.cpp`) and checked against the next owner log:
+
+- Both take their arguments as raw integers: the four argument registers and the first four stack slots. Every call
+  (the first 16 per export) logs one line with the caller (`module+0xRVA`; `image@0xBASE+0xRVA` for an image the
+  loader does not name, such as a title mapped by `pe_map`) and all eight values, then one line per argument that is a
+  committed, readable pointer (checked with `VirtualQuery`) with up to its first 64 bytes in hex. Stack slots the caller
+  did not pass are logged as whatever the caller's frame holds there.
+- `D3D12XboxCreateDevice`, by analogy with the public `D3D12CreateDevice(adapter, minimum level, REFIID, void**)`: the
+  first argument pointing at a known device IID (`ID3D12Device` through `ID3D12Device10`, or `IUnknown`), and the first
+  writable, 8-byte-aligned pointer argument after it, are taken as the requested IID and the `void**` that receives the
+  device. The device is the one our `D3D12CreateDevice` export hands out (desktop default adapter, WARP when that fails;
+  the adapter and the creation-parameters struct, if the title passes them, are logged but not read), wrapped and
+  queried for that IID. The chosen mapping is logged as `d3d12x-create-device contract iid=<arg>(<interface>)
+  out=<arg>(void**) adapter=<default|warp> -> <HRESULT>`. With no such pair it returns `E_NOTIMPL` and logs
+  `d3d12x-create-device unknown-contract`, so the owner's next log shows the arguments to read the real contract from.
+- `D3D12ConfigureVirtualMemoryX` is logged the same way and returns `S_OK` with no effect: desktop D3D12 has no
+  virtual-memory configuration for the shim to forward to.
+
+Any other export a title asks `d3d12_xs.dll` for by name can be routed to `X2WGfxUnknownExport(name)`
+(`src/d3d12_xs_api.h`): one stub per distinct name that logs `d3d12_xs!<name>`, its caller and four argument registers
+on its first call (event `X2W_GFX_EVENT_UNKNOWN_EXPORT`) and returns `E_NOTIMPL`. The launcher's own stub for a name a
+shim lacks returns 0, which reads as `S_OK` to an HRESULT caller; routing `d3d12_xs.dll` misses through
+`X2WGfxUnknownExport` instead is a launcher change.
+
 ### Descriptors
 
 Converted shaders read descriptors as hardware words (V#, T#, S#) from memory, as the console GPU does; the converter

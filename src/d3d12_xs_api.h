@@ -35,7 +35,8 @@ typedef enum X2WGfxEventKind {
     X2W_GFX_EVENT_UNKNOWN_SLOT = 2,  // vtable slot past the interface's public methods; returned E_NOTIMPL
     X2W_GFX_EVENT_UNKNOWN_IID = 3,   // QueryInterface of an IID the wrapper does not implement; E_NOINTERFACE
     X2W_GFX_EVENT_NOTE = 4,          // shim decisions worth a line (title GPU attach, passthrough IIDs)
-    X2W_GFX_EVENT_REFUSED = 5        // a pipeline or draw the shim cannot translate; detail names the refused form
+    X2W_GFX_EVENT_REFUSED = 5,       // a pipeline or draw the shim cannot translate; detail names the refused form
+    X2W_GFX_EVENT_UNKNOWN_EXPORT = 6 // first call of an X2WGfxUnknownExport stub; returned E_NOTIMPL
 } X2WGfxEventKind;
 
 typedef struct X2WGfxEvent {
@@ -46,7 +47,7 @@ typedef struct X2WGfxEvent {
     const char* detail;          // human-readable rest of the line (IID, caller, arguments)
     GUID iid;                    // UNKNOWN_IID and passthrough notes, otherwise zero
     const void* caller;          // return address of the call into the shim
-    uint64_t args[4];            // this pointer, then RDX, R8, R9 as integers (UNKNOWN_SLOT)
+    uint64_t args[4];            // this pointer, then RDX, R8, R9 (UNKNOWN_SLOT); RCX..R9 (UNKNOWN_EXPORT)
 } X2WGfxEvent;
 
 typedef void (WINAPI* X2WGfxLogSink)(const X2WGfxEvent* event, void* context);
@@ -103,6 +104,13 @@ X2W_GFX_API BOOL WINAPI X2WGfxGetCounters(X2WGfxCounters* counters);
 X2W_GFX_API HRESULT WINAPI X2WGfxCreateSwapChainForHwnd(IUnknown* queue, HWND window,
     const DXGI_SWAP_CHAIN_DESC1* desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen_desc,
     IDXGIOutput* restrict_to_output, REFIID riid, void** swap_chain);
+
+// A logged stub for a d3d12_xs.dll export the shim does not have, by name: each distinct name gets its own
+// function (the same address for the same name), which logs "d3d12_xs!<name>" with its caller and first four
+// integer arguments on its first call and returns E_NOTIMPL. It is for a loader that finds no export of that
+// name here (the launcher's import routing, a GetProcAddress hook). Returns null for a null or empty name, a
+// name the shim does export, or past the stub table's 64 names.
+X2W_GFX_API void* WINAPI X2WGfxUnknownExport(const char* name);
 
 // Console bytecode container for source-built programs (runtime rung R3, docs/design/runtime.md section 3).
 // The container real titles hand to Create*PipelineState is not publicly documented; it is learned from

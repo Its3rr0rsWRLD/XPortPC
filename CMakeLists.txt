@@ -138,7 +138,7 @@ endforeach()
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
     src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_resources.cpp
-    src/d3d12_xs_indirect.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_indirect.cpp src/d3d12_xs_xbox.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -525,6 +525,17 @@ target_include_directories(d3d12_xs_shim_check PRIVATE "${CMAKE_CURRENT_BINARY_D
 target_compile_features(d3d12_xs_shim_check PRIVATE cxx_std_17)
 foreach(scenario IN ITEMS exports serialize deserialize warp_root)
     add_test(NAME d3d12_xs_shim_${scenario} COMMAND d3d12_xs_shim_check ${scenario})
+endforeach()
+# The console-named device exports (src/d3d12_xs_xbox.cpp) through named imports, and the per-name stubs for
+# exports the shim does not have.
+add_executable(d3d12_xs_xbox_check tests/d3d12_xs_xbox_check.cpp)
+target_link_libraries(d3d12_xs_xbox_check PRIVATE d3d12_xs_shim dxguid)
+target_include_directories(d3d12_xs_xbox_check PRIVATE src)
+target_compile_features(d3d12_xs_xbox_check PRIVATE cxx_std_17)
+foreach(scenario IN ITEMS create_device create_device_permuted create_device_unknown_iid configure_virtual_memory
+                          unknown_export)
+    add_test(NAME d3d12_xs_xbox_${scenario} COMMAND d3d12_xs_xbox_check ${scenario})
+    set_tests_properties(d3d12_xs_xbox_${scenario} PROPERTIES TIMEOUT 60)
 endforeach()
 foreach(adapter IN ITEMS hardware warp)
     add_test(NAME offscreen_${adapter} COMMAND offscreen_check ${adapter} triangle_${adapter}.bmp)
