@@ -1621,17 +1621,23 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
         const descriptors::Resolved found =
             descriptors::resolve(args.address[ref.parameter], ref.offset, want,
                                  ref.kind == RefKind::sampler ? heaps.samplers : heaps.views, buffer);
-        if (buffer && found.found && (ref.flags & ref_typed) && found.buffer != descriptors::BufferForm::typed_int) {
-            // The converter lowers typed accesses exactly for 32_UINT and 32_SINT only (tools/pixel_aot_ops/hlsl.py):
-            // through any other view the shader would read zeros or drop the store where the console converts.
-            char detail[256];
+        const bool typed_store = (ref.flags & ref_typed) && (ref.flags & ref_stored);
+        if (buffer && found.found && (ref.flags & ref_typed) && found.buffer != descriptors::BufferForm::typed_int &&
+            (typed_store || found.buffer != descriptors::BufferForm::typed_load)) {
+            // The converter's typed loads decode every gfx10 format, its typed stores only 32_UINT and 32_SINT
+            // (tools/pixel_aot_ops/hlsl.py, forms/stores.py): elsewhere the shader would read zeros or drop the store
+            // where the console converts.
+            char detail[320];
             std::snprintf(detail, sizeof(detail),
                           "draw skipped: %s buffer V# at root parameter %u + %u is accessed typed (buffer_*_format) "
-                          "through a %s view; typed accesses are translated for R32_UINT and R32_SINT views only",
+                          "through a %s view; typed %s translated for %s views only",
                           ref.stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel", ref.parameter, ref.offset,
                           found.buffer == descriptors::BufferForm::raw          ? "raw"
                           : found.buffer == descriptors::BufferForm::structured ? "structured"
-                                                                                : "typed (other format or swizzle)");
+                          : found.buffer == descriptors::BufferForm::typed_load ? "typed (not a 32-bit integer format)"
+                                                                                : "typed (other format or swizzle)",
+                          typed_store ? "stores are" : "loads are",
+                          typed_store ? "R32_UINT and R32_SINT" : "typed formats with a gfx10 buffer format");
             log_refused(symbol, detail, true);
             return false;
         }

@@ -90,6 +90,9 @@ class Lowering:
         # Stage hooks (docs/design/compute-stage.md): the stage being lowered, and the high word a descriptor-list
         # pointer is completed with (0 for the pixel contract; tools/compute_aot.py sets RADV's 0xffff8000).
         self.stage = "pixel"
+        # tbuffer_load_format may name any gfx10 format (the vertex stage, whose typed draws check them all); otherwise
+        # only the two the pixel draws check (forms/mtbuf.py).
+        self.all_buffer_formats = False
         self.descriptor_high = 0
         # CF-2c: each VOPC compare's relation without the EXEC mask, the line count when it was written and the lane bit
         # it ran under, by the name of its bool (cmp<i>); s_cbranch_vccz/vccnz on a uniform compare branches on it

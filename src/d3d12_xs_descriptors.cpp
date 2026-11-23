@@ -66,7 +66,7 @@ Encoded unencoded(const char* why)
     return out;
 }
 
-constexpr std::uint32_t fmt_32_uint = 20, fmt_32_sint = 21, fmt_32_float = 22;
+constexpr std::uint32_t fmt_32_float = 22;
 
 Encoded encode_buffer(ID3D12Resource* resource, DXGI_FORMAT format, UINT64 first, UINT count, UINT structure,
                       bool raw, bool default_mapping)
@@ -92,8 +92,12 @@ Encoded encode_buffer(ID3D12Resource* resource, DXGI_FORMAT format, UINT64 first
         records = count;
         stride = static_cast<std::uint32_t>(element);
         const bool integer = format == DXGI_FORMAT_R32_UINT || format == DXGI_FORMAT_R32_SINT;
-        if (integer) fmt = format == DXGI_FORMAT_R32_UINT ? fmt_32_uint : fmt_32_sint;
-        form = integer && default_mapping ? BufferForm::typed_int : BufferForm::typed_other;
+        const std::uint32_t gfx10 = buffer_format(format);
+        if (gfx10) fmt = gfx10;
+        form = !default_mapping ? BufferForm::typed_other
+               : integer        ? BufferForm::typed_int
+               : gfx10          ? BufferForm::typed_load
+                                : BufferForm::typed_other;
     }
     if (records > 0xffffffffull) return unencoded("a buffer view past the V#'s 32-bit num_records");
     if (!resource) return unencoded("a buffer view without a resource");
@@ -127,6 +131,55 @@ Encoded encode_uav(ID3D12Resource* resource, ID3D12Resource* counter, const D3D1
 }
 
 }  // namespace
+
+std::uint32_t buffer_format(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_R8_UNORM: return 1;
+    case DXGI_FORMAT_R8_SNORM: return 2;
+    case DXGI_FORMAT_R8_UINT: return 5;
+    case DXGI_FORMAT_R8_SINT: return 6;
+    case DXGI_FORMAT_R16_UNORM: return 7;
+    case DXGI_FORMAT_R16_SNORM: return 8;
+    case DXGI_FORMAT_R16_UINT: return 11;
+    case DXGI_FORMAT_R16_SINT: return 12;
+    case DXGI_FORMAT_R16_FLOAT: return 13;
+    case DXGI_FORMAT_R8G8_UNORM: return 14;
+    case DXGI_FORMAT_R8G8_SNORM: return 15;
+    case DXGI_FORMAT_R8G8_UINT: return 18;
+    case DXGI_FORMAT_R8G8_SINT: return 19;
+    case DXGI_FORMAT_R32_UINT: return 20;
+    case DXGI_FORMAT_R32_SINT: return 21;
+    case DXGI_FORMAT_R32_FLOAT: return 22;
+    case DXGI_FORMAT_R16G16_UNORM: return 23;
+    case DXGI_FORMAT_R16G16_SNORM: return 24;
+    case DXGI_FORMAT_R16G16_UINT: return 27;
+    case DXGI_FORMAT_R16G16_SINT: return 28;
+    case DXGI_FORMAT_R16G16_FLOAT: return 29;
+    case DXGI_FORMAT_R11G11B10_FLOAT: return 36;    // 10_11_11_FLOAT: x in the low 11 bits
+    case DXGI_FORMAT_R10G10B10A2_UNORM: return 50;  // 2_10_10_10_UNORM: x in the low 10 bits
+    case DXGI_FORMAT_R10G10B10A2_UINT: return 54;
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return 56;
+    case DXGI_FORMAT_R8G8B8A8_SNORM: return 57;
+    case DXGI_FORMAT_R8G8B8A8_UINT: return 60;
+    case DXGI_FORMAT_R8G8B8A8_SINT: return 61;
+    case DXGI_FORMAT_R32G32_UINT: return 62;
+    case DXGI_FORMAT_R32G32_SINT: return 63;
+    case DXGI_FORMAT_R32G32_FLOAT: return 64;
+    case DXGI_FORMAT_R16G16B16A16_UNORM: return 65;
+    case DXGI_FORMAT_R16G16B16A16_SNORM: return 66;
+    case DXGI_FORMAT_R16G16B16A16_UINT: return 69;
+    case DXGI_FORMAT_R16G16B16A16_SINT: return 70;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return 71;
+    case DXGI_FORMAT_R32G32B32_UINT: return 72;
+    case DXGI_FORMAT_R32G32B32_SINT: return 73;
+    case DXGI_FORMAT_R32G32B32_FLOAT: return 74;
+    case DXGI_FORMAT_R32G32B32A32_UINT: return 75;
+    case DXGI_FORMAT_R32G32B32A32_SINT: return 76;
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: return 77;
+    default: return 0;
+    }
+}
 
 UINT format_bytes(DXGI_FORMAT format)
 {

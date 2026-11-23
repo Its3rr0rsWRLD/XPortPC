@@ -22,11 +22,14 @@
 //   raw (ByteAddressBuffer)   stride 0, num_records = bytes, OOB_SELECT 3 (raw: an offset at or past num_records)
 //   structured                stride = StructureByteStride, num_records = NumElements, OOB_SELECT 0
 //   typed                     stride = the format's size, num_records = NumElements, OOB_SELECT 0
-//   all                       DST_SEL x, y, z, w; FORMAT 20 (32_UINT) or 21 (32_SINT) for R32_UINT and R32_SINT
-//                             views, 22 (32_FLOAT) otherwise; RESOURCE_LEVEL 1; swizzle, ADD_TID and type 0.
+//   all                       DST_SEL x, y, z, w; FORMAT the gfx10 unified format of a typed view (buffer_format;
+//                             22, 32_FLOAT, for raw and structured views and typed formats without one);
+//                             RESOURCE_LEVEL 1; swizzle, ADD_TID and type 0.
 // What the console driver writes for a view is not public; these are the words that give the D3D12 view's semantics
-// under the converter's (and the hardware's) V# reading. Typed accesses are exact only for the two 32-bit integer
-// formats, so the draw-time check (pipeline.cpp) refuses a typed access through any other view. The words are also
+// under the converter's (and the hardware's) V# reading. The converter's typed loads decode every gfx10 format
+// (tools/pixel_aot_ops/hlsl.py, buffer_load_format) and its typed stores only the two 32-bit integer formats, so the
+// draw-time check (pipeline.cpp) refuses a typed store through any view but R32_UINT/R32_SINT and a typed load through
+// a view without a gfx10 format. The words are also
 // written to the descriptor's first 16 bytes in the heap's title memory (zeros for every other kind of view), so a
 // title that reads its descriptor memory sees them; descriptors the title writes or copies there itself are not read
 // back.
@@ -53,7 +56,9 @@ enum class BufferForm : std::uint8_t {
     raw,          // ByteAddressBuffer
     structured,   // StructureByteStride != 0
     typed_int,    // typed R32_UINT or R32_SINT: typed loads and stores are exact
-    typed_other,  // any other typed format: untyped accesses only
+    typed_load,   // another typed format with a gfx10 buffer format (buffer_format): typed loads are exact, typed
+                  // stores are not translated
+    typed_other,  // a typed format without one, or a component swizzle: untyped accesses only
     unencoded     // a buffer view that has no V# (Slot::buffer_why says why): it reads as a miss
 };
 
@@ -121,6 +126,8 @@ Resolved resolve(std::uint64_t table, std::uint32_t offset, SlotKind kind, std::
 
 // The bytes of one element of a typed buffer view's format, or 0 when the shim does not know the format.
 UINT format_bytes(DXGI_FORMAT format);
+// The gfx10 unified buffer format (LLVM AMDGPU::UfmtGFX10) of a DXGI format, or 0 when it has none.
+std::uint32_t buffer_format(DXGI_FORMAT format);
 
 }  // namespace descriptors
 }  // namespace d3d12_xs

@@ -150,10 +150,11 @@ and matched separately; this matcher refuses it.
   comes from its shader metadata, read the same way the pixel tools read theirs. Inline data words become root
   constants (`uint`, never `float`; see the raw-word finding in docs/experiments.md). `s_load_dwordx8`/`x16` of
   descriptor-table entries (two or four V#s in one load) must be accepted. The pixel lowering handles `x4` for V#s.
-- **Typed fetch** (`buffer_load_format_*`, `tbuffer_load_format_*`): the corpus has none. It is lowered as raw dword
-  loads plus explicit unpacking chosen by the runtime V#'s format field (gfx10 word 3), with every format and
-  out-of-range rule taken from the ISA text and drawn. To see what RADV emits for 8- and 16-bit formats, rebuild the
-  corpus with other `vin` formats in `pipe.c`.
+- **Typed fetch** (`buffer_load_format_*`, `tbuffer_load_format_*`): the corpus has none. It is lowered (since the
+  vertex typed family) as byte or dword loads plus explicit unpacking chosen by the runtime V#'s format field (gfx10
+  word 3) or the instruction's format, for every gfx10 unified format, and drawn (`vertex_aot_typed_*`; conversion
+  rules in docs/experiments.md, Typed vertex fetch). The d16 forms stay refused. To see what RADV emits for 8- and
+  16-bit formats, rebuild the corpus with other `vin` formats in `pipe.c`.
 - **Embedded constants** (`s_getpc_b64` plus an offset): the data follows `s_endpgm` in the code object. The ISA
   dumps do not print it, and `native_program()` cuts the image at the terminator. The translator needs the bytes
   after the program (bounded and checked) and resolves the getpc base to a constant table at translation time.

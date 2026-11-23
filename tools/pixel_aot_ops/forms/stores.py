@@ -16,7 +16,7 @@ import re
 from ..dispatch import form
 from ..registers import vector_u32, vgprs
 from .flat import global_operands
-from .mtbuf import FORMATS
+from .mtbuf import EXACT as FORMATS  # typed stores: the two 32-bit integer formats only
 from .mubuf import OPERANDS, buffer_operands
 
 STORE_HELPERS = """bool buffer_dword_address(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, uint dword, out uint2 address) {

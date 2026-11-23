@@ -77,10 +77,10 @@ REFUSALS = (
     (r"(?:ds_\w+|v_mbcnt\w*|s_bcnt\w*|v_readlane\w*|v_readfirstlane\w*|v_writelane\w*|v_permlane\w*|s_ff1\w*"
      r"|\w+_dpp|\w+_sdwa)\b.*", "a lane-cooperative operation (LDS, lane counts, cross-lane reads, DPP, SDWA) cannot "
      "be lowered one vertex per invocation; NGG culling is refused (docs/design/vertex-stage.md)"),
-    (r"(?:buffer_load_format\w*|tbuffer_\w+)\b.*",
-     "typed vertex fetch (buffer_load_format_*, tbuffer_*) needs a corpus build that exercises it (card V-3)"),
+    (r"(?:buffer_load_format_d16\w*|tbuffer_load_format_d16\w*)\b.*",
+     "a d16 typed vertex fetch (16-bit results) is not lowered"),
     (r"(?:flat_\w+|scratch_\w+)\b.*", "flat and scratch memory are not lowered in the vertex stage"),
-    (r"(?:buffer_store\w*|buffer_atomic\w*|global_store\w*|global_atomic\w*|s_store\w*|s_buffer_store\w*"
+    (r"(?:buffer_store\w*|buffer_atomic\w*|tbuffer_store\w*|global_store\w*|global_atomic\w*|s_store\w*|s_buffer_store\w*"
      r"|image_store\w*|image_atomic\w*)\b.*", "a vertex shader with memory side effects is not lowered"),
     (r"image_\w+\b.*", "image operations in the vertex stage (image_sample_lz) are lowered in card V-5"),
     (r"v_interp_\w+\b.*", "interpolation is a pixel-stage operation"),
@@ -383,6 +383,7 @@ def lower_with_layout(instructions, user_sgprs, vs_out_cntl=None):
     st = Lowering(dict(entry_scalar), {reg: ("uint", name) for reg, name in ENTRY_VGPRS[stage].items()}, [PREAMBLE],
                   {}, (), 0 if has_constants else None, {})
     st.constant_limit = CONSTANT_BYTES
+    st.all_buffer_formats = True  # typed fetch: every gfx10 format (tests/vertex_aot_check.py, family typed)
     reasons = ENTRY_VGPR_REASONS[stage]
     unwritten = set(reasons)
     instance = next(reg for reg, name in ENTRY_VGPRS[stage].items() if name == "iid")

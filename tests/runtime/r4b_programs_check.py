@@ -48,7 +48,7 @@ REGISTERS = {
 # Forms the runtime does not bind, as one-line changes of a program, and the reason they give.
 REFUSED = [
     ("r4b_vs", "buffer_load_dwordx4 v[4:7], v1, s[8:11], 0 idxen",
-     ["buffer_load_format_xyzw v[4:7], v1, s[8:11], 0 idxen"], "typed vertex fetch"),
+     ["buffer_load_format_d16_xyzw v[4:5], v1, s[8:11], 0 idxen"], "d16 typed vertex fetch"),
     ("r4b_vs", "exp param0 v8, v9, v10, v11",
      ["buffer_store_dword v8, v1, s[8:11], 0 idxen", "exp param0 v8, v9, v10, v11"], "memory side effects"),
     ("r4b_ps", "v_mov_b32_e32 v4, s44", ["s_mov_b32 s26, 0", "v_mov_b32_e32 v4, s44"],

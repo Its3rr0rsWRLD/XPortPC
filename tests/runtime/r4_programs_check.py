@@ -43,10 +43,10 @@ REFUSED = [
                                                           "s_mov_b32 s35, 0"],
      "an inline (immutable) sampler"),
     ("r4_ps", "s_mov_b32 s22, s4", ["s_mov_b32 s22, s6"], "does not bind as a descriptor table"),
-    # A buffer V# read from a table translates since rung R4b (tests/runtime/r4b_programs_check.py); a typed fetch
-    # through it does not.
+    # A buffer V# read from a table translates since rung R4b (tests/runtime/r4b_programs_check.py), and typed fetch
+    # through it since the vertex typed family; a d16 typed fetch does not.
     ("r4_vs", "s_buffer_load_dwordx2 s[16:17], s[12:15], null",
-     ["buffer_load_format_xy v[16:17], v1, s[12:15], 0 idxen"], "typed vertex fetch"),
+     ["buffer_load_format_d16_xy v16, v1, s[12:15], 0 idxen"], "d16 typed vertex fetch"),
 ]
 FORMS = [
     "s_mov_b64 s[50:51], exec", "s_mov_b64 exec, s[4:5]", "s_wqm_b64 exec, exec", "s_and_b64 exec, exec, s[50:51]",

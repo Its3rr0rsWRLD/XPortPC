@@ -147,9 +147,11 @@ assert TITLE_RW_DECLARATIONS != TITLE_DECLARATIONS
 # as does an offset sum that wraps 32 bits.
 # Sub-dword loads (ubyte, sbyte, ushort, sshort and the d16 forms) read bytes one at a time, so any alignment works,
 # and apply the same range rule to the offset of their first byte. Typed loads (buffer_load_format_*, tbuffer_load_format_*)
-# are exact only for the 32_UINT (20) and 32_SINT (21) formats, whose single component is the raw dword; the V# DST_SEL
-# fields (word 3 bits 0 to 11: 0 = 0, 1 = 1, 4 to 7 = X, Y, Z, W) then place it, with X = the dword, Y = Z = 0, W = 1. Any
-# other format, and an out-of-range element, reads zero in every channel.
+# decode every gfx10 unified format (LLVM AMDGPU::UfmtGFX10 numbers, Mesa radv_formats.c for the packed component order):
+# see buffer_load_format below. The V# DST_SEL fields (word 3 bits 0 to 11: 0 = 0, 1 = 1, 4 to 7 = X, Y, Z, W) place the
+# converted components; an invalid format and an out-of-range element read zero in every channel. The UNORM and SNORM
+# rounding (to nearest even) and the NaN payloads of the small floats follow the Vulkan conversion rules
+# (c / (2^n - 1), max(c / (2^(n-1) - 1), -1)) exactly; that console hardware rounds the same way is not checked here.
 MEMORY_HELPERS = """uint2 add64(uint2 a, uint2 b) {
     uint low = a.x + b.x;
     return uint2(low, a.y + b.y + (low < a.x ? 1u : 0u));
@@ -213,14 +215,133 @@ uint buffer_load_sub(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, u
     if (!buffer_address(rsrc, soffset, voffset, inst_offset, index, address)) return 0u;
     return bytes == 1u ? title_load8(address) : title_load16(address);
 }
+// gfx10 unified buffer formats (LLVM AMDGPU::UfmtGFX10, 1..77): component widths in bits, x first from bit 0 (AMD
+// names list components from the most significant: 10_11_11 is z10 y11 x11), and the numeric kind of every component:
+// 0 UNORM, 1 SNORM, 2 USCALED, 3 SSCALED, 4 UINT, 5 SINT, 6 FLOAT. False for INVALID (0) and numbers past 77.
+bool buffer_format_layout(uint f, out uint4 bits, out uint kind) {
+    bits = uint4(0u, 0u, 0u, 0u);
+    kind = 0u;
+    if (f >= 1u && f <= 6u) { bits = uint4(8u, 0u, 0u, 0u); kind = f - 1u; }
+    else if (f >= 7u && f <= 13u) { bits = uint4(16u, 0u, 0u, 0u); kind = f - 7u; }
+    else if (f >= 14u && f <= 19u) { bits = uint4(8u, 8u, 0u, 0u); kind = f - 14u; }
+    else if (f >= 20u && f <= 22u) { bits = uint4(32u, 0u, 0u, 0u); kind = f - 16u; }
+    else if (f >= 23u && f <= 29u) { bits = uint4(16u, 16u, 0u, 0u); kind = f - 23u; }
+    else if (f >= 30u && f <= 36u) { bits = uint4(11u, 11u, 10u, 0u); kind = f - 30u; }
+    else if (f >= 37u && f <= 43u) { bits = uint4(10u, 11u, 11u, 0u); kind = f - 37u; }
+    else if (f >= 44u && f <= 49u) { bits = uint4(2u, 10u, 10u, 10u); kind = f - 44u; }
+    else if (f >= 50u && f <= 55u) { bits = uint4(10u, 10u, 10u, 2u); kind = f - 50u; }
+    else if (f >= 56u && f <= 61u) { bits = uint4(8u, 8u, 8u, 8u); kind = f - 56u; }
+    else if (f >= 62u && f <= 64u) { bits = uint4(32u, 32u, 0u, 0u); kind = f - 58u; }
+    else if (f >= 65u && f <= 71u) { bits = uint4(16u, 16u, 16u, 16u); kind = f - 65u; }
+    else if (f >= 72u && f <= 74u) { bits = uint4(32u, 32u, 32u, 0u); kind = f - 68u; }
+    else if (f >= 75u && f <= 77u) { bits = uint4(32u, 32u, 32u, 32u); kind = f - 71u; }
+    else return false;
+    return true;
+}
+// c / d as binary32, rounded to nearest even, for 0 <= c <= d < 2^17: long division one quotient bit at a time (no
+// floating-point division, whose rounding the shader model does not fix).
+uint norm_bits(uint c, uint d) {
+    if (c == 0u) return 0u;
+    if (c >= d) return 0x3f800000u;
+    uint r = c;
+    uint p = 0u;
+    [loop] for (uint k = 0u; k < 32u; ++k) {
+        r <<= 1;
+        p += 1u;
+        if (r >= d) { r -= d; break; }
+    }
+    uint m = 1u;
+    [loop] for (uint i = 0u; i < 23u; ++i) {
+        r <<= 1;
+        m <<= 1;
+        if (r >= d) { r -= d; m |= 1u; }
+    }
+    r <<= 1;
+    uint guard = r >= d ? 1u : 0u;
+    if (guard != 0u) r -= d;
+    if (guard != 0u && (r != 0u || (m & 1u) != 0u)) m += 1u;
+    uint e = 127u - p;
+    if (m == 0x1000000u) { m >>= 1; e += 1u; }
+    return (e << 23) | (m & 0x7fffffu);
+}
+// A float with a 5-bit exponent (bias 15) and `mant` mantissa bits (16-bit: signed, 10; the packed 11- and 10-bit
+// floats: unsigned, 6 and 5) as binary32: exact, subnormals normalized, Inf and NaN kept with the mantissa shifted.
+uint small_float_bits(uint v, uint mant, bool signed_value) {
+    uint sign = signed_value ? (v >> (5u + mant)) & 1u : 0u;
+    uint e = (v >> mant) & 31u;
+    uint m = v & ((1u << mant) - 1u);
+    uint out = 0u;
+    if (e == 31u) out = 0x7f800000u | (m << (23u - mant));
+    else if (e != 0u) out = ((e + 112u) << 23) | (m << (23u - mant));
+    else if (m != 0u) {
+        uint shift = 0u;
+        [loop] for (uint k = 0u; k < 11u; ++k) {
+            if ((m & (1u << mant)) != 0u) break;
+            m <<= 1;
+            shift += 1u;
+        }
+        out = ((113u - shift) << 23) | ((m & ((1u << mant) - 1u)) << (23u - mant));
+    }
+    return out | (sign << 31);
+}
+uint convert_component(uint v, uint width, uint kind) {
+    uint top = width == 32u ? 0u : 1u << (width - 1u);
+    uint sext = width == 32u ? v : ((v & top) != 0u ? v | ~((top << 1) - 1u) : v);
+    if (kind == 0u) return norm_bits(v, (top << 1) - 1u);
+    if (kind == 1u) {
+        if (sext == (0u - top)) return 0xbf800000u;  // the most negative value clamps to -1.0
+        uint magnitude = (sext & 0x80000000u) != 0u ? 0u - sext : sext;
+        return (sext & 0x80000000u) | norm_bits(magnitude, top - 1u);
+    }
+    if (kind == 2u) return asuint((float)v);
+    if (kind == 3u) return asuint((float)asint(sext));
+    if (kind == 4u) return v;
+    if (kind == 5u) return sext;
+    if (width == 16u) return small_float_bits(v, 10u, true);
+    if (width == 11u) return small_float_bits(v, 6u, false);
+    if (width == 10u) return small_float_bits(v, 5u, false);
+    return v;
+}
+// Typed loads (buffer_load_format_*, tbuffer_load_format_*): the element at the V#'s address in the given format,
+// converted component by component (UNORM c / (2^n - 1) and SNORM c / (2^(n-1) - 1) rounded to nearest even, the most
+// negative SNORM value -1.0; scaled formats as exact floats; 16-, 11- and 10-bit floats exactly), missing components
+// filled with 0, 0 and 1 (1.0 for the float kinds), then placed by DST_SEL. An invalid format and an out-of-range
+// element read zero in every channel.
 uint4 buffer_load_format(uint4 rsrc, uint soffset, uint voffset, uint inst_offset, uint index, uint format) {
     uint2 address;
-    if ((format != 20u && format != 21u) || !buffer_address(rsrc, soffset, voffset, inst_offset, index, address)) return uint4(0u, 0u, 0u, 0u);
-    uint4 raw = uint4(title_load32(address), 0u, 0u, 1u);
-    uint4 result;
+    uint4 bits;
+    uint kind;
+    if (!buffer_format_layout(format, bits, kind) || !buffer_address(rsrc, soffset, voffset, inst_offset, index, address))
+        return uint4(0u, 0u, 0u, 0u);
+    uint bytes = (bits.x + bits.y + bits.z + bits.w) / 8u;
+    uint4 data = uint4(0u, 0u, 0u, 0u);
+    if (bytes < 4u) {
+        data.x = bytes == 1u ? title_load8(address) : title_load16(address);
+    } else {
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            uint2 at = add64(address, uint2(4u * k, 0u));
+            if (4u * k < bytes)
+                data[k] = (at.x & 3u) == 0u ? title_load32(at)
+                                            : title_load16(at) | (title_load16(add64(at, uint2(2u, 0u))) << 16);
+        }
+    }
+    bool floats = kind != 4u && kind != 5u;
+    uint4 raw = uint4(0u, 0u, 0u, floats ? 0x3f800000u : 1u);
+    uint offset = 0u;
     [unroll] for (uint c = 0u; c < 4u; ++c) {
-        uint select = (rsrc.w >> (3u * c)) & 7u;
-        result[c] = select == 1u ? 1u : (select >= 4u ? raw[select - 4u] : 0u);
+        uint width = bits[c];
+        if (width != 0u) {
+            uint word = data[offset >> 5];
+            uint value = width == 32u ? word : (word >> (offset & 31u)) & ((1u << width) - 1u);
+            raw[c] = convert_component(value, width, kind);
+        }
+        offset += width;
+    }
+    uint4 result;
+    [unroll] for (uint c2 = 0u; c2 < 4u; ++c2) {
+        uint select = (rsrc.w >> (3u * c2)) & 7u;
+        uint one = floats ? 0x3f800000u : 1u;
+        result[c2] = select == 1u ? one : (select >= 4u ? raw[select - 4u] : 0u);
     }
     return result;
 }
