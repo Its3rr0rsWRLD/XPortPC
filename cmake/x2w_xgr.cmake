@@ -30,3 +30,17 @@ add_executable(x2w_xgr_statics_title tests/xgr/statics_title.cpp)
 target_compile_features(x2w_xgr_statics_title PRIVATE cxx_std_17)
 target_link_options(x2w_xgr_statics_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
 set_target_properties(x2w_xgr_statics_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+# The same title with whole-program optimization, as the GDK samples are built: its code reaches implicit
+# TLS through slot 0 directly (x2w_launch's "slot 0" alias).
+add_executable(x2w_xgr_statics_ltcg_title tests/xgr/statics_title.cpp)
+target_compile_features(x2w_xgr_statics_ltcg_title PRIVATE cxx_std_17)
+target_compile_options(x2w_xgr_statics_ltcg_title PRIVATE /GL /O2)
+target_link_options(x2w_xgr_statics_ltcg_title PRIVATE /LTCG /DYNAMICBASE /INCREMENTAL:NO)
+set_target_properties(x2w_xgr_statics_ltcg_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+add_dependencies(x2w_xgr_statics_title x2w_xgr)
+add_dependencies(x2w_xgr_statics_ltcg_title x2w_xgr)
+if(TARGET x2w_launch)
+    add_test(NAME xgr_launch_statics COMMAND "${x2w_shimgen_python}" -B "${CMAKE_SOURCE_DIR}/tests/xgr/statics_check.py"
+        "$<TARGET_FILE:x2w_launch>" "$<TARGET_FILE:x2w_xgr_statics_title>" "$<TARGET_FILE:x2w_xgr_statics_ltcg_title>")
+    set_tests_properties(xgr_launch_statics PROPERTIES TIMEOUT 120)
+endif()

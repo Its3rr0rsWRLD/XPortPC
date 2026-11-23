@@ -21,7 +21,8 @@ param(
     [string]$Run = "AsynchronousProgramming,GameSaveCombo",
     [string]$Scan = "AsynchronousProgramming,GameSaveCombo,SystemInfo,SimpleTriangleDesktop,GameInputSequential",
     [string]$Modes = "trace,ours",
-    [int]$Timeout = 20
+    [int]$Timeout = 20,
+    [string]$Tests = "^xgr_|^native_launch|^native_run_log|^shimgen_dynamic"
 )
 $ErrorActionPreference = "Continue"
 $launcher = Join-Path $Build "x2w_launch.exe"
@@ -265,28 +266,32 @@ function Exe-Of($name) {
     return Get-ChildItem -File -Path $dir -Filter *.exe | Select-Object -First 1
 }
 
-# 0. Magic statics in a /MD title of our own, under Windows and under x2w_launch.
-$statics = Join-Path $Build "x2w_xgr_statics_title.exe"
-if (Test-Path $statics) {
-    $rows = @()
+# 0. Magic statics in /MD titles of our own (plain and /GL + /LTCG), under Windows and under x2w_launch,
+#    and the TLS directories of those titles and of x2w_launch itself (which must keep no TLS data).
+$rows = @()
+foreach ($title in "x2w_xgr_statics_title", "x2w_xgr_statics_ltcg_title") {
+    $statics = Join-Path $Build "$title.exe"
+    if (-not (Test-Path $statics)) { $rows += "$title missing"; continue }
     foreach ($how in "windows", "x2w_launch") {
-        $file = Join-Path $Out "statics-$how.txt"
+        $file = Join-Path $Out "$title-$how.txt"
         if ($how -eq "windows") {
             $p = Start-Process -FilePath $statics -WindowStyle Hidden -PassThru -RedirectStandardOutput $file
         } else {
             $p = Start-Process -FilePath $launcher -WindowStyle Hidden -PassThru -RedirectStandardOutput $file `
-                -RedirectStandardError (Join-Path $Out "statics-launch-err.txt") `
-                -ArgumentList @("--shims", "`"$shims`"", "--log", "`"$(Join-Path $Out 'statics-run.log')`"", "--timeout", "20", "`"$statics`"")
+                -RedirectStandardError (Join-Path $Out "$title-launch-err.txt") `
+                -ArgumentList @("--shims", "`"$shims`"", "--log", "`"$(Join-Path $Out "$title-run.log")`"", "--timeout", "20", "`"$statics`"")
         }
         $null = $p.Handle
         if (-not $p.WaitForExit(40000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-        $rows += "$how exit=0x$('{0:x}' -f $p.ExitCode) $((Get-Content $file -ErrorAction SilentlyContinue) -join ' ')"
+        $rows += "$title $how exit=0x$('{0:x}' -f $p.ExitCode) $((Get-Content $file -ErrorAction SilentlyContinue) -join ' ')"
     }
-    $opened = [XgrSym]::Open($statics)
-    $rows += "tls $([XgrSym]::Tls($statics))"
-    $rows | Set-Content (Join-Path $Out "statics.txt")
-    $rows | ForEach-Object { Write-Output "statics $_" }
+    $null = [XgrSym]::Open($statics)
+    $rows += "$title tls $([XgrSym]::Tls($statics))"
 }
+$null = [XgrSym]::Open($launcher)
+$rows += "x2w_launch tls $([XgrSym]::Tls($launcher))"
+$rows | Set-Content (Join-Path $Out "statics.txt")
+$rows | ForEach-Object { Write-Output "statics $_" }
 
 $summary = @("sample`tmode`texit`tseconds`tlast-lines")
 foreach ($name in $Run.Split(",")) {
@@ -374,5 +379,14 @@ if (Test-Path $Gdk) {
     Write-Output "gdk-headers $($hits.Count) lines, $($libs.Count) libs"
 } else {
     Set-Content (Join-Path $Out "gdk-headers.txt") "# no GDK at $Gdk"
+}
+# 5. The gateway's and launcher's own tests (-Tests regex; empty skips).
+if ($Tests) {
+    $ctest = Get-Command ctest -ErrorAction SilentlyContinue
+    if ($ctest) {
+        & $ctest.Source --test-dir $Build -R $Tests --timeout 120 2>&1 | Set-Content (Join-Path $Out "ctest.txt")
+        Get-Content (Join-Path $Out "ctest.txt") | Where-Object { $_ -match "Test +#|tests passed|tests failed" } |
+            ForEach-Object { Write-Output "ctest $_" }
+    } else { Write-Output "ctest not found" }
 }
 exit 0

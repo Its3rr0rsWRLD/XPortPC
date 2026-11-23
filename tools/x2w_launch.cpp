@@ -53,6 +53,7 @@
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
 // leaves them naming the launcher, for comparison.
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <cctype>
 #include <cstdarg>
@@ -564,10 +565,91 @@ void end_identity() {
     if (host_image_base) InterlockedExchangePointer(peb_image_base(), host_image_base);
 }
 
+// ---------------------------------------------------------------- the program's implicit TLS in slot 0
+// An EXE built with whole-program optimization (/GL + /LTCG, as every Microsoft GDK sample is) reaches its
+// implicit TLS as ThreadLocalStoragePointer[0] + offset without reading _tls_index, since the Windows
+// loader always gives the process EXE index 0 (measured on the stand-in samples: UITK's magic statics do
+// mov rax, gs:[58h]; mov rcx, [rax], and stayed empty under x2w_launch). Here index 0 is the launcher's.
+// pe_map gives the program a carrier DLL's index N whose block the loader fills from the program's
+// template on every thread, so the launcher makes entry 0 of each thread's TLS vector point at that same
+// block: on every thread that exists when the program is mapped, and in its own TLS callback on each new
+// thread's attach; on thread detach it puts its own entry back, so ntdll frees each block once. The
+// launcher keeps no implicit TLS data of its own (no thread_local, and it is built with
+// /Zc:threadSafeInit-, so function-local statics do not use _Init_thread_epoch), so none of its code reads
+// entry 0. The run log gets "tls-slot0 index N threads T".
+DWORD slot0_index = 0;  // the program's carrier index, 0 when the program has no implicit TLS block
+SRWLOCK slot0_lock = SRWLOCK_INIT;
+std::map<DWORD, void*>* slot0_saved;  // thread ID -> the launcher's own entry 0 (allocated once, never freed)
+
+bool slot0_alias(void** vector, DWORD thread) {
+    if (!vector || !vector[slot0_index] || vector[0] == vector[slot0_index]) return false;
+    AcquireSRWLockExclusive(&slot0_lock);
+    (*slot0_saved)[thread] = vector[0];
+    vector[0] = vector[slot0_index];
+    ReleaseSRWLockExclusive(&slot0_lock);
+    return true;
+}
+
+void slot0_restore(void** vector, DWORD thread) {
+    AcquireSRWLockExclusive(&slot0_lock);
+    auto it = slot0_saved->find(thread);
+    if (it != slot0_saved->end()) {
+        if (vector) vector[0] = it->second;
+        slot0_saved->erase(it);
+    }
+    ReleaseSRWLockExclusive(&slot0_lock);
+}
+
+void** current_tls_vector() { return reinterpret_cast<void**>(__readgsqword(0x58)); }
+
+// After mapping: the carrier index pe_map wrote to the program's AddressOfIndex, then every thread.
+void slot0_start(void* base) {
+    const auto* bytes = static_cast<const std::uint8_t*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(bytes + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (!dir.VirtualAddress) return;
+    const auto* tls = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(bytes + dir.VirtualAddress);
+    if (tls->StartAddressOfRawData == tls->EndAddressOfRawData && !tls->SizeOfZeroFill) return;
+    const DWORD index = *reinterpret_cast<const DWORD*>(tls->AddressOfIndex);
+    if (!index) return;
+    slot0_saved = new std::map<DWORD, void*>;
+    slot0_index = index;
+    using QueryInfo = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    struct BasicInfo {
+        LONG exit_status;
+        void* teb;
+        void* client[2];
+        ULONG_PTR affinity;
+        LONG priority, base_priority;
+    };
+    const auto query = reinterpret_cast<QueryInfo>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    unsigned threads = slot0_alias(current_tls_vector(), GetCurrentThreadId()) ? 1 : 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE && query) {
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof entry;
+        for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == GetCurrentThreadId()) continue;
+            HANDLE thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+            if (!thread) continue;
+            BasicInfo info{};
+            if (query(thread, 0 /* ThreadBasicInformation */, &info, sizeof info, nullptr) >= 0 && info.teb) {
+                auto** vector = *reinterpret_cast<void***>(static_cast<std::uint8_t*>(info.teb) + 0x58);
+                if (slot0_alias(vector, entry.th32ThreadID)) ++threads;
+            }
+            CloseHandle(thread);
+        }
+    }
+    if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    log_line("tls-slot0 index %lu threads %u", static_cast<unsigned long>(index), threads);
+}
+
 // The Windows DLL of a shim's name (the loader's search path, then System32), loaded by full path so it is
-// not the shim, or null. Cached.
+// not the shim, or null. Cached (a namespace-scope map: the launcher keeps no function-local statics with
+// dynamic initializers, see "The program's implicit TLS in slot 0").
+std::map<std::string, HMODULE> twins;
 HMODULE windows_twin(const std::string& name) {
-    static std::map<std::string, HMODULE> twins;
     AcquireSRWLockExclusive(&dynamic_lock);
     auto it = twins.find(name);
     if (it == twins.end()) {
@@ -994,6 +1076,10 @@ QueryThread query_thread;
 
 // The launcher's own TLS callback sees every thread that starts in the process while the program runs.
 void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
+    if (slot0_index) {
+        if (reason == DLL_THREAD_ATTACH) slot0_alias(current_tls_vector(), GetCurrentThreadId());
+        if (reason == DLL_THREAD_DETACH) slot0_restore(current_tls_vector(), GetCurrentThreadId());
+    }
     if (reason != DLL_THREAD_ATTACH || !armed || log_file == INVALID_HANDLE_VALUE) return;
     if (GetCurrentThreadId() == watchdog_id) return;
     void* start = nullptr;
@@ -1127,6 +1213,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     regions.insert(regions.begin(),
                    Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full});
+    slot0_start(base);
     unsigned missing_stubs = 0;
     for (const Stub* stub : stubs) missing_stubs += stub->missing;
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
@@ -1152,6 +1239,7 @@ int wmain(int argc, wchar_t** argv) {
     start_identity(base);
     const int ran = map_run(base, &exit_code, log_file != INVALID_HANDLE_VALUE ? observe_run : nullptr);
     end_identity();
+    if (slot0_index) slot0_restore(current_tls_vector(), GetCurrentThreadId());
     if (!ran) {
         std::fprintf(stderr, "[x2w] %ls has no runnable entry point\n", full);
         log_line("error no runnable entry point");
