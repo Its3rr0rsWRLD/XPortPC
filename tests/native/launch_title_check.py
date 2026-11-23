@@ -61,6 +61,8 @@ def compare(launcher, title, expected_code, expected_stdout=None, label=""):
         raise AssertionError(f"{label}stdout differs: native {native_out!r} x2w_launch {launch_out!r}")
     if expected_stdout is not None and native_out.strip() != expected_stdout:
         raise AssertionError(f"{label}stdout {native_out!r} != {expected_stdout!r}")
+    if Path(title).name.lower() in launch_err.lower():
+        raise AssertionError(f"{label}stderr holds the program's real file name:\n{launch_err}")
     if "-> stub" in launch_err:
         raise AssertionError(f"{label}an import fell back to a stub:\n{launch_err}")
     return launch_err
@@ -145,7 +147,7 @@ def check_throw(launcher, title):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from run_log_check import check_grammar  # noqa: E402
 
-    name = Path(title).name.lower()
+    name = "title.exe"  # the launcher's default name for the program
     with tempfile.TemporaryDirectory() as folder:
         log = Path(folder) / "run.log"
         code, out, err = run([launcher, "--log", log, "--timeout", "60", title])
@@ -155,6 +157,7 @@ def check_throw(launcher, title):
     if code != 0x107 or out != native_out:
         raise AssertionError(f"--log: exit {code:#x} stdout {out!r}\n{err}")
     check_grammar(lines, title)
+    assert Path(title).name.lower() not in "\n".join(lines).lower() + err.lower(), lines
     compare(launcher, title, 0x107)
     where = rf"{re.escape(name)}\+0x([0-9a-f]+)"
     throws = []

@@ -1,7 +1,7 @@
 """Report what a title's executable needs from XPortPC, without running or loading it.
 
 Usage:
-  python -B tools/x2w_report.py TITLE.exe [--folder DIR] [--shims DIR]... [--windows-dir DIR]
+  python -B tools/x2w_report.py TITLE.exe [--folder DIR] [--shims DIR]... [--windows-dir DIR] [--show-program-name]
                                 [--shaders DIR] [--shader-archive FILE]... [--llvm LIB] [--out DIR]
 
 The tool reads the PE headers and the import tables with pefile and writes report.md and report.json to
@@ -413,7 +413,11 @@ def shader_archive_census(path):
         candidate_rejections=dict(sorted(result["candidate_rejections"].items())))
 
 
-def build_report(title, folder=None, shim_dirs=None, windows_dir=None, shaders=None, archives=(), llvm=None):
+HIDDEN_PROGRAM_NAME = "title.exe"
+
+
+def build_report(title, folder=None, shim_dirs=None, windows_dir=None, shaders=None, archives=(), llvm=None,
+                 hide_program_name=True):
     folder = folder or title.parent
     pe = pefile.PE(str(title), fast_load=True)
     try:
@@ -433,7 +437,9 @@ def build_report(title, folder=None, shim_dirs=None, windows_dir=None, shaders=N
     overall = OrderedDict((c, sum(t[c] for t in per_dll.values())) for c in CLASSES)
     report = OrderedDict(
         schema=SCHEMA,
-        program=clean_name(title.name),
+        # The report reads no module-identity string from inside the image (export directory name, version
+        # resource names, CodeView/PDB path); the file name is the only name of the program it can hold.
+        program=HIDDEN_PROGRAM_NAME if hide_program_name else clean_name(title.name),
         pe=facts,
         pe_map_preflight=preflight(facts, delay_rva_based),
         routes=OrderedDict(shims=routes.shim_source, windows=routes.windows.source,
@@ -517,12 +523,20 @@ def main(argv=None):
     parser.add_argument("--shader-archive", type=Path, action="append", default=[], help="A shader archive to count")
     parser.add_argument("--llvm", help="libLLVM with AMDGPU support, for binary shaders in --shaders")
     parser.add_argument("--out", type=Path, default=Path("out/x2w-report"))
+    parser.add_argument("--show-program-name", action="store_true",
+                        help="Name the program by its real file name (for our own tests); by default the program is"
+                             " title.exe and no field holds the file name or a name read from inside the image")
     args = parser.parse_args(argv)
+    hide = not args.show_program_name
     try:
         report = build_report(args.title, args.folder, args.shims, args.windows_dir, args.shaders,
-                              args.shader_archive, args.llvm)
+                              args.shader_archive, args.llvm, hide)
     except (OSError, ValueError, pefile.PEFormatError) as error:
-        parser.exit(1, f"x2w_report: {error}\n")
+        message = str(error)
+        if hide:
+            for name in {args.title.name, str(args.title)}:
+                message = message.replace(name, HIDDEN_PROGRAM_NAME)
+        parser.exit(1, f"x2w_report: {message}\n")
     args.out.mkdir(parents=True, exist_ok=True)
     json_path, md_path = args.out / "report.json", args.out / "report.md"
     json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

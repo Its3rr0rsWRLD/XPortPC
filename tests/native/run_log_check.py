@@ -55,14 +55,14 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            rf"first-thread=(?:yes|no) d3d12-call=(?:yes|no) crash=(?:yes|no) last-stub={LAST}"]
 
 
-def run(launcher, title, shims, crash):
+def run(launcher, title, shims, crash, extra=()):
     with tempfile.TemporaryDirectory() as scratch:
         log = Path(scratch) / "run.log"
         env = dict(os.environ)
         env.pop("X2W_RUNG1_CRASH", None)
         if crash:
             env["X2W_RUNG1_CRASH"] = "1"
-        result = subprocess.run([launcher, "--shims", shims, "--log", str(log), "--timeout", "60", title],
+        result = subprocess.run([launcher, "--shims", shims, "--log", str(log), "--timeout", "60", *extra, title],
                                 capture_output=True, text=True, timeout=120, env=env)
         text = log.read_text(encoding="utf-8")
     print(f"--- run.log ({'crash control' if crash else 'clean start'}), exit {result.returncode & 0xffffffff:#x}")
@@ -80,6 +80,15 @@ def check_grammar(lines, title):
             window = raw[offset:offset + 8]
             if len(set(window)) >= 4 and not all(0x20 <= b < 0x7F for b in window):
                 assert window not in blob, f"log holds raw section bytes at {offset:#x}"
+
+
+HIDDEN = "title.exe"
+
+
+def assert_hidden(real, *texts):
+    """The program's real file name (and its stem followed by a dot) appears in none of the texts."""
+    for text in texts:
+        assert real.lower() not in text.lower(), f"the program's real name {real!r} is in:\n{text}"
 
 
 def index_of(lines, pattern):
@@ -101,12 +110,14 @@ def text_range(title):
 
 def main():
     launcher, title, shims = sys.argv[1:4]
-    name = Path(title).name.lower()
+    real = Path(title).name.lower()
+    name = HIDDEN  # the launcher names the program title.exe unless --show-program-name
     entry, text_start, text_end = text_range(title)
     ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
 
     result, lines = run(launcher, title, shims, crash=False)
     check_grammar(lines, title)
+    assert_hidden(real, "\n".join(lines), result.stderr)
     assert result.returncode == 0x5F, f"exit {result.returncode:#x}, expected 0x5f"
     assert lines[:2] == ["x2w-run-log 1", f"program {name}"], lines[:2]
     imports = next(line for line in lines if line.startswith("imports "))
@@ -136,6 +147,7 @@ def main():
 
     result, lines = run(launcher, title, shims, crash=True)
     check_grammar(lines, title)
+    assert_hidden(real, "\n".join(lines), result.stderr)
     assert result.returncode & 0xFFFFFFFF == 0xC0000005, f"exit {result.returncode & 0xffffffff:#x}"
     crash = index_of(lines, rf"crash exception 0xc0000005 at {re.escape(name)}\+0x([0-9a-f]+) thread program "
                             r"writing 0x0 last-stub x2w_missing\.dll!#7")
@@ -150,6 +162,11 @@ def main():
                               r"crash=yes last-stub=x2w_missing\.dll!#7")
     assert first < crash < summary, (first, crash, summary)
     assert not any(line.startswith("exit code") for line in lines), lines
+    # --show-program-name (for our own tests) gives the real name back, and nothing else changes.
+    result, lines = run(launcher, title, shims, crash=False, extra=("--show-program-name",))
+    check_grammar(lines, title)
+    assert lines[:2] == ["x2w-run-log 1", f"program {real}"], lines[:2]
+    assert any(f" at {real}+0x" in line for line in lines) and "title.exe" not in "\n".join(lines), lines
     print("native_run_log_rung1: clean start and crash control logged as expected")
     return 0
 

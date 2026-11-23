@@ -304,6 +304,35 @@ class SyntheticReport(unittest.TestCase):
         assert_names_only(self.out / "report.json", self.out / "report.md", self.title)
         assert_tamper_detected(self.out / "report.json", self.out / "report.md", self.title)
 
+    def test_program_name_is_hidden_by_default(self):
+        # An EXE that also has an export directory naming the module (provider.dll in build_pe).
+        self.title.write_bytes(build_pe(TITLE_IMPORTS, exports=["TitleExport"]))
+        out = self.out
+        argv = [str(self.title), "--windows-dir", str(self.windows), "--out", str(out)]
+        self.assertEqual(x2w_report.main(argv), 0)
+        report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["program"], "title.exe")
+        texts = [(out / "report.json").read_text(encoding="utf-8"), (out / "report.md").read_text(encoding="utf-8")]
+        self.assertIn("# x2w_report: `title.exe`", texts[1])
+        for text in texts:
+            for hidden in (self.title.name, "synthetic_title", "provider.dll"):
+                self.assertNotIn(hidden, text.lower())
+        # Imported and package DLL names stay.
+        self.assertIn("title_pkg.dll", texts[0])
+        assert_names_only(out / "report.json", out / "report.md", self.title)
+        # Opt out, for our own tests: the real file name returns, still no export-directory name.
+        self.assertEqual(x2w_report.main(argv + ["--show-program-name"]), 0)
+        shown = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(shown["program"], self.title.name)
+        self.assertNotIn("provider.dll", (out / "report.json").read_text(encoding="utf-8"))
+        # An unreadable image's error does not name the file either.
+        bad = self.game / "broken_title.exe"
+        bad.write_bytes(b"not a pe")
+        run = subprocess.run([sys.executable, "-B", str(ROOT / "tools" / "x2w_report.py"), str(bad),
+                              "--out", str(out)], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertNotIn("broken_title", run.stderr + run.stdout)
+
     def test_shader_census_reports_counts_and_isa_names_only(self):
         shaders = Path(self.scratch.name) / "shaders"
         shaders.mkdir()
@@ -374,6 +403,10 @@ def check_rung1(title, shims):
         assert all(c["ok"] for c in report["pe_map_preflight"]), report["pe_map_preflight"]
         assert_names_only(out / "report.json", out / "report.md", title)
         assert_tamper_detected(out / "report.json", out / "report.md", title)
+        assert report["program"] == "title.exe", report["program"]
+        for path in (out / "report.json", out / "report.md"):
+            assert title.name.lower() not in path.read_text(encoding="utf-8").lower(), path.name
+        assert title.name.lower() not in (run.stdout + run.stderr).lower()
     print("native_report_rung1: classifications, PE facts and the names-only property behaved")
     return 0
 

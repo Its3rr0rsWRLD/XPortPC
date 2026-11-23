@@ -22,7 +22,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_log_check import check_grammar, text_range  # noqa: E402
+from run_log_check import assert_hidden, check_grammar, text_range  # noqa: E402
 
 MNEMONICS = ["sha1rnds4", "sha1nexte", "sha1msg1", "sha1msg2", "sha256rnds2", "sha256msg1", "sha256msg2",
              "clzero", "rdpid", "monitorx", "mwaitx", "extrq", "insertq", "movntsd", "movntss", "rdpru", "clwb"]
@@ -47,6 +47,7 @@ def run(launcher, title, label, force, **env_flags):
     print(text, end="")
     lines = text.splitlines()
     check_grammar(lines, title)
+    assert_hidden(Path(title).name, text, result.stderr)
     cases = dict(re.findall(r"^case (\S+) (ok|FAIL)$", result.stdout, re.M))
     counts = {m: int(n) for m, n in re.findall(r"^count (\S+) (\d+)$", result.stdout, re.M)}
     return code, cases, counts, lines
@@ -69,7 +70,7 @@ def missing(lines):
 
 def main():
     launcher, title = sys.argv[1:3]
-    name = Path(title).name.lower()
+    name = "title.exe"  # the launcher's default name for the program
     _, text_start, text_end = text_range(title)
     ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
     failures = []

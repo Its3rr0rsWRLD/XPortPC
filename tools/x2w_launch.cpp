@@ -1,7 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
-//                   [--xmem NAME=VALUE]... [--sys-config FILE] program.exe
+//                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -68,6 +68,11 @@
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
 // leaves them naming the launcher, for comparison.
+//
+// Program name. Stderr and the run log call the program title.exe (the program line, module+RVA, callers, mapped-image
+// names, dynamic-load/resolve/handle lines, errors); its real file name appears in neither. The launcher prints no
+// name read from inside the image. Package and imported DLL names are unchanged. --show-program-name restores the real
+// file name, for the launcher's own tests.
 #include <windows.h>
 #include <tlhelp32.h>
 
@@ -148,6 +153,7 @@ struct Region {
     std::uintptr_t base;
     std::size_t size;
     std::wstring path;  // full path the image was mapped from
+    std::string label;  // the name logs give the image (the program is title.exe unless --show-program-name)
 };
 std::vector<Region> regions;  // the program first, then each mapped package DLL
 
@@ -199,6 +205,41 @@ std::wstring file_of(const std::wstring& path) {
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+// Logs and stderr name the program title.exe, and no run line holds its real file name, unless
+// --show-program-name (for the launcher's own tests). Package and Windows DLL names are unchanged. The launcher
+// prints no module-identity string read from inside the image (export directory name, version resource names,
+// PDB path); pe_map prints none in its detail text either.
+constexpr const char* kHiddenProgram = "title.exe";
+bool show_program_name = false;
+std::string real_program_name;  // lower-case file name of the program, set once before any log line names it
+
+std::string scrub_program_name(std::string text) {
+    if (show_program_name || real_program_name.empty()) return text;
+    const std::string folded = lower(text);
+    std::string out;
+    for (std::size_t at = 0; at < text.size();) {
+        if (folded.compare(at, real_program_name.size(), real_program_name) == 0) {
+            out += kHiddenProgram;
+            at += real_program_name.size();
+        } else {
+            out += text[at++];
+        }
+    }
+    return out;
+}
+
+int err_printf(const char* format, ...) {
+    char line[2048];
+    va_list args;
+    va_start(args, format);
+    int length = std::vsnprintf(line, sizeof line, format, args);
+    va_end(args);
+    if (length < 0) return length;
+    if (length >= static_cast<int>(sizeof line)) length = static_cast<int>(sizeof line) - 1;
+    const std::string text = scrub_program_name(std::string(line, static_cast<std::size_t>(length)));
+    return static_cast<int>(std::fwrite(text.data(), 1, text.size(), stderr));
+}
+
 void log_line(const char* format, ...) {
     if (log_file == INVALID_HANDLE_VALUE) return;
     char line[1024];
@@ -208,10 +249,10 @@ void log_line(const char* format, ...) {
     va_end(args);
     if (length < 0) return;
     if (length > static_cast<int>(sizeof line) - 2) length = static_cast<int>(sizeof line) - 2;
-    line[length++] = '\n';
+    const std::string text = scrub_program_name(std::string(line, static_cast<std::size_t>(length))) + "\n";
     DWORD written = 0;
     // The file is opened for appending only, so lines from different threads never overwrite each other.
-    WriteFile(log_file, line, static_cast<DWORD>(length), &written, nullptr);
+    WriteFile(log_file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
 }
 
 std::size_t image_size(const void* base) {
@@ -226,7 +267,7 @@ void describe(const void* address, char* out, std::size_t capacity) {
     const auto at = reinterpret_cast<std::uintptr_t>(address);
     for (const auto& region : regions) {
         if (at >= region.base && at - region.base < region.size) {
-            std::snprintf(out, capacity, "%s+0x%llx", region.name.c_str(),
+            std::snprintf(out, capacity, "%s+0x%llx", region.label.c_str(),
                           static_cast<unsigned long long>(at - region.base));
             return;
         }
@@ -323,7 +364,7 @@ extern "C" std::uint64_t x2w_stub_call(std::uint64_t index) {
     Stub* stub = stubs[static_cast<std::size_t>(index)];
     InterlockedExchange(&last_stub, static_cast<long>(index + 1));
     if (InterlockedIncrement(&stub->calls) == 1) {
-        std::fprintf(stderr, "[x2w] call stub %s!%s\n", stub->dll.c_str(), stub->symbol.c_str());
+        err_printf( "[x2w] call stub %s!%s\n", stub->dll.c_str(), stub->symbol.c_str());
         log_line("first-call %s %s!%s", stub->missing ? "missing" : "stub", stub->dll.c_str(), stub->symbol.c_str());
         if (stub->d3d12) d3d12_milestone(stub->dll, stub->symbol, stub->missing ? "missing" : "stub");
     }
@@ -390,7 +431,7 @@ void* make_watch(const std::string& dll, const std::string& symbol, void* target
 }
 
 void* report(const std::string& dll, const std::string& symbol, const char* route, const char* kind, void* address) {
-    std::fprintf(stderr, "[x2w] import %s!%s -> %s\n", dll.c_str(), symbol.c_str(), route);
+    err_printf( "[x2w] import %s!%s -> %s\n", dll.c_str(), symbol.c_str(), route);
     ++route_counts[kind];
     // Watch the program's d3d12* imports for the run log; stubs record their own first call.
     if (log_file != INVALID_HANDLE_VALUE && address && std::strncmp(kind, "stub", 4) != 0
@@ -446,7 +487,7 @@ void log_dynamic_once(const std::string& line) {
     const bool first = dynamic_logged.insert(line).second;
     ReleaseSRWLockExclusive(&dynamic_lock);
     if (!first) return;
-    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    err_printf( "[x2w] %s\n", line.c_str());
     log_line("%s", line.c_str());
 }
 
@@ -835,7 +876,7 @@ void* hook_for(const std::string& dll, const char* name);
 // "unknown-0x<handle>" for a handle none of them knows, so the line still says which handle was asked.
 std::string module_label(HMODULE module, const std::string& shim, const Region* region) {
     if (!shim.empty()) return shim;
-    if (region) return region->name;
+    if (region) return region->label;
     wchar_t path[MAX_PATH];
     const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
     if (length) return lower(narrow(file_of(std::wstring(path, length))));
@@ -932,11 +973,11 @@ void* map_package(const std::string& key) {
     mapping.erase(key);
     if (base) {
         package_images[key] = base;
-        regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base), local});
+        regions.push_back({key, reinterpret_cast<std::uintptr_t>(base), image_size(base), local, key});
     }
     ReleaseSRWLockExclusive(&package_lock);
     if (!base) {
-        std::fprintf(stderr, "[x2w] cannot map %s: status %u %s\n", key.c_str(), status, detail);
+        err_printf( "[x2w] cannot map %s: status %u %s\n", key.c_str(), status, detail);
         log_line("package-map-failed %s status %u %s", key.c_str(), status, detail);
     }
     return base;
@@ -1173,7 +1214,7 @@ void log_cpp_throw(EXCEPTION_POINTERS* info) {
     const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
     ReleaseSRWLockExclusive(&cpp_lock);
     if (!first) return;
-    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    err_printf( "[x2w] %s\n", line.c_str());
     log_line("%s", line.c_str());
 }
 
@@ -1287,7 +1328,7 @@ LONG CALLBACK cpu_trap(EXCEPTION_POINTERS* info) {
         InterlockedIncrement(&trap_counts[result.op]);
         if (InterlockedExchange(&trap_seen[result.op], 1) == 0) {
             describe(reinterpret_cast<const void*>(at), where, sizeof where);
-            std::fprintf(stderr, "[x2w] cpu trap %s at %s\n", x2w_cpu::op_name(result.op), where);
+            err_printf( "[x2w] cpu trap %s at %s\n", x2w_cpu::op_name(result.op), where);
             log_line("cpu-trap first %s at %s", x2w_cpu::op_name(result.op), where);
         }
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -1295,7 +1336,7 @@ LONG CALLBACK cpu_trap(EXCEPTION_POINTERS* info) {
     if (InterlockedIncrement(&unhandled_logged) <= kUnhandledLines) {
         describe(reinterpret_cast<const void*>(at), where, sizeof where);
         const char* mnemonic = x2w_cpu::name(code, available);
-        std::fprintf(stderr, "[x2w] illegal instruction %s at %s\n", mnemonic, where);
+        err_printf( "[x2w] illegal instruction %s at %s\n", mnemonic, where);
         log_line("cpu-unhandled %s at %s", mnemonic, where);
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -1316,7 +1357,7 @@ void log_host_features() {
     for (auto& list : lists)
         if (list.empty()) list = "none";
     if (lists[0] != "none" || lists[1] != "none" || lists[2] != "none")
-        std::fprintf(stderr, "[x2w] host lacks Zen 2 features: emulated=%s unhandled=%s silent=%s\n",
+        err_printf( "[x2w] host lacks Zen 2 features: emulated=%s unhandled=%s silent=%s\n",
                      lists[0].c_str(), lists[1].c_str(), lists[2].c_str());
     log_line("cpu-host-missing emulated=%s unhandled=%s silent=%s", lists[0].c_str(), lists[1].c_str(),
              lists[2].c_str());
@@ -1383,7 +1424,7 @@ DWORD WINAPI watchdog(void* seconds) {
     Sleep(limit * 1000);
     log_line("timeout still running after %lu s", limit);
     log_summary("timeout");
-    std::fprintf(stderr, "[x2w] timeout after %lu s\n", limit);
+    err_printf( "[x2w] timeout after %lu s\n", limit);
     TerminateProcess(GetCurrentProcess(), 124);
     return 0;
 }
@@ -1416,6 +1457,8 @@ int wmain(int argc, wchar_t** argv) {
             keep_host_identity = true;
         } else if (argument == L"--timeout" && i + 1 < argc) {
             timeout = wcstoul(argv[++i], nullptr, 10);
+        } else if (argument == L"--show-program-name") {
+            show_program_name = true;
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
         } else if (argument == L"--xgr" && i + 1 < argc) {
@@ -1444,8 +1487,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
-        std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] program.exe\n");
+        err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
+                     "[--host-identity] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -1456,7 +1499,7 @@ int wmain(int argc, wchar_t** argv) {
         log_file = CreateFileW(log_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
         if (log_file == INVALID_HANDLE_VALUE) {
-            std::fprintf(stderr, "[x2w] cannot write the log %ls\n", log_path.c_str());
+            err_printf( "[x2w] cannot write the log %ls\n", log_path.c_str());
             return 2;
         }
         query_thread = reinterpret_cast<QueryThread>(
@@ -1471,7 +1514,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetEnvironmentVariableW(L"X2W_XMEM_LOG", nullptr, 0)) SetEnvironmentVariableW(L"X2W_XMEM_LOG", L"1");
     for (const auto& [name, value] : xmem_settings) {
         SetEnvironmentVariableW(name.c_str(), value.c_str());
-        std::fprintf(stderr, "[x2w] xmem setting %ls=%ls\n", name.c_str(), value.c_str());
+        err_printf( "[x2w] xmem setting %ls=%ls\n", name.c_str(), value.c_str());
         log_line("xmem setting %ls=%ls", name.c_str(), value.c_str());
     }
     // After the logger, so the logger sees the corrected base.
@@ -1490,7 +1533,7 @@ int wmain(int argc, wchar_t** argv) {
         map_run = reinterpret_cast<MapRunTraced>(GetProcAddress(pe_map, "pe_map_run_traced"));
     }
     if (!map_image || !map_export || !map_run) {
-        std::fprintf(stderr, "[x2w] pe_map.dll is missing beside x2w_launch.exe\n");
+        err_printf( "[x2w] pe_map.dll is missing beside x2w_launch.exe\n");
         log_line("error pe_map.dll is missing beside x2w_launch.exe");
         return 2;
     }
@@ -1498,8 +1541,9 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetFullPathNameW(program.c_str(), MAX_PATH, full, nullptr)) return 2;
     package_dir = directory_of(full);
     const std::string program_name = lower(narrow(file_of(full)));
+    real_program_name = program_name;
     log_line("x2w-run-log 1");
-    log_line("program %s", program_name.c_str());
+    log_line("program %s", show_program_name ? program_name.c_str() : kHiddenProgram);
     if (xgr_gateway_on()) log_line("xgr %s", xgr_mode.c_str());
     {
         std::wstring stem = file_of(full);
@@ -1521,7 +1565,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!sys_config.empty()) {
             wchar_t config_path[MAX_PATH];
             if (!GetFullPathNameW(sys_config.c_str(), MAX_PATH, config_path, nullptr) || !is_file(config_path)) {
-                std::fprintf(stderr, "[x2w] --sys-config: cannot read %ls\n", sys_config.c_str());
+                err_printf( "[x2w] --sys-config: cannot read %ls\n", sys_config.c_str());
                 return 2;
             }
             config_full = config_path;
@@ -1541,10 +1585,10 @@ int wmain(int argc, wchar_t** argv) {
             sys_lookup = nullptr;
             sys_shutdown = nullptr;
             if (!config_full.empty()) {
-                std::fprintf(stderr, "[x2w] --sys-config needs x2w_sys.dll in a --shims directory\n");
+                err_printf( "[x2w] --sys-config needs x2w_sys.dll in a --shims directory\n");
                 return 2;
             }
-            std::fprintf(stderr, "[x2w] sys: x2w_sys.dll not found; no system layer\n");
+            err_printf( "[x2w] sys: x2w_sys.dll not found; no system layer\n");
         } else {
             std::wstring stem = file_of(full);
             const auto dot = stem.find_last_of(L'.');
@@ -1571,18 +1615,19 @@ int wmain(int argc, wchar_t** argv) {
     char detail[512] = {};
     void* base = map_image(full, resolve, &status, detail, sizeof detail);
     if (!base) {
-        std::fprintf(stderr, "[x2w] cannot map %ls: status %u %s\n", full, status, detail);
+        err_printf( "[x2w] cannot map %ls: status %u %s\n", full, status, detail);
         log_line("map-failed status %u %s", status, detail);
         return 3;
     }
     regions.insert(regions.begin(),
-                   Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full});
+                   Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full,
+                          show_program_name ? program_name : std::string(kHiddenProgram)});
     slot0_start(base);
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
     log_line("imports shim=%u package=%u windows=%u stub=%u missing=%u", route_counts["shim"],
              route_counts["package"], route_counts["windows"], route_counts["stub"], route_counts["missing"]);
     if (force_cpu_traps && !force_traps(base)) {
-        std::fprintf(stderr, "[x2w] --force-cpu-traps: no usable x2w_cpu_trap_sites export\n");
+        err_printf( "[x2w] --force-cpu-traps: no usable x2w_cpu_trap_sites export\n");
         log_line("error no usable x2w_cpu_trap_sites export");
         return 2;
     }
@@ -1594,13 +1639,13 @@ int wmain(int argc, wchar_t** argv) {
     end_identity();
     if (slot0_index) slot0_restore(current_tls_vector(), GetCurrentThreadId());
     if (!ran) {
-        std::fprintf(stderr, "[x2w] %ls has no runnable entry point\n", full);
+        err_printf( "[x2w] %ls has no runnable entry point\n", full);
         log_line("error no runnable entry point");
         return 4;
     }
     long calls = 0;
     for (const Stub* stub : stubs) calls += stub->calls;
-    std::fprintf(stderr, "[x2w] exit code %u; %zu stubs, %ld stub calls\n", exit_code, stubs.size(), calls);
+    err_printf( "[x2w] exit code %u; %zu stubs, %ld stub calls\n", exit_code, stubs.size(), calls);
     log_exit(exit_code, "exit");
     return static_cast<int>(exit_code);
 }

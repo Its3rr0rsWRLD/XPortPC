@@ -26,25 +26,31 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_log_check import GRAMMAR  # noqa: E402
+from run_log_check import GRAMMAR, HIDDEN, assert_hidden  # noqa: E402
 
 TITLE = "x2w_resolve_title.exe"
 PKG = "x2w_resolve_pkg.dll"
 
 
-def run(launcher, folder, shims, mode):
+def run(launcher, folder, shims, mode, extra=()):
     log = Path(folder) / f"run-{mode or 'clean'}.log"
     env = dict(os.environ)
     env.pop("X2W_RESOLVE_MODE", None)
     if mode:
         env["X2W_RESOLVE_MODE"] = mode
-    result = subprocess.run([launcher, "--shims", shims, "--log", str(log), "--timeout", "60",
+    result = subprocess.run([launcher, "--shims", shims, "--log", str(log), "--timeout", "60", *extra,
                              str(Path(folder) / TITLE)], capture_output=True, text=True, timeout=120, env=env)
     lines = log.read_text(encoding="utf-8").splitlines()
     print(f"--- run.log ({mode or 'clean'}), exit {result.returncode & 0xffffffff:#x}")
     print("\n".join(lines))
     for line in lines:
         assert any(re.fullmatch(rule, line) for rule in GRAMMAR), f"log line outside the grammar: {line!r}"
+    if "--show-program-name" in extra:
+        assert any(TITLE in line for line in lines), lines
+    else:
+        # The program is title.exe in every log line and on stderr; package and Windows DLL names stay.
+        assert_hidden(TITLE, "\n".join(lines), result.stderr)
+        assert_hidden(Path(TITLE).stem + ".", "\n".join(lines), result.stderr)
     return result.returncode & 0xFFFFFFFF, lines
 
 
@@ -77,7 +83,7 @@ def main():
         assert code == 0x7F, f"fault mode exit {code:#x}, expected 0x7f"
         first = index_of(lines, rf"first-chance exception 0xc0000005 at (?:ntdll|kernel32|kernelbase)\.dll\+0x[0-9a-f]+ "
                                 rf"thread program(?: thread-name \S+)? reading 0x10 last-stub none callers {re.escape(PKG)}\+0x[0-9a-f]+ "
-                                rf"from {re.escape(TITLE)}\+0x[0-9a-f]+(?: from \S+)?")
+                                rf"from {re.escape(HIDDEN)}\+0x[0-9a-f]+(?: from \S+)?")
         provisional = index_of(lines, r"summary first-fault: .* entry=reached .* crash=no last-stub=none")
         exit_line = index_of(lines, r"exit code 0x7f \(127\); stubs \d+ \(missing \d+\), stub calls \d+")
         final = index_of(lines, r"summary exit: .* crash=no last-stub=none")
@@ -87,11 +93,15 @@ def main():
         code, lines = run(launcher, folder, shims, "crash")
         assert code == 0x66, f"crash mode exit {code:#x}, expected 0x66 from the program's own filter"
         index_of(lines, r"unhandled-filter program filter kept behind the launcher's")
-        crash = index_of(lines, rf"crash exception 0xc0000005 at {re.escape(TITLE)}\+0x[0-9a-f]+ thread program"
+        crash = index_of(lines, rf"crash exception 0xc0000005 at {re.escape(HIDDEN)}\+0x[0-9a-f]+ thread program"
                                 r"(?: thread-name \S+)? writing 0x0 last-stub none")
         final = index_of(lines, r"summary crash: .* crash=yes last-stub=none")
         assert crash < final, (crash, final)
         assert sum(line.startswith(("summary crash", "summary exit", "summary terminate")) for line in lines) == 1, lines
+
+        # --show-program-name: the callers chain names the real file again.
+        code, lines = run(launcher, folder, shims, "fault", extra=("--show-program-name",))
+        index_of(lines, rf"first-chance exception .* callers {re.escape(PKG)}\+0x[0-9a-f]+ from {re.escape(TITLE)}\+0x[0-9a-f]+(?: from \S+)?")
 
         # Control: the Windows loader runs the same folder; every bit but the API set one agrees.
         native = subprocess.run([str(Path(folder) / TITLE)], capture_output=True, timeout=30)

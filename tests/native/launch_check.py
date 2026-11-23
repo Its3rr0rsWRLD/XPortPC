@@ -8,6 +8,8 @@ name each route. As a control, the Windows loader cannot start it, because x2w_m
 """
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
 def main():
@@ -29,6 +31,20 @@ def main():
     assert report.count("[x2w] call stub x2w_missing.dll!X2wMissingFirst") == 1, report
     assert report.count("[x2w] call stub x2w_missing.dll!X2wMissingSecond") == 1, report
     assert run.returncode == 0x47, run.returncode
+    # The program is title.exe in stderr and the run log; --show-program-name gives the real file name back.
+    real = Path(title).name.lower()
+    assert real not in report.lower(), report
+    with tempfile.TemporaryDirectory() as scratch:
+        for flags in ((), ("--show-program-name",)):
+            log = Path(scratch) / "run.log"
+            run2 = subprocess.run([launcher, "--shims", shims, "--log", str(log), *flags, title],
+                                  capture_output=True, text=True, timeout=30)
+            text = log.read_text(encoding="utf-8")
+            if flags:
+                assert f"program {real}" in text.splitlines(), text
+            else:
+                assert "program title.exe" in text.splitlines(), text
+                assert real not in (text + run2.stderr).lower(), text + run2.stderr
     # Control: the normal Windows loader refuses the title (STATUS_DLL_NOT_FOUND). The error mode, which the
     # child inherits, suppresses the loader's dialog so the refusal returns instead of waiting for a click.
     import ctypes
