@@ -22,7 +22,7 @@
 //   r5_frames warp|hardware view_churn       after cold: as warm, and each frame allocates title memory and frees
 //                                            an older allocation, so the title-memory view changes 600 times (the
 //                                            shim recycles its 256 view blocks once the GPU is done with them)
-//   r5_frames warp refused                   a compute program the translator refuses (s_barrier, card C-6) fails
+//   r5_frames warp refused                   a compute program the translator refuses (ds_bpermute_b32) fails
 //                                            CreateComputePipelineState with E_NOTIMPL and one REFUSED event; a
 //                                            compute container in a vertex slot and a vertex container in the
 //                                            compute slot are refused before translation
@@ -804,7 +804,7 @@ int refused_check()
                 static_cast<unsigned long>(hr), static_cast<unsigned long>(vs_in_cs),
                 static_cast<unsigned long>(cs_in_vs), recorded.refused, end.pipelines_refused - start.pipelines_refused,
                 end.shaders_translated - start.shaders_translated);
-    const bool named = recorded.details.find("s_barrier is card C-6") != std::string::npos;
+    const bool named = recorded.details.find("a cross-lane permutation is refused") != std::string::npos;
     const bool good = hr == E_NOTIMPL && !a && vs_in_cs == E_NOTIMPL && !b && cs_in_vs == E_NOTIMPL && !c &&
                       recorded.refused == 3 && end.pipelines_refused - start.pipelines_refused == 3 && named &&
                       end.shaders_translated == start.shaders_translated && gpu.debug_errors() == 0;
