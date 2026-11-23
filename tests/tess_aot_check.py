@@ -210,6 +210,8 @@ def run_family(directory, compiler, renderer, backend, tool, name):
                                      f"{count} expected); only in the reference {only_ref}; only on the desktop "
                                      f"{only_gpu}")
             for flaw in separated:
+                if separated[flaw]:
+                    continue  # caught by an earlier set: the capture already differs from this wrong reference
                 wrong, _ = model_draw(pipeline, state, data, tool, flaw)
                 if wrong != want:
                     separated[flaw] = True

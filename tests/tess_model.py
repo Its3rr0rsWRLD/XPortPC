@@ -9,8 +9,9 @@ binary32 with mad rounding twice and flushing subnormals). flaws switch single r
 pipeline driver in tests/tess_aot_check.py applies the tessellator-level ones.
 """
 from collections import Counter
-from fractions import Fraction
+import functools
 import re
+import struct
 
 import vertex_aot_check as vc
 
@@ -19,8 +20,88 @@ M64 = (1 << 64) - 1
 INLINE = {**vc.INLINE_FLOAT, "-1.0": 0xbf800000, "-0.5": 0xbf000000, "-2.0": 0xc0000000}
 
 
+_F32 = struct.Struct("<f")
+_U32 = struct.Struct("<I")
+
+
+def _value(bits):
+    return _F32.unpack(_U32.pack(bits))[0]
+
+
+def _round(value):
+    """binary64 to the nearest binary32 (ties to even), as tests/vertex_aot_check.py's round_f32 does with exact
+    rationals: a binary64 sum, difference or product of two binary32 values is exact or within the innocuous double
+    rounding bound (53 >= 2 * 24 + 2), so rounding it once more gives the correctly rounded binary32 result."""
+    return _U32.unpack(_F32.pack(value))[0]
+
+
+def _finite(*words):
+    return all((w >> 23) & 0xff != 0xff for w in words)
+
+
 def frac(bits):
-    return vc.f32_fraction(vc.checked(bits))
+    """The value of a binary32 word for comparisons (a float: binary64 holds every binary32 value exactly)."""
+    return _value(vc.checked(bits))
+
+
+def f32_mul(a, b):
+    vc.checked(a), vc.checked(b)
+    try:
+        return vc.checked(_round(_value(a) * _value(b)))
+    except OverflowError:
+        return vc.f32_mul(a, b)
+
+
+def f32_add(a, b):
+    vc.checked(a), vc.checked(b)
+    try:
+        return vc.checked(_round(_value(a) + _value(b)))
+    except OverflowError:
+        return vc.f32_add(a, b)
+
+
+def f32_mad(a, b, c):
+    """v_mad_f32 as vc.f32_mad: flushed operands, the product rounded and flushed, the sum rounded and flushed."""
+    if not _finite(a, b, c):
+        return vc.f32_mad(a, b, c)
+    a, b, c = vc.ftz(a), vc.ftz(b), vc.ftz(c)
+    try:
+        product = vc.ftz(_round(_value(a) * _value(b)))
+        if not _finite(product):
+            return vc.f32_mad(a, b, c)
+        return vc.ftz(_round(_value(product) + _value(c)))
+    except OverflowError:
+        return vc.f32_mad(a, b, c)
+
+
+@functools.lru_cache(maxsize=None)
+def _scalar_operand(token):
+    """("s", number), ("const", word) or ("special", name) for a scalar operand token (parsed once)."""
+    token = token.strip()
+    if token in INLINE:
+        return "const", INLINE[token]
+    if re.fullmatch(r"-?\d+", token):
+        return "const", int(token) & M32
+    if re.fullmatch(r"0x[0-9a-f]+", token):
+        return "const", int(token, 16)
+    if token in ("src_scc", "vcc_lo", "vcc_hi", "exec_lo"):
+        return "special", token
+    m = re.fullmatch(r"s(\d+)", token)
+    if not m:
+        raise AssertionError(f"Model has no scalar operand {token}")
+    return "s", int(m[1])
+
+
+@functools.lru_cache(maxsize=None)
+def _vector_operand(token):
+    """(negated, "v", number) or (negated, "scalar", scalar token) for a vector source operand (parsed once)."""
+    token = token.strip().split()[0]
+    if token.startswith("-") and not re.fullmatch(r"-\d+", token) and token not in INLINE:
+        negate, kind, value = _vector_operand(token[1:])
+        return not negate, kind, value
+    if re.fullmatch(r"v\d+", token):
+        return False, "v", int(token[1:])
+    return False, "scalar", token
 
 
 class Wave:
@@ -41,26 +122,18 @@ class Wave:
 
     # --- operands -----------------------------------------------------------------------------------------------
     def sval(self, token):
-        token = token.strip()
-        if token in INLINE:
-            return INLINE[token]
-        if re.fullmatch(r"-?\d+", token):
-            return int(token) & M32
-        if re.fullmatch(r"0x[0-9a-f]+", token):
-            return int(token, 16)
-        if token == "src_scc":
+        kind, value = _scalar_operand(token)
+        if kind == "s":
+            return self.s[value]
+        if kind == "const":
+            return value
+        if value == "src_scc":
             return self.scc
-        if token == "vcc_lo":
+        if value == "vcc_lo":
             return self.vcc & M32
-        if token == "vcc_hi":
+        if value == "vcc_hi":
             return self.vcc >> 32
-        if token == "exec_lo":
-            return self.exec & M32
-        m = re.fullmatch(r"s(\d+)", token)
-        if not m:
-            raise AssertionError(f"Model has no scalar operand {token}")
-        value = self.s[int(m[1])]
-        return value
+        return self.exec & M32
 
     def s64(self, token):
         if token == "exec":
@@ -86,14 +159,13 @@ class Wave:
             self.s[int(m[1])], self.s[int(m[2])] = value & M32, value >> 32
 
     def vval(self, lane, token):
-        token = token.strip().split()[0]
-        if token.startswith("-") and not re.fullmatch(r"-\d+", token) and token not in INLINE:
-            return self.vval(lane, token[1:]) ^ 0x80000000
-        if re.fullmatch(r"v\d+", token):
-            return self.v[lane][int(token[1:])]
-        value = self.sval(token)
-        assert isinstance(value, int), (token, value)
-        return value
+        negate, kind, value = _vector_operand(token)
+        if kind == "v":
+            word = self.v[lane][value]
+        else:
+            word = self.sval(value)
+            assert isinstance(word, int), (token, word)
+        return word ^ 0x80000000 if negate else word
 
     def span(self, token):
         if m := re.fullmatch(r"[sv]\[(\d+):(\d+)\]", token):
@@ -389,17 +461,17 @@ class Wave:
                 mask = self.vcc if len(ops) == 3 or ops[3] == "vcc" else self.s64(ops[3])
                 v[int(d[1:])] = val(ops[2]) if mask >> lane & 1 else val(ops[1])
             elif name == "v_cvt_f32_u32":
-                v[int(d[1:])] = vc.round_f32(Fraction(val(ops[1])))
+                v[int(d[1:])] = _round(float(val(ops[1])))
             elif name == "v_mul_f32":
-                v[int(d[1:])] = vc.f32_mul(val(ops[1]), val(ops[2]))
+                v[int(d[1:])] = f32_mul(val(ops[1]), val(ops[2]))
             elif name == "v_add_f32":
-                v[int(d[1:])] = vc.f32_add(val(ops[1]), val(ops[2]))
+                v[int(d[1:])] = f32_add(val(ops[1]), val(ops[2]))
             elif name == "v_sub_f32":
-                v[int(d[1:])] = vc.f32_add(val(ops[1]), val(ops[2]) ^ 0x80000000)
+                v[int(d[1:])] = f32_add(val(ops[1]), val(ops[2]) ^ 0x80000000)
             elif name == "v_mad_f32":
-                v[int(d[1:])] = vc.f32_mad(val(ops[1]), val(ops[2]), val(ops[3]))
+                v[int(d[1:])] = f32_mad(val(ops[1]), val(ops[2]), val(ops[3]))
             elif name == "v_mac_f32":
-                v[int(d[1:])] = vc.f32_mad(val(ops[1]), val(ops[2]), v[int(d[1:])])
+                v[int(d[1:])] = f32_mad(val(ops[1]), val(ops[2]), v[int(d[1:])])
             elif name in ("v_max_f32", "v_min_f32", "v_max3_f32", "v_min3_f32"):
                 words = [val(t) for t in ops[1:]]
                 pick = max if "max" in name else min
