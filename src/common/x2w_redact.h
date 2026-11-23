@@ -80,8 +80,11 @@ inline std::string hide_paths(const std::string& text, const std::string& progra
 inline std::string apply(const std::string& text)
 {
     if (show_names()) return text;
-    const std::string program = program_file();
-    return replace_ci(hide_paths(text, program, "title.exe"), program, "title.exe");
+    const std::string program = program_file(), stem = lower(env("X2W_TITLE"));
+    std::string out = replace_ci(hide_paths(text, program, "title.exe"), program, "title.exe");
+    // The bare stem too (a runtime names the title by it), when long enough not to clobber ordinary words.
+    if (stem.size() >= 5) out = replace_ci(out, stem, "title");
+    return out;
 }
 
 }  // namespace x2w_redact
