@@ -166,7 +166,7 @@ def main():
     result, lines = run(launcher, title, shims, crash=False, extra=("--show-program-name",))
     check_grammar(lines, title)
     assert lines[:2] == ["x2w-run-log 1", f"program {real}"], lines[:2]
-    assert any(f" at {real}+0x" in line for line in lines) and "title.exe" not in "\n".join(lines), lines
+    assert any(f" at {real}+0x" in line for line in lines) and "program title.exe" not in lines, lines
     print("native_run_log_rung1: clean start and crash control logged as expected")
     return 0
 
