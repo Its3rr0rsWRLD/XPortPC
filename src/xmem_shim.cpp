@@ -146,3 +146,44 @@ extern "C" int32_t X2WTitleGpuGetShaderView(X2WTitleGpuRange* ranges, void** res
     }
     return S_OK;
 }
+
+extern "C" int32_t X2WTitleGpuRegisterResource(uint64_t title_address, uint64_t bytes, void* resource, uint32_t flags)
+{
+    if (!resource) {
+        return E_POINTER;
+    }
+    const bool shader = (flags & X2W_TITLE_GPU_REGISTER_NO_SHADER) == 0;
+    return era_title_gpu::register_resource(title_address, bytes, static_cast<ID3D12Resource*>(resource), shader)
+               ? S_OK
+               : E_INVALIDARG;
+}
+
+extern "C" int32_t X2WTitleGpuUnregisterResource(uint64_t title_address)
+{
+    return era_title_gpu::unregister_resource(title_address) ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+extern "C" int32_t X2WTitleGpuGetTranslations(X2WTitleGpuTranslation* out, uint32_t capacity, uint32_t* required)
+{
+    if (!required) {
+        return E_POINTER;
+    }
+    std::vector<era_title_va::Range> ranges;
+    if (!era_title_gpu::translations(ranges) || ranges.size() > std::numeric_limits<uint32_t>::max()) {
+        return E_FAIL;
+    }
+    const uint32_t count = static_cast<uint32_t>(ranges.size());
+    *required = count;
+    if (capacity < count) {
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    }
+    if (count > 0 && !out) {
+        return E_POINTER;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        out[i].title_begin = ranges[i].title_begin;
+        out[i].title_end = ranges[i].title_end;
+        out[i].gpu_begin = ranges[i].gpu_begin;
+    }
+    return S_OK;
+}

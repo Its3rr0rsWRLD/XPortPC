@@ -898,42 +898,53 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
 
 }  // namespace
 
-HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
-                                 void** out)
+namespace {
+
+// The shaders of a graphics pipeline after translation: desktop (nothing to translate), or translated DXIL and the
+// pipeline's binding record.
+struct GraphicsTranslation {
+    bool translated = false;
+    std::vector<std::uint8_t> vs, ps;
+    PsoInfo info{};
+};
+
+// Translates the console shaders of a graphics pipeline. S_OK with translated=false for desktop bytecode; E_NOTIMPL
+// after a logged refusal.
+HRESULT translate_graphics(const D3D12_SHADER_BYTECODE& vs_code, const D3D12_SHADER_BYTECODE& ps_code,
+                           bool other_stages, ID3D12RootSignature* root_signature, GraphicsTranslation& result)
 {
-    if (!desc) return device->CreateGraphicsPipelineState(desc, riid, out);
     Program vs, ps;
     std::string why;
-    const Parsed vs_kind = desc->VS.BytecodeLength ? parse_container(desc->VS.pShaderBytecode, desc->VS.BytecodeLength, vs, why)
+    const Parsed vs_kind = vs_code.BytecodeLength ? parse_container(vs_code.pShaderBytecode, vs_code.BytecodeLength, vs, why)
                                                    : Parsed::desktop;
     if (vs_kind == Parsed::malformed) {
         refuse("vertex", "", why);
         return E_NOTIMPL;
     }
-    const Parsed ps_kind = desc->PS.BytecodeLength ? parse_container(desc->PS.pShaderBytecode, desc->PS.BytecodeLength, ps, why)
+    const Parsed ps_kind = ps_code.BytecodeLength ? parse_container(ps_code.pShaderBytecode, ps_code.BytecodeLength, ps, why)
                                                    : Parsed::desktop;
     if (ps_kind == Parsed::malformed) {
         refuse("pixel", "", why);
         return E_NOTIMPL;
     }
-    if (vs_kind == Parsed::desktop && ps_kind == Parsed::desktop) return device->CreateGraphicsPipelineState(desc, riid, out);
+    if (vs_kind == Parsed::desktop && ps_kind == Parsed::desktop) return S_OK;
 
     // A console pipeline: every present stage must be a console shader of the stage it is bound to.
-    if (vs_kind != Parsed::container || (desc->PS.BytecodeLength && ps_kind != Parsed::container)) {
+    if (vs_kind != Parsed::container || (ps_code.BytecodeLength && ps_kind != Parsed::container)) {
         refuse(vs_kind == Parsed::container ? "pixel" : "vertex", "",
                "desktop bytecode beside a console shader in one pipeline");
         return E_NOTIMPL;
     }
-    if (desc->GS.BytecodeLength || desc->HS.BytecodeLength || desc->DS.BytecodeLength || desc->StreamOutput.NumEntries) {
+    if (other_stages) {
         refuse("vertex", "", "geometry, tessellation or stream output with console shaders is not translated");
         return E_NOTIMPL;
     }
-    if (vs.stage != X2W_SHADER_STAGE_VERTEX || (desc->PS.BytecodeLength && ps.stage != X2W_SHADER_STAGE_PIXEL)) {
+    if (vs.stage != X2W_SHADER_STAGE_VERTEX || (ps_code.BytecodeLength && ps.stage != X2W_SHADER_STAGE_PIXEL)) {
         refuse("vertex", "", "a container's stage does not match the pipeline stage it is bound to");
         return E_NOTIMPL;
     }
     RootInfo root{};
-    if (!root_info(desc->pRootSignature, &root)) {
+    if (!root_info(root_signature, &root)) {
         refuse("vertex", "", "the root signature was not created through the shim, so it has no converter parameters");
         return E_NOTIMPL;
     }
@@ -1030,7 +1041,7 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     shaders[0].roles = vs_roles;
     shaders[1].program = &ps;
     shaders[1].roles = ps_roles;
-    const std::size_t count = desc->PS.BytecodeLength ? 2 : 1;
+    const std::size_t count = ps_code.BytecodeLength ? 2 : 1;
     for (std::size_t i = 0; i < count; ++i) look_up(*c, shaders[i]);
     // The pipeline's missing shaders translate together; the first that fails is reported, as when they were
     // translated one after another.
@@ -1047,9 +1058,27 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
             return E_NOTIMPL;
         }
     }
+    result.translated = true;
+    result.vs = std::move(shaders[0].dxil);
+    if (ps_code.BytecodeLength) result.ps = std::move(shaders[1].dxil);
+    result.info = info;
+    return S_OK;
+}
+
+}  // namespace
+
+HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
+                                 void** out)
+{
+    if (!desc) return device->CreateGraphicsPipelineState(desc, riid, out);
+    GraphicsTranslation t;
+    const bool other = desc->GS.BytecodeLength || desc->HS.BytecodeLength || desc->DS.BytecodeLength ||
+                       desc->StreamOutput.NumEntries;
+    if (FAILED(translate_graphics(desc->VS, desc->PS, other, desc->pRootSignature, t))) return E_NOTIMPL;
+    if (!t.translated) return device->CreateGraphicsPipelineState(desc, riid, out);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;
-    copy.VS = {shaders[0].dxil.data(), shaders[0].dxil.size()};
-    if (desc->PS.BytecodeLength) copy.PS = {shaders[1].dxil.data(), shaders[1].dxil.size()};
+    copy.VS = {t.vs.data(), t.vs.size()};
+    if (desc->PS.BytecodeLength) copy.PS = {t.ps.data(), t.ps.size()};
     // Vertex data is read through title memory, not the input assembler.
     copy.InputLayout = {nullptr, 0};
     ComPtr<ID3D12PipelineState> state;
@@ -1061,7 +1090,7 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
         log_refused(create_graphics, detail, false);
         return hr;
     }
-    state->SetPrivateData(pso_info_guid, sizeof(info), &info);
+    state->SetPrivateData(pso_info_guid, sizeof(t.info), &t.info);
     return state->QueryInterface(riid, out);
 }
 
@@ -1069,10 +1098,21 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
 // reads as its inline user-data word of that index (tools/compute_aot.py's user:N role, from push_words); a
 // workgroup-id binding is SV_GroupID's component. The workgroup and wave size come from the container's
 // X2WShaderComputeInfo and are part of the key.
-HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
-                                void** out)
+namespace {
+
+const char* const create_compute = "d3d12_xs!ID3D12Device::CreateComputePipelineState";
+
+struct ComputeTranslation {
+    bool translated = false;
+    std::vector<std::uint8_t> cs;
+    PsoInfo info{};
+};
+
+// Translates the console shader of a compute pipeline; the contract of translate_graphics.
+HRESULT translate_compute(const D3D12_SHADER_BYTECODE& cs_code, ID3D12RootSignature* root_signature,
+                          ComputeTranslation& result)
 {
-    const char* symbol = "d3d12_xs!ID3D12Device::CreateComputePipelineState";
+    const char* symbol = create_compute;
     const auto refuse_cs = [symbol](const std::string& key, const std::string& why) {
         std::string detail = "compute shader";
         if (!key.empty()) detail += " " + key.substr(0, 16);
@@ -1080,16 +1120,16 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
         log_refused(symbol, detail.c_str(), false);
         return E_NOTIMPL;
     };
-    if (!desc || !desc->CS.BytecodeLength) return device->CreateComputePipelineState(desc, riid, out);
+    if (!cs_code.BytecodeLength) return S_OK;
     Program cs;
     std::string why;
-    const Parsed kind = parse_container(desc->CS.pShaderBytecode, desc->CS.BytecodeLength, cs, why);
-    if (kind == Parsed::desktop) return device->CreateComputePipelineState(desc, riid, out);
+    const Parsed kind = parse_container(cs_code.pShaderBytecode, cs_code.BytecodeLength, cs, why);
+    if (kind == Parsed::desktop) return S_OK;
     if (kind == Parsed::malformed) return refuse_cs("", why);
     if (cs.stage != X2W_SHADER_STAGE_COMPUTE)
         return refuse_cs("", "a container's stage does not match the pipeline stage it is bound to");
     RootInfo root{};
-    if (!root_info(desc->pRootSignature, &root))
+    if (!root_info(root_signature, &root))
         return refuse_cs("", "the root signature was not created through the shim, so it has no converter parameters");
 
     PsoInfo info{};
@@ -1146,15 +1186,245 @@ HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELI
     const std::vector<std::uint8_t>& dxil = shader.dxil;
     if (shader.bindings != "x2w-bindings 1\n")
         return refuse_cs(key, "the translation reads descriptor tables, which compute pipelines do not bind yet");
+    result.translated = true;
+    result.cs = dxil;
+    result.info = info;
+    return S_OK;
+}
+
+}  // namespace
+
+HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
+                                void** out)
+{
+    if (!desc) return device->CreateComputePipelineState(desc, riid, out);
+    ComputeTranslation t;
+    if (FAILED(translate_compute(desc->CS, desc->pRootSignature, t))) return E_NOTIMPL;
+    if (!t.translated) return device->CreateComputePipelineState(desc, riid, out);
     D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
-    copy.CS = {dxil.data(), dxil.size()};
+    copy.CS = {t.cs.data(), t.cs.size()};
     ComPtr<ID3D12PipelineState> state;
     const HRESULT hr = device->CreateComputePipelineState(&copy, IID_PPV_ARGS(&state));
     if (FAILED(hr)) {
         char detail[160];
         std::snprintf(detail, sizeof(detail), "desktop CreateComputePipelineState of the translation -> 0x%08lx",
                       static_cast<unsigned long>(hr));
-        log_refused(symbol, detail, false);
+        log_refused(create_compute, detail, false);
+        return hr;
+    }
+    state->SetPrivateData(pso_info_guid, sizeof(t.info), &t.info);
+    return state->QueryInterface(riid, out);
+}
+
+// --- pipeline state streams (ID3D12Device2::CreatePipelineState) ----------------------------------------------
+
+namespace {
+
+const char* const create_stream = "d3d12_xs!ID3D12Device2::CreatePipelineState";
+
+// Size and alignment of a subobject's payload, by D3D12_PIPELINE_STATE_SUBOBJECT_TYPE. Each subobject is the type
+// word, then the payload at its natural alignment, padded to pointer alignment (the CD3DX12 stream layout). Types
+// past the SDK header this builds with are listed by value, from the public DirectX-Headers definitions.
+bool subobject_layout(UINT type, std::size_t* size, std::size_t* align)
+{
+    switch (type) {
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: *size = sizeof(void*); *align = alignof(void*); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+    case 24:  // AS
+    case 25:  // MS
+        *size = sizeof(D3D12_SHADER_BYTECODE); *align = alignof(D3D12_SHADER_BYTECODE); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
+        *size = sizeof(D3D12_STREAM_OUTPUT_DESC); *align = alignof(D3D12_STREAM_OUTPUT_DESC); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: *size = sizeof(D3D12_BLEND_DESC); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: *size = 4; *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: *size = sizeof(D3D12_RASTERIZER_DESC); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+        *size = sizeof(D3D12_DEPTH_STENCIL_DESC); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
+        *size = sizeof(D3D12_INPUT_LAYOUT_DESC); *align = alignof(D3D12_INPUT_LAYOUT_DESC); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
+        *size = 4; *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
+        *size = sizeof(D3D12_RT_FORMAT_ARRAY); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: *size = sizeof(DXGI_SAMPLE_DESC); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
+        *size = sizeof(D3D12_CACHED_PIPELINE_STATE); *align = alignof(D3D12_CACHED_PIPELINE_STATE); return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
+        *size = sizeof(D3D12_DEPTH_STENCIL_DESC1); *align = 4; return true;
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
+        *size = sizeof(D3D12_VIEW_INSTANCING_DESC); *align = alignof(D3D12_VIEW_INSTANCING_DESC); return true;
+    case 26: *size = 60; *align = 4; return true;  // DEPTH_STENCIL2: D3D12_DEPTH_STENCIL_DESC2
+    case 27: *size = 44; *align = 4; return true;  // RASTERIZER1: D3D12_RASTERIZER_DESC1
+    case 28: *size = 40; *align = 4; return true;  // RASTERIZER2: D3D12_RASTERIZER_DESC2
+    case 29: *size = 2 * sizeof(void*); *align = alignof(void*); return true;  // SERIALIZED_ROOT_SIGNATURE
+    default: return false;
+    }
+}
+static_assert(sizeof(D3D12_SHADER_BYTECODE) == 16 && sizeof(D3D12_INPUT_LAYOUT_DESC) == 16);
+
+std::size_t round_up(std::size_t value, std::size_t align) { return (value + align - 1) / align * align; }
+
+struct Subobject {
+    UINT type;
+    std::size_t payload;  // byte offset of the payload in the stream
+};
+
+// Walks a stream. False, with `why`, when it cannot be walked (an unknown type, a subobject past the end).
+bool walk_stream(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, std::vector<Subobject>& out, std::string& why)
+{
+    const auto* bytes = static_cast<const std::uint8_t*>(desc.pPipelineStateSubobjectStream);
+    std::size_t at = 0;
+    while (at < desc.SizeInBytes) {
+        if (desc.SizeInBytes - at < sizeof(UINT)) {
+            why = "a truncated subobject";
+            return false;
+        }
+        UINT type;
+        std::memcpy(&type, bytes + at, sizeof(type));
+        std::size_t size = 0, align = 0;
+        if (!subobject_layout(type, &size, &align)) {
+            why = "subobject type " + std::to_string(type) + " is not known to the shim";
+            return false;
+        }
+        const std::size_t payload = round_up(at + sizeof(UINT), align);
+        const std::size_t end = round_up(payload + size, alignof(void*));
+        if (payload + size > desc.SizeInBytes) {
+            why = "a subobject runs past the stream's size";
+            return false;
+        }
+        out.push_back({type, payload});
+        at = end;
+    }
+    return true;
+}
+
+// Bytecode the shim translates: anything that is not a desktop DXBC/DXIL container (parse_container decides).
+bool console_bytecode(const D3D12_SHADER_BYTECODE& code)
+{
+    if (!code.pShaderBytecode || code.BytecodeLength < 4) return false;
+    std::uint32_t magic;
+    std::memcpy(&magic, code.pShaderBytecode, 4);
+    return magic != 0x43425844u;  // "DXBC"
+}
+
+}  // namespace
+
+HRESULT create_pipeline_state(ID3D12Device2* device, const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid,
+                              void** out)
+{
+    if (!desc || !desc->pPipelineStateSubobjectStream || !desc->SizeInBytes) return device->CreatePipelineState(desc, riid, out);
+    std::vector<Subobject> subobjects;
+    std::string why;
+    if (!walk_stream(*desc, subobjects, why)) {
+        // Unwalkable: no console shader can be found in it, so it goes to desktop D3D12, which validates it (a console
+        // container there fails creation rather than drawing anything).
+        log_note(create_stream, (why + "; the stream is passed to desktop D3D12 unchanged").c_str(), nullptr);
+        return device->CreatePipelineState(desc, riid, out);
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(desc->pPipelineStateSubobjectStream);
+    const auto bytecode = [&](const Subobject& s) {
+        D3D12_SHADER_BYTECODE code;
+        std::memcpy(&code, bytes + s.payload, sizeof(code));
+        return code;
+    };
+    D3D12_SHADER_BYTECODE vs{}, ps{}, cs{};
+    std::size_t vs_at = 0, ps_at = 0, cs_at = 0;
+    bool console = false, mesh = false, other = false, serialized_root = false;
+    ID3D12RootSignature* root = nullptr;
+    for (const Subobject& s : subobjects) {
+        switch (s.type) {
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+            std::memcpy(&root, bytes + s.payload, sizeof(root));
+            break;
+        case 29: serialized_root = true; break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: vs = bytecode(s); vs_at = s.payload; break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS: ps = bytecode(s); ps_at = s.payload; break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS: cs = bytecode(s); cs_at = s.payload; break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+            other = other || bytecode(s).BytecodeLength;
+            console = console || console_bytecode(bytecode(s));
+            break;
+        case 24:
+        case 25:
+            mesh = mesh || bytecode(s).BytecodeLength;
+            console = console || console_bytecode(bytecode(s));
+            break;
+        case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: {
+            D3D12_STREAM_OUTPUT_DESC so;
+            std::memcpy(&so, bytes + s.payload, sizeof(so));
+            other = other || so.NumEntries;
+            break;
+        }
+        default: break;
+        }
+    }
+    console = console || console_bytecode(vs) || console_bytecode(ps) || console_bytecode(cs);
+    if (!console) return device->CreatePipelineState(desc, riid, out);
+
+    if (mesh) {
+        log_refused(create_stream,
+                    "mesh or amplification pipeline with console shaders refused: the converter has no mesh or "
+                    "amplification lowering -> E_NOTIMPL",
+                    false);
+        return E_NOTIMPL;
+    }
+    if (serialized_root) {
+        log_refused(create_stream,
+                    "console shaders with a serialized root signature subobject refused: translation needs a root "
+                    "signature created through the shim -> E_NOTIMPL",
+                    false);
+        return E_NOTIMPL;
+    }
+    std::vector<std::uint64_t> storage((desc->SizeInBytes + 7) / 8);
+    std::memcpy(storage.data(), bytes, desc->SizeInBytes);
+    auto* copy = reinterpret_cast<std::uint8_t*>(storage.data());
+    PsoInfo info{};
+    GraphicsTranslation g;
+    ComputeTranslation c;
+    if (cs.BytecodeLength) {
+        if (vs.BytecodeLength || ps.BytecodeLength || other) {
+            log_refused(create_stream, "a stream with both a compute shader and graphics shaders -> E_NOTIMPL", false);
+            return E_NOTIMPL;
+        }
+        if (FAILED(translate_compute(cs, root, c))) return E_NOTIMPL;
+        const D3D12_SHADER_BYTECODE patched{c.cs.data(), c.cs.size()};
+        std::memcpy(copy + cs_at, &patched, sizeof(patched));
+        info = c.info;
+    } else {
+        if (FAILED(translate_graphics(vs, ps, other, root, g))) return E_NOTIMPL;
+        const D3D12_SHADER_BYTECODE patched_vs{g.vs.data(), g.vs.size()};
+        std::memcpy(copy + vs_at, &patched_vs, sizeof(patched_vs));
+        if (ps.BytecodeLength) {
+            const D3D12_SHADER_BYTECODE patched_ps{g.ps.data(), g.ps.size()};
+            std::memcpy(copy + ps_at, &patched_ps, sizeof(patched_ps));
+        }
+        // Vertex data is read through title memory, not the input assembler.
+        for (const Subobject& s : subobjects) {
+            if (s.type != D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT) continue;
+            const D3D12_INPUT_LAYOUT_DESC none{nullptr, 0};
+            std::memcpy(copy + s.payload, &none, sizeof(none));
+        }
+        info = g.info;
+    }
+    const D3D12_PIPELINE_STATE_STREAM_DESC patched{desc->SizeInBytes, copy};
+    ComPtr<ID3D12PipelineState> state;
+    const HRESULT hr = device->CreatePipelineState(&patched, IID_PPV_ARGS(&state));
+    if (FAILED(hr)) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "desktop CreatePipelineState of the translated stream -> 0x%08lx",
+                      static_cast<unsigned long>(hr));
+        log_refused(create_stream, detail, false);
         return hr;
     }
     state->SetPrivateData(pso_info_guid, sizeof(info), &info);

@@ -137,6 +137,13 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
                                  void** out);
 HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                 void** out);
+// ID3D12Device2::CreatePipelineState. A stream whose shaders are all desktop bytecode is passed through. Console
+// shaders go through the same translation as create_graphics_pipeline (VS, PS) or create_compute_pipeline (CS); the
+// stream is copied with the translated DXIL in place of the containers (and an empty input layout for graphics), so
+// every other subobject and default is the title's. Mesh and amplification shaders in console containers, and
+// console shaders with a serialized root signature subobject, are refused (logged, E_NOTIMPL).
+HRESULT create_pipeline_state(ID3D12Device2* device, const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid,
+                              void** out);
 
 // Starts the first translator service in the background (at device creation), unless X2W_TRANSLATE says otherwise.
 void prestart_translator();

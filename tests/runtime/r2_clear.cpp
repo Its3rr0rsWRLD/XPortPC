@@ -280,11 +280,12 @@ int unknown_entries_check()
         unsigned slot;
     };
     // The first slot past each public interface, and one far past it.
-    const Case cases[] = {{gpu.device.Get(), "ID3D12Device", 44},
-                          {gpu.device.Get(), "ID3D12Device", 77},
+    // The device and list wrappers end at ID3D12Device10 (79 slots) and ID3D12GraphicsCommandList7 (81).
+    const Case cases[] = {{gpu.device.Get(), "ID3D12Device", 79},
+                          {gpu.device.Get(), "ID3D12Device", 120},
                           {gpu.queue.Get(), "ID3D12CommandQueue", 19},
                           {gpu.allocator.Get(), "ID3D12CommandAllocator", 9},
-                          {gpu.list.Get(), "ID3D12GraphicsCommandList", 60},
+                          {gpu.list.Get(), "ID3D12GraphicsCommandList", 81},
                           {gpu.fence.Get(), "ID3D12Fence1", 12}};
     for (const Case& c : cases) {
         const std::size_t seen = recorded.events.size();
@@ -305,13 +306,13 @@ int unknown_entries_check()
     }
     // A repeated slot is counted but not logged again.
     const std::size_t seen_before_repeat = recorded.events.size();
-    call_slot(gpu.device.Get(), 44);
+    call_slot(gpu.device.Get(), 79);
     expect(recorded.events.size() == seen_before_repeat, "repeated unknown slot not logged again");
 
-    // Unknown IIDs: a made-up one and a public one this skeleton does not implement (ID3D12Device1).
+    // Unknown IIDs: a made-up one and a public interface the device is not (ID3D12CommandQueue).
     const GUID made_up = {0x7832772d, 0x5250, 0x4f72, {0x9a, 0x51, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x31}};
-    const GUID device1 = __uuidof(ID3D12Device1);
-    for (const GUID* iid : {&made_up, &device1}) {
+    const GUID not_device = __uuidof(ID3D12CommandQueue);
+    for (const GUID* iid : {&made_up, &not_device}) {
         const std::size_t seen = recorded.events.size();
         void* out = reinterpret_cast<void*>(0x1);
         const HRESULT hr = gpu.device->QueryInterface(*iid, &out);

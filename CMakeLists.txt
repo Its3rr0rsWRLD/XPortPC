@@ -93,7 +93,8 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_resources.cpp
+    src/d3d12_xs_indirect.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -114,6 +115,19 @@ foreach(adapter IN ITEMS warp hardware)
 endforeach()
 add_test(NAME runtime_r2_unknown_entries_warp COMMAND r2_clear warp unknown_entries)
 set_tests_properties(runtime_r2_unknown_entries_warp PROPERTIES TIMEOUT 60)
+
+# The shim's public desktop D3D12 surface past the first interface versions: versions, the buffer address model,
+# ExecuteIndirect with title addresses, enhanced barriers (tests/runtime/d3d12_full.cpp).
+add_executable(d3d12_full tests/runtime/d3d12_full.cpp)
+target_include_directories(d3d12_full PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_features(d3d12_full PRIVATE cxx_std_17)
+target_link_libraries(d3d12_full PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+foreach(adapter IN ITEMS warp hardware)
+    foreach(mode IN ITEMS versions indirect indirect_wrong_reference enhanced enhanced_wrong_reference)
+        add_test(NAME runtime_d3d12_${mode}_${adapter} COMMAND d3d12_full ${adapter} ${mode})
+        set_tests_properties(runtime_d3d12_${mode}_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+    endforeach()
+endforeach()
 
 # Runtime ladder R3: a triangle from llvm-mc-assembled gfx1013 programs (tests/runtime/r3_*.s, r3_programs.h), which
 # the shim translates at pipeline creation (src/d3d12_xs_pipeline.h) by running tools/pso_translate.py (Python + DXC)
@@ -139,6 +153,23 @@ target_link_libraries(r5_frames PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
+foreach(stage IN ITEMS vs ps)
+    string(TOUPPER "${stage}" entry)
+    set(header "${CMAKE_CURRENT_BINARY_DIR}/d3d12_full_${stage}.h")
+    add_custom_command(OUTPUT "${header}"
+        COMMAND "${DXC_EXECUTABLE}" -T ${stage}_6_0 -E ${entry}Main -Vn d3d12_full_${stage} -Fh "${header}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/d3d12_full.hlsl"
+        DEPENDS tests/runtime/d3d12_full.hlsl VERBATIM)
+    target_sources(d3d12_full PRIVATE "${header}")
+endforeach()
+# The graphics shim's ExecuteIndirect address rewrite (src/d3d12_xs_indirect.h), embedded in d3d12_xs.dll.
+set(x2w_indirect_cs "${CMAKE_CURRENT_BINARY_DIR}/d3d12_xs_indirect_cs.h")
+add_custom_command(OUTPUT "${x2w_indirect_cs}"
+    COMMAND "${DXC_EXECUTABLE}" -T cs_6_0 -E main -Vn x2w_indirect_cs -Fh "${x2w_indirect_cs}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12_xs_indirect.hlsl"
+    DEPENDS src/d3d12_xs_indirect.hlsl VERBATIM)
+target_sources(d3d12_xs_shim PRIVATE "${x2w_indirect_cs}")
+target_include_directories(d3d12_xs_shim PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(root_probe PRIVATE SDK_DXC_DIR=L"${DXC_BIN_DIR}/")
 add_executable(offscreen_check tests/offscreen_check.cpp tests/compute_check.cpp tests/dxr_check.cpp tests/buffer_ops.cpp)
 target_sources(offscreen_check PRIVATE tests/spirv_window/readback.cpp tests/spirv_window/sampler_readback.cpp)
@@ -2680,11 +2711,15 @@ if(EXISTS "${INTAKE_PYTHON}")
         add_test(NAME runtime_r3_triangle_cold_${adapter} COMMAND r3_triangle ${adapter} cold)
         add_test(NAME runtime_r3_triangle_warm_${adapter} COMMAND r3_triangle ${adapter} warm)
         add_test(NAME runtime_r3_wrong_reference_${adapter} COMMAND r3_triangle ${adapter} wrong_reference)
+        add_test(NAME runtime_r3_triangle_stream_${adapter} COMMAND r3_triangle ${adapter} stream)
+        add_test(NAME runtime_r3_stream_wrong_reference_${adapter} COMMAND r3_triangle ${adapter} stream_wrong_reference)
         set_tests_properties(runtime_r3_triangle_cold_${adapter} PROPERTIES FIXTURES_SETUP r3_cache_${adapter})
-        set_tests_properties(runtime_r3_triangle_warm_${adapter} runtime_r3_wrong_reference_${adapter} PROPERTIES
+        set_tests_properties(runtime_r3_triangle_warm_${adapter} runtime_r3_wrong_reference_${adapter}
+            runtime_r3_triangle_stream_${adapter} runtime_r3_stream_wrong_reference_${adapter} PROPERTIES
             FIXTURES_REQUIRED r3_cache_${adapter})
         set_tests_properties(runtime_r3_triangle_cold_${adapter} runtime_r3_triangle_warm_${adapter}
-            runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+            runtime_r3_wrong_reference_${adapter} runtime_r3_triangle_stream_${adapter}
+            runtime_r3_stream_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
             ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
     endforeach()
     # Runtime ladder R4 (tests/runtime/r4_scene.cpp): cold run first (empties the cache), then warm and the controls.

@@ -6,10 +6,13 @@
 // and its vtable continues past the public methods with logging thunks (d3d12_xs_log.cpp), so a
 // title calling a slot we do not implement gets E_NOTIMPL and one log line with the slot index.
 //
-// Wrapped: ID3D12Device, ID3D12CommandQueue, ID3D12CommandAllocator, ID3D12GraphicsCommandList,
-// ID3D12Fence1, IDXGISwapChain3 and CBV/SRV/UAV and sampler ID3D12DescriptorHeaps (d3d12_xs_descriptors.h).
-// Everything else a wrapped method returns (resources, heaps, RTV and DSV heaps, pipeline state, root
-// signatures, query heaps) is the desktop object itself.
+// Wrapped: ID3D12Device through ID3D12Device10, ID3D12CommandQueue, ID3D12CommandAllocator,
+// ID3D12GraphicsCommandList through ID3D12GraphicsCommandList7, ID3D12Fence1, IDXGISwapChain3, CBV/SRV/UAV and
+// sampler ID3D12DescriptorHeaps (d3d12_xs_descriptors.h), ID3D12Resource2 (resources the title creates through the
+// device: their GPU virtual addresses are title addresses, d3d12_xs_resources.h), ID3D12Heap1 and
+// ID3D12CommandSignature. A versioned wrapper answers QueryInterface for version N only when the desktop object
+// implements it. Everything else a wrapped method returns (RTV and DSV heaps, pipeline state, root signatures, query
+// heaps, state objects, protected sessions, swap chain buffers) is the desktop object itself.
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -18,19 +21,24 @@
 
 namespace d3d12_xs {
 
-enum class Kind : unsigned { device, queue, allocator, list, fence, swap_chain, descriptor_heap, count };
+enum class Kind : unsigned {
+    device, queue, allocator, list, fence, swap_chain, descriptor_heap, resource, heap, command_signature, count
+};
 
 // Public desktop method count of each wrapped interface (IUnknown included), from d3d12.h/dxgi1_4.h.
 constexpr unsigned public_slots(Kind kind)
 {
     switch (kind) {
-    case Kind::device: return 44;      // ID3D12Device
+    case Kind::device: return 79;      // ID3D12Device10 (ID3D12Device: 44)
     case Kind::queue: return 19;       // ID3D12CommandQueue
     case Kind::allocator: return 9;    // ID3D12CommandAllocator
-    case Kind::list: return 60;        // ID3D12GraphicsCommandList
+    case Kind::list: return 81;        // ID3D12GraphicsCommandList7 (ID3D12GraphicsCommandList: 60)
     case Kind::fence: return 12;       // ID3D12Fence1
     case Kind::swap_chain: return 40;  // IDXGISwapChain3
     case Kind::descriptor_heap: return 11;  // ID3D12DescriptorHeap
+    case Kind::resource: return 17;    // ID3D12Resource2
+    case Kind::heap: return 10;        // ID3D12Heap1
+    case Kind::command_signature: return 8;  // ID3D12CommandSignature
     default: return 0;
     }
 }
@@ -58,6 +66,10 @@ void count_texture_miss();
 void count_object(int delta);
 void count_device();
 void count_present();
+void count_indirect_rewrite();
+// A call the shim has no translation for: logged once per (symbol, detail) as X2W_GFX_EVENT_REFUSED without
+// counting a pipeline or draw (an API object or call refused with a documented failure code).
+void log_refused_call(const char* symbol, const char* detail);
 void set_title_gpu(int state, HRESULT hr);
 
 // Wrapping entry points (d3d12_xs_wrap.cpp). wrap_device takes over one reference to `real`;

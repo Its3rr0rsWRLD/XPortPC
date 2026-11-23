@@ -7,13 +7,16 @@
 #include "d3d12_xs_wrap.h"
 #include "d3d12_xs_api.h"
 #include "d3d12_xs_descriptors.h"
+#include "d3d12_xs_indirect.h"
 #include "d3d12_xs_pipeline.h"
+#include "d3d12_xs_resources.h"
 
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <new>
@@ -33,6 +36,31 @@ namespace {
         if (!x2w_seen_.exchange(true, std::memory_order_relaxed))                    \
             log_first_use(kind, __func__, X2W_RETURN_ADDRESS());                     \
     } while (0)
+
+// A method of a later interface version that the desktop object does not implement: logged once, then the method
+// returns the given value (nothing for void). A title only reaches it through a vtable it did not QueryInterface for.
+void log_missing_version(Kind kind, const char* method)
+{
+    char symbol[160];
+    std::snprintf(symbol, sizeof(symbol), "d3d12_xs!%s::%s", interface_name(kind), method);
+    log_refused_call(symbol, "the desktop object does not implement the interface version of this method; not called");
+}
+#define X2W_REQUIRE(version, ...)                                                                \
+    do {                                                                                         \
+        if (!(version)) {                                                                        \
+            log_missing_version(kind, __func__);                                                 \
+            return __VA_ARGS__;                                                                  \
+        }                                                                                        \
+    } while (0)
+
+// Refuses a call with a logged reason: "<interface>::<method>: <why>".
+void refuse_call(Kind kind, const char* method, const char* why)
+{
+    char symbol[160];
+    std::snprintf(symbol, sizeof(symbol), "d3d12_xs!%s::%s", interface_name(kind), method);
+    log_refused_call(symbol, why);
+}
+#define X2W_REFUSE(why) refuse_call(kind, __func__, why)
 
 IUnknown* real_of(const void* object);
 
@@ -61,6 +89,7 @@ template <class Derived, class Interface, Kind K>
 class Wrapper : public Interface {
 public:
     static constexpr Kind kind = K;
+    using interface_type = Interface;
 
     explicit Wrapper(Interface* real) : real_(real) { count_object(1); }
     ~Wrapper()
@@ -86,7 +115,7 @@ public:
     {
         if (!out) return E_POINTER;
         *out = nullptr;
-        if (IsEqualIID(riid, __uuidof(IUnknown)) || Derived::implements(riid)) {
+        if (IsEqualIID(riid, __uuidof(IUnknown)) || static_cast<Derived*>(this)->implements(riid)) {
             AddRef();
             *out = static_cast<Interface*>(this);
             return S_OK;
@@ -145,6 +174,7 @@ class Device;
 std::atomic<Device*> g_attached_device;
 HRESULT device_query(Device* device, REFIID riid, void** out, const void* caller);
 pipeline::TitleViews* device_views(Device* device);
+indirect::Rewriter* device_rewriter(Device* device);
 
 // ID3D12DeviceChild::GetDevice (slot 7): the wrapped device.
 #define X2W_DEVICE_CHILD_METHODS                                                                     \
@@ -214,19 +244,225 @@ private:
 class Allocator final : public Wrapper<Allocator, ID3D12CommandAllocator, Kind::allocator>, DeviceRef {
 public:
     Allocator(ID3D12CommandAllocator* real, Device* device) : Wrapper(real), DeviceRef(device) { install(); }
+    ~Allocator() { indirect::recycle(keep_); }
     static bool implements(REFIID riid)
     {
         return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandAllocator));
     }
+    // The shim's buffers that lists recording into this allocator read (ExecuteIndirect rewrites).
+    indirect::Keep& keep() { return keep_; }
 
     X2W_D3D12_OBJECT_METHODS
     X2W_DEVICE_CHILD_METHODS
+    // A reset allocator's command memory is free, so the GPU has finished its lists: their rewrite buffers are too.
     HRESULT STDMETHODCALLTYPE Reset() override
     {
         X2W_USE();
-        return real_->Reset();
+        const HRESULT hr = real_->Reset();
+        if (SUCCEEDED(hr)) indirect::recycle(keep_);
+        return hr;
     }
+
+private:
+    indirect::Keep keep_;
 };
+
+D3D12_RESOURCE_DESC resource_desc(ID3D12Resource* resource)
+{
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_RESOURCE_DESC desc{};
+    resource->GetDesc(&desc);
+    return desc;
+#else
+    return resource->GetDesc();
+#endif
+}
+D3D12_HEAP_DESC heap_desc(ID3D12Heap* heap)
+{
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_HEAP_DESC desc{};
+    heap->GetDesc(&desc);
+    return desc;
+#else
+    return heap->GetDesc();
+#endif
+}
+
+// A resource the title created through the device (d3d12_xs_resources.h): a buffer's GPU virtual address is its
+// title address. real_ is the desktop resource.
+class Resource final : public Wrapper<Resource, ID3D12Resource2, Kind::resource>, DeviceRef {
+public:
+    Resource(ID3D12Resource* real, Device* device, const resources::TitleAddress& address)
+        : Wrapper(static_cast<ID3D12Resource2*>(real)), DeviceRef(device), address_(address)
+    {
+        real->QueryInterface(IID_PPV_ARGS(&r1_));
+        real->QueryInterface(IID_PPV_ARGS(&r2_));
+        install();
+    }
+    ~Resource() { resources::release(real_, address_); }
+    bool implements(REFIID riid) const
+    {
+        return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12Resource)) ||
+               (r1_ && IsEqualIID(riid, __uuidof(ID3D12Resource1))) ||
+               (r2_ && IsEqualIID(riid, __uuidof(ID3D12Resource2)));
+    }
+    std::uint64_t title_address() const { return address_.title; }
+
+    X2W_D3D12_OBJECT_METHODS
+    X2W_DEVICE_CHILD_METHODS
+    HRESULT STDMETHODCALLTYPE Map(UINT subresource, const D3D12_RANGE* range, void** data) override
+    {
+        X2W_USE();
+        return real_->Map(subresource, range, data);
+    }
+    void STDMETHODCALLTYPE Unmap(UINT subresource, const D3D12_RANGE* range) override
+    {
+        X2W_USE();
+        real_->Unmap(subresource, range);
+    }
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_RESOURCE_DESC* STDMETHODCALLTYPE GetDesc(D3D12_RESOURCE_DESC* ret) override
+    {
+        X2W_USE();
+        return real_->GetDesc(ret);
+    }
+#else
+    D3D12_RESOURCE_DESC STDMETHODCALLTYPE GetDesc() override
+    {
+        X2W_USE();
+        return real_->GetDesc();
+    }
+#endif
+    D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override
+    {
+        X2W_USE();
+        return address_.title;
+    }
+    HRESULT STDMETHODCALLTYPE WriteToSubresource(UINT subresource, const D3D12_BOX* box, const void* data, UINT row_pitch,
+                                                 UINT depth_pitch) override
+    {
+        X2W_USE();
+        return real_->WriteToSubresource(subresource, box, data, row_pitch, depth_pitch);
+    }
+    HRESULT STDMETHODCALLTYPE ReadFromSubresource(void* data, UINT row_pitch, UINT depth_pitch, UINT subresource,
+                                                  const D3D12_BOX* box) override
+    {
+        X2W_USE();
+        return real_->ReadFromSubresource(data, row_pitch, depth_pitch, subresource, box);
+    }
+    HRESULT STDMETHODCALLTYPE GetHeapProperties(D3D12_HEAP_PROPERTIES* properties, D3D12_HEAP_FLAGS* flags) override
+    {
+        X2W_USE();
+        return real_->GetHeapProperties(properties, flags);
+    }
+    HRESULT STDMETHODCALLTYPE GetProtectedResourceSession(REFIID riid, void** session) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(r1_, E_NOINTERFACE);
+        return r1_->GetProtectedResourceSession(riid, session);
+    }
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_RESOURCE_DESC1* STDMETHODCALLTYPE GetDesc1(D3D12_RESOURCE_DESC1* ret) override
+    {
+        X2W_USE();
+        if (!r2_) {
+            *ret = {};
+            X2W_REQUIRE(r2_, ret);
+        }
+        return r2_->GetDesc1(ret);
+    }
+#else
+    D3D12_RESOURCE_DESC1 STDMETHODCALLTYPE GetDesc1() override
+    {
+        X2W_USE();
+        X2W_REQUIRE(r2_, D3D12_RESOURCE_DESC1{});
+        return r2_->GetDesc1();
+    }
+#endif
+
+private:
+    resources::TitleAddress address_;
+    ComPtr<ID3D12Resource1> r1_;
+    ComPtr<ID3D12Resource2> r2_;
+};
+
+// A heap the title created or opened through the device. `existing_address` is the address an existing heap was
+// opened from (OpenExistingHeapFromAddress), so buffers placed in it get title addresses inside that memory.
+class Heap final : public Wrapper<Heap, ID3D12Heap1, Kind::heap>, DeviceRef {
+public:
+    Heap(ID3D12Heap* real, Device* device, std::uint64_t existing_address)
+        : Wrapper(static_cast<ID3D12Heap1*>(real)), DeviceRef(device), existing_address_(existing_address)
+    {
+        real->QueryInterface(IID_PPV_ARGS(&h1_));
+        install();
+    }
+    bool implements(REFIID riid) const
+    {
+        return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12Heap)) ||
+               (h1_ && IsEqualIID(riid, __uuidof(ID3D12Heap1)));
+    }
+    std::uint64_t existing_address() const { return existing_address_; }
+
+    X2W_D3D12_OBJECT_METHODS
+    X2W_DEVICE_CHILD_METHODS
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_HEAP_DESC* STDMETHODCALLTYPE GetDesc(D3D12_HEAP_DESC* ret) override
+    {
+        X2W_USE();
+        return real_->GetDesc(ret);
+    }
+#else
+    D3D12_HEAP_DESC STDMETHODCALLTYPE GetDesc() override
+    {
+        X2W_USE();
+        return real_->GetDesc();
+    }
+#endif
+    HRESULT STDMETHODCALLTYPE GetProtectedResourceSession(REFIID riid, void** session) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(h1_, E_NOINTERFACE);
+        return h1_->GetProtectedResourceSession(riid, session);
+    }
+
+private:
+    std::uint64_t existing_address_;
+    ComPtr<ID3D12Heap1> h1_;
+};
+
+// A command signature with the layout of its records (d3d12_xs_indirect.h).
+class CommandSignature final : public Wrapper<CommandSignature, ID3D12CommandSignature, Kind::command_signature>,
+                               DeviceRef {
+public:
+    CommandSignature(ID3D12CommandSignature* real, Device* device, const indirect::Layout& layout)
+        : Wrapper(real), DeviceRef(device), layout_(layout)
+    {
+        install();
+    }
+    static bool implements(REFIID riid)
+    {
+        return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandSignature));
+    }
+    const indirect::Layout& layout() const { return layout_; }
+
+    X2W_D3D12_OBJECT_METHODS
+    X2W_DEVICE_CHILD_METHODS
+
+private:
+    indirect::Layout layout_;
+};
+
+template <class W>
+W* as_wrapper(const void* object, Kind want)
+{
+    Kind kind;
+    if (!wrapper_kind(object, &kind) || kind != want) return nullptr;
+    return static_cast<W*>(reinterpret_cast<typename W::interface_type*>(const_cast<void*>(object)));
+}
+
+// The private-data key that marks a state object whose subobjects include a local root signature (DispatchRays
+// refuses it: its shader records may hold title addresses or title descriptor handles).
+constexpr GUID local_root_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x10}};
 
 // A title CBV/SRV/UAV or sampler heap (d3d12_xs_descriptors.h): title handles over a desktop shadow heap that is
 // never shader visible. real_ is the shadow heap.
@@ -301,11 +537,22 @@ const descriptors::Heap* title_heap(ID3D12DescriptorHeap* heap)
     return &static_cast<DescriptorHeap*>(heap)->state();
 }
 
-class List final : public Wrapper<List, ID3D12GraphicsCommandList, Kind::list>, DeviceRef {
+class List final : public Wrapper<List, ID3D12GraphicsCommandList7, Kind::list>, DeviceRef {
 public:
-    List(ID3D12GraphicsCommandList* real, Device* device) : Wrapper(real), DeviceRef(device), args_(new (std::nothrow) pipeline::RootArgs())
+    List(ID3D12GraphicsCommandList* real, Device* device, Allocator* allocator, ID3D12PipelineState* state)
+        : Wrapper(static_cast<ID3D12GraphicsCommandList7*>(real)), DeviceRef(device),
+          args_(new (std::nothrow) pipeline::RootArgs()), replay_(new (std::nothrow) ComputeReplay()),
+          allocator_(allocator), current_pso_(state)
     {
         if (args_) args_->clear();
+        if (replay_) replay_->clear();
+        real->QueryInterface(IID_PPV_ARGS(&l1_));
+        real->QueryInterface(IID_PPV_ARGS(&l2_));
+        real->QueryInterface(IID_PPV_ARGS(&l3_));
+        real->QueryInterface(IID_PPV_ARGS(&l4_));
+        real->QueryInterface(IID_PPV_ARGS(&l5_));
+        real->QueryInterface(IID_PPV_ARGS(&l6_));
+        real->QueryInterface(IID_PPV_ARGS(&l7_));
         install();
     }
     ~List()
@@ -313,12 +560,20 @@ public:
         pipeline::release_blocks(device_views(device_), blocks_);
         delete args_;
         delete compute_.args;
+        delete replay_;
     }
     pipeline::BlockUse* blocks() { return &blocks_; }
-    static bool implements(REFIID riid)
+    bool implements(REFIID riid) const
     {
         return is_d3d12_child_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandList)) ||
-               IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList));
+               IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList)) ||
+               (l1_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList1))) ||
+               (l2_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList2))) ||
+               (l3_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList3))) ||
+               (l4_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList4))) ||
+               (l5_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList5))) ||
+               (l6_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList6))) ||
+               (l7_ && IsEqualIID(riid, __uuidof(ID3D12GraphicsCommandList7)));
     }
 
     // Graphics state the converter's bindings depend on (d3d12_xs_pipeline.h), recorded as the title sets it.
@@ -330,9 +585,16 @@ public:
         ours_bound_ = false;
         if (args_) args_->clear();
         compute_.reset();
+        compute_root_ = nullptr;
+        if (replay_) replay_->clear();
+        predication_ = {};
+        in_render_pass_ = false;
+        enhanced_ = false;
+        state_object_local_root_ = false;
     }
     void set_pipeline(ID3D12PipelineState* state)
     {
+        current_pso_ = state;
         translated_ = pipeline::pso_info(state, &pso_);
         compute_.translated = pipeline::compute_pso_info(state, &compute_.pso);
     }
@@ -380,6 +642,7 @@ public:
         // A new recording: the blocks the previous one read are protected by its submissions' stamps only.
         pipeline::release_blocks(device_views(device_), blocks_);
         reset_state(state);
+        allocator_ = as_wrapper<Allocator>(allocator, Kind::allocator);
         return real_->Reset(unwrap(allocator), state);
     }
     void STDMETHODCALLTYPE ClearState(ID3D12PipelineState* state) override
@@ -414,31 +677,40 @@ public:
                                             UINT64 src_offset, UINT64 bytes) override
     {
         X2W_USE();
-        real_->CopyBufferRegion(dst, dst_offset, src, src_offset, bytes);
+        real_->CopyBufferRegion(unwrap(dst), dst_offset, unwrap(src), src_offset, bytes);
     }
     void STDMETHODCALLTYPE CopyTextureRegion(const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x, UINT y, UINT z,
                                              const D3D12_TEXTURE_COPY_LOCATION* src, const D3D12_BOX* box) override
     {
         X2W_USE();
-        real_->CopyTextureRegion(dst, x, y, z, src, box);
+        D3D12_TEXTURE_COPY_LOCATION d{}, s{};
+        if (dst) {
+            d = *dst;
+            d.pResource = unwrap(dst->pResource);
+        }
+        if (src) {
+            s = *src;
+            s.pResource = unwrap(src->pResource);
+        }
+        real_->CopyTextureRegion(dst ? &d : nullptr, x, y, z, src ? &s : nullptr, box);
     }
     void STDMETHODCALLTYPE CopyResource(ID3D12Resource* dst, ID3D12Resource* src) override
     {
         X2W_USE();
-        real_->CopyResource(dst, src);
+        real_->CopyResource(unwrap(dst), unwrap(src));
     }
     void STDMETHODCALLTYPE CopyTiles(ID3D12Resource* tiled, const D3D12_TILED_RESOURCE_COORDINATE* start,
                                      const D3D12_TILE_REGION_SIZE* size, ID3D12Resource* buffer, UINT64 offset,
                                      D3D12_TILE_COPY_FLAGS flags) override
     {
         X2W_USE();
-        real_->CopyTiles(tiled, start, size, buffer, offset, flags);
+        real_->CopyTiles(unwrap(tiled), start, size, unwrap(buffer), offset, flags);
     }
     void STDMETHODCALLTYPE ResolveSubresource(ID3D12Resource* dst, UINT dst_sub, ID3D12Resource* src, UINT src_sub,
                                               DXGI_FORMAT format) override
     {
         X2W_USE();
-        real_->ResolveSubresource(dst, dst_sub, src, src_sub, format);
+        real_->ResolveSubresource(unwrap(dst), dst_sub, unwrap(src), src_sub, format);
     }
     void STDMETHODCALLTYPE IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY topology) override
     {
@@ -474,7 +746,28 @@ public:
     void STDMETHODCALLTYPE ResourceBarrier(UINT count, const D3D12_RESOURCE_BARRIER* barriers) override
     {
         X2W_USE();
-        real_->ResourceBarrier(count, barriers);
+        std::vector<D3D12_RESOURCE_BARRIER> desktop;
+        if (!barriers || !count) {
+            real_->ResourceBarrier(count, barriers);
+            return;
+        }
+        try {
+            desktop.assign(barriers, barriers + count);
+        } catch (...) {
+            X2W_REFUSE("out of memory unwrapping barriers; not recorded");
+            return;
+        }
+        for (D3D12_RESOURCE_BARRIER& b : desktop) {
+            if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+                b.Transition.pResource = unwrap(b.Transition.pResource);
+            } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
+                b.Aliasing.pResourceBefore = unwrap(b.Aliasing.pResourceBefore);
+                b.Aliasing.pResourceAfter = unwrap(b.Aliasing.pResourceAfter);
+            } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV) {
+                b.UAV.pResource = unwrap(b.UAV.pResource);
+            }
+        }
+        real_->ResourceBarrier(count, desktop.data());
     }
     void STDMETHODCALLTYPE ExecuteBundle(ID3D12GraphicsCommandList* bundle) override
     {
@@ -506,6 +799,8 @@ public:
     {
         X2W_USE();
         compute_.set_root(root);
+        compute_root_ = root;
+        if (replay_) replay_->clear();
         real_->SetComputeRootSignature(root);
     }
     void STDMETHODCALLTYPE SetGraphicsRootSignature(ID3D12RootSignature* root) override
@@ -524,6 +819,7 @@ public:
                         true);
             return;
         }
+        if (replay_) replay_->table(index, base);
         real_->SetComputeRootDescriptorTable(index, base);
     }
     // A table of a title root signature is recorded (its parameter is a placeholder on desktop); bind_for_draw
@@ -546,6 +842,7 @@ public:
     {
         X2W_USE();
         compute_.record_constants(index, 1, &data, offset);
+        if (replay_) replay_->constants(index, 1, &data, offset);
         real_->SetComputeRoot32BitConstant(index, data, offset);
     }
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstant(UINT index, UINT data, UINT offset) override
@@ -558,6 +855,7 @@ public:
     {
         X2W_USE();
         if (data) compute_.record_constants(index, count, data, offset);
+        if (data && replay_) replay_->constants(index, count, data, offset);
         real_->SetComputeRoot32BitConstants(index, count, data, offset);
     }
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstants(UINT index, UINT count, const void* data, UINT offset) override
@@ -573,7 +871,9 @@ public:
     {
         X2W_USE();
         compute_.record_address(index, address);
-        real_->SetComputeRootConstantBufferView(index, pipeline::translate_address(address, 4));
+        const D3D12_GPU_VIRTUAL_ADDRESS desktop = pipeline::translate_address(address, 4);
+        if (replay_) replay_->view(index, ComputeReplay::cbv, desktop);
+        real_->SetComputeRootConstantBufferView(index, desktop);
     }
     void STDMETHODCALLTYPE SetGraphicsRootConstantBufferView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
@@ -585,7 +885,9 @@ public:
     {
         X2W_USE();
         compute_.record_address(index, address);
-        real_->SetComputeRootShaderResourceView(index, pipeline::translate_address(address, 4));
+        const D3D12_GPU_VIRTUAL_ADDRESS desktop = pipeline::translate_address(address, 4);
+        if (replay_) replay_->view(index, ComputeReplay::srv, desktop);
+        real_->SetComputeRootShaderResourceView(index, desktop);
     }
     void STDMETHODCALLTYPE SetGraphicsRootShaderResourceView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
@@ -597,7 +899,9 @@ public:
     {
         X2W_USE();
         compute_.record_address(index, address);
-        real_->SetComputeRootUnorderedAccessView(index, pipeline::translate_address(address, 4));
+        const D3D12_GPU_VIRTUAL_ADDRESS desktop = pipeline::translate_address(address, 4);
+        if (replay_) replay_->view(index, ComputeReplay::uav, desktop);
+        real_->SetComputeRootUnorderedAccessView(index, desktop);
     }
     void STDMETHODCALLTYPE SetGraphicsRootUnorderedAccessView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
@@ -633,6 +937,16 @@ public:
     void STDMETHODCALLTYPE SOSetTargets(UINT start, UINT count, const D3D12_STREAM_OUTPUT_BUFFER_VIEW* views) override
     {
         X2W_USE();
+        if (views && count <= D3D12_SO_BUFFER_SLOT_COUNT) {
+            D3D12_STREAM_OUTPUT_BUFFER_VIEW desktop[D3D12_SO_BUFFER_SLOT_COUNT];
+            for (UINT i = 0; i < count; ++i) {
+                desktop[i] = views[i];
+                desktop[i].BufferLocation = pipeline::translate_address(views[i].BufferLocation, views[i].SizeInBytes);
+                desktop[i].BufferFilledSizeLocation = pipeline::translate_address(views[i].BufferFilledSizeLocation, 4);
+            }
+            real_->SOSetTargets(start, count, desktop);
+            return;
+        }
         real_->SOSetTargets(start, count, views);
     }
     void STDMETHODCALLTYPE OMSetRenderTargets(UINT count, const D3D12_CPU_DESCRIPTOR_HANDLE* targets, BOOL single,
@@ -659,7 +973,7 @@ public:
     {
         X2W_USE();
         if (title_uav_clear(gpu, cpu)) return;
-        real_->ClearUnorderedAccessViewUint(gpu, cpu, resource, values, count, rects);
+        real_->ClearUnorderedAccessViewUint(gpu, cpu, unwrap(resource), values, count, rects);
     }
     void STDMETHODCALLTYPE ClearUnorderedAccessViewFloat(D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
                                                          ID3D12Resource* resource, const FLOAT values[4], UINT count,
@@ -667,7 +981,7 @@ public:
     {
         X2W_USE();
         if (title_uav_clear(gpu, cpu)) return;
-        real_->ClearUnorderedAccessViewFloat(gpu, cpu, resource, values, count, rects);
+        real_->ClearUnorderedAccessViewFloat(gpu, cpu, unwrap(resource), values, count, rects);
     }
     // A UAV clear through title-heap handles needs a shader-visible desktop copy of the view; not translated yet.
     bool title_uav_clear(D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu)
@@ -680,7 +994,7 @@ public:
     void STDMETHODCALLTYPE DiscardResource(ID3D12Resource* resource, const D3D12_DISCARD_REGION* region) override
     {
         X2W_USE();
-        real_->DiscardResource(resource, region);
+        real_->DiscardResource(unwrap(resource), region);
     }
     void STDMETHODCALLTYPE BeginQuery(ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) override
     {
@@ -696,12 +1010,13 @@ public:
                                             ID3D12Resource* dst, UINT64 offset) override
     {
         X2W_USE();
-        real_->ResolveQueryData(heap, type, start, count, dst, offset);
+        real_->ResolveQueryData(heap, type, start, count, unwrap(dst), offset);
     }
     void STDMETHODCALLTYPE SetPredication(ID3D12Resource* buffer, UINT64 offset, D3D12_PREDICATION_OP op) override
     {
         X2W_USE();
-        real_->SetPredication(buffer, offset, op);
+        predication_ = {unwrap(buffer), offset, op};
+        real_->SetPredication(unwrap(buffer), offset, op);
     }
     void STDMETHODCALLTYPE SetMarker(UINT metadata, const void* data, UINT size) override
     {
@@ -718,15 +1033,486 @@ public:
         X2W_USE();
         real_->EndEvent();
     }
+    // ExecuteIndirect (d3d12_xs_indirect.h): records with title addresses are rewritten by a compute pass first.
     void STDMETHODCALLTYPE ExecuteIndirect(ID3D12CommandSignature* signature, UINT max_commands, ID3D12Resource* args,
                                            UINT64 args_offset, ID3D12Resource* count, UINT64 count_offset) override
     {
         X2W_USE();
-        real_->ExecuteIndirect(signature, max_commands, args, args_offset, count, count_offset);
+        const CommandSignature* wrapped = as_wrapper<CommandSignature>(signature, Kind::command_signature);
+        if (!wrapped) {
+            X2W_REFUSE("a command signature not created through the shim (its records are unknown); not executed");
+            return;
+        }
+        const indirect::Layout& layout = wrapped->layout();
+        if (layout.refused) {
+            X2W_REFUSE((std::string(layout.refused) + "; not executed").c_str());
+            return;
+        }
+        const bool dispatch = layout.op == indirect::Op::dispatch;
+        if (dispatch ? compute_.translated : translated_) {
+            log_refused("d3d12_xs!ID3D12GraphicsCommandList::ExecuteIndirect",
+                        "indirect commands with a translated pipeline are not executed: its converter parameters "
+                        "(push words, draw bases) come from root arguments recorded on the CPU",
+                        true);
+            return;
+        }
+        ID3D12Resource* desktop_args = unwrap(args);
+        ID3D12Resource* executed = desktop_args;
+        UINT64 executed_offset = args_offset;
+        if (layout.field_count && max_commands) {
+            if (real_->GetType() == D3D12_COMMAND_LIST_TYPE_BUNDLE || in_render_pass_) {
+                log_refused("d3d12_xs!ID3D12GraphicsCommandList::ExecuteIndirect",
+                            "indirect records with GPU addresses in a bundle or a render pass: the address rewrite "
+                            "needs a dispatch, which is not allowed there; not executed",
+                            true);
+                return;
+            }
+            if (!allocator_ || !desktop_args) {
+                log_refused("d3d12_xs!ID3D12GraphicsCommandList::ExecuteIndirect",
+                            "indirect records with GPU addresses without a shim allocator or argument buffer; not "
+                            "executed",
+                            true);
+                return;
+            }
+            // Only records the argument buffer holds can be read; the copy still has room for max_commands.
+            const UINT64 width = resource_desc(desktop_args).Width;
+            const UINT64 available = width > args_offset ? (width - args_offset) / layout.stride : 0;
+            const UINT commands = static_cast<UINT>(available < max_commands ? available : max_commands);
+            if (UINT64(max_commands) * layout.stride > (UINT64(256) << 20) || !commands) {
+                log_refused("d3d12_xs!ID3D12GraphicsCommandList::ExecuteIndirect",
+                            "indirect records with GPU addresses: no record fits the argument buffer, or more than "
+                            "256 MiB of records; not executed",
+                            true);
+                return;
+            }
+            if (predication_.buffer) real_->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+            std::string why;
+            ID3D12Resource* rewritten = nullptr;
+            const bool good = indirect::record(device_rewriter(device_), real_, enhanced_ ? l7_.Get() : nullptr,
+                                               desktop_args, args_offset, commands, layout, allocator_->keep(),
+                                               &rewritten, why);
+            // The pass set its own pipeline and compute root signature (and suspended predication): restore them.
+            if (current_pso_) real_->SetPipelineState(current_pso_);
+            if (compute_root_) {
+                real_->SetComputeRootSignature(compute_root_);
+                if (replay_) replay_->apply(real_);
+            }
+            if (predication_.buffer) real_->SetPredication(predication_.buffer, predication_.offset, predication_.op);
+            if (!good) {
+                log_refused("d3d12_xs!ID3D12GraphicsCommandList::ExecuteIndirect",
+                            ("indirect records with GPU addresses not rewritten: " + why + "; not executed").c_str(),
+                            true);
+                return;
+            }
+            executed = rewritten;
+            executed_offset = 0;
+        }
+        if (dispatch) {
+            if (!compute_.bind(device_views(device_), real_, heaps_, &ours_bound_, &blocks_)) return;
+        } else if (!bind_draw(0, 0)) {
+            return;
+        }
+        real_->ExecuteIndirect(unwrap(signature), max_commands, executed, executed_offset, unwrap(count), count_offset);
+    }
+
+    // ID3D12GraphicsCommandList1
+    void STDMETHODCALLTYPE AtomicCopyBufferUINT(ID3D12Resource* dst, UINT64 dst_offset, ID3D12Resource* src,
+                                                UINT64 src_offset, UINT dependencies,
+                                                ID3D12Resource* const* dependent_resources,
+                                                const D3D12_SUBRESOURCE_RANGE_UINT64* ranges) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        std::vector<ID3D12Resource*> deps;
+        if (dependent_resources && !unwrap_array(dependencies, dependent_resources, deps)) return;
+        l1_->AtomicCopyBufferUINT(unwrap(dst), dst_offset, unwrap(src), src_offset, dependencies,
+                                  dependent_resources ? deps.data() : nullptr, ranges);
+    }
+    void STDMETHODCALLTYPE AtomicCopyBufferUINT64(ID3D12Resource* dst, UINT64 dst_offset, ID3D12Resource* src,
+                                                  UINT64 src_offset, UINT dependencies,
+                                                  ID3D12Resource* const* dependent_resources,
+                                                  const D3D12_SUBRESOURCE_RANGE_UINT64* ranges) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        std::vector<ID3D12Resource*> deps;
+        if (dependent_resources && !unwrap_array(dependencies, dependent_resources, deps)) return;
+        l1_->AtomicCopyBufferUINT64(unwrap(dst), dst_offset, unwrap(src), src_offset, dependencies,
+                                    dependent_resources ? deps.data() : nullptr, ranges);
+    }
+    void STDMETHODCALLTYPE OMSetDepthBounds(FLOAT min, FLOAT max) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        l1_->OMSetDepthBounds(min, max);
+    }
+    void STDMETHODCALLTYPE SetSamplePositions(UINT per_pixel, UINT pixels, D3D12_SAMPLE_POSITION* positions) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        l1_->SetSamplePositions(per_pixel, pixels, positions);
+    }
+    void STDMETHODCALLTYPE ResolveSubresourceRegion(ID3D12Resource* dst, UINT dst_sub, UINT x, UINT y,
+                                                    ID3D12Resource* src, UINT src_sub, D3D12_RECT* rect,
+                                                    DXGI_FORMAT format, D3D12_RESOLVE_MODE mode) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        l1_->ResolveSubresourceRegion(unwrap(dst), dst_sub, x, y, unwrap(src), src_sub, rect, format, mode);
+    }
+    void STDMETHODCALLTYPE SetViewInstanceMask(UINT mask) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l1_);
+        l1_->SetViewInstanceMask(mask);
+    }
+    // ID3D12GraphicsCommandList2: the destinations are GPU addresses (title addresses translated).
+    void STDMETHODCALLTYPE WriteBufferImmediate(UINT count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER* params,
+                                                const D3D12_WRITEBUFFERIMMEDIATE_MODE* modes) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l2_);
+        std::vector<D3D12_WRITEBUFFERIMMEDIATE_PARAMETER> desktop;
+        if (params && count) {
+            try {
+                desktop.assign(params, params + count);
+            } catch (...) {
+                return;
+            }
+            for (auto& p : desktop) p.Dest = pipeline::translate_address(p.Dest, 4);
+        }
+        l2_->WriteBufferImmediate(count, params ? desktop.data() : nullptr, modes);
+    }
+    // ID3D12GraphicsCommandList3
+    void STDMETHODCALLTYPE SetProtectedResourceSession(ID3D12ProtectedResourceSession* session) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l3_);
+        l3_->SetProtectedResourceSession(session);
+    }
+    // ID3D12GraphicsCommandList4
+    void STDMETHODCALLTYPE BeginRenderPass(UINT count, const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets,
+                                           const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth,
+                                           D3D12_RENDER_PASS_FLAGS flags) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        const auto unwrap_ending = [](D3D12_RENDER_PASS_ENDING_ACCESS& e) {
+            if (e.Type == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_RESOLVE) {
+                e.Resolve.pSrcResource = unwrap(e.Resolve.pSrcResource);
+                e.Resolve.pDstResource = unwrap(e.Resolve.pDstResource);
+            }
+        };
+        std::vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rts;
+        if (targets && count) {
+            try {
+                rts.assign(targets, targets + count);
+            } catch (...) {
+                return;
+            }
+            for (auto& rt : rts) unwrap_ending(rt.EndingAccess);
+        }
+        D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
+        if (depth) {
+            ds = *depth;
+            unwrap_ending(ds.DepthEndingAccess);
+            unwrap_ending(ds.StencilEndingAccess);
+        }
+        in_render_pass_ = true;
+        l4_->BeginRenderPass(count, targets ? rts.data() : nullptr, depth ? &ds : nullptr, flags);
+    }
+    void STDMETHODCALLTYPE EndRenderPass() override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        in_render_pass_ = false;
+        l4_->EndRenderPass();
+    }
+    // Meta commands cannot exist here: ID3D12Device5::CreateMetaCommand is refused.
+    void STDMETHODCALLTYPE InitializeMetaCommand(ID3D12MetaCommand* command, const void* data, SIZE_T size) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        l4_->InitializeMetaCommand(command, data, size);
+    }
+    void STDMETHODCALLTYPE ExecuteMetaCommand(ID3D12MetaCommand* command, const void* data, SIZE_T size) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        l4_->ExecuteMetaCommand(command, data, size);
+    }
+    // Acceleration structures: the addresses in the description are translated on the CPU. Bottom-level geometry
+    // descriptions are CPU memory and are translated too; a top-level build reads instance descriptions (holding
+    // bottom-level addresses) from GPU memory, which the shim does not rewrite yet, so it is refused.
+    void STDMETHODCALLTYPE BuildRaytracingAccelerationStructure(
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC* desc, UINT postbuild_count,
+        const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC* postbuild) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        if (!desc) return;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC copy = *desc;
+        copy.DestAccelerationStructureData = pipeline::translate_address(desc->DestAccelerationStructureData, 4);
+        copy.SourceAccelerationStructureData = pipeline::translate_address(desc->SourceAccelerationStructureData, 4);
+        copy.ScratchAccelerationStructureData = pipeline::translate_address(desc->ScratchAccelerationStructureData, 4);
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometry;
+        std::vector<const D3D12_RAYTRACING_GEOMETRY_DESC*> pointers;
+        if (desc->Inputs.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+            if (desc->Inputs.NumDescs) {
+                X2W_REFUSE("a top-level build with instances: the instance descriptions in GPU memory hold title "
+                           "addresses of bottom-level structures, which are not rewritten; not built");
+                return;
+            }
+        } else {
+            try {
+                geometry.resize(desc->Inputs.NumDescs);
+                pointers.resize(desc->Inputs.NumDescs);
+            } catch (...) {
+                return;
+            }
+            for (UINT i = 0; i < desc->Inputs.NumDescs; ++i) {
+                const D3D12_RAYTRACING_GEOMETRY_DESC* g =
+                    desc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY ? &desc->Inputs.pGeometryDescs[i]
+                                                                           : desc->Inputs.ppGeometryDescs[i];
+                geometry[i] = *g;
+                if (g->Type == D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES) {
+                    auto& t = geometry[i].Triangles;
+                    t.Transform3x4 = pipeline::translate_address(t.Transform3x4, 48);
+                    t.IndexBuffer = pipeline::translate_address(t.IndexBuffer, 4);
+                    t.VertexBuffer.StartAddress = pipeline::translate_address(t.VertexBuffer.StartAddress, 4);
+                } else if (g->Type == D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS) {
+                    auto& b = geometry[i].AABBs;
+                    b.AABBs.StartAddress = pipeline::translate_address(b.AABBs.StartAddress, 4);
+                } else {
+                    X2W_REFUSE("a geometry type the shim does not know; not built");
+                    return;
+                }
+                pointers[i] = &geometry[i];
+            }
+            if (desc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY) copy.Inputs.pGeometryDescs = geometry.data();
+            else copy.Inputs.ppGeometryDescs = pointers.data();
+        }
+        std::vector<D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC> post;
+        if (postbuild && postbuild_count) {
+            try {
+                post.assign(postbuild, postbuild + postbuild_count);
+            } catch (...) {
+                return;
+            }
+            for (auto& p : post) p.DestBuffer = pipeline::translate_address(p.DestBuffer, 8);
+        }
+        l4_->BuildRaytracingAccelerationStructure(&copy, postbuild_count, postbuild ? post.data() : nullptr);
+    }
+    void STDMETHODCALLTYPE EmitRaytracingAccelerationStructurePostbuildInfo(
+        const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC* desc, UINT count,
+        const D3D12_GPU_VIRTUAL_ADDRESS* sources) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC copy{};
+        if (desc) {
+            copy = *desc;
+            copy.DestBuffer = pipeline::translate_address(desc->DestBuffer, 8);
+        }
+        std::vector<D3D12_GPU_VIRTUAL_ADDRESS> translated;
+        if (sources && count) {
+            try {
+                translated.resize(count);
+            } catch (...) {
+                return;
+            }
+            for (UINT i = 0; i < count; ++i) translated[i] = pipeline::translate_address(sources[i], 4);
+        }
+        l4_->EmitRaytracingAccelerationStructurePostbuildInfo(desc ? &copy : nullptr, count,
+                                                              sources ? translated.data() : nullptr);
+    }
+    void STDMETHODCALLTYPE CopyRaytracingAccelerationStructure(
+        D3D12_GPU_VIRTUAL_ADDRESS dst, D3D12_GPU_VIRTUAL_ADDRESS src,
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE mode) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        l4_->CopyRaytracingAccelerationStructure(pipeline::translate_address(dst, 4), pipeline::translate_address(src, 4),
+                                                 mode);
+    }
+    void STDMETHODCALLTYPE SetPipelineState1(ID3D12StateObject* state) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        std::uint32_t flag = 0;
+        UINT size = sizeof(flag);
+        state_object_local_root_ =
+            state && SUCCEEDED(state->GetPrivateData(local_root_guid, &size, &flag)) && size == sizeof(flag) && flag;
+        l4_->SetPipelineState1(state);
+    }
+    // The shader tables' addresses are translated. A state object with local root signatures is refused: its
+    // shader records may hold title GPU addresses or title descriptor handles in memory, which are not rewritten.
+    void STDMETHODCALLTYPE DispatchRays(const D3D12_DISPATCH_RAYS_DESC* desc) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l4_);
+        if (state_object_local_root_) {
+            X2W_REFUSE("a state object with local root signatures: its shader records may hold title addresses "
+                       "that are not rewritten; not dispatched");
+            return;
+        }
+        if (!desc) return;
+        D3D12_DISPATCH_RAYS_DESC copy = *desc;
+        copy.RayGenerationShaderRecord.StartAddress =
+            pipeline::translate_address(desc->RayGenerationShaderRecord.StartAddress, desc->RayGenerationShaderRecord.SizeInBytes);
+        copy.MissShaderTable.StartAddress =
+            pipeline::translate_address(desc->MissShaderTable.StartAddress, desc->MissShaderTable.SizeInBytes);
+        copy.HitGroupTable.StartAddress =
+            pipeline::translate_address(desc->HitGroupTable.StartAddress, desc->HitGroupTable.SizeInBytes);
+        copy.CallableShaderTable.StartAddress =
+            pipeline::translate_address(desc->CallableShaderTable.StartAddress, desc->CallableShaderTable.SizeInBytes);
+        l4_->DispatchRays(&copy);
+    }
+    // ID3D12GraphicsCommandList5
+    void STDMETHODCALLTYPE RSSetShadingRate(D3D12_SHADING_RATE rate, const D3D12_SHADING_RATE_COMBINER* combiners) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l5_);
+        l5_->RSSetShadingRate(rate, combiners);
+    }
+    void STDMETHODCALLTYPE RSSetShadingRateImage(ID3D12Resource* image) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l5_);
+        l5_->RSSetShadingRateImage(unwrap(image));
+    }
+    // ID3D12GraphicsCommandList6. Console mesh pipelines are refused at creation, so a mesh pipeline here is desktop.
+    void STDMETHODCALLTYPE DispatchMesh(UINT x, UINT y, UINT z) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l6_);
+        if (translated_) {
+            log_refused("d3d12_xs!ID3D12GraphicsCommandList::DispatchMesh",
+                        "DispatchMesh with a translated vertex pipeline bound; not dispatched", true);
+            return;
+        }
+        if (!bind_draw(0, 0)) return;
+        l6_->DispatchMesh(x, y, z);
+    }
+    // ID3D12GraphicsCommandList7: enhanced barriers, with resources unwrapped. From the first one on, the shim's own
+    // barriers in this recording are enhanced barriers too.
+    void STDMETHODCALLTYPE Barrier(UINT count, const D3D12_BARRIER_GROUP* groups) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(l7_);
+        enhanced_ = true;
+        if (!groups || !count) {
+            l7_->Barrier(count, groups);
+            return;
+        }
+        std::vector<D3D12_BARRIER_GROUP> copy;
+        std::vector<D3D12_TEXTURE_BARRIER> textures;
+        std::vector<D3D12_BUFFER_BARRIER> buffers;
+        try {
+            copy.assign(groups, groups + count);
+            std::size_t t = 0, b = 0;
+            for (const auto& g : copy) {
+                if (g.Type == D3D12_BARRIER_TYPE_TEXTURE) t += g.NumBarriers;
+                if (g.Type == D3D12_BARRIER_TYPE_BUFFER) b += g.NumBarriers;
+            }
+            textures.reserve(t);
+            buffers.reserve(b);
+        } catch (...) {
+            X2W_REFUSE("out of memory unwrapping barriers; not recorded");
+            return;
+        }
+        for (auto& g : copy) {
+            if (g.Type == D3D12_BARRIER_TYPE_TEXTURE && g.pTextureBarriers) {
+                const std::size_t first = textures.size();
+                for (UINT i = 0; i < g.NumBarriers; ++i) {
+                    textures.push_back(g.pTextureBarriers[i]);
+                    textures.back().pResource = unwrap(textures.back().pResource);
+                }
+                g.pTextureBarriers = textures.data() + first;
+            } else if (g.Type == D3D12_BARRIER_TYPE_BUFFER && g.pBufferBarriers) {
+                const std::size_t first = buffers.size();
+                for (UINT i = 0; i < g.NumBarriers; ++i) {
+                    buffers.push_back(g.pBufferBarriers[i]);
+                    buffers.back().pResource = unwrap(buffers.back().pResource);
+                }
+                g.pBufferBarriers = buffers.data() + first;
+            }
+        }
+        l7_->Barrier(count, copy.data());
     }
 
 private:
+    // Compute root arguments as forwarded to desktop D3D12 (title addresses translated), replayed after the shim's
+    // own compute pass (ExecuteIndirect rewrites) changed the compute root signature.
+    struct ComputeReplay {
+        enum Type : std::uint8_t { none = 0, table_arg, constants_arg, cbv, srv, uav };
+        Type type[pipeline::max_title_params];
+        std::uint64_t value[pipeline::max_title_params];
+        std::uint64_t set[pipeline::max_title_params];  // constants: which of the 64 words were set
+        std::uint32_t words[pipeline::max_title_params][64];
+        void clear()
+        {
+            std::memset(type, 0, sizeof(type));
+            std::memset(set, 0, sizeof(set));
+        }
+        void table(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE base)
+        {
+            if (index >= pipeline::max_title_params) return;
+            type[index] = Type::table_arg;
+            value[index] = base.ptr;
+        }
+        void view(UINT index, Type t, D3D12_GPU_VIRTUAL_ADDRESS address)
+        {
+            if (index >= pipeline::max_title_params) return;
+            type[index] = t;
+            value[index] = address;
+        }
+        void constants(UINT index, UINT count, const void* data, UINT offset)
+        {
+            if (index >= pipeline::max_title_params || offset >= 64 || count > 64 - offset) return;
+            type[index] = Type::constants_arg;
+            std::memcpy(&words[index][offset], data, count * 4);
+            for (UINT i = 0; i < count; ++i) set[index] |= std::uint64_t(1) << (offset + i);
+        }
+        void apply(ID3D12GraphicsCommandList* list) const
+        {
+            for (UINT i = 0; i < pipeline::max_title_params; ++i) {
+                switch (type[i]) {
+                case Type::table_arg: list->SetComputeRootDescriptorTable(i, {value[i]}); break;
+                case Type::cbv: list->SetComputeRootConstantBufferView(i, value[i]); break;
+                case Type::srv: list->SetComputeRootShaderResourceView(i, value[i]); break;
+                case Type::uav: list->SetComputeRootUnorderedAccessView(i, value[i]); break;
+                case Type::constants_arg:
+                    for (UINT w = 0; w < 64; ++w)
+                        if (set[i] >> w & 1) list->SetComputeRoot32BitConstant(i, words[i][w], w);
+                    break;
+                default: break;
+                }
+            }
+        }
+    };
+    struct Predication {
+        ID3D12Resource* buffer = nullptr;
+        UINT64 offset = 0;
+        D3D12_PREDICATION_OP op = D3D12_PREDICATION_OP_EQUAL_ZERO;
+    };
+
+    ComPtr<ID3D12GraphicsCommandList1> l1_;
+    ComPtr<ID3D12GraphicsCommandList2> l2_;
+    ComPtr<ID3D12GraphicsCommandList3> l3_;
+    ComPtr<ID3D12GraphicsCommandList4> l4_;
+    ComPtr<ID3D12GraphicsCommandList5> l5_;
+    ComPtr<ID3D12GraphicsCommandList6> l6_;
+    ComPtr<ID3D12GraphicsCommandList7> l7_;
     pipeline::RootArgs* args_;
+    ComputeReplay* replay_;
+    Allocator* allocator_;                     // the allocator this recording uses (not referenced: the title's)
+    ID3D12PipelineState* current_pso_;         // as the title set it (not referenced)
+    ID3D12RootSignature* compute_root_ = nullptr;
+    Predication predication_;
+    bool in_render_pass_ = false;
+    bool enhanced_ = false;                    // the recording has used enhanced barriers
+    bool state_object_local_root_ = false;     // the state object set by SetPipelineState1 has local root signatures
     pipeline::RootInfo root_{};
     pipeline::PsoInfo pso_{};
     bool has_root_ = false;
@@ -798,15 +1584,15 @@ public:
                                               const UINT* tile_counts, D3D12_TILE_MAPPING_FLAGS mapping_flags) override
     {
         X2W_USE();
-        real_->UpdateTileMappings(resource, regions, starts, sizes, heap, ranges, flags, heap_offsets, tile_counts,
-                                  mapping_flags);
+        real_->UpdateTileMappings(unwrap(resource), regions, starts, sizes, unwrap(heap), ranges, flags, heap_offsets,
+                                  tile_counts, mapping_flags);
     }
     void STDMETHODCALLTYPE CopyTileMappings(ID3D12Resource* dst, const D3D12_TILED_RESOURCE_COORDINATE* dst_start,
                                             ID3D12Resource* src, const D3D12_TILED_RESOURCE_COORDINATE* src_start,
                                             const D3D12_TILE_REGION_SIZE* size, D3D12_TILE_MAPPING_FLAGS flags) override
     {
         X2W_USE();
-        real_->CopyTileMappings(dst, dst_start, src, src_start, size, flags);
+        real_->CopyTileMappings(unwrap(dst), dst_start, unwrap(src), src_start, size, flags);
     }
     void STDMETHODCALLTYPE ExecuteCommandLists(UINT count, ID3D12CommandList* const* lists) override
     {
@@ -867,8 +1653,7 @@ public:
     D3D12_COMMAND_QUEUE_DESC* STDMETHODCALLTYPE GetDesc(D3D12_COMMAND_QUEUE_DESC* ret) override
     {
         X2W_USE();
-        *ret = real_->GetDesc();
-        return ret;
+        return real_->GetDesc(ret);
     }
 #else
     D3D12_COMMAND_QUEUE_DESC STDMETHODCALLTYPE GetDesc() override
@@ -879,20 +1664,41 @@ public:
 #endif
 };
 
-class Device final : public Wrapper<Device, ID3D12Device, Kind::device> {
+class Device final : public Wrapper<Device, ID3D12Device10, Kind::device> {
 public:
-    explicit Device(ID3D12Device* real) : Wrapper(real), views_(pipeline::create_title_views(real)) { install(); }
+    explicit Device(ID3D12Device* real)
+        : Wrapper(static_cast<ID3D12Device10*>(real)), views_(pipeline::create_title_views(real)),
+          rewriter_(indirect::create_rewriter(real))
+    {
+        real->QueryInterface(IID_PPV_ARGS(&d1_));
+        real->QueryInterface(IID_PPV_ARGS(&d2_));
+        real->QueryInterface(IID_PPV_ARGS(&d3_));
+        real->QueryInterface(IID_PPV_ARGS(&d4_));
+        real->QueryInterface(IID_PPV_ARGS(&d5_));
+        real->QueryInterface(IID_PPV_ARGS(&d6_));
+        real->QueryInterface(IID_PPV_ARGS(&d7_));
+        real->QueryInterface(IID_PPV_ARGS(&d8_));
+        real->QueryInterface(IID_PPV_ARGS(&d9_));
+        real->QueryInterface(IID_PPV_ARGS(&d10_));
+        install();
+    }
     ~Device()
     {
+        indirect::destroy_rewriter(rewriter_);
         pipeline::destroy_title_views(views_);
         if (attached_ && detach_) {
             detach_();
             g_attached_device.store(nullptr);
         }
     }
-    static bool implements(REFIID riid)
+    bool implements(REFIID riid) const
     {
-        return IsEqualIID(riid, __uuidof(ID3D12Object)) || IsEqualIID(riid, __uuidof(ID3D12Device));
+        return IsEqualIID(riid, __uuidof(ID3D12Object)) || IsEqualIID(riid, __uuidof(ID3D12Device)) ||
+               (d1_ && IsEqualIID(riid, __uuidof(ID3D12Device1))) || (d2_ && IsEqualIID(riid, __uuidof(ID3D12Device2))) ||
+               (d3_ && IsEqualIID(riid, __uuidof(ID3D12Device3))) || (d4_ && IsEqualIID(riid, __uuidof(ID3D12Device4))) ||
+               (d5_ && IsEqualIID(riid, __uuidof(ID3D12Device5))) || (d6_ && IsEqualIID(riid, __uuidof(ID3D12Device6))) ||
+               (d7_ && IsEqualIID(riid, __uuidof(ID3D12Device7))) || (d8_ && IsEqualIID(riid, __uuidof(ID3D12Device8))) ||
+               (d9_ && IsEqualIID(riid, __uuidof(ID3D12Device9))) || (d10_ && IsEqualIID(riid, __uuidof(ID3D12Device10)));
     }
     // Debug-layer interfaces are handed out as the desktop objects: they are developer tools that
     // take no wrapped arguments, and the R2 check reads the debug layer's messages through them.
@@ -992,7 +1798,8 @@ public:
         ID3D12GraphicsCommandList* list = nullptr;
         const HRESULT hr = real_->CreateCommandList(node_mask, type, unwrap(allocator), state, IID_PPV_ARGS(&list));
         if (FAILED(hr)) return hr;
-        return hand_out(new (std::nothrow) List(list, this), list, riid, out, X2W_RETURN_ADDRESS());
+        return hand_out(new (std::nothrow) List(list, this, as_wrapper<Allocator>(allocator, Kind::allocator), state), list,
+                        riid, out, X2W_RETURN_ADDRESS());
     }
     HRESULT STDMETHODCALLTYPE CheckFeatureSupport(D3D12_FEATURE feature, void* data, UINT size) override
     {
@@ -1049,6 +1856,15 @@ public:
                                                     D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
+        resource = unwrap(resource);
+        // An acceleration structure's view names it by GPU address.
+        D3D12_SHADER_RESOURCE_VIEW_DESC copy{};
+        if (desc && desc->ViewDimension == D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE) {
+            copy = *desc;
+            copy.RaytracingAccelerationStructure.Location =
+                pipeline::translate_address(desc->RaytracingAccelerationStructure.Location, 4);
+            desc = &copy;
+        }
         if (descriptors::write_srv(descriptor.ptr, resource, desc)) return;
         real_->CreateShaderResourceView(resource, desc, descriptor);
     }
@@ -1057,6 +1873,8 @@ public:
                                                      D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
+        resource = unwrap(resource);
+        counter = unwrap(counter);
         if (descriptors::write_uav(descriptor.ptr, resource, counter, desc)) return;
         real_->CreateUnorderedAccessView(resource, counter, desc, descriptor);
     }
@@ -1064,13 +1882,13 @@ public:
                                                   D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
-        real_->CreateRenderTargetView(resource, desc, descriptor);
+        real_->CreateRenderTargetView(unwrap(resource), desc, descriptor);
     }
     void STDMETHODCALLTYPE CreateDepthStencilView(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC* desc,
                                                   D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
-        real_->CreateDepthStencilView(resource, desc, descriptor);
+        real_->CreateDepthStencilView(unwrap(resource), desc, descriptor);
     }
     void STDMETHODCALLTYPE CreateSampler(const D3D12_SAMPLER_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
@@ -1119,15 +1937,13 @@ public:
                                                                                 const D3D12_RESOURCE_DESC* descs) override
     {
         X2W_USE();
-        *ret = real_->GetResourceAllocationInfo(mask, count, descs);
-        return ret;
+        return real_->GetResourceAllocationInfo(ret, mask, count, descs);
     }
     D3D12_HEAP_PROPERTIES* STDMETHODCALLTYPE GetCustomHeapProperties(D3D12_HEAP_PROPERTIES* ret, UINT node_mask,
                                                                      D3D12_HEAP_TYPE type) override
     {
         X2W_USE();
-        *ret = real_->GetCustomHeapProperties(node_mask, type);
-        return ret;
+        return real_->GetCustomHeapProperties(ret, node_mask, type);
     }
 #else
     D3D12_RESOURCE_ALLOCATION_INFO STDMETHODCALLTYPE GetResourceAllocationInfo(UINT mask, UINT count,
@@ -1147,25 +1963,33 @@ public:
                                                       const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) override
     {
         X2W_USE();
-        return real_->CreateCommittedResource(heap, flags, desc, state, clear, riid, out);
+        return make_resource(riid, out, heap, 0, 0, [&](REFIID iid, void** p) {
+            return real_->CreateCommittedResource(heap, flags, desc, state, clear, iid, p);
+        });
     }
     HRESULT STDMETHODCALLTYPE CreateHeap(const D3D12_HEAP_DESC* desc, REFIID riid, void** out) override
     {
         X2W_USE();
-        return real_->CreateHeap(desc, riid, out);
+        return make_heap(riid, out, 0, [&](REFIID iid, void** p) { return real_->CreateHeap(desc, iid, p); });
     }
     HRESULT STDMETHODCALLTYPE CreatePlacedResource(ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC* desc,
                                                    D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear,
                                                    REFIID riid, void** out) override
     {
         X2W_USE();
-        return real_->CreatePlacedResource(heap, offset, desc, state, clear, riid, out);
+        D3D12_HEAP_PROPERTIES properties{};
+        const std::uint64_t existing = placed_heap(heap, &properties);
+        return make_resource(riid, out, heap ? &properties : nullptr, existing, offset, [&](REFIID iid, void** p) {
+            return real_->CreatePlacedResource(unwrap(heap), offset, desc, state, clear, iid, p);
+        });
     }
     HRESULT STDMETHODCALLTYPE CreateReservedResource(const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
                                                      const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) override
     {
         X2W_USE();
-        return real_->CreateReservedResource(desc, state, clear, riid, out);
+        return make_resource(riid, out, nullptr, 0, 0, [&](REFIID iid, void** p) {
+            return real_->CreateReservedResource(desc, state, clear, iid, p);
+        });
     }
     HRESULT STDMETHODCALLTYPE CreateSharedHandle(ID3D12DeviceChild* object, const SECURITY_ATTRIBUTES* attributes,
                                                  DWORD access, LPCWSTR name, HANDLE* handle) override
@@ -1234,21 +2058,26 @@ public:
                                                      ID3D12RootSignature* root, REFIID riid, void** out) override
     {
         X2W_USE();
-        return real_->CreateCommandSignature(desc, root, riid, out);
+        if (!desc || !out) return real_->CreateCommandSignature(desc, root, riid, out);
+        *out = nullptr;
+        ID3D12CommandSignature* signature = nullptr;
+        const HRESULT hr = real_->CreateCommandSignature(desc, root, IID_PPV_ARGS(&signature));
+        if (FAILED(hr)) return hr;
+        return hand_out(new (std::nothrow) CommandSignature(signature, this, indirect::describe(*desc)), signature,
+                        riid, out, X2W_RETURN_ADDRESS());
     }
     void STDMETHODCALLTYPE GetResourceTiling(ID3D12Resource* resource, UINT* tiles, D3D12_PACKED_MIP_INFO* packed,
                                              D3D12_TILE_SHAPE* shape, UINT* tilings, UINT first,
                                              D3D12_SUBRESOURCE_TILING* out) override
     {
         X2W_USE();
-        real_->GetResourceTiling(resource, tiles, packed, shape, tilings, first, out);
+        real_->GetResourceTiling(unwrap(resource), tiles, packed, shape, tilings, first, out);
     }
 #ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
     LUID* STDMETHODCALLTYPE GetAdapterLuid(LUID* ret) override
     {
         X2W_USE();
-        *ret = real_->GetAdapterLuid();
-        return ret;
+        return real_->GetAdapterLuid(ret);
     }
 #else
     LUID STDMETHODCALLTYPE GetAdapterLuid() override
@@ -1258,12 +2087,449 @@ public:
     }
 #endif
 
+    // --- resources and heaps: wrapped (d3d12_xs_resources.h) ----------------------------------------------------
+
+    // Creates a desktop resource through `create` (as ID3D12Resource) and hands it out wrapped with its title address.
+    // A null output is a support check and is forwarded with the title's riid.
+    template <class Create>
+    HRESULT make_resource(REFIID riid, void** out, const D3D12_HEAP_PROPERTIES* heap, std::uint64_t existing,
+                          std::uint64_t offset, Create create)
+    {
+        if (!out) return create(riid, nullptr);
+        *out = nullptr;
+        ID3D12Resource* resource = nullptr;
+        const HRESULT hr = create(__uuidof(ID3D12Resource), reinterpret_cast<void**>(&resource));
+        if (FAILED(hr)) return hr;
+        if (hr == S_FALSE || !resource) return hr;
+        const resources::TitleAddress address = resources::assign(resource, heap, existing, offset);
+        return hand_out(new (std::nothrow) Resource(resource, this, address), resource, riid, out, X2W_RETURN_ADDRESS());
+    }
+    template <class Create>
+    HRESULT make_heap(REFIID riid, void** out, std::uint64_t existing, Create create)
+    {
+        if (!out) return create(riid, nullptr);
+        *out = nullptr;
+        ID3D12Heap* heap = nullptr;
+        const HRESULT hr = create(__uuidof(ID3D12Heap), reinterpret_cast<void**>(&heap));
+        if (FAILED(hr)) return hr;
+        if (hr == S_FALSE || !heap) return hr;
+        return hand_out(new (std::nothrow) Heap(heap, this, existing), heap, riid, out, X2W_RETURN_ADDRESS());
+    }
+    // The heap properties of the heap a resource is placed in, and the address it was opened from (0 if none).
+    static std::uint64_t placed_heap(ID3D12Heap* heap, D3D12_HEAP_PROPERTIES* properties)
+    {
+        if (!heap) return 0;
+        *properties = heap_desc(unwrap(heap)).Properties;
+        const Heap* wrapped = as_wrapper<Heap>(heap, Kind::heap);
+        return wrapped ? wrapped->existing_address() : 0;
+    }
+    template <class Create>
+    HRESULT make_list(REFIID riid, void** out, Create create)
+    {
+        if (!out) return create(riid, nullptr);
+        *out = nullptr;
+        ID3D12GraphicsCommandList* list = nullptr;
+        const HRESULT hr = create(__uuidof(ID3D12GraphicsCommandList), reinterpret_cast<void**>(&list));
+        if (FAILED(hr)) return hr;
+        return hand_out(new (std::nothrow) List(list, this, nullptr, nullptr), list, riid, out, X2W_RETURN_ADDRESS());
+    }
+    static std::vector<ID3D12Pageable*> unwrap_pageables(UINT count, ID3D12Pageable* const* objects, bool* good)
+    {
+        std::vector<ID3D12Pageable*> desktop;
+        *good = !objects || unwrap_array(count, objects, desktop);
+        return desktop;
+    }
+    // A state object whose subobjects include a local root signature is marked (List::DispatchRays refuses it).
+    static void mark_state_object(const D3D12_STATE_OBJECT_DESC* desc, void* object, REFIID riid)
+    {
+        if (!desc || !object) return;
+        std::uint32_t local = 0;
+        for (UINT i = 0; i < desc->NumSubobjects && desc->pSubobjects; ++i)
+            if (desc->pSubobjects[i].Type == D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE) local = 1;
+        ComPtr<ID3D12StateObject> state;
+        if (local && SUCCEEDED(static_cast<IUnknown*>(object)->QueryInterface(IID_PPV_ARGS(&state))))
+            state->SetPrivateData(local_root_guid, sizeof(local), &local);
+        (void)riid;
+    }
+
+    // --- ID3D12Device1 ----------------------------------------------------------------------------------------
+    // A pipeline library stores and loads pipelines by description, which would bypass translation; D3D12 lets a
+    // driver refuse libraries with DXGI_ERROR_UNSUPPORTED, and titles fall back to creating pipelines.
+    HRESULT STDMETHODCALLTYPE CreatePipelineLibrary(const void* blob, SIZE_T size, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        (void)blob;
+        (void)size;
+        (void)riid;
+        if (out) *out = nullptr;
+        X2W_REFUSE("pipeline libraries would load pipelines without translation -> DXGI_ERROR_UNSUPPORTED");
+        return DXGI_ERROR_UNSUPPORTED;
+    }
+    HRESULT STDMETHODCALLTYPE SetEventOnMultipleFenceCompletion(ID3D12Fence* const* fences, const UINT64* values,
+                                                                UINT count, D3D12_MULTIPLE_FENCE_WAIT_FLAGS flags,
+                                                                HANDLE event) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d1_, E_NOTIMPL);
+        std::vector<ID3D12Fence*> desktop;
+        if (fences && !unwrap_array(count, fences, desktop)) return E_OUTOFMEMORY;
+        return d1_->SetEventOnMultipleFenceCompletion(fences ? desktop.data() : nullptr, values, count, flags, event);
+    }
+    HRESULT STDMETHODCALLTYPE SetResidencyPriority(UINT count, ID3D12Pageable* const* objects,
+                                                   const D3D12_RESIDENCY_PRIORITY* priorities) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d1_, E_NOTIMPL);
+        bool good;
+        auto desktop = unwrap_pageables(count, objects, &good);
+        if (!good) return E_OUTOFMEMORY;
+        return d1_->SetResidencyPriority(count, objects ? desktop.data() : nullptr, priorities);
+    }
+    // --- ID3D12Device2: pipeline state streams go through translation (pipeline::create_pipeline_state). ---------
+    HRESULT STDMETHODCALLTYPE CreatePipelineState(const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid,
+                                                  void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d2_, E_NOTIMPL);
+        return pipeline::create_pipeline_state(d2_.Get(), desc, riid, out);
+    }
+    // --- ID3D12Device3 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE OpenExistingHeapFromAddress(const void* address, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d3_, E_NOTIMPL);
+        return make_heap(riid, out, reinterpret_cast<std::uintptr_t>(address),
+                         [&](REFIID iid, void** p) { return d3_->OpenExistingHeapFromAddress(address, iid, p); });
+    }
+    HRESULT STDMETHODCALLTYPE OpenExistingHeapFromFileMapping(HANDLE mapping, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d3_, E_NOTIMPL);
+        return make_heap(riid, out, 0,
+                         [&](REFIID iid, void** p) { return d3_->OpenExistingHeapFromFileMapping(mapping, iid, p); });
+    }
+    HRESULT STDMETHODCALLTYPE EnqueueMakeResident(D3D12_RESIDENCY_FLAGS flags, UINT count, ID3D12Pageable* const* objects,
+                                                  ID3D12Fence* fence, UINT64 value) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d3_, E_NOTIMPL);
+        bool good;
+        auto desktop = unwrap_pageables(count, objects, &good);
+        if (!good) return E_OUTOFMEMORY;
+        return d3_->EnqueueMakeResident(flags, count, objects ? desktop.data() : nullptr, unwrap(fence), value);
+    }
+    // --- ID3D12Device4 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE CreateCommandList1(UINT node_mask, D3D12_COMMAND_LIST_TYPE type,
+                                                 D3D12_COMMAND_LIST_FLAGS flags, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, E_NOTIMPL);
+        return make_list(riid, out, [&](REFIID iid, void** p) { return d4_->CreateCommandList1(node_mask, type, flags, iid, p); });
+    }
+    HRESULT STDMETHODCALLTYPE CreateProtectedResourceSession(const D3D12_PROTECTED_RESOURCE_SESSION_DESC* desc,
+                                                             REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, E_NOTIMPL);
+        return d4_->CreateProtectedResourceSession(desc, riid, out);
+    }
+    HRESULT STDMETHODCALLTYPE CreateCommittedResource1(const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                       const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+                                                       const D3D12_CLEAR_VALUE* clear,
+                                                       ID3D12ProtectedResourceSession* session, REFIID riid,
+                                                       void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, E_NOTIMPL);
+        return make_resource(riid, out, heap, 0, 0, [&](REFIID iid, void** p) {
+            return d4_->CreateCommittedResource1(heap, flags, desc, state, clear, session, iid, p);
+        });
+    }
+    HRESULT STDMETHODCALLTYPE CreateHeap1(const D3D12_HEAP_DESC* desc, ID3D12ProtectedResourceSession* session,
+                                          REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, E_NOTIMPL);
+        return make_heap(riid, out, 0, [&](REFIID iid, void** p) { return d4_->CreateHeap1(desc, session, iid, p); });
+    }
+    HRESULT STDMETHODCALLTYPE CreateReservedResource1(const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+                                                      const D3D12_CLEAR_VALUE* clear,
+                                                      ID3D12ProtectedResourceSession* session, REFIID riid,
+                                                      void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, E_NOTIMPL);
+        return make_resource(riid, out, nullptr, 0, 0, [&](REFIID iid, void** p) {
+            return d4_->CreateReservedResource1(desc, state, clear, session, iid, p);
+        });
+    }
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE GetResourceAllocationInfo1(
+        D3D12_RESOURCE_ALLOCATION_INFO* ret, UINT mask, UINT count, const D3D12_RESOURCE_DESC* descs,
+        D3D12_RESOURCE_ALLOCATION_INFO1* info) override
+    {
+        X2W_USE();
+        if (!d4_) *ret = {};
+        X2W_REQUIRE(d4_, ret);
+        return d4_->GetResourceAllocationInfo1(ret, mask, count, descs, info);
+    }
+#else
+    D3D12_RESOURCE_ALLOCATION_INFO STDMETHODCALLTYPE GetResourceAllocationInfo1(
+        UINT mask, UINT count, const D3D12_RESOURCE_DESC* descs, D3D12_RESOURCE_ALLOCATION_INFO1* info) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d4_, D3D12_RESOURCE_ALLOCATION_INFO{});
+        return d4_->GetResourceAllocationInfo1(mask, count, descs, info);
+    }
+#endif
+    // --- ID3D12Device5 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE CreateLifetimeTracker(ID3D12LifetimeOwner* owner, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_, E_NOTIMPL);
+        return d5_->CreateLifetimeTracker(owner, riid, out);
+    }
+    void STDMETHODCALLTYPE RemoveDevice() override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_);
+        d5_->RemoveDevice();
+    }
+    HRESULT STDMETHODCALLTYPE EnumerateMetaCommands(UINT* count, D3D12_META_COMMAND_DESC* descs) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_, E_NOTIMPL);
+        return d5_->EnumerateMetaCommands(count, descs);
+    }
+    HRESULT STDMETHODCALLTYPE EnumerateMetaCommandParameters(REFGUID command, D3D12_META_COMMAND_PARAMETER_STAGE stage,
+                                                             UINT* total, UINT* count,
+                                                             D3D12_META_COMMAND_PARAMETER_DESC* descs) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_, E_NOTIMPL);
+        return d5_->EnumerateMetaCommandParameters(command, stage, total, count, descs);
+    }
+    // Meta-command parameters are driver-defined and may hold GPU addresses the shim cannot find and translate.
+    HRESULT STDMETHODCALLTYPE CreateMetaCommand(REFGUID command, UINT node_mask, const void* data, SIZE_T size,
+                                                REFIID riid, void** out) override
+    {
+        X2W_USE();
+        (void)command;
+        (void)node_mask;
+        (void)data;
+        (void)size;
+        (void)riid;
+        if (out) *out = nullptr;
+        X2W_REFUSE("meta-command parameters may hold GPU addresses the shim cannot translate -> E_NOTIMPL");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE CreateStateObject(const D3D12_STATE_OBJECT_DESC* desc, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_, E_NOTIMPL);
+        const HRESULT hr = d5_->CreateStateObject(desc, riid, out);
+        if (SUCCEEDED(hr) && out) mark_state_object(desc, *out, riid);
+        return hr;
+    }
+    void STDMETHODCALLTYPE GetRaytracingAccelerationStructurePrebuildInfo(
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* inputs,
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* info) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_);
+        d5_->GetRaytracingAccelerationStructurePrebuildInfo(inputs, info);
+    }
+    D3D12_DRIVER_MATCHING_IDENTIFIER_STATUS STDMETHODCALLTYPE CheckDriverMatchingIdentifier(
+        D3D12_SERIALIZED_DATA_TYPE type, const D3D12_SERIALIZED_DATA_DRIVER_MATCHING_IDENTIFIER* identifier) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d5_, D3D12_DRIVER_MATCHING_IDENTIFIER_UNSUPPORTED_TYPE);
+        return d5_->CheckDriverMatchingIdentifier(type, identifier);
+    }
+    // --- ID3D12Device6 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE SetBackgroundProcessingMode(D3D12_BACKGROUND_PROCESSING_MODE mode,
+                                                          D3D12_MEASUREMENTS_ACTION action, HANDLE event,
+                                                          BOOL* further) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d6_, E_NOTIMPL);
+        return d6_->SetBackgroundProcessingMode(mode, action, event, further);
+    }
+    // --- ID3D12Device7 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE AddToStateObject(const D3D12_STATE_OBJECT_DESC* addition, ID3D12StateObject* existing,
+                                               REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d7_, E_NOTIMPL);
+        const HRESULT hr = d7_->AddToStateObject(addition, existing, riid, out);
+        if (SUCCEEDED(hr) && out) {
+            mark_state_object(addition, *out, riid);
+            std::uint32_t flag = 0;
+            UINT size = sizeof(flag);
+            ComPtr<ID3D12StateObject> state;
+            if (existing && SUCCEEDED(existing->GetPrivateData(local_root_guid, &size, &flag)) && flag &&
+                SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&state))))
+                state->SetPrivateData(local_root_guid, sizeof(flag), &flag);
+        }
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE CreateProtectedResourceSession1(const D3D12_PROTECTED_RESOURCE_SESSION_DESC1* desc,
+                                                              REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d7_, E_NOTIMPL);
+        return d7_->CreateProtectedResourceSession1(desc, riid, out);
+    }
+    // --- ID3D12Device8 ----------------------------------------------------------------------------------------
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_RESOURCE_ALLOCATION_INFO* STDMETHODCALLTYPE GetResourceAllocationInfo2(
+        D3D12_RESOURCE_ALLOCATION_INFO* ret, UINT mask, UINT count, const D3D12_RESOURCE_DESC1* descs,
+        D3D12_RESOURCE_ALLOCATION_INFO1* info) override
+    {
+        X2W_USE();
+        if (!d8_) *ret = {};
+        X2W_REQUIRE(d8_, ret);
+        return d8_->GetResourceAllocationInfo2(ret, mask, count, descs, info);
+    }
+#else
+    D3D12_RESOURCE_ALLOCATION_INFO STDMETHODCALLTYPE GetResourceAllocationInfo2(
+        UINT mask, UINT count, const D3D12_RESOURCE_DESC1* descs, D3D12_RESOURCE_ALLOCATION_INFO1* info) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d8_, D3D12_RESOURCE_ALLOCATION_INFO{});
+        return d8_->GetResourceAllocationInfo2(mask, count, descs, info);
+    }
+#endif
+    HRESULT STDMETHODCALLTYPE CreateCommittedResource2(const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                       const D3D12_RESOURCE_DESC1* desc, D3D12_RESOURCE_STATES state,
+                                                       const D3D12_CLEAR_VALUE* clear,
+                                                       ID3D12ProtectedResourceSession* session, REFIID riid,
+                                                       void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d8_, E_NOTIMPL);
+        return make_resource(riid, out, heap, 0, 0, [&](REFIID iid, void** p) {
+            return d8_->CreateCommittedResource2(heap, flags, desc, state, clear, session, iid, p);
+        });
+    }
+    HRESULT STDMETHODCALLTYPE CreatePlacedResource1(ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+                                                    D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear,
+                                                    REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d8_, E_NOTIMPL);
+        D3D12_HEAP_PROPERTIES properties{};
+        const std::uint64_t existing = placed_heap(heap, &properties);
+        return make_resource(riid, out, heap ? &properties : nullptr, existing, offset, [&](REFIID iid, void** p) {
+            return d8_->CreatePlacedResource1(unwrap(heap), offset, desc, state, clear, iid, p);
+        });
+    }
+    // A sampler-feedback view in a title descriptor heap has no slot kind there yet.
+    void STDMETHODCALLTYPE CreateSamplerFeedbackUnorderedAccessView(ID3D12Resource* target, ID3D12Resource* feedback,
+                                                                    D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d8_);
+        if (descriptors::is_title_handle(descriptor.ptr)) {
+            X2W_REFUSE("a sampler-feedback UAV in a title descriptor heap is not translated; not written");
+            return;
+        }
+        d8_->CreateSamplerFeedbackUnorderedAccessView(unwrap(target), unwrap(feedback), descriptor);
+    }
+    void STDMETHODCALLTYPE GetCopyableFootprints1(const D3D12_RESOURCE_DESC1* desc, UINT first, UINT count, UINT64 base,
+                                                  D3D12_PLACED_SUBRESOURCE_FOOTPRINT* layouts, UINT* rows,
+                                                  UINT64* row_bytes, UINT64* total) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d8_);
+        d8_->GetCopyableFootprints1(desc, first, count, base, layouts, rows, row_bytes, total);
+    }
+    // --- ID3D12Device9 ----------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE CreateShaderCacheSession(const D3D12_SHADER_CACHE_SESSION_DESC* desc, REFIID riid,
+                                                       void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d9_, E_NOTIMPL);
+        return d9_->CreateShaderCacheSession(desc, riid, out);
+    }
+    HRESULT STDMETHODCALLTYPE ShaderCacheControl(D3D12_SHADER_CACHE_KIND_FLAGS kinds,
+                                                 D3D12_SHADER_CACHE_CONTROL_FLAGS control) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d9_, E_NOTIMPL);
+        return d9_->ShaderCacheControl(kinds, control);
+    }
+    HRESULT STDMETHODCALLTYPE CreateCommandQueue1(const D3D12_COMMAND_QUEUE_DESC* desc, REFIID creator, REFIID riid,
+                                                  void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d9_, E_NOTIMPL);
+        if (!out) return d9_->CreateCommandQueue1(desc, creator, riid, nullptr);
+        *out = nullptr;
+        ID3D12CommandQueue* queue = nullptr;
+        const HRESULT hr = d9_->CreateCommandQueue1(desc, creator, IID_PPV_ARGS(&queue));
+        if (FAILED(hr)) return hr;
+        return hand_out(new (std::nothrow) Queue(queue, this), queue, riid, out, X2W_RETURN_ADDRESS());
+    }
+    // --- ID3D12Device10 ---------------------------------------------------------------------------------------
+    HRESULT STDMETHODCALLTYPE CreateCommittedResource3(const D3D12_HEAP_PROPERTIES* heap, D3D12_HEAP_FLAGS flags,
+                                                       const D3D12_RESOURCE_DESC1* desc, D3D12_BARRIER_LAYOUT layout,
+                                                       const D3D12_CLEAR_VALUE* clear,
+                                                       ID3D12ProtectedResourceSession* session, UINT castable_count,
+                                                       const DXGI_FORMAT* castable, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d10_, E_NOTIMPL);
+        return make_resource(riid, out, heap, 0, 0, [&](REFIID iid, void** p) {
+            return d10_->CreateCommittedResource3(heap, flags, desc, layout, clear, session, castable_count, castable,
+                                                  iid, p);
+        });
+    }
+    HRESULT STDMETHODCALLTYPE CreatePlacedResource2(ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+                                                    D3D12_BARRIER_LAYOUT layout, const D3D12_CLEAR_VALUE* clear,
+                                                    UINT castable_count, const DXGI_FORMAT* castable, REFIID riid,
+                                                    void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d10_, E_NOTIMPL);
+        D3D12_HEAP_PROPERTIES properties{};
+        const std::uint64_t existing = placed_heap(heap, &properties);
+        return make_resource(riid, out, heap ? &properties : nullptr, existing, offset, [&](REFIID iid, void** p) {
+            return d10_->CreatePlacedResource2(unwrap(heap), offset, desc, layout, clear, castable_count, castable, iid,
+                                               p);
+        });
+    }
+    HRESULT STDMETHODCALLTYPE CreateReservedResource2(const D3D12_RESOURCE_DESC* desc, D3D12_BARRIER_LAYOUT layout,
+                                                      const D3D12_CLEAR_VALUE* clear,
+                                                      ID3D12ProtectedResourceSession* session, UINT castable_count,
+                                                      const DXGI_FORMAT* castable, REFIID riid, void** out) override
+    {
+        X2W_USE();
+        X2W_REQUIRE(d10_, E_NOTIMPL);
+        return make_resource(riid, out, nullptr, 0, 0, [&](REFIID iid, void** p) {
+            return d10_->CreateReservedResource2(desc, layout, clear, session, castable_count, castable, iid, p);
+        });
+    }
+
+    indirect::Rewriter* rewriter() const { return rewriter_; }
+
     pipeline::TitleViews* views() const { return views_; }
 
 private:
     bool attached_ = false;
     void (*detach_)() = nullptr;
     pipeline::TitleViews* views_;
+    indirect::Rewriter* rewriter_;
+    ComPtr<ID3D12Device1> d1_;
+    ComPtr<ID3D12Device2> d2_;
+    ComPtr<ID3D12Device3> d3_;
+    ComPtr<ID3D12Device4> d4_;
+    ComPtr<ID3D12Device5> d5_;
+    ComPtr<ID3D12Device6> d6_;
+    ComPtr<ID3D12Device7> d7_;
+    ComPtr<ID3D12Device8> d8_;
+    ComPtr<ID3D12Device9> d9_;
+    ComPtr<ID3D12Device10> d10_;
 };
 
 DeviceRef::DeviceRef(Device* device) : device_(device) { device_->AddRef(); }
@@ -1275,6 +2541,7 @@ HRESULT device_query(Device* device, REFIID riid, void** out, const void* caller
 }
 
 pipeline::TitleViews* device_views(Device* device) { return device->views(); }
+indirect::Rewriter* device_rewriter(Device* device) { return device->rewriter(); }
 
 class SwapChain final : public Wrapper<SwapChain, IDXGISwapChain3, Kind::swap_chain> {
 public:
@@ -1491,23 +2758,28 @@ private:
 
 static_assert(std::is_final_v<Device> && std::is_final_v<Queue> && std::is_final_v<Allocator> &&
               std::is_final_v<List> && std::is_final_v<Fence> && std::is_final_v<SwapChain> &&
-              std::is_final_v<DescriptorHeap>);
+              std::is_final_v<DescriptorHeap> && std::is_final_v<Resource> && std::is_final_v<Heap> &&
+              std::is_final_v<CommandSignature>);
 
 IUnknown* real_of(const void* object)
 {
     Kind kind;
     if (!wrapper_kind(object, &kind)) return nullptr;
     // `object` is the interface base at offset 0 of the wrapper (single inheritance).
-    auto* base = static_cast<IUnknown*>(const_cast<void*>(object));
+    void* base = const_cast<void*>(object);
     switch (kind) {
-    case Kind::device: return static_cast<Device*>(static_cast<ID3D12Device*>(base))->real();
+    case Kind::device: return static_cast<Device*>(static_cast<ID3D12Device10*>(base))->real();
     case Kind::queue: return static_cast<Queue*>(static_cast<ID3D12CommandQueue*>(base))->real();
     case Kind::allocator: return static_cast<Allocator*>(static_cast<ID3D12CommandAllocator*>(base))->real();
-    case Kind::list: return static_cast<List*>(static_cast<ID3D12GraphicsCommandList*>(base))->real();
+    case Kind::list: return static_cast<List*>(static_cast<ID3D12GraphicsCommandList7*>(base))->real();
     case Kind::fence: return static_cast<Fence*>(static_cast<ID3D12Fence1*>(base))->real();
     case Kind::swap_chain: return static_cast<SwapChain*>(static_cast<IDXGISwapChain3*>(base))->real();
     case Kind::descriptor_heap:
         return static_cast<DescriptorHeap*>(static_cast<ID3D12DescriptorHeap*>(base))->real();
+    case Kind::resource: return static_cast<Resource*>(static_cast<ID3D12Resource2*>(base))->real();
+    case Kind::heap: return static_cast<Heap*>(static_cast<ID3D12Heap1*>(base))->real();
+    case Kind::command_signature:
+        return static_cast<CommandSignature*>(static_cast<ID3D12CommandSignature*>(base))->real();
     default: return nullptr;
     }
 }

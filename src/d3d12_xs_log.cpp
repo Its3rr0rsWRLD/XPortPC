@@ -28,8 +28,9 @@ constexpr unsigned prefix_slots = 2;
 void* g_tables[kind_count][prefix_slots + vtable_slots];
 INIT_ONCE g_table_once[kind_count] = {INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
                                       INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
+                                      INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
                                       INIT_ONCE_STATIC_INIT};
-static_assert(kind_count == 7, "one INIT_ONCE per wrapper kind");
+static_assert(kind_count == 10, "one INIT_ONCE per wrapper kind");
 std::atomic<bool> g_slot_seen[kind_count][vtable_slots];
 
 struct SeenIid {
@@ -57,6 +58,12 @@ std::atomic<std::uint32_t> g_shaders_cached;
 std::atomic<std::uint32_t> g_pipelines_refused;
 std::atomic<std::uint32_t> g_draws_refused;
 std::atomic<std::uint64_t> g_texture_misses;
+std::atomic<std::uint64_t> g_indirect_rewrites;
+
+// Distinct refused calls already logged (log_refused_call): a hash of symbol and detail.
+constexpr unsigned max_refused_calls = 256;
+std::uint64_t g_refused_calls[max_refused_calls];
+unsigned g_refused_call_count;
 
 using Thunk = std::uintptr_t(STDMETHODCALLTYPE*)(void*, std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
@@ -148,6 +155,9 @@ const char* interface_name(Kind kind)
     case Kind::fence: return "ID3D12Fence1";
     case Kind::swap_chain: return "IDXGISwapChain3";
     case Kind::descriptor_heap: return "ID3D12DescriptorHeap";
+    case Kind::resource: return "ID3D12Resource";
+    case Kind::heap: return "ID3D12Heap";
+    case Kind::command_signature: return "ID3D12CommandSignature";
     default: return "unknown";
     }
 }
@@ -238,6 +248,26 @@ void log_refused(const char* symbol, const char* detail, bool draw)
     emit(event);
 }
 
+void log_refused_call(const char* symbol, const char* detail)
+{
+    std::uint64_t hash = 1469598103934665603ull;  // FNV-1a over both strings
+    for (const char* text : {symbol, "\n", detail})
+        for (const char* p = text; p && *p; ++p) hash = (hash ^ static_cast<unsigned char>(*p)) * 1099511628211ull;
+    bool first = true;
+    AcquireSRWLockExclusive(&g_lock);
+    for (unsigned i = 0; i < g_refused_call_count; ++i) first = first && g_refused_calls[i] != hash;
+    if (first && g_refused_call_count < max_refused_calls) g_refused_calls[g_refused_call_count++] = hash;
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!first) return;
+    X2WGfxEvent event{};
+    event.kind = X2W_GFX_EVENT_REFUSED;
+    event.symbol = symbol;
+    event.detail = detail;
+    emit(event);
+}
+
+void count_indirect_rewrite() { g_indirect_rewrites.fetch_add(1); }
+
 void count_texture_miss() { g_texture_misses.fetch_add(1); }
 
 void count_shader(bool cached) { (cached ? g_shaders_cached : g_shaders_translated).fetch_add(1); }
@@ -315,5 +345,6 @@ extern "C" X2W_GFX_API BOOL WINAPI X2WGfxGetCounters(X2WGfxCounters* counters)
     counters->draws_refused = g_draws_refused.load();
     counters->title_lookup_misses = pipeline::title_lookup_misses();
     counters->texture_lookup_misses = g_texture_misses.load();
+    counters->indirect_rewrites = g_indirect_rewrites.load();
     return TRUE;
 }

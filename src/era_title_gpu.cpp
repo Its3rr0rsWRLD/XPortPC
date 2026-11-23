@@ -16,7 +16,16 @@ namespace {
 struct Entry {
     std::size_t bytes;
     era_gpu_alias::Alias alias;
+    // A desktop buffer the D3D12 layer registered at a title address (register_resource): no XMem memory and no
+    // alias; `external` holds the buffer for the whole range.
+    Microsoft::WRL::ComPtr<ID3D12Resource> external;
+    bool shader = true;  // packed for TitleLookup (shader_view)
 };
+
+ID3D12Resource* buffer_of(const Entry& entry) noexcept
+{
+    return entry.external ? entry.external.Get() : entry.alias.buffer.Get();
+}
 
 struct State {
     std::mutex lock;  // guards entries and device; taken before the table's own lock
@@ -94,7 +103,7 @@ std::map<std::uintptr_t, Entry>::iterator find(State& s, std::uint64_t address, 
     }
     auto entry = std::prev(next);
     const std::uint64_t offset = address - entry->first;
-    if (!entry->second.alias.buffer || offset >= entry->second.bytes || bytes > entry->second.bytes - offset) {
+    if (!buffer_of(entry->second) || offset >= entry->second.bytes || bytes > entry->second.bytes - offset) {
         return s.entries.end();
     }
     return entry;
@@ -141,7 +150,7 @@ bool untrack(void* base) noexcept
     State& s = *registry_state;
     std::lock_guard<std::mutex> guard(s.lock);
     auto entry = s.entries.find(reinterpret_cast<std::uintptr_t>(base));
-    if (entry == s.entries.end()) {
+    if (entry == s.entries.end() || entry->second.external) {
         return false;
     }
     unalias(s, entry->first, entry->second);
@@ -174,7 +183,7 @@ HRESULT attach(ID3D12Device* device) noexcept
     }
     HRESULT first = S_OK;
     for (auto& [base, entry] : s.entries) {
-        if (entry.alias.buffer) {
+        if (entry.alias.buffer || entry.external) {
             continue;
         }
         const HRESULT hr = alias(s, base, entry);
@@ -219,7 +228,8 @@ bool locate(std::uint64_t title_address, std::uint64_t bytes, ID3D12Resource** b
         return false;
     }
     *offset = title_address - entry->first;
-    entry->second.alias.buffer.CopyTo(buffer);
+    *buffer = buffer_of(entry->second);
+    (*buffer)->AddRef();
     return true;
 }
 
@@ -237,13 +247,18 @@ bool shader_view(ShaderView& view) noexcept
     std::lock_guard<std::mutex> guard(s.lock);
     try {
         ShaderView result;
-        const auto ranges = s.table.ranges();
+        std::vector<era_title_va::Range> ranges;
+        for (const auto& range : s.table.ranges()) {
+            if (s.entries.at(static_cast<std::uintptr_t>(range.title_begin)).shader) {
+                ranges.push_back(range);
+            }
+        }
         if (!era_title_va::shader_ranges(ranges, result.ranges)) {
             return false;
         }
         result.resources.reserve(ranges.size());
         for (const auto& range : ranges) {
-            result.resources.push_back(s.entries.at(static_cast<std::uintptr_t>(range.title_begin)).alias.buffer);
+            result.resources.push_back(buffer_of(s.entries.at(static_cast<std::uintptr_t>(range.title_begin))));
         }
         view = std::move(result);
     } catch (const std::exception&) {
@@ -260,10 +275,91 @@ Counts counts() noexcept
     }
     State& s = *registry_state;
     std::lock_guard<std::mutex> guard(s.lock);
-    Counts result{s.entries.size(), 0};
+    Counts result{0, 0, 0};
     for (const auto& [base, entry] : s.entries) {
+        if (entry.external) {
+            ++result.external;
+            continue;
+        }
+        ++result.tracked;
         result.aliased += entry.alias.buffer ? 1 : 0;
     }
     return result;
+}
+
+bool register_resource(std::uint64_t title_address, std::uint64_t bytes, ID3D12Resource* buffer,
+                       bool shader) noexcept
+{
+    if (!title_address || !bytes || !buffer || title_address + bytes < title_address) {
+        return false;
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS gpu = buffer->GetGPUVirtualAddress();
+    if (!gpu) {
+        return false;
+    }
+    State* const registry_state = created();
+    if (!registry_state) {
+        return false;
+    }
+    State& s = *registry_state;
+    std::lock_guard<std::mutex> guard(s.lock);
+    const auto key = static_cast<std::uintptr_t>(title_address);
+    // No overlap with a tracked allocation or another registered buffer.
+    auto next = s.entries.lower_bound(key);
+    if (next != s.entries.end() && next->first < title_address + bytes) {
+        return false;
+    }
+    if (next != s.entries.begin()) {
+        auto before = std::prev(next);
+        if (before->first + before->second.bytes > title_address) {
+            return false;
+        }
+    }
+    try {
+        Entry entry{static_cast<std::size_t>(bytes), {}, buffer, shader};
+        auto [at, inserted] = s.entries.emplace(key, std::move(entry));
+        if (!inserted) {
+            return false;
+        }
+        if (!s.table.add(title_address, bytes, gpu)) {
+            s.entries.erase(at);
+            return false;
+        }
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    return true;
+}
+
+bool unregister_resource(std::uint64_t title_address) noexcept
+{
+    State* const registry_state = existing();
+    if (!registry_state) {
+        return false;
+    }
+    State& s = *registry_state;
+    std::lock_guard<std::mutex> guard(s.lock);
+    auto entry = s.entries.find(static_cast<std::uintptr_t>(title_address));
+    if (entry == s.entries.end() || !entry->second.external) {
+        return false;
+    }
+    s.table.remove(entry->first);
+    s.entries.erase(entry);
+    return true;
+}
+
+bool translations(std::vector<era_title_va::Range>& out) noexcept
+{
+    State* const registry_state = existing();
+    out.clear();
+    if (!registry_state) {
+        return true;
+    }
+    try {
+        out = registry_state->table.ranges();
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
 }
 }

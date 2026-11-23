@@ -65,8 +65,23 @@ struct ShaderView {
 bool shader_view(ShaderView& view) noexcept;
 
 struct Counts {
-    std::size_t tracked;
-    std::size_t aliased;
+    std::size_t tracked;   // XMem allocations
+    std::size_t aliased;   // of those, aliased
+    std::size_t external;  // desktop buffers registered with register_resource
 };
 Counts counts() noexcept;
+
+// Desktop buffers at title addresses (the D3D12 layer's address model, docs/design/runtime.md section 4): a buffer
+// a title creates through the D3D12 layer has a title GPU address the layer chose (a reserved or mapped range of
+// this process, so it never overlaps a tracked allocation). Registering maps [title_address, + bytes) to the
+// buffer's desktop GPU address for translate/locate and, when `shader` is set, packs it for TitleLookup. The
+// registry holds a reference on the buffer until unregister_resource. Works with or without an attached device.
+// Returns false for a null or empty span, a buffer without a GPU address, an overlap or allocation failure.
+bool register_resource(std::uint64_t title_address, std::uint64_t bytes, ID3D12Resource* buffer,
+                       bool shader) noexcept;
+// Drops a registered buffer. Returns false when title_address does not start one.
+bool unregister_resource(std::uint64_t title_address) noexcept;
+// Every translated range (aliased allocations and registered buffers) sorted by title address, with its desktop
+// GPU address: what an API-side or GPU-side rewrite of title addresses needs.
+bool translations(std::vector<era_title_va::Range>& out) noexcept;
 }

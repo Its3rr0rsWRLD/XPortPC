@@ -9,3 +9,6 @@ EXPORTS
     X2WTitleGpuTranslate
     X2WTitleGpuLocate
     X2WTitleGpuGetShaderView
+    X2WTitleGpuRegisterResource
+    X2WTitleGpuUnregisterResource
+    X2WTitleGpuGetTranslations

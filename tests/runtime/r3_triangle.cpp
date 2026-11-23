@@ -12,8 +12,13 @@
 //   r3_triangle warp|hardware warm             after cold: both shaders from the on-disk cache, none translated
 //   r3_triangle warp|hardware wrong_reference  control: the frame against a reference whose triangle colour is one
 //                                              step off in green; passes only if exactly the covered pixels differ
+//   r3_triangle warp|hardware stream           after cold: the pipeline created as a pipeline-state stream
+//                                              (ID3D12Device2::CreatePipelineState, with an input layout the shim
+//                                              must drop) through the same translation; both shaders from the cache
+//   r3_triangle warp|hardware stream_wrong_reference  the stream pipeline's control
 //   r3_triangle warp refused                   a vertex program the translator refuses fails the pipeline with
-//                                              E_NOTIMPL and one REFUSED event naming the refused export
+//                                              E_NOTIMPL and one REFUSED event naming the refused export, also when
+//                                              it comes in a stream
 //
 // Each drawing mode renders one 64x64 R8G8B8A8_UNORM frame (clear, draw, read back, present) and compares every
 // pixel with a CPU reference: pixel centres strictly inside the triangle (exact integer edge functions; the vertices
@@ -147,6 +152,49 @@ double seconds_since(const LARGE_INTEGER& start)
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&frequency);
     return double(now.QuadPart - start.QuadPart) / double(frequency.QuadPart);
+}
+
+template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type, class Inner>
+struct alignas(void*) Sub {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
+    Inner inner;
+};
+
+// The same pipeline as a stream. The input layout names an attribute the translated vertex program does not read;
+// the shim replaces it with an empty one, as for CreateGraphicsPipelineState.
+HRESULT create_stream_pipeline(ID3D12Device* device, ID3D12RootSignature* root, const std::vector<std::uint8_t>& vs,
+                               const std::vector<std::uint8_t>& ps, ComPtr<ID3D12PipelineState>& pso, double* ms)
+{
+    static const D3D12_INPUT_ELEMENT_DESC element = {"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,
+                                                     D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0};
+    struct {
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, ID3D12RootSignature*> root;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, D3D12_SHADER_BYTECODE> vs;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, D3D12_SHADER_BYTECODE> ps;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT, D3D12_INPUT_LAYOUT_DESC> layout;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, D3D12_RASTERIZER_DESC> rs;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, D3D12_DEPTH_STENCIL_DESC> ds;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> topology;
+        Sub<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, D3D12_RT_FORMAT_ARRAY> rt;
+    } stream{};
+    stream.root.inner = root;
+    stream.vs.inner = {vs.data(), vs.size()};
+    stream.ps.inner = {ps.data(), ps.size()};
+    stream.layout.inner = {&element, 1};
+    stream.rs.inner.FillMode = D3D12_FILL_MODE_SOLID;
+    stream.rs.inner.CullMode = D3D12_CULL_MODE_NONE;
+    stream.rs.inner.DepthClipEnable = TRUE;
+    stream.topology.inner = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    stream.rt.inner.NumRenderTargets = 1;
+    stream.rt.inner.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ComPtr<ID3D12Device2> device2;
+    if (!ok(device->QueryInterface(IID_PPV_ARGS(&device2)), "QueryInterface(ID3D12Device2)")) return E_NOINTERFACE;
+    const D3D12_PIPELINE_STATE_STREAM_DESC desc{sizeof(stream), &stream};
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    const HRESULT hr = device2->CreatePipelineState(&desc, IID_PPV_ARGS(&pso));
+    if (ms) *ms = 1000.0 * seconds_since(start);
+    return hr;
 }
 
 HRESULT create_pipeline(ID3D12Device* device, ID3D12RootSignature* root, const std::vector<std::uint8_t>& vs,
@@ -336,7 +384,9 @@ bool draw_frame(Gpu& gpu, ID3D12RootSignature* root, ID3D12PipelineState* pso, s
 
 int triangle_check(bool warp, std::string_view mode)
 {
-    const bool cold = mode == "cold", warm = mode == "warm", control = mode == "wrong_reference";
+    const bool stream = mode == "stream" || mode == "stream_wrong_reference";
+    const bool cold = mode == "cold", warm = mode == "warm" || mode == "stream",
+               control = mode == "wrong_reference" || mode == "stream_wrong_reference";
     const std::wstring cache = cache_directory();
     if (cache.empty()) {
         std::fputs("r3: X2W_CACHE_DIR must name the test's cache root\n", stderr);
@@ -390,7 +440,9 @@ int triangle_check(bool warp, std::string_view mode)
         const auto ps = container(X2W_SHADER_STAGE_PIXEL, r3_ps, sizeof(r3_ps), {{2, X2W_SHADER_BINDING_INTERP, 0, 0}});
         ComPtr<ID3D12PipelineState> pso;
         double ms = 0;
-        const HRESULT hr = root ? create_pipeline(gpu.device.Get(), root.Get(), vs, ps, pso, &ms) : E_FAIL;
+        const HRESULT hr = !root     ? E_FAIL
+                           : stream ? create_stream_pipeline(gpu.device.Get(), root.Get(), vs, ps, pso, &ms)
+                                    : create_pipeline(gpu.device.Get(), root.Get(), vs, ps, pso, &ms);
         std::printf("pso_create_ms=%.3f hr=0x%08lx mode=%s\n", ms, static_cast<unsigned long>(hr),
                     std::string(mode).c_str());
         good = good && SUCCEEDED(hr);
@@ -441,14 +493,20 @@ int refused_check()
     // A container with a stage that does not match its slot is refused before any translation.
     ComPtr<ID3D12PipelineState> swapped;
     const HRESULT swapped_hr = root ? create_pipeline(gpu.device.Get(), root.Get(), ps, vs, swapped, nullptr) : E_FAIL;
+    // The same refusal through a pipeline-state stream.
+    ComPtr<ID3D12PipelineState> streamed;
+    const HRESULT stream_hr =
+        root ? create_stream_pipeline(gpu.device.Get(), root.Get(), vs, ps, streamed, nullptr) : E_FAIL;
     const auto end = counters();
     X2WGfxSetLogSink(nullptr, nullptr);
-    std::printf("hr=0x%08lx swapped_hr=0x%08lx refused_events=%u pipelines_refused=%u translated=%u\n",
-                static_cast<unsigned long>(hr), static_cast<unsigned long>(swapped_hr), recorded.refused,
-                end.pipelines_refused - start.pipelines_refused, end.shaders_translated - start.shaders_translated);
+    std::printf("hr=0x%08lx swapped_hr=0x%08lx stream_hr=0x%08lx refused_events=%u pipelines_refused=%u "
+                "translated=%u\n",
+                static_cast<unsigned long>(hr), static_cast<unsigned long>(swapped_hr),
+                static_cast<unsigned long>(stream_hr), recorded.refused, end.pipelines_refused - start.pipelines_refused,
+                end.shaders_translated - start.shaders_translated);
     const bool named = recorded.details.find("mrt0 is not a vertex-shader export") != std::string::npos;
-    const bool good = hr == E_NOTIMPL && !pso && swapped_hr == E_NOTIMPL && !swapped && recorded.refused == 2 &&
-                      end.pipelines_refused - start.pipelines_refused == 2 && named &&
+    const bool good = hr == E_NOTIMPL && !pso && swapped_hr == E_NOTIMPL && !swapped && stream_hr == E_NOTIMPL &&
+                      !streamed && recorded.refused == 3 && end.pipelines_refused - start.pipelines_refused == 3 && named &&
                       end.shaders_translated == start.shaders_translated && gpu.debug_errors() == 0;
     std::printf("refused=%s\n", good ? "pass" : "fail");
     return good ? 0 : 1;
@@ -463,7 +521,9 @@ int main(int argc, char** argv)
     const std::string_view mode = argv[2];
     if (adapter != "warp" && adapter != "hardware") return 2;
     const bool warp = adapter == "warp";
-    if (mode == "cold" || mode == "warm" || mode == "wrong_reference") return triangle_check(warp, mode);
+    if (mode == "cold" || mode == "warm" || mode == "wrong_reference" || mode == "stream" ||
+        mode == "stream_wrong_reference")
+        return triangle_check(warp, mode);
     if (mode == "refused" && warp) return refused_check();
     return 2;
 }

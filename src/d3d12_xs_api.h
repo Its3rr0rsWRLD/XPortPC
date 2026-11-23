@@ -74,6 +74,9 @@ typedef struct X2WGfxCounters {
     // where the table's heap holds no view of that kind (the draw reads a null view, a point sampler or zeros).
     uint64_t title_lookup_misses;
     uint64_t texture_lookup_misses;
+    // ExecuteIndirect calls whose argument buffer held title GPU addresses and was rewritten on the GPU before the
+    // desktop call (d3d12_xs_indirect.h).
+    uint64_t indirect_rewrites;
 } X2WGfxCounters;
 
 typedef enum X2WGfxTitleGpuState {
