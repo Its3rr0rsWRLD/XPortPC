@@ -161,6 +161,30 @@ public static class XgrSym {
         return rows.ToArray();
     }
 
+    // The bytes of the named function (hex) and every exact data symbol a rel32 inside it could name
+    // (offset of the rel32, target RVA, symbol), for disassembly next to its references.
+    public static string[] Dump(string name) {
+        var info = new SYMBOL_INFOW();
+        info.SizeOfStruct = 88;
+        info.MaxNameLen = 1024;
+        if (!SymFromNameW(process, name, ref info)) return new string[] { "# " + name + " not found" };
+        long start = (long)(info.Address - Base), size = Math.Min(info.Size == 0 ? 256u : info.Size, 4096u);
+        var rows = new List<string>();
+        var hex = new StringBuilder();
+        for (long i = 0; i < size; i++) hex.Append(image[start + i].ToString("x2"));
+        rows.Add("dump " + name + " rva=0x" + start.ToString("x") + " size=" + size + " " + hex);
+        for (long o = start; o + 4 <= start + size; o++) {
+            int disp = BitConverter.ToInt32(image, (int)o);
+            foreach (int extra in new int[] { 0, 1, 4 }) {
+                long target = o + 4 + extra + disp;
+                if (target <= 0 || target >= image.Length || !InData(target, 1)) continue;
+                string n = Name((ulong)target);
+                if (n.EndsWith("+0x0")) rows.Add("ref +0x" + (o - start).ToString("x") + " (+" + extra + ") 0x" + target.ToString("x") + " " + n);
+            }
+        }
+        return rows.ToArray();
+    }
+
     // One TSV row per function: name, rva, size, leas (reg=guid), indirect (call|jmp reg+disp), direct callees.
     public static string[] Scan() {
         var rows = new List<string>();
@@ -279,6 +303,11 @@ foreach ($name in $Run.Split(",")) {
         $null = [XgrSym]::Open($exe.FullName)
         $found = @([XgrSym]::Find("*ClassID*")) + @([XgrSym]::Find("_Init_global_epoch")) + @([XgrSym]::Find("_tls_index"))
         $found | Set-Content (Join-Path $target "peek-symbols.tsv")
+        $dumps = @()
+        foreach ($fn in @("ATG::UITK::UIStaticText::ClassID", "ATG::UITK::UIPanel::ClassID", "_Init_thread_header", "_Init_thread_footer")) {
+            $dumps += [XgrSym]::Dump($fn)
+        }
+        $dumps | Set-Content (Join-Path $target "dumps.txt")
         $peek = @()
         foreach ($row in $found) {
             $cols = $row.Split("`t")

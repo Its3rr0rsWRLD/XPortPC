@@ -48,7 +48,34 @@ def guid_initializer(text):
     return f"{{0x{parts[0]}, 0x{parts[1]}, 0x{parts[2]}, {{{data4}}}}}"
 
 
+def load_slots(owner, entries):
+    slots = {}
+    for slot in entries:
+        index = slot.get("index")
+        if not isinstance(index, int) or not 3 <= index < MAX_SLOTS:
+            raise TableError(f"{owner}: slot index {index!r} must be 3..{MAX_SLOTS - 1}")
+        if index in slots:
+            raise TableError(f"{owner}: slot {index} is listed twice")
+        unknown = set(slot) - {"index", "function", "evidence", "impl", "returns", "params"}
+        if unknown:
+            raise TableError(f"{owner}: slot {index}: unknown fields {sorted(unknown)}")
+        if "evidence" not in slot:
+            raise TableError(f"{owner}: slot {index} needs evidence")
+        function = slot.get("function", "")
+        if function and not IDENT.match(function):
+            raise TableError(f"{owner}: slot {index} function {function!r}")
+        if slot.get("impl") not in (None, "xgr"):
+            raise TableError(f"{owner}: slot {index}: impl must be \"xgr\" (src/xgr/xgr_extra.cpp) or absent")
+        if slot.get("impl") == "xgr":
+            if not function or "returns" not in slot or "params" not in slot:
+                raise TableError(f"{owner}: slot {index}: impl = \"xgr\" needs function, returns and params")
+            shimgen.split_params(slot["params"])
+        slots[index] = slot
+    return slots
+
+
 def load_table(path):
+    """[class] with class["interfaces"][i]["_slots"] = {index: slot}, inherited slots included."""
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     classes = data.get("classes", [])
     seen_clsid, seen_iid, seen_name = set(), set(), set()
@@ -67,65 +94,95 @@ def load_table(path):
         interfaces = klass.get("interfaces", [])
         if not interfaces:
             raise TableError(f"{klass['name']}: needs at least one interface")
+        by_name = {}
         for interface in interfaces:
             for key in ("name", "iid", "evidence"):
                 if key not in interface:
                     raise TableError(f"{klass['name']}: interface {interface.get('name')!r} needs {key}")
+            if not IDENT.match(interface["name"]) or interface["name"] in seen_name:
+                raise TableError(f"interface name {interface['name']!r} is not a unique identifier")
+            seen_name.add(interface["name"])
             iid = interface["iid"].lower()
             guid_initializer(iid)
             if iid in seen_iid:
                 raise TableError(f"IID {iid} is listed twice")
             seen_iid.add(iid)
-        slots = {}
-        for slot in klass.get("slots", []):
-            index = slot.get("index")
-            if not isinstance(index, int) or not 3 <= index < MAX_SLOTS:
-                raise TableError(f"{klass['name']}: slot index {index!r} must be 3..{MAX_SLOTS - 1}")
-            if index in slots:
-                raise TableError(f"{klass['name']}: slot {index} is listed twice")
-            if "evidence" not in slot:
-                raise TableError(f"{klass['name']}: slot {index} needs evidence")
-            function = slot.get("function", "")
-            if function and not IDENT.match(function):
-                raise TableError(f"{klass['name']}: slot {index} function {function!r}")
-            slots[index] = slot
-        klass["_slots"] = slots
+            interface["_own"] = load_slots(interface["name"], interface.get("slots", []))
+            by_name[interface["name"]] = interface
+        for interface in interfaces:
+            # Versions are append-only: an interface that extends another has all of its slots first.
+            chain, current = [], interface
+            while current is not None:
+                if current["name"] in [c["name"] for c in chain]:
+                    raise TableError(f"{interface['name']}: extends loops")
+                chain.append(current)
+                base = current.get("extends")
+                if base and base not in by_name:
+                    raise TableError(f"{current['name']}: extends unknown interface {base!r} of {klass['name']}")
+                current = by_name.get(base) if base else None
+            merged = {}
+            for link in reversed(chain):
+                for index, slot in link["_own"].items():
+                    if index in merged and merged[index].get("function") != slot.get("function"):
+                        raise TableError(f"{interface['name']}: slot {index} disagrees with {link['name']}")
+                    merged[index] = slot
+            interface["_slots"] = merged
     return classes
 
 
-def wrapper(klass, index, slot, specs):
-    """(C++ definition, target expression) for one slot."""
+def wrapper(owner, index, slot, specs, cache):
+    """(C++ definition or None, target expression) for one slot; one wrapper per (function, kind)."""
     function = slot.get("function", "")
-    spec = specs.functions.get(function) if function else None
-    if spec is None:
-        return None, "nullptr"
-    name = f"xgr_{klass['name']}_{index}"
-    params = ", ".join(["void* /*self*/"] + [f"{t} {n}" for t, n in spec.params])
-    args = ", ".join(n for _, n in spec.params)
-    lines = [f"// slot {index}: {function} ({spec.doc_url(specs.families)})"]
-    if spec.returns in STRUCT_RETURNS:
-        params = ", ".join(["void* /*self*/", f"{spec.returns}* result"] + [f"{t} {n}" for t, n in spec.params])
-        value = f"x2w_impl_{function}({args})" if spec.body == "impl" else "{}"
-        if spec.body != "impl":
-            lines.append(f"// (not implemented in x2w_gdk: returns a zeroed {spec.returns})")
-        lines.append(f"static {spec.returns}* {name}({params}) noexcept {{ *result = {value}; return result; }}")
-        return "\n".join(lines), f"reinterpret_cast<void*>(&{name})"
-    if spec.body == "impl":
-        call = f"x2w_impl_{function}({args})"
-        body = f"{call};" if spec.returns == "void" else f"return {call};"
-        lines.append(f"static {spec.returns} {name}({params}) noexcept {{ {body} }}")
+    if slot.get("impl") == "xgr":
+        returns, params = slot["returns"], shimgen.split_params(slot["params"])
+        callee, doc, body_kind = f"xgr_impl_{function}", "src/xgr/xgr_extra.cpp", "impl"
+        spec = None
     else:
-        body = [f'    x2w_stub_called("xgameruntime.dll!{function}", "xgr gateway {klass["name"]} slot {index}", '
-                f"_ReturnAddress());"]
+        spec = specs.functions.get(function) if function else None
+        if spec is None:
+            return None, "nullptr"
+        returns, params = spec.returns, spec.params
+        callee, doc, body_kind = f"x2w_impl_{function}", spec.doc_url(specs.families), spec.body
+    name = f"xgr_m_{function}"
+    target = f"reinterpret_cast<void*>(&{name})"
+    if name in cache:
+        return None, target
+    cache.add(name)
+    args = ", ".join(n for _, n in params)
+    lines = [f"// {function} ({doc})"]
+    if returns in STRUCT_RETURNS:
+        plist = ", ".join(["void* /*self*/", f"{returns}* result"] + [f"{t} {n}" for t, n in params])
+        value = f"{callee}({args})" if body_kind == "impl" else "{}"
+        if body_kind != "impl":
+            lines.append(f"// (not implemented: returns a zeroed {returns})")
+        lines.append(f"static {returns}* {name}({plist}) noexcept {{ *result = {value}; return result; }}")
+        return "\n".join(lines), target
+    plist = ", ".join(["void* /*self*/"] + [f"{t} {n}" for t, n in params])
+    if body_kind == "impl":
+        call = f"{callee}({args})"
+        body = f"{call};" if returns == "void" else f"return {call};"
+        lines.append(f"static {returns} {name}({plist}) noexcept {{ {body} }}")
+    else:
+        body = [f'    x2w_stub_called("xgameruntime.dll!{function}", "xgr gateway {owner} slot {index}", _ReturnAddress());']
         for out in spec.out:
             body.append(f"    if ({out}) *{out} = {{}};")
+        for n in [n for _, n in params if n not in spec.out]:
+            body.insert(0, f"    (void){n};")
         default = spec.default_return()
         body.append("    return;" if default is None else f"    return {default};")
-        unused = [n for _, n in spec.params if n not in spec.out]
-        for n in unused:
-            body.insert(0, f"    (void){n};")
-        lines.append(f"static {spec.returns} {name}({params}) noexcept\n{{\n" + "\n".join(body) + "\n}")
-    return "\n".join(lines), f"reinterpret_cast<void*>(&{name})"
+        lines.append(f"static {returns} {name}({plist}) noexcept\n{{\n" + "\n".join(body) + "\n}")
+    return "\n".join(lines), target
+
+
+def xgr_declarations(classes):
+    out, seen = [], set()
+    for klass in classes:
+        for interface in klass["interfaces"]:
+            for slot in interface["_own"].values():
+                if slot.get("impl") == "xgr" and slot["function"] not in seen:
+                    seen.add(slot["function"])
+                    out.append(f"{slot['returns']} xgr_impl_{slot['function']}({slot['params'] or 'void'}) noexcept;")
+    return out
 
 
 def render(classes, specs, source):
@@ -134,31 +191,37 @@ def render(classes, specs, source):
         "// Included by src/xgr/xgr_gateway.cpp after XgrClass and XgrInterface.",
         "",
     ]
-    class_rows, interface_rows = [], []
-    for class_index, klass in enumerate(classes):
-        slots = klass["_slots"]
-        count = max([3] + [i + 1 for i in slots])
-        targets = ["nullptr"] * count
-        for index in sorted(slots):
-            definition, target = wrapper(klass, index, slots[index], specs)
-            if definition:
-                out.append(definition)
-            targets[index] = target
-        out.append(f"static void* const xgr_targets_{klass['name']}[{count}] = {{")
-        out.extend(f"    {t},  // {i}" for i, t in enumerate(targets))
-        out.append("};")
+    declarations = xgr_declarations(classes)
+    if declarations:
+        out.append("// Gateway-local implementations (src/xgr/xgr_extra.cpp).")
+        out.extend(declarations)
         out.append("")
-        class_rows.append(f'    {{"{klass["name"]}", {guid_initializer(klass["clsid"])}, xgr_targets_{klass["name"]}, '
-                          f"{count}u}},")
+    class_rows, interface_rows, cache = [], [], set()
+    for class_index, klass in enumerate(classes):
+        class_rows.append(f'    {{"{klass["name"]}", {guid_initializer(klass["clsid"])}}},')
         for interface in klass["interfaces"]:
+            slots = interface["_slots"]
+            count = max([3] + [i + 1 for i in slots])
+            targets = ["nullptr"] * count
+            for index in sorted(slots):
+                definition, target = wrapper(interface["name"], index, slots[index], specs, cache)
+                if definition:
+                    out.append(definition)
+                targets[index] = target
+            out.append(f"static void* const xgr_targets_{interface['name']}[{count}] = {{")
+            for i, t in enumerate(targets):
+                label = slots[i].get("function", "") if i in slots else ("IUnknown" if i < 3 else "")
+                out.append(f"    {t},  // {i} {label}".rstrip())
+            out.append("};")
+            out.append("")
             interface_rows.append(f'    {{"{interface["name"]}", {guid_initializer(interface["iid"])}, {class_index}u, '
-                                  f"{int(interface.get('slots', 0))}u}},")
+                                  f"xgr_targets_{interface['name']}, {count}u}},")
     out.append(f"static const XgrClass xgr_classes[{max(1, len(class_rows))}] = {{")
-    out.extend(class_rows or ['    {"(none)", {}, nullptr, 0u},'])
+    out.extend(class_rows or ['    {"(none)", {}},'])
     out.append("};")
     out.append(f"static const unsigned xgr_class_count = {len(class_rows)}u;")
     out.append(f"static const XgrInterface xgr_interfaces[{max(1, len(interface_rows))}] = {{")
-    out.extend(interface_rows or ['    {"(none)", {}, 0u, 0u},'])
+    out.extend(interface_rows or ['    {"(none)", {}, 0u, nullptr, 0u},'])
     out.append("};")
     out.append(f"static const unsigned xgr_interface_count = {len(interface_rows)}u;")
     return "\n".join(out) + "\n"
@@ -177,11 +240,12 @@ def main(argv=None):
     except (TableError, shimgen.SpecError, tomllib.TOMLDecodeError) as error:
         print(f"xgr_gen: {error}", file=sys.stderr)
         return 1
-    named = sum(1 for k in classes for s in k["_slots"].values() if s.get("function"))
-    implemented = sum(1 for k in classes for s in k["_slots"].values()
-                      if s.get("function") in specs.functions and specs.functions[s["function"]].body == "impl")
+    own = [s for k in classes for i in k["interfaces"] for s in i["_own"].values()]
+    named = sum(1 for s in own if s.get("function"))
+    implemented = sum(1 for s in own if s.get("impl") == "xgr" or (
+        s.get("function") in specs.functions and specs.functions[s["function"]].body == "impl"))
     print(f"xgr_gen: {len(classes)} classes, {sum(len(k['interfaces']) for k in classes)} interfaces, "
-          f"{sum(len(k['_slots']) for k in classes)} slots ({named} named, {implemented} implemented)")
+          f"{len(own)} slots ({named} named, {implemented} implemented)")
     if args.check:
         return 0
     if not args.out:

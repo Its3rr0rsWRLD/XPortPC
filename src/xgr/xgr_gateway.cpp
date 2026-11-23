@@ -47,14 +47,13 @@ constexpr unsigned xgr_slots = 256;  // XGR_SLOTS in xgr_thunks.asm
 struct XgrClass {
     const char* name;
     GUID clsid;
-    void* const* targets;  // slot -> function taking (this, flat args...); null: not implemented
-    unsigned count;
 };
 struct XgrInterface {
     const char* name;
     GUID iid;
-    unsigned class_index;
-    unsigned slots;  // slots this version has, as far as learned (0: unknown)
+    unsigned class_index;  // into xgr_classes
+    void* const* targets;  // slot -> function taking (this, flat args...); null: not implemented
+    unsigned count;
 };
 
 #include "xgr_table.inc"  // xgr_classes, xgr_class_count, xgr_interfaces, xgr_interface_count
@@ -65,7 +64,7 @@ enum class Mode { ours, trace, record };
 
 struct Object {
     void* const* vtbl;  // xgr_stub_table
-    const XgrClass* klass;
+    const XgrInterface* iface;  // ours: the learned interface; null in record and trace
     void* real;  // trace: the Windows runtime's interface
     GUID clsid;
     GUID iid;
@@ -249,11 +248,11 @@ std::string label(REFCLSID clsid, REFIID iid)
     return "{" + guid_text(clsid) + "}{" + guid_text(iid) + "}";
 }
 
-Object* new_object(REFCLSID clsid, REFIID iid, const XgrClass* klass, void* real)
+Object* new_object(REFCLSID clsid, REFIID iid, const XgrInterface* iface, void* real)
 {
     auto* object = new Object;
     object->vtbl = xgr_stub_table;
-    object->klass = klass;
+    object->iface = iface;
     object->real = real;
     object->clsid = clsid;
     object->iid = iid;
@@ -263,12 +262,12 @@ Object* new_object(REFCLSID clsid, REFIID iid, const XgrClass* klass, void* real
 }
 
 // A singleton per (CLSID, IID) for ours and record: the runtime's objects are process-wide.
-Object* singleton(REFCLSID clsid, REFIID iid, const XgrClass* klass)
+Object* singleton(REFCLSID clsid, REFIID iid, const XgrInterface* iface)
 {
     const std::string key = guid_text(clsid) + guid_text(iid);
     std::lock_guard<std::mutex> hold(state().lock);
     Object*& object = state().singletons[key];
-    if (!object) object = new_object(clsid, iid, klass, nullptr);
+    if (!object) object = new_object(clsid, iid, iface, nullptr);
     return object;
 }
 
@@ -277,7 +276,7 @@ Object* proxy_for(REFCLSID clsid, REFIID iid, void* real)
     const auto key = std::make_pair(real, guid_text(iid));
     std::lock_guard<std::mutex> hold(state().lock);
     Object*& object = state().proxies[key];
-    if (!object) object = new_object(clsid, iid, find_class(clsid), real);
+    if (!object) object = new_object(clsid, iid, nullptr, real);
     return object;
 }
 
@@ -304,10 +303,10 @@ HRESULT STDMETHODCALLTYPE object_QueryInterface(Object* self, REFIID iid, void**
     const XgrInterface* known = find_interface(iid);
     bool ok = IsEqualGUID(iid, self->iid) || IsEqualGUID(iid, unknown) || IsEqualGUID(iid, agile) ||
               IsEqualGUID(iid, inspectable) || mode() == Mode::record ||
-              (known && self->klass && &xgr_classes[known->class_index] == self->klass);
+              (known && self->iface && known->class_index == self->iface->class_index);
     emit_once("xgr-qi", self->name, format("%s -> %s", label(self->clsid, iid).c_str(), ok ? "ok" : "E_NOINTERFACE"));
     if (!ok) return E_NOINTERFACE;
-    *out = singleton(self->clsid, known ? iid : self->iid, self->klass);
+    *out = singleton(self->clsid, known && self->iface ? iid : self->iid, known && self->iface ? known : self->iface);
     return S_OK;
 }
 
@@ -359,8 +358,8 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
     } else if (self->real) {
         args[0] = self->real;
         target = real_vtbl(self)[slot];
-    } else if (self->klass && slot < self->klass->count) {
-        target = self->klass->targets[slot];
+    } else if (self->iface && slot < self->iface->count) {
+        target = self->iface->targets[slot];
     }
     if (!target && slot >= 3) known = false;
 
@@ -501,12 +500,12 @@ HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
         hr = fn ? fn(clsid, iid, &real) : E_NOTIMPL;
         if (SUCCEEDED(hr) && real) *out = proxy_for(clsid, iid, real);
     } else if (current == Mode::record) {
-        *out = singleton(clsid, iid, find_class(clsid));
+        *out = singleton(clsid, iid, nullptr);
     } else {
         const XgrInterface* known = find_interface(iid);
         const XgrClass* klass = find_class(clsid);
         if (known && klass && &xgr_classes[known->class_index] == klass) {
-            *out = singleton(clsid, iid, klass);
+            *out = singleton(clsid, iid, known);
         } else {
             hr = static_cast<HRESULT>(0x80070032L);  // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
         }
