@@ -3379,6 +3379,18 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "$<TARGET_FILE:x2w_break_title>")
     set_tests_properties(native_launch_breakpoints PROPERTIES TIMEOUT 120)
 
+    # The recent-calls trace: every routed import runs through a recording thunk, and a crash, first-chance or
+    # breakpoint line is followed by the thread's last calls with their results (tests/native/trace_check.py).
+    add_executable(x2w_trace_title tests/native/trace_title.cpp)
+    target_compile_options(x2w_trace_title PRIVATE /GS- /Zl)
+    target_link_options(x2w_trace_title PRIVATE /ENTRY:trace_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO)
+    target_link_libraries(x2w_trace_title PRIVATE kernel32)
+    add_test(NAME native_launch_trace_calls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/trace_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_trace_title>")
+    set_tests_properties(native_launch_trace_calls PROPERTIES TIMEOUT 180)
+
     # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
     # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a
     # title"). The rung 1 title imports names the shims export, one the xmem shim does not, kernel32 and

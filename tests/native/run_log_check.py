@@ -65,6 +65,10 @@ GRAMMAR = [r"x2w-run-log 1", rf"program {NAME}", r"mapped size 0x[0-9a-f]+",
            r"console-event \d+ \((?:ctrl-c|ctrl-break|close|logoff|shutdown)\)",
            # The heap guard (tools/x2w_launch.cpp, "heap guard"): on by default, --no-heap-guard turns it off.
            r"heap-guard on", r"heap-guard more invalid pointers are counted only",
+           # The recent-calls trace (tools/x2w_launch.cpp, "recent-calls trace"): on by default, --no-trace-calls.
+           r"trace-calls (?:on|unavailable)", r"recent-calls thread (?:\d+|main) calls \d+",
+           rf"recent \d+: {NAME}![A-Za-z0-9_#@?$]+\(0x[0-9a-f]+(?:,0x[0-9a-f]+){{3}}\) -> (?:0x[0-9a-f]+|pending) "
+           rf"caller={WHERE}",
            rf"heap-guard invalid [A-Za-z_]+ ptr=0x[0-9a-f]+ heap=0x[0-9a-f]+ owner=[a-z\-]+(?:\([^)]*\))?"
            rf"(?: callers {WHERE}(?: from {WHERE})*| callers\? {WHERE}(?: {WHERE})* \(stack-scan\)| callers none) not-forwarded",
            r"heap-guard corrupted-before .+ after .+",

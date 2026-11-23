@@ -1,6 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity] [--no-heap-guard]
+//                   [--no-trace-calls]
 //                   [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name]
 //                   [--continue-breakpoints|--stop-on-breakpoints] program.exe
 //
@@ -78,6 +79,12 @@
 // that is not one of its blocks, instead of letting ntdll end the process with 0xc0000374; the process heap is
 // validated at milestones to bracket a write that corrupts it. Lines: "heap-guard on", "heap-guard invalid ...",
 // "heap-guard corrupted-before M after P", and "heap-guard summary ..." before the final summary. See "heap guard" below.
+//
+// Recent-calls trace (diagnostic, on by default for now; --no-trace-calls turns it off). Every import routed for the
+// program and its package DLLs, and every function GetProcAddress hands them, runs through a thunk that records the
+// call in a per-thread 64-entry ring (name, caller, first four integer arguments, RAX on return). A crash, a
+// first-chance line and the first breakpoint lines are followed by that thread's last 32 calls; a crash also by the
+// main thread's. Lines: "trace-calls on", "recent-calls thread ...", "recent N: ..." (see "recent-calls trace" below).
 //
 // The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
@@ -485,6 +492,316 @@ void* make_watch(const std::string& dll, const std::string& symbol, void* target
     return thunk;
 }
 
+// ---------------------------------------------------------------- recent-calls trace (--trace-calls)
+// On by default for now (--no-trace-calls turns it off). Every import routed for the program and its package DLLs
+// (shim, package, windows, stub) and every code address GetProcAddress hands them is replaced by a 32-byte thunk that
+// loads its descriptor (target, "dll!symbol") into R10 and jumps to one shared body. The body is a real frame with
+// unwind data (RtlAddFunctionTable), so exceptions and stack walks pass through it: it saves RCX, RDX, R8, R9 and
+// XMM0-XMM3, records the call (x2w_trace_enter: descriptor, caller's return address, first four integer arguments)
+// in this thread's ring, copies up to 12 stack arguments (bounded by the thread's stack base) into its own outgoing
+// area, calls the target with the registers restored, records RAX (x2w_trace_leave) and returns RAX and XMM0 as the
+// target left them. RBX, RSI and RDI are pushed and popped; nothing else nonvolatile is touched, and RSP is 0 mod 16
+// at both calls. LastError is not changed: the record functions call nothing that sets it, and the one-time ring
+// setup saves and restores it. Each thread gets a fixed 64-entry ring from a pool allocated once (no lock, no
+// allocation per call); its pointer is in a dynamic TLS slot read straight from the TEB (the launcher keeps no
+// implicit TLS, see "slot 0"). Functions that never return, inspect or replace their caller's frame, switch stacks or
+// take varargs or a va_list are not wrapped (trace_skip). Data exports are not wrapped: only addresses in an
+// executable section of an image, or in executable private memory (stubs), are.
+// Lines: "trace-calls on", and at a crash, a first-chance line and the first breakpoint lines, the faulting thread's
+// last 32 calls oldest first, "recent-calls thread TID|main calls N" then "recent SEQ: dll!NAME(a1,a2,a3,a4) -> RAX
+// caller=module+RVA" (RAX "pending" for a call that has not returned); a crash also gives the main thread's ring.
+bool trace_calls = true;
+struct TraceDesc {
+    void* target;  // at offset 0: the body calls [R10]
+    const char* name;
+};
+struct TraceEntry {
+    const TraceDesc* desc;
+    std::uint64_t caller;
+    std::uint64_t args[4];
+    std::uint64_t rax;
+    volatile std::uint64_t seq;  // the call's number on its thread, kTraceDone set once it returned; 0 while written
+};
+static_assert(sizeof(TraceEntry) == 64, "one cache line per entry");
+constexpr std::uint64_t kTraceRing = 64, kTraceShown = 32, kTraceDone = 1ull << 63;
+struct TraceRing {
+    DWORD tid;
+    DWORD unused;
+    volatile std::uint64_t count;
+    std::uint64_t pad[6];
+    TraceEntry entries[kTraceRing];
+};
+constexpr long kTraceRings = 4096;
+constexpr long kTraceBreakpointDumps = 8;
+TraceRing* trace_pool;
+volatile long trace_pool_used;
+DWORD trace_slot = TLS_OUT_OF_INDEXES;
+DWORD trace_main_tid;
+std::uint8_t* trace_body;
+SRWLOCK trace_lock = SRWLOCK_INIT;
+std::map<void*, void*>* trace_thunks;  // target -> thunk, so every route to one function gets the same thunk
+std::vector<std::uint8_t*> trace_pages;
+std::size_t trace_used;
+constexpr std::size_t kTraceThunk = 32, kTracePage = 1 << 16;
+
+// This thread's ring, made on first use when create is set; null if the pool is used up (marked with 1).
+TraceRing* trace_ring(bool create) {
+    if (trace_slot == TLS_OUT_OF_INDEXES) return nullptr;
+    void* value;
+    if (trace_slot < 64) {
+        value = reinterpret_cast<void*>(__readgsqword(0x1480 + trace_slot * 8));  // TEB TlsSlots
+    } else {
+        const DWORD error = GetLastError();
+        value = TlsGetValue(trace_slot);  // sets LastError to 0 on success
+        SetLastError(error);
+    }
+    if (value == reinterpret_cast<void*>(1)) return nullptr;
+    if (value || !create) return static_cast<TraceRing*>(value);
+    const DWORD error = GetLastError();
+    const long index = InterlockedIncrement(&trace_pool_used) - 1;
+    TraceRing* ring = index < kTraceRings ? &trace_pool[index] : nullptr;
+    if (ring) ring->tid = GetCurrentThreadId();
+    TlsSetValue(trace_slot, ring ? static_cast<void*>(ring) : reinterpret_cast<void*>(1));
+    SetLastError(error);
+    return ring;
+}
+
+extern "C" std::uint64_t x2w_trace_enter(const TraceDesc* desc, std::uint64_t caller, const std::uint64_t* args) {
+    TraceRing* ring = trace_ring(true);
+    if (!ring) return 0;
+    const std::uint64_t seq = ring->count + 1;
+    TraceEntry& entry = ring->entries[(seq - 1) % kTraceRing];
+    entry.seq = 0;
+    entry.desc = desc;
+    entry.caller = caller;
+    for (int i = 0; i < 4; ++i) entry.args[i] = args[i];
+    entry.rax = 0;
+    entry.seq = seq;  // volatile stores are release stores under MSVC on x64
+    ring->count = seq;
+    return seq;
+}
+
+extern "C" void x2w_trace_leave(std::uint64_t seq, std::uint64_t rax) {
+    if (!seq) return;
+    TraceRing* ring = trace_ring(false);
+    if (!ring) return;
+    TraceEntry& entry = ring->entries[(seq - 1) % kTraceRing];
+    if (entry.seq != seq) return;  // overwritten by 64 later calls, or a fiber that moved threads
+    entry.rax = rax;
+    entry.seq = seq | kTraceDone;
+}
+
+// The shared body, assembled with llvm-mc from:
+//   push rbx; push rsi; push rdi; sub rsp, 0xF0                         (prolog, 10 bytes)
+//   mov [rsp+0x80..0x98], rcx, rdx, r8, r9; movdqu [rsp+0xA0..0xD0], xmm0..xmm3; mov [rsp+0xE0], r10
+//   mov rcx, r10; mov rdx, [rsp+0x108]; lea r8, [rsp+0x80]; mov rax, <x2w_trace_enter>; call rax; mov rbx, rax
+//   lea rsi, [rsp+0x130]; lea rdi, [rsp+0x20]; mov rcx, gs:[8]; sub rcx, rsi; shr rcx, 3
+//   cmp rcx, 12; jbe 1f; mov ecx, 12; 1: rep movsq                       (stack arguments 5..16)
+//   mov rcx..r9, [rsp+0x80..0x98]; movdqu xmm0..xmm3, [rsp+0xA0..0xD0]; mov r10, [rsp+0xE0]; call [r10]
+//   mov [rsp+0x80], rax; movdqu [rsp+0xA0], xmm0; mov rcx, rbx; mov rdx, rax; mov rax, <x2w_trace_leave>; call rax
+//   mov rax, [rsp+0x80]; movdqu xmm0, [rsp+0xA0]; add rsp, 0xF0; pop rdi; pop rsi; pop rbx; ret
+// Entry RSP is 8 mod 16; three pushes and 0xF0 make it 0 mod 16. The caller's return address is at [rsp+0x108] and
+// its fifth argument at [rsp+0x130]; the callee's home space is [rsp, rsp+0x20) and its stack arguments follow.
+constexpr std::uint8_t kTraceBody[] = {
+    0x53, 0x56, 0x57, 0x48, 0x81, 0xec, 0xf0, 0x00, 0x00, 0x00, 0x48, 0x89, 0x8c, 0x24, 0x80, 0x00, 0x00, 0x00, 0x48,
+    0x89, 0x94, 0x24, 0x88, 0x00, 0x00, 0x00, 0x4c, 0x89, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00, 0x4c, 0x89, 0x8c, 0x24,
+    0x98, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x7f, 0x84, 0x24, 0xa0, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x7f, 0x8c, 0x24, 0xb0,
+    0x00, 0x00, 0x00, 0xf3, 0x0f, 0x7f, 0x94, 0x24, 0xc0, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x7f, 0x9c, 0x24, 0xd0, 0x00,
+    0x00, 0x00, 0x4c, 0x89, 0x94, 0x24, 0xe0, 0x00, 0x00, 0x00, 0x4c, 0x89, 0xd1, 0x48, 0x8b, 0x94, 0x24, 0x08, 0x01,
+    0x00, 0x00, 0x4c, 0x8d, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0x48, 0xb8, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0xff, 0xd0, 0x48, 0x89, 0xc3, 0x48, 0x8d, 0xb4, 0x24, 0x30, 0x01, 0x00, 0x00, 0x48, 0x8d, 0x7c, 0x24, 0x20,
+    0x65, 0x48, 0x8b, 0x0c, 0x25, 0x08, 0x00, 0x00, 0x00, 0x48, 0x29, 0xf1, 0x48, 0xc1, 0xe9, 0x03, 0x48, 0x83, 0xf9,
+    0x0c, 0x76, 0x05, 0xb9, 0x0c, 0x00, 0x00, 0x00, 0xf3, 0x48, 0xa5, 0x48, 0x8b, 0x8c, 0x24, 0x80, 0x00, 0x00, 0x00,
+    0x48, 0x8b, 0x94, 0x24, 0x88, 0x00, 0x00, 0x00, 0x4c, 0x8b, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00, 0x4c, 0x8b, 0x8c,
+    0x24, 0x98, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x6f, 0x84, 0x24, 0xa0, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x6f, 0x8c, 0x24,
+    0xb0, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x6f, 0x94, 0x24, 0xc0, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x6f, 0x9c, 0x24, 0xd0,
+    0x00, 0x00, 0x00, 0x4c, 0x8b, 0x94, 0x24, 0xe0, 0x00, 0x00, 0x00, 0x41, 0xff, 0x12, 0x48, 0x89, 0x84, 0x24, 0x80,
+    0x00, 0x00, 0x00, 0xf3, 0x0f, 0x7f, 0x84, 0x24, 0xa0, 0x00, 0x00, 0x00, 0x48, 0x89, 0xd9, 0x48, 0x89, 0xc2, 0x48,
+    0xb8, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0xff, 0xd0, 0x48, 0x8b, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00,
+    0xf3, 0x0f, 0x6f, 0x84, 0x24, 0xa0, 0x00, 0x00, 0x00, 0x48, 0x81, 0xc4, 0xf0, 0x00, 0x00, 0x00, 0x5f, 0x5e, 0x5b,
+    0xc3};
+constexpr std::size_t kTraceEnter = 107, kTraceLeave = 267, kTraceUnwind = 320, kTraceFunction = 352;
+static_assert(sizeof kTraceBody == 305 && sizeof kTraceBody <= kTraceUnwind);
+static_assert(kTraceBody[kTraceEnter - 2] == 0x48 && kTraceBody[kTraceEnter - 1] == 0xb8);
+static_assert(kTraceBody[kTraceLeave - 2] == 0x48 && kTraceBody[kTraceLeave - 1] == 0xb8);
+// UNWIND_INFO: version 1, prolog 10 bytes, 5 codes: at 10 ALLOC_LARGE 0xF0 (two slots, size / 8), at 3 PUSH_NONVOL
+// rdi, at 2 PUSH_NONVOL rsi, at 1 PUSH_NONVOL rbx; padded to an even count.
+constexpr std::uint8_t kTraceUnwindInfo[] = {0x01, 0x0a, 0x05, 0x00, 0x0a, 0x01, 0x1e, 0x00,
+                                             0x03, 0x70, 0x02, 0x60, 0x01, 0x30, 0x00, 0x00};
+
+bool trace_init() {
+    auto* page = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    trace_pool = static_cast<TraceRing*>(
+        VirtualAlloc(nullptr, sizeof(TraceRing) * kTraceRings, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    trace_slot = TlsAlloc();
+    if (!page || !trace_pool || trace_slot == TLS_OUT_OF_INDEXES) return false;
+    std::memcpy(page, kTraceBody, sizeof kTraceBody);
+    const auto enter = reinterpret_cast<std::uint64_t>(&x2w_trace_enter);
+    const auto leave = reinterpret_cast<std::uint64_t>(&x2w_trace_leave);
+    std::memcpy(page + kTraceEnter, &enter, 8);
+    std::memcpy(page + kTraceLeave, &leave, 8);
+    std::memcpy(page + kTraceUnwind, kTraceUnwindInfo, sizeof kTraceUnwindInfo);
+    auto* function = reinterpret_cast<RUNTIME_FUNCTION*>(page + kTraceFunction);
+    function->BeginAddress = 0;
+    function->EndAddress = sizeof kTraceBody;
+    function->UnwindData = kTraceUnwind;
+    DWORD old = 0;
+    if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old)) return false;
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+    if (!RtlAddFunctionTable(function, 1, reinterpret_cast<DWORD64>(page))) return false;
+    trace_thunks = new std::map<void*, void*>;
+    trace_main_tid = GetCurrentThreadId();
+    trace_body = page;
+    return true;
+}
+
+// Imports that are not wrapped: they never return, unwind or restore a frame, read or switch the caller's stack, are
+// called by the exception machinery, or take varargs or a va_list.
+bool trace_skip(const std::string& symbol) {
+    static const char* const exact[] = {
+        "ExitProcess", "ExitThread", "FreeLibraryAndExitThread", "RtlExitUserThread", "RtlExitUserProcess",
+        "NtTerminateProcess", "ZwTerminateProcess", "TerminateProcess", "FatalExit", "FatalAppExitA", "FatalAppExitW",
+        "RaiseException", "RaiseFailFastException", "RtlRaiseException", "NtRaiseException", "ZwRaiseException",
+        "RtlCaptureContext", "RtlCaptureContext2", "RtlRestoreContext", "NtContinue", "ZwContinue", "NtContinueEx",
+        "RtlCaptureStackBackTrace", "RtlWalkFrameChain", "_CxxThrowException", "__C_specific_handler",
+        "__std_terminate", "terminate", "abort", "exit", "_exit", "_Exit", "quick_exit", "_cexit", "_c_exit",
+        "_invoke_watson", "_invalid_parameter_noinfo_noreturn", "__report_gsfailure", "_endthread", "_endthreadex",
+        "longjmp", "_longjmp", "setjmp", "_setjmp", "_setjmpex", "__intrinsic_setjmp", "__intrinsic_setjmpex",
+        "SwitchToFiber", "ConvertThreadToFiber", "ConvertThreadToFiberEx", "ConvertFiberToThread", "DeleteFiber",
+        "__chkstk", "_chkstk", "__alloca_probe", "_alloca_probe", "_alloca_probe_16", "_alloca_probe_8",
+        "_resetstkoflw", "__security_check_cookie", "DbgPrint", "DbgPrintEx", "DbgBreakPoint", "DebugBreak"};
+    for (const char* name : exact)
+        if (symbol == name) return true;
+    static const char* const prefixes[] = {"RtlUnwind", "__CxxFrameHandler", "_CxxFrameHandler", "__GSHandlerCheck",
+                                           "_except_handler", "__NLG_", "_local_unwind", "__longjmp", "__DestructExceptionObject"};
+    for (const char* prefix : prefixes)
+        if (symbol.rfind(prefix, 0) == 0) return true;
+    std::string folded = symbol;
+    for (char& c : folded) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // printf/scanf families (sprintf, wsprintfW, __stdio_common_vfprintf, ...), va_list takers (vsnprintf, ...).
+    return folded.find("printf") != std::string::npos || folded.find("scanf") != std::string::npos ||
+           folded.find("va_list") != std::string::npos;
+}
+
+// True for an address in an executable section of an image (a mapped one, or one the Windows loader knows), or in
+// executable private memory (the launcher's stubs and watch thunks). Data exports are false.
+bool trace_is_code(const void* address) {
+    const auto at = reinterpret_cast<std::uintptr_t>(address);
+    std::uintptr_t base = 0;
+    for (const auto& region : regions)
+        if (at >= region.base && at - region.base < region.size) base = region.base;
+    if (!base) {
+        MEMORY_BASIC_INFORMATION info;
+        if (!VirtualQuery(address, &info, sizeof info) || info.State != MEM_COMMIT) return false;
+        if (info.Type != MEM_IMAGE)
+            return (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+        base = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const std::uintptr_t rva = at - base;
+    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        const DWORD size = section->Misc.VirtualSize ? section->Misc.VirtualSize : section->SizeOfRawData;
+        if (rva >= section->VirtualAddress && rva - section->VirtualAddress < size)
+            return (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    }
+    return false;
+}
+
+bool in_trace_page(std::uintptr_t at) {
+    for (const auto* page : trace_pages) {
+        const auto start = reinterpret_cast<std::uintptr_t>(page);
+        if (at >= start && at - start < kTracePage) return true;
+    }
+    return false;
+}
+
+// The thunk the program gets for dll!symbol at address, or address itself when it is not wrapped.
+void* trace_wrap(const std::string& dll, const std::string& symbol, void* address) {
+    if (!trace_calls || !trace_body || !address || trace_skip(symbol)) return address;
+    AcquireSRWLockExclusive(&trace_lock);
+    void* result = address;
+    if (!in_trace_page(reinterpret_cast<std::uintptr_t>(address))) {
+        void*& thunk = (*trace_thunks)[address];
+        if (!thunk && trace_is_code(address)) {
+            if (trace_pages.empty() || trace_used + kTraceThunk > kTracePage) {
+                auto* page = static_cast<std::uint8_t*>(
+                    VirtualAlloc(nullptr, kTracePage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+                if (page) {
+                    trace_pages.push_back(page);
+                    trace_used = 0;
+                }
+            }
+            if (!trace_pages.empty() && trace_used + kTraceThunk <= kTracePage) {
+                std::uint8_t* code = trace_pages.back() + trace_used;
+                trace_used += kTraceThunk;
+                auto* desc = new TraceDesc{address, _strdup((dll + "!" + symbol).c_str())};
+                const auto pointer = reinterpret_cast<std::uint64_t>(desc);
+                const auto body = reinterpret_cast<std::uint64_t>(trace_body);
+                std::memset(code, 0xcc, kTraceThunk);
+                code[0] = 0x49;  // mov r10, imm64 (the descriptor)
+                code[1] = 0xba;
+                std::memcpy(code + 2, &pointer, 8);
+                code[10] = 0x49;  // mov r11, imm64 (the body)
+                code[11] = 0xbb;
+                std::memcpy(code + 12, &body, 8);
+                code[20] = 0x41;  // jmp r11
+                code[21] = 0xff;
+                code[22] = 0xe3;
+                FlushInstructionCache(GetCurrentProcess(), code, kTraceThunk);
+                thunk = code;
+            }
+        }
+        if (thunk) result = thunk;
+    }
+    ReleaseSRWLockExclusive(&trace_lock);
+    return result;
+}
+
+void trace_dump(const TraceRing* ring, const char* who) {
+    if (!trace_body) return;
+    const std::uint64_t count = ring ? ring->count : 0;
+    log_line("recent-calls thread %s calls %llu", who, static_cast<unsigned long long>(count));
+    if (!ring) return;
+    const std::uint64_t first = count > kTraceShown ? count - kTraceShown + 1 : 1;
+    for (std::uint64_t n = first; n <= count; ++n) {
+        const TraceEntry& entry = ring->entries[(n - 1) % kTraceRing];
+        const std::uint64_t seq = entry.seq;
+        if ((seq & ~kTraceDone) != n || !entry.desc) continue;
+        char caller[160];
+        describe(reinterpret_cast<const void*>(entry.caller), caller, sizeof caller);
+        char rax[24] = "pending";
+        if (seq & kTraceDone) std::snprintf(rax, sizeof rax, "0x%llx", static_cast<unsigned long long>(entry.rax));
+        log_line("recent %llu: %s(0x%llx,0x%llx,0x%llx,0x%llx) -> %s caller=%s", static_cast<unsigned long long>(n),
+                 entry.desc->name, static_cast<unsigned long long>(entry.args[0]),
+                 static_cast<unsigned long long>(entry.args[1]), static_cast<unsigned long long>(entry.args[2]),
+                 static_cast<unsigned long long>(entry.args[3]), rax, caller);
+    }
+}
+
+// The current thread's ring ("main" when it is the program's main thread).
+void trace_dump_current() {
+    if (!trace_body) return;
+    char who[16];
+    const DWORD self = GetCurrentThreadId();
+    if (self == trace_main_tid) std::snprintf(who, sizeof who, "main");
+    else std::snprintf(who, sizeof who, "%lu", self);
+    trace_dump(trace_ring(false), who);
+}
+
+// The main thread's ring, when the current thread is another one.
+void trace_dump_main() {
+    if (!trace_body || GetCurrentThreadId() == trace_main_tid) return;
+    const long used = trace_pool_used < kTraceRings ? trace_pool_used : kTraceRings;
+    const TraceRing* ring = nullptr;
+    for (long i = 0; i < used && !ring; ++i)
+        if (trace_pool[i].tid == trace_main_tid) ring = &trace_pool[i];
+    trace_dump(ring, "main");
+}
+
 void* report(const std::string& dll, const std::string& symbol, const char* route, const char* kind, void* address) {
     err_printf( "[x2w] import %s!%s -> %s\n", dll.c_str(), symbol.c_str(), route);
     ++route_counts[kind];
@@ -493,8 +810,8 @@ void* report(const std::string& dll, const std::string& symbol, const char* rout
     const bool bound = address && std::strncmp(kind, "stub", 4) != 0 && std::strcmp(kind, "missing") != 0;
     const bool d3d12 = dll.rfind("d3d12", 0) == 0;
     if (bound && ((d3d12 && (log_file != INVALID_HANDLE_VALUE || heap_guard)) || (heap_guard && std::strcmp(kind, "shim") == 0)))
-        return make_watch(dll, symbol, address);
-    return address;
+        return trace_wrap(dll, symbol, make_watch(dll, symbol, address));
+    return trace_wrap(dll, symbol, address);
 }
 
 // Module identity. A title finds its own resources and files through GetModuleHandle(NULL),
@@ -1121,6 +1438,8 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
         else if (void* heap = heap_hook(dll, name)) address = reinterpret_cast<FARPROC>(heap);
         else if (void* sys = sys_hook(dll, name)) address = reinterpret_cast<FARPROC>(sys);
     }
+    // The program gets the recent-calls thunk (the same one a static import of that function has).
+    if (address) address = reinterpret_cast<FARPROC>(trace_wrap(dll, symbol, reinterpret_cast<void*>(address)));
     log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " + route);
     SetLastError(error);
     return address;
@@ -2030,6 +2349,7 @@ LONG CALLBACK breakpoint_continue(EXCEPTION_POINTERS* info) {
         const std::string regs = register_text(info);
         err_printf("[x2w] breakpoint continued at %s (count %ld)\n", where, count);
         log_line("breakpoint continued at %s count %ld%s", where, count, regs.c_str());
+        if (count <= kTraceBreakpointDumps) trace_dump_current();
         if (count == kBreakpointLines) log_line("breakpoint %ld lines logged; later breakpoints are counted only", count);
     }
     context->Rip = next;
@@ -2063,6 +2383,7 @@ LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
             const std::string chain = caller_chain(info);
             log_line("first-chance %s last-stub %s%s%s%s", text, last_stub_name().c_str(), chain.c_str(),
                      thread_init_text(info, chain).c_str(), register_text(info).c_str());
+            trace_dump_current();
             log_provisional_summary();
         }
     }
@@ -2079,6 +2400,8 @@ LONG WINAPI unhandled(EXCEPTION_POINTERS* info) {
         const std::string chain = caller_chain(info);
         log_line("crash %s last-stub %s%s%s%s", text, last_stub_name().c_str(), chain.c_str(),
                  thread_init_text(info, chain).c_str(), register_text(info).c_str());
+        trace_dump_current();
+        trace_dump_main();
         log_summary("crash");
     }
     // The program's own filter (hook_SetUnhandledExceptionFilter) runs after the log is written.
@@ -2273,6 +2596,10 @@ int wmain(int argc, wchar_t** argv) {
             heap_guard = false;
         } else if (argument == L"--heap-guard") {
             heap_guard = true;
+        } else if (argument == L"--no-trace-calls") {
+            trace_calls = false;
+        } else if (argument == L"--trace-calls") {
+            trace_calls = true;
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
         } else if (argument == L"--xgr" && i + 1 < argc) {
@@ -2302,7 +2629,7 @@ int wmain(int argc, wchar_t** argv) {
     if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         err_printf( "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] [--no-heap-guard] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
+                     "[--host-identity] [--no-heap-guard] [--no-trace-calls] [--xgr shim|ours|trace|record] [--xmem NAME=VALUE]... [--sys-config FILE] [--show-program-name] "
                      "[--continue-breakpoints|--stop-on-breakpoints] program.exe\n");
         return 2;
     }
@@ -2378,6 +2705,11 @@ int wmain(int argc, wchar_t** argv) {
         HMODULE ucrt = LoadLibraryW(L"ucrtbase.dll");
         if (ucrt) crt_init(0, [ucrt](const char* symbol) { return reinterpret_cast<void*>(GetProcAddress(ucrt, symbol)); });
         log_line("heap-guard on");
+    }
+    // Before any import is bound: every routed import gets its recent-calls thunk.
+    if (trace_calls) {
+        trace_calls = trace_init();
+        log_line(trace_calls ? "trace-calls on" : "trace-calls unavailable");
     }
     {
         std::wstring stem = file_of(full);
