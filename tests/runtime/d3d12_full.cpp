@@ -300,6 +300,7 @@ int versions_check(bool warp)
                 check(texture->GetGPUVirtualAddress() == 0, "a texture has no GPU address");
                 ComPtr<ID3D12Resource2> r2;
                 check(FAILED(vram.As(&r2)) || r2.Get() == vram.Get(), "ID3D12Resource2 is the wrapper");
+                r2.Reset();
                 vram.Reset();
                 check(X2WTitleGpuTranslate(va, 4) == 0, "a released buffer is unregistered");
             }

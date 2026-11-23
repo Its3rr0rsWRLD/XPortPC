@@ -122,13 +122,14 @@ The title gets objects from our graphics shim and calls them through vtables. Ea
 
 | Console object | Desktop object | Translation |
 |---|---|---|
-| device | `ID3D12Device` (newest available) + debug layer in dev builds | create calls translated one by one; `QueryInterface` of an unknown IID is logged and fails with `E_NOINTERFACE` |
+| device | `ID3D12Device` through `ID3D12Device10` + debug layer in dev builds | create calls translated one by one; version N is answered only when the desktop device implements it; `QueryInterface` of an unknown IID is logged and fails with `E_NOINTERFACE` |
 | command queue | `ID3D12CommandQueue` | `ExecuteCommandLists` unwraps lists; fences map 1:1; present goes through a DXGI swap chain the shim owns |
-| command allocator / list | same | each record call becomes the desktop call with title GPU addresses translated (`X2WTitleGpuTranslate`) and descriptors remapped |
+| command allocator / list | same; lists through `ID3D12GraphicsCommandList7` | each record call becomes the desktop call with title GPU addresses translated (`X2WTitleGpuTranslate`), wrapped resources unwrapped (also inside barriers, copy locations and render-pass resolves) and descriptors remapped |
 | pipeline state | desktop PSO | built from translated shaders (below); cached |
 | root signature | desktop root signature | console blob deserialized, console-only flags dropped, converter parameters appended |
 | descriptor heap | shader-visible desktop heap + shadow table | below |
-| resource / heap | desktop resource; buffers in title memory are aliases (section 4) | layout and state rules below |
+| resource / heap | wrapped `ID3D12Resource2` / `ID3D12Heap1` over the desktop objects; buffers in title memory are aliases (section 4) | a buffer's `GetGPUVirtualAddress` is a title address (section 4, "Buffers the title creates") |
+| command signature | wrapped `ID3D12CommandSignature` | keeps the record layout for `ExecuteIndirect` (below) |
 
 Vtable slots. The wrappers use the public desktop method order. That the console interfaces share this order is an
 assumption that the first owner logs test: every slot past the public ones, and every slot at all in dev builds, first
@@ -194,6 +195,37 @@ already tracks them (`tools/pixel_aot_ops/bindings.py`, [pixel-bindings.md](pixe
 
 Measured numbers are in [experiments.md](../experiments.md#translator-service-and-ahead-of-time-cache-runtime-rung-r3).
 
+### The rest of the public desktop surface
+
+Titles query later interface versions and call their methods, so the wrappers cover the public desktop D3D12 surface in
+public method order: `ID3D12Device1` to `ID3D12Device10` (79 slots), `ID3D12GraphicsCommandList1` to
+`ID3D12GraphicsCommandList7` (81 slots), `ID3D12Resource2` (17), `ID3D12Heap1` (10), `ID3D12CommandSignature` (8).
+Slots past those still go to the logging thunks. A method of a version the desktop object lacks is logged once and
+returns `E_NOTIMPL` (or nothing). Everything forwards with arguments unwrapped and GPU addresses translated, except:
+
+| Entry | Handling |
+|---|---|
+| `ID3D12Device2::CreatePipelineState` | the stream is walked (every subobject type through `RASTERIZER2`); desktop bytecode is passed through; console VS/PS or CS containers go through the same translation as `CreateGraphicsPipelineState`/`CreateComputePipelineState` and the stream is copied with the DXIL in place (input layout emptied), keeping every other subobject and default; console mesh or amplification shaders and console shaders with a serialized root signature are **refused** (`E_NOTIMPL`) |
+| `ExecuteIndirect` | records without address fields run in place; records with vertex/index buffer views or root CBV/SRV/UAV addresses are rewritten on the GPU first (below); indirect `DispatchRays` and indirect commands of a translated pipeline are **refused** |
+| `CreatePipelineLibrary` | **refused** with `DXGI_ERROR_UNSUPPORTED` (libraries load pipelines by description, bypassing translation; drivers may refuse them the same way) |
+| `CreateMetaCommand` | **refused** with `E_NOTIMPL` (driver-defined parameters may hold GPU addresses) |
+| `BuildRaytracingAccelerationStructure` | addresses in the description and bottom-level geometry translated on the CPU; a top-level build with instances is **refused** (its instance descriptions in GPU memory hold bottom-level title addresses) |
+| `DispatchRays` | table addresses translated; a state object with local root signatures is **refused** (shader records may hold title addresses or descriptor handles) |
+| `CreateSamplerFeedbackUnorderedAccessView` into a title heap | **refused** (no slot kind yet) |
+| `WriteBufferImmediate`, `SOSetTargets`, acceleration-structure SRVs, postbuild info, AS copies | destination addresses translated |
+| `BeginEvent`/`EndEvent`/`SetMarker` (PIX) | forwarded |
+
+**ExecuteIndirect with title addresses** (`src/d3d12_xs_indirect.h`). The argument records a title writes (often from
+the GPU) hold title GPU addresses. Before the desktop call the shim records a compute pass
+(`src/d3d12_xs_indirect.hlsl`, embedded at build time) that copies the records the argument buffer holds into a buffer
+of its own and translates every address field through a snapshot of all translated ranges (title begin, end, desktop
+begin; `X2WTitleGpuGetTranslations`); an address no range holds is copied unchanged, as for API calls. The desktop
+`ExecuteIndirect` reads the copy, with the title's count buffer. The pass restores the pipeline, the compute root
+signature and its arguments, and predication afterwards. It needs a dispatch, so it is refused in bundles and render
+passes. Barriers: none for an UPLOAD argument buffer; otherwise legacy `INDIRECT_ARGUMENT` <-> `NON_PIXEL_SHADER_RESOURCE`
+transitions (the argument buffer must be in exactly `INDIRECT_ARGUMENT`), or enhanced buffer barriers once the list has
+used `Barrier`. The copies are held by the command allocator and reused after its `Reset`.
+
 ### Console-only features
 
 - Features with a desktop equivalent (mesh shaders, DXR, sampler feedback, VRS, ExecuteIndirect) map to it.
@@ -240,6 +272,23 @@ per 4 KiB page, by `MEM_WRITE_WATCH` (`GetWriteWatch`, set when `era_heap` alloc
 `OpenExistingHeapFromAddress` accepts such memory must be measured) or by guard pages and a vectored handler. Dirty
 pages are copied to VRAM before each submit. GPU-written ranges the CPU reads (query results, readbacks) stay
 aliased.
+
+**Buffers the title creates through the device** (`src/d3d12_xs_resources.h`). A title stores the
+`GetGPUVirtualAddress` of its buffers in memory that shaders and indirect records read, so that address must be a title
+address that the same translation serves as XMem memory. Decided with the memory registry: every buffer created
+through the shim's device gets a title GPU address, registered with `xmem.dll` (`X2WTitleGpuRegisterResource`), so
+`X2WTitleGpuTranslate`/`Locate` answer for it and `TitleLookup` finds it in the shader view.
+
+- CPU-visible heaps (UPLOAD, READBACK, GPU_UPLOAD, CUSTOM with CPU access): the buffer's mapped CPU pointer, kept
+  mapped for its life, so CPU pointer and GPU address are equal as on the console.
+- Placed in a heap opened from title memory (`OpenExistingHeapFromAddress`): the heap's address plus the offset; when
+  that span is already an XMem allocation, nothing new is registered.
+- Everything else (DEFAULT, reserved, other placed buffers): a range of process address space reserved for the buffer
+  (`MEM_RESERVE`, no access, 64 KiB granularity), so it never collides with title memory.
+- READBACK buffers and buffers of 4 GiB or more are registered for API translation only, not for `TitleLookup`. Note
+  that every shader-visible registered buffer takes one of the converter's 8 title-memory slots.
+- Textures have no GPU address. Without `xmem.dll` the address is the desktop one (identity), noted once.
+- Releasing the wrapper unregisters the range and frees the reservation.
 
 **Not modelled:** the console's page types and caching (the six graphics memory types are policy only, see
 `era_heap`), and any GPU-side page table manipulation (tiled/reserved resources map to desktop reserved resources).

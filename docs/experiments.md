@@ -2797,7 +2797,7 @@ This covers only the two root-signature imports observed in the pre-executable D
 |---|---|
 | `runtime_r2_clear_warp`, `runtime_r2_clear_hardware` | `tests/runtime/r2_clear.cpp` imports device creation from `d3d12_xs.dll` (no desktop `d3d12.lib`) and allocates 64 KiB of graphics memory through `xmem.dll` first. Through the shim it creates the device, queue, allocator, list, fence and a 64x64 `R8G8B8A8_UNORM` swap chain. For 3 frames it clears the back buffer to a frame colour (each channel `k/255`), copies it to a readback buffer, waits on the fence and presents. Every pixel must equal the colour bit for bit. Also required: 3 successful presents, no debug-layer errors, no unknown slot or IID, the device counted as created by the shim, and either a non-zero `X2WTitleGpuTranslate` of the allocation or the registry's `E_NOTIMPL`. Every wrapper must be released at exit. The hardware case skips (77) without a hardware adapter. |
 | `runtime_r2_wrong_color_warp`, `runtime_r2_wrong_color_hardware` | Control: the same frames compared against the colour with green one step higher. Passes only when every pixel of every frame is reported as a mismatch and everything else holds. |
-| `runtime_r2_unknown_entries_warp` | With a recording sink: slots 44 and 77 of the device, 19 of the queue, 9 of the allocator, 60 of the list and 12 of the fence return `E_NOTIMPL`. Each is logged once with its interface, slot index, this pointer, the three marker arguments and a caller inside the test. A repeated slot is counted but not logged again. A made-up IID and `ID3D12Device1` fail on the device with `E_NOINTERFACE` and are logged with their IID, and the made-up IID is logged again for the queue. Known IIDs and slot 7 (`GetNodeCount`) log nothing. Seven slot calls and three IID calls are counted. |
+| `runtime_r2_unknown_entries_warp` | With a recording sink: slots 79 and 120 of the device, 19 of the queue, 9 of the allocator, 81 of the list and 12 of the fence return `E_NOTIMPL` (the device and list wrappers end at `ID3D12Device10` and `ID3D12GraphicsCommandList7`, see "The full public desktop surface" below). Each is logged once with its interface, slot index, this pointer, the three marker arguments and a caller inside the test. A repeated slot is counted but not logged again. A made-up IID and `ID3D12CommandQueue` fail on the device with `E_NOINTERFACE` and are logged with their IID, and the made-up IID is logged again for the queue. Known IIDs and slot 7 (`GetNodeCount`) log nothing. Seven slot calls and three IID calls are counted. |
 
 The R2 program does not run under `x2w_launch` yet: it links the CRT, and `pe_map` refuses its TLS template (the implicit-TLS gap in [runtime.md](design/runtime.md), section 1).
 
@@ -2916,6 +2916,39 @@ Frame time, from a diagnostic run of the same code (`r5_frames`, debug layer on,
 Pipeline creation: cold 0.60 s for compute and 1.0 to 1.9 s for vertex + pixel; warm 15 to 31 ms for compute and 2 to 10 ms for graphics. WARP's maximum (about 0.2 to 0.3 s, one frame per run) and its heavier p99 tail are single stalls of the software rasterizer. Churn costs about 0.6 to 0.8 ms per frame on top of warm: an `XMemAlloc` (`OpenExistingHeapFromAddress` plus a placed buffer), a free and new view descriptors every frame.
 
 Not covered yet: compute descriptor tables in title heaps, LDS and barriers in the runtime path (C-6), global stores (C-5). The converter parameters still take 46 of 64 root DWORDs, 32 of them push words; a per-draw upload ring for push words would free most of that.
+
+#### The full public desktop surface (graphics shim)
+
+`d3d12_xs.dll` wraps the public desktop D3D12 interfaces past their first versions, in public method order, so a title's
+`QueryInterface` of a later version does not fail ([runtime.md](design/runtime.md), section 3, "The rest of the public
+desktop surface", and section 4, "Buffers the title creates through the device").
+
+| Wrapper | Slots | Notes |
+|---|---|---|
+| `ID3D12Device` .. `ID3D12Device10` | 79 | version N answered only when the desktop device implements it; resources, heaps, command signatures, lists (`CreateCommandList1`) and queues (`CreateCommandQueue1`) come back wrapped |
+| `ID3D12GraphicsCommandList` .. `ID3D12GraphicsCommandList7` | 81 | resources unwrapped in every call and inside barriers (legacy and enhanced), copy locations, render-pass resolves and atomic-copy dependencies |
+| `ID3D12Resource2` | 17 | `GetGPUVirtualAddress` returns the buffer's title address |
+| `ID3D12Heap1` | 10 | keeps the address of a heap opened with `OpenExistingHeapFromAddress` |
+| `ID3D12CommandSignature` | 8 | keeps the record layout |
+
+Refused (logged as `REFUSED`, documented failure code): `CreatePipelineLibrary` (`DXGI_ERROR_UNSUPPORTED`),
+`CreateMetaCommand` (`E_NOTIMPL`), console mesh/amplification shaders in a pipeline stream (`E_NOTIMPL`), top-level
+acceleration-structure builds with instances, `DispatchRays` with local root signatures, indirect `DispatchRays`,
+indirect commands of a translated pipeline, address-bearing indirect records in bundles or render passes.
+
+`xmem.dll` gains `X2WTitleGpuRegisterResource`, `X2WTitleGpuUnregisterResource` and `X2WTitleGpuGetTranslations`
+(`src/era_title_gpu_api.h`): registered desktop buffers sit in the same table as XMem aliases. `X2WGfxCounters` gains
+`indirect_rewrites`.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_d3d12_versions_warp`, `_hardware` | `tests/runtime/d3d12_full.cpp versions`. `QueryInterface` of `ID3D12Device1..10` and `ID3D12GraphicsCommandList1..7`: each success returns the wrapper itself, each failure is `E_NOINTERFACE` and is the only kind of unknown IID counted; versions 1 to 5 and 1 to 4 must be answered. Address model: a DEFAULT buffer's address is a reserved range, translates to the desktop buffer `X2WTitleGpuLocate` returns (offset kept) and is unregistered on release; an UPLOAD buffer's address is its mapped pointer; a texture's is 0; placed buffers (`CreateHeap1`) and `CreateCommittedResource2/3` buffers are registered; a buffer placed in a heap opened from `VirtualAlloc` memory has that memory's address. Forwarded with unwrapping: `SetResidencyPriority`, `EnqueueMakeResident`, `CreateCommandList1` (then recorded), `GetResourceAllocationInfo1/2`. The pipeline library, meta command and a console mesh stream are refused (3 REFUSED events). Slots 79 (device), 81 (list), 17 (resource), 10 (heap) and 8 (command signature) return `E_NOTIMPL` and are logged. No debug-layer error; every wrapper released. |
+| `runtime_d3d12_indirect_warp`, `_hardware` | Title memory (XMem) holds three colours and three rectangles' vertices. Records (vertex buffer view, root CBV, draw; stride 40) name them by title address. `ExecuteIndirect` 1 reads an UPLOAD buffer with 4 records, 2 valid and 2 with addresses no range holds, and a count buffer of 2; `ExecuteIndirect` 2 reads a DEFAULT buffer with 1 record, copied from staging and moved to `INDIRECT_ARGUMENT`. The pipeline is a desktop one created through a pipeline-state stream. The 64x64 frame must equal the CPU reference bit for bit (edges on pixel boundaries), with 2 rewrites counted, no refusal and no debug-layer error. |
+| `runtime_d3d12_indirect_wrong_reference_*` | Control: the reference with the first two rectangles' colours swapped; passes only when exactly their 2048 pixels differ. |
+| `runtime_d3d12_enhanced_*`, `runtime_d3d12_enhanced_wrong_reference_*` | The same frame with resources from `CreateCommittedResource3` and only enhanced barriers (`Barrier`), so the shim's rewrite uses enhanced buffer barriers. Skip (77) without `EnhancedBarriersSupported`. |
+| `runtime_r3_triangle_stream_*`, `runtime_r3_stream_wrong_reference_*` | After `runtime_r3_triangle_cold_*`: the R3 pipeline created as a stream through `ID3D12Device2::CreatePipelineState`, with an input layout the shim must drop; both shaders from the cache, frame bit for bit against the R3 reference, and its control. `runtime_r3_refused_warp` also refuses the refused vertex program when it comes in a stream (3 refusals). |
+
+@@PCRESULTS@@
 
 ### Attribute words at xmem call sites
 
