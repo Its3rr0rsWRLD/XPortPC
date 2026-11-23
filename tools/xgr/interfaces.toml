@@ -1,0 +1,12 @@
+# The PC Gaming Runtime's interface layer, as learned from our own evidence (docs/design/runtime.md,
+# section 2, "The Gaming Runtime gateway"). tools/xgr_gen.py turns this into the xgameruntime.dll
+# gateway's table (src/xgr/xgr_gateway.cpp).
+#
+# Sources allowed here: x2w_launch --xgr trace runs of Microsoft's public GDK samples (Xbox-GDK-Samples,
+# MIT, built by us for PC: cards/standin-titles), with each caller resolved to a function name through
+# the PDB of our own build of the sample (dbghelp, tools/pc_jobs/run_xgr.ps1), and the public PC GDK
+# NuGet packages (Microsoft.GDK.Core/Windows 2610.0.9661) as facts. No other project's code or docs.
+#
+# [[classes]]: name (our label), clsid, evidence. interfaces: name, iid, evidence (and optionally slots,
+# the number of slots that version has when known). [[classes.slots]]: index (3.. ; 0-2 are IUnknown),
+# function (the flat function whose thunk makes this call, or "" when unknown), evidence.

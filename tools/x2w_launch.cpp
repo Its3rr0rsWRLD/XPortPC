@@ -31,6 +31,9 @@
 // Windows would. Each distinct load and resolve is logged once, as
 // "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|windows-fallback|missing|windows", on
 // stderr and in the run log; tools/shimgen.py --run-log turns those lines into shims.
+// --xgr ours|trace|record (or X2W_XGR) sends xgameruntime.dll to the Gaming Runtime gateway instead
+// (shims\x2w_xgr.dll, src/xgr/xgr_gateway.cpp, mode passed as X2W_XGR_MODE): "dynamic-load
+// xgameruntime.dll -> gateway (MODE)", resolves route "gateway", and nothing falls back to Windows' DLL.
 // Shims are loaded with LOAD_WITH_ALTERED_SEARCH_PATH, so DLLs beside a shim (x2w_gdk.dll) resolve.
 // The program's environment gets X2W_TITLE (its file name without extension) and X2W_TITLE_DIR (its
 // folder) unless they are set; the generated shims use them for save folders and the package path.
@@ -78,6 +81,13 @@ MapRunTraced map_run;
 std::vector<std::wstring> shim_dirs;
 std::wstring package_dir;
 std::map<std::string, HMODULE> shim_modules;
+// --xgr MODE (or X2W_XGR): "shim" (default) leaves xgameruntime.dll to the --shims directories and the
+// windows-fallback; "ours", "trace" and "record" route it to the gateway (shims\x2w_xgr.dll,
+// src/xgr/xgr_gateway.cpp) in that mode, with no fallback to Windows' DLL.
+std::string xgr_mode = "shim";
+std::wstring launcher_dir;
+constexpr const char* kXgrName = "xgameruntime.dll";
+constexpr const wchar_t* kXgrGateway = L"x2w_xgr.dll";
 std::map<std::string, void*> package_images;
 std::set<std::string> mapping;  // package DLLs being mapped, to stop import cycles
 
@@ -396,10 +406,17 @@ std::string dll_file_name(const std::wstring& request) {
     return name;
 }
 
-// The shim for a DLL name from a --shims directory, loading it if needed, or null.
+bool xgr_gateway_on() { return xgr_mode != "shim"; }
+
+// The shim for a DLL name from a --shims directory, loading it if needed, or null. With --xgr other
+// than shim, xgameruntime.dll is the gateway: x2w_xgr.dll from a --shims directory, else from the
+// launcher's own shims directory.
 HMODULE shim_for(const std::string& name) {
-    for (const auto& directory : shim_dirs) {
-        const std::wstring path = directory + L"\\" + widen(name);
+    std::vector<std::wstring> directories = shim_dirs;
+    const bool gateway = name == kXgrName && xgr_gateway_on();
+    if (gateway) directories.push_back(launcher_dir + L"\\shims");
+    for (const auto& directory : directories) {
+        const std::wstring path = directory + L"\\" + (gateway ? std::wstring(kXgrGateway) : widen(name));
         if (!is_file(path)) continue;
         AcquireSRWLockExclusive(&dynamic_lock);
         HMODULE& module = shim_modules[name];
@@ -589,7 +606,8 @@ HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
     const std::string name = dll_file_name(request);
     if (!(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE))) {
         if (HMODULE shim = shim_for(name)) {
-            log_dynamic_once("dynamic-load " + name + " -> shim");
+            log_dynamic_once("dynamic-load " + name + " -> " +
+                             (name == kXgrName && xgr_gateway_on() ? "gateway (" + xgr_mode + ")" : std::string("shim")));
             return shim;
         }
     }
@@ -630,8 +648,9 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
                                           : std::string(name ? name : "(null)");
     const std::string shim = shim_name_of(module);
     FARPROC address = GetProcAddress(module, name);
-    const char* route = address ? "shim" : "missing";
-    if (!shim.empty() && !address) {
+    const bool gateway = shim == kXgrName && xgr_gateway_on();
+    const char* route = address ? (gateway ? "gateway" : "shim") : "missing";
+    if (!shim.empty() && !address && !gateway) {
         // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
         // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
         // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
@@ -1028,15 +1047,22 @@ int wmain(int argc, wchar_t** argv) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
+        } else if (argument == L"--xgr" && i + 1 < argc) {
+            xgr_mode = lower(narrow(argv[++i]));
         } else if (program.empty()) {
             program = argument;
         } else {
             usage = true;
         }
     }
+    if (xgr_mode == "shim") {
+        wchar_t value[16] = {};
+        if (GetEnvironmentVariableW(L"X2W_XGR", value, 16)) xgr_mode = lower(narrow(value));
+    }
+    if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] program.exe\n");
+                     "[--host-identity] [--xgr shim|ours|trace|record] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -1062,6 +1088,8 @@ int wmain(int argc, wchar_t** argv) {
     AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
+    launcher_dir = directory_of(self);
+    if (xgr_gateway_on()) SetEnvironmentVariableW(L"X2W_XGR_MODE", widen(xgr_mode).c_str());
     HMODULE pe_map = LoadLibraryW((directory_of(self) + L"\\pe_map.dll").c_str());
     if (pe_map) {
         map_image = reinterpret_cast<MapImage>(GetProcAddress(pe_map, "pe_map_image"));
@@ -1079,6 +1107,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::string program_name = lower(narrow(file_of(full)));
     log_line("x2w-run-log 1");
     log_line("program %s", program_name.c_str());
+    if (xgr_gateway_on()) log_line("xgr %s", xgr_mode.c_str());
     {
         std::wstring stem = file_of(full);
         const auto dot = stem.find_last_of(L'.');

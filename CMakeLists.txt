@@ -3096,3 +3096,5 @@ endif()
 
 # System-library shims: x2w_gdk.dll and the DLLs tools/shimgen.py generates (cmake/x2w_shimgen.cmake).
 include(cmake/x2w_shimgen.cmake)
+# The xgameruntime.dll gateway for PC GDK titles (cmake/x2w_xgr.cmake).
+include(cmake/x2w_xgr.cmake)
