@@ -5,7 +5,8 @@
 Runs tests/runtime/r3_triangle.cpp on WARP with each path of d3d12_xs.dll and compares the cache files byte for byte
 (<key>.dxil, and <key>.hlsl kept with X2W_KEEP_HLSL=1):
     process     X2W_TRANSLATE=process: one tools/pso_translate.py per shader (the path before the service), cold
-    service     the default: the translator service pool (tools/pso_service.py), cold, then warm (all cache hits)
+    service     the default: the translator service pool (tools/pso_service.py), cold, warm (all cache hits), and
+                cold again (the services' Python bytecode now cached)
     fallback    X2W_TRANSLATOR_SERVICES=0: the service unavailable, so the shim falls back to the process path, cold
     precompile  X2W_TRANSLATE=defer records both shaders and fails the pipeline without translating; then
                 tools/precompile_cache.py translates the manifest, and a warm run finds both in the cache
@@ -71,6 +72,10 @@ def main(argv):
     expect(files(paths["service"] / "r3_triangle") == reference, "service path: cache files equal the process path's")
     rc, out, warm_ms = r3(exe, dxc, paths["service"], "warm")
     expect(rc == 0, "service path: warm run", out)
+    # A second launch with the cache emptied: the services start with Python's bytecode cached (X2W_CACHE_DIR\pycache).
+    rc, out, again_ms = r3(exe, dxc, paths["service"], "cold")
+    expect(rc == 0 and SERVICE_NOTE in out, "service path: cold run with bytecode cached", out)
+    expect(files(paths["service"] / "r3_triangle") == reference, "service path: second cold run's cache files")
 
     rc, out, fallback_ms = r3(exe, dxc, paths["fallback"], "cold", X2W_TRANSLATOR_SERVICES="0")
     expect(rc == 0 and FALLBACK_NOTE in out and SERVICE_NOTE not in out, "fallback path: cold run", out)
@@ -107,7 +112,8 @@ def main(argv):
     def shown(ms):
         return "-" if ms is None else f"{ms:.1f}"
 
-    print(f"pso_create_ms (2 shaders): process cold {shown(process_ms)}, service cold {shown(service_ms)}, "
+    print(f"pso_create_ms (2 shaders): process cold {shown(process_ms)}, service cold {shown(service_ms)} "
+          f"(first start, no bytecode cached) and {shown(again_ms)} (bytecode cached), "
           f"fallback cold {shown(fallback_ms)}, warm {shown(warm_ms)}, after precompile {shown(precompiled_ms)}")
     print("paths: " + ("identical" if not failures else f"{len(failures)} failures"))
     return 1 if failures else 0
