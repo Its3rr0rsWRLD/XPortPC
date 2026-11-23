@@ -527,8 +527,80 @@ HRESULT WINAPI XErrorReport(HRESULT status, const char* message)
 
 }  // extern "C"
 
+// ---------------------------------------------------------------- X2W_XGR_PEEK (diagnostics)
+// X2W_XGR_PEEK="RVA:LEN,..." (hex RVAs in the title): at the title's first C++ throws, log those bytes of
+// the title as hex ("xgr-peek"), the thread's word at offset 4 of its implicit TLS block (the C runtime's
+// _Init_thread_epoch, given X2W_XGR_TLS_INDEX=RVA of _tls_index) and the thrown object's first words and
+// any std::string-shaped members (MSVC layout) at offsets 24 and 56 ("xgr-throw-object"). For finding why a
+// title throws under x2w_launch; off unless set.
+namespace {
+std::string peek_hex(const unsigned char* p, size_t n)
+{
+    std::string out;
+    for (size_t i = 0; i < n; ++i) out += format("%02x", p[i]);
+    return out;
+}
+
+std::string msvc_string(const unsigned char* at)
+{
+    const auto size = *reinterpret_cast<const size_t*>(at + 16);
+    const auto capacity = *reinterpret_cast<const size_t*>(at + 24);
+    if (size > 4096 || capacity < size) return format("(not a string: size %zu cap %zu)", size, capacity);
+    const char* text = capacity > 15 ? *reinterpret_cast<const char* const*>(at) : reinterpret_cast<const char*>(at);
+    std::string out;
+    for (size_t i = 0; i < size && i < 160; ++i) {
+        const char c = text[i];
+        out += (c >= 0x20 && c < 0x7f) ? c : '.';
+    }
+    return "\"" + out + "\"";
+}
+
+void peek_body(const EXCEPTION_RECORD* record)
+{
+        auto* title = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+        char spec[4096] = {};
+        GetEnvironmentVariableA("X2W_XGR_PEEK", spec, sizeof spec);
+        for (char* item = std::strtok(spec, ","); item; item = std::strtok(nullptr, ",")) {
+            char* colon = std::strchr(item, ':');
+            const unsigned long rva = std::strtoul(item, nullptr, 16);
+            const unsigned long length = colon ? std::strtoul(colon + 1, nullptr, 16) : 8;
+            emit("xgr-peek", format("0x%lx", rva), peek_hex(title + rva, length > 64 ? 64 : length));
+        }
+        char index_rva[32] = {};
+        if (GetEnvironmentVariableA("X2W_XGR_TLS_INDEX", index_rva, sizeof index_rva)) {
+            const DWORD index = *reinterpret_cast<const DWORD*>(title + std::strtoul(index_rva, nullptr, 16));
+            auto* const* vector = reinterpret_cast<unsigned char* const*>(__readgsqword(0x58));
+            emit("xgr-peek", "tls", format("index %lu block %p epoch %d thread %lu", index, vector ? vector[index] : nullptr,
+                                           vector && vector[index] ? *reinterpret_cast<const int*>(vector[index] + 4) : 0,
+                                           GetCurrentThreadId()));
+        }
+        const auto* object = reinterpret_cast<const unsigned char*>(record->ExceptionInformation[1]);
+        if (object)
+            emit("xgr-throw-object", format("%p", object),
+                 peek_hex(object, 88) + " id=" + msvc_string(object + 24) + " message=" + msvc_string(object + 56));
+}
+
+void peek_fault() { emit("xgr-peek", "fault", ""); }
+
+volatile LONG peek_count = 0;
+LONG CALLBACK peek_handler(EXCEPTION_POINTERS* info)
+{
+    const EXCEPTION_RECORD* record = info->ExceptionRecord;
+    if (record->ExceptionCode != 0xE06D7363 || record->NumberParameters < 3) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedIncrement(&peek_count) > 4) return EXCEPTION_CONTINUE_SEARCH;
+    __try {
+        peek_body(record);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        peek_fault();
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+}  // namespace
+
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved)
 {
+    if (reason == DLL_PROCESS_ATTACH && GetEnvironmentVariableA("X2W_XGR_PEEK", nullptr, 0))
+        AddVectoredExceptionHandler(1, peek_handler);
     if (reason == DLL_PROCESS_DETACH && reserved) summary();  // process exit; FreeLibrary leaves it to Uninitialize
     return TRUE;
 }

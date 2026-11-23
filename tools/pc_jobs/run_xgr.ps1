@@ -145,6 +145,22 @@ public static class XgrSym {
     static readonly string[] Regs = { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
                                       "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
 
+    // "name<TAB>rva<TAB>size" for every symbol matching a dbghelp mask (data and functions).
+    public static string[] Find(string mask) {
+        var rows = new List<string>();
+        EnumCallback callback = (IntPtr info, uint size, IntPtr context) => {
+            uint symSize = (uint)Marshal.ReadInt32(info, 28);
+            ulong address = (ulong)Marshal.ReadInt64(info, 56);
+            int nameLen = Marshal.ReadInt32(info, 76);
+            string name = Marshal.PtrToStringUni(new IntPtr(info.ToInt64() + 84), Math.Max(0, Math.Min(nameLen, 1000)));
+            if (address >= Base) rows.Add(name + "\t0x" + (address - Base).ToString("x") + "\t" + symSize);
+            return rows.Count < 400;
+        };
+        SymEnumSymbolsW(process, Base, mask, callback, IntPtr.Zero);
+        GC.KeepAlive(callback);
+        return rows.ToArray();
+    }
+
     // One TSV row per function: name, rva, size, leas (reg=guid), indirect (call|jmp reg+disp), direct callees.
     public static string[] Scan() {
         var rows = new List<string>();
@@ -258,6 +274,19 @@ foreach ($name in $Run.Split(",")) {
         $log = Join-Path $target "run.log"
         $err = Join-Path $target "stderr-full.txt"
         $outFile = Join-Path $target "stdout.txt"
+        # Diagnostics for the title's C++ throws (X2W_XGR_PEEK, src/xgr/xgr_gateway.cpp): the magic-static
+        # objects and guards of the UITK element class IDs, the C runtime's global epoch and _tls_index.
+        $null = [XgrSym]::Open($exe.FullName)
+        $found = @([XgrSym]::Find("*ClassID*")) + @([XgrSym]::Find("_Init_global_epoch")) + @([XgrSym]::Find("_tls_index"))
+        $found | Set-Content (Join-Path $target "peek-symbols.tsv")
+        $peek = @()
+        foreach ($row in $found) {
+            $cols = $row.Split("`t")
+            if ($cols[0] -ne "_tls_index" -and ($cols[0] -match "TSS0|::id|_Init_global_epoch")) { $peek += "$($cols[1].Substring(2)):$('{0:x}' -f [math]::Max(8, [math]::Min([int]$cols[2], 32)))" }
+            if ($cols[0] -eq "_tls_index") { $env:X2W_XGR_TLS_INDEX = $cols[1].Substring(2) }
+        }
+        $env:X2W_XGR_PEEK = ($peek | Select-Object -First 40) -join ","
+        if (-not $env:X2W_XGR_PEEK) { $env:X2W_XGR_PEEK = "0:8" }
         $start = Get-Date
         $p = Start-Process -FilePath $launcher -WorkingDirectory $exe.DirectoryName -WindowStyle Hidden -PassThru `
             -RedirectStandardError $err -RedirectStandardOutput $outFile `
