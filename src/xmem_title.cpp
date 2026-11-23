@@ -1123,13 +1123,11 @@ void register_runs(State&, std::uintptr_t base, Mapping& m)
     }
 }
 
-// Splits the placeholder region [base, base + total pages) into one placeholder per 64 KiB page, so each page can hold
-// its own view, and records it as a mapping with nothing mapped. Caller holds the lock.
+// Records the placeholder region [base, base + total pages) as a mapping with nothing mapped. The region stays one
+// placeholder: a page is split off into its own placeholder only when it is first mapped (isolate_page), so a large
+// reservation costs no per-page work up front (a 24 GiB one was ~393k VirtualFree calls). Caller holds the lock.
 std::map<std::uintptr_t, Mapping>::iterator track_placeholders(State& s, std::uintptr_t base, std::size_t total)
 {
-    for (std::size_t i = 1; i < total; ++i)
-        VirtualFree(reinterpret_cast<void*>(base + (total - i) * physical_page), physical_page,
-                    MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
     try {
         Mapping m;
         m.pages = total;
@@ -1138,6 +1136,26 @@ std::map<std::uintptr_t, Mapping>::iterator track_placeholders(State& s, std::ui
     } catch (const std::bad_alloc&) {
         return s.mappings.end();
     }
+}
+
+// Makes the 64 KiB page at `at` (inside the mapping [base, base + bytes)) a placeholder of its own, splitting the
+// placeholder that holds it at the page's start and end (each split frees from a placeholder's start, as the
+// documented placeholder samples do). A page that is already its own placeholder needs nothing. Caller holds the lock.
+bool isolate_page(std::uintptr_t base, std::uint64_t bytes, std::uintptr_t at)
+{
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) != sizeof(info)) return false;
+    if (info.State != MEM_RESERVE) return true;  // not a placeholder (mapped): the replace fails and is logged
+    std::uintptr_t start = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
+    std::uintptr_t end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    if (start < base) start = base;
+    if (end > base + bytes) end = base + bytes;
+    if (start < at && !VirtualFree(reinterpret_cast<void*>(start), at - start, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+        return false;
+    if (end > at + physical_page &&
+        !VirtualFree(reinterpret_cast<void*>(at), physical_page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+        return false;
+    return true;
 }
 
 // A placeholder region for a mapping at `address` (null: anywhere in the system window). Caller holds the lock.
@@ -1733,6 +1751,9 @@ static PVOID impl_XMemMapPhysicalPages(PVOID VirtualAddress, ULONG_PTR NumberOfP
             m.physical[page] = -1;
         }
         if (!PageArray) continue;
+        if (!isolate_page(base, m.pages * physical_page, reinterpret_cast<std::uintptr_t>(at)))
+            log_once("unimplemented", "splitting the placeholder at 0x%llx failed (error %lu)",
+                     static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(at)), GetLastError());
         if (!map3(s.pool, GetCurrentProcess(), at, PageArray[i] * physical_page, physical_page, MEM_REPLACE_PLACEHOLDER,
                   PAGE_READWRITE, nullptr, 0)) {
             log_once("unimplemented", "MapViewOfFile3 of physical page %llu failed (error %lu)",

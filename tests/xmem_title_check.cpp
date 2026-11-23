@@ -635,6 +635,25 @@ bool physical_reserve()
                "the last page of the requested range maps");
         XMemMapPhysicalPages(at + 2 * 64 * KiB, 1, nullptr);
     }
+    // A 24 GiB reservation (a real title's size) costs no per-page work: pages are split off when first mapped.
+    {
+        const ULONGLONG t0 = GetTickCount64();
+        auto* big = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, std::size_t{24} << 30, type, PAGE_READWRITE));
+        const ULONGLONG took = GetTickCount64() - t0;
+        expect(big != nullptr, "24 GiB physical reservation");
+        expect(took < 500, "24 GiB physical reservation takes under 500 ms");
+        if (big) {
+            unsigned char* mid = big + (std::size_t{12} << 30);
+            PVOID spots[3] = {mid, mid + 64 * KiB, big + (std::size_t{24} << 30) - 64 * KiB};
+            ULONG_PTR three[3] = {nz[0], nz[1], nz[2]};
+            expect(XMemMapPhysicalPagesScatter(spots, 3, three) && mid[3] == 0x77 &&
+                       static_cast<unsigned char*>(spots[2])[1] == 0x42,
+                   "adjacent pages in the middle and the last page map");
+            ULONG_PTR again = nz[2];
+            expect(XMemMapPhysicalPages(mid, 1, &again) && mid[1] == 0x42, "a mapped page is remapped");
+            XMemMapPhysicalPagesScatter(spots, 3, nullptr);
+        }
+    }
     // MEM_4MB_PAGES: 4 MiB alignment.
     auto* four = static_cast<unsigned char*>(XMemVirtualAlloc(nullptr, 8 * MiB, MEM_RESERVE | 0x80000000u, PAGE_READWRITE));
     expect(four && addr(four) % (4 * MiB) == 0, "MEM_4MB_PAGES: 4 MiB aligned");
