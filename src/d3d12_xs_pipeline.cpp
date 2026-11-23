@@ -674,6 +674,7 @@ const char* add_refs(const std::string& text, std::uint32_t stage, const std::ve
             info.writes_memory = 1;
             continue;
         }
+        if (line == "memory ro") continue;  // reads title memory through SRVs
         char kind[16] = {};
         unsigned slot = 0, set = 0, offset = 0, flags = 0;
         if (std::sscanf(line.c_str(), "%15s %u %u %u %u", kind, &slot, &set, &offset, &flags) != 5)
@@ -839,10 +840,17 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     }
     ps_roles += "}}";
 
-    // The pixel program first: when it stores to title memory, the vertex program is translated to read title memory
-    // through the same UAVs (role "title_memory": "rw"; vertex programs never store, tools/vertex_aot.py refuses it).
+    // The vertex program first (a refusal there translates nothing else), then the pixel program. When the pixel
+    // program stores to title memory and the vertex program reads it through SRVs ("memory ro"), the vertex program is
+    // translated again to read it through the same UAVs (role "title_memory": "rw"), so one draw never sees title
+    // memory as both; vertex programs never store (tools/vertex_aot.py refuses it).
     std::vector<std::uint8_t> vs_dxil, ps_dxil;
     std::string key, vs_bind, ps_bind;
+    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
+        refuse("vertex", key, why);
+        return E_NOTIMPL;
+    }
+    std::string vs_key = key;
     if (desc->PS.BytecodeLength) {
         if (!translated_shader(ps, ps_roles, ps_dxil, ps_bind, key, why)) {
             refuse("pixel", key, why);
@@ -853,13 +861,15 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
             return E_NOTIMPL;
         }
     }
-    if (info.writes_memory) vs_roles.insert(vs_roles.size() - 1, ", \"title_memory\": \"rw\"");
-    if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, key, why)) {
-        refuse("vertex", key, why);
-        return E_NOTIMPL;
+    if (info.writes_memory && vs_bind.find("\nmemory ro\n") != std::string::npos) {
+        vs_roles.insert(vs_roles.size() - 1, ", \"title_memory\": \"rw\"");
+        if (!translated_shader(vs, vs_roles, vs_dxil, vs_bind, vs_key, why)) {
+            refuse("vertex", vs_key, why);
+            return E_NOTIMPL;
+        }
     }
     if (const char* problem = add_refs(vs_bind, X2W_SHADER_STAGE_VERTEX, tables[0], info)) {
-        refuse("vertex", key, problem);
+        refuse("vertex", vs_key, problem);
         return E_NOTIMPL;
     }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC copy = *desc;

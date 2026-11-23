@@ -27,8 +27,8 @@ import pso_translate  # noqa: E402
 from r3_programs_check import assemble, llvm_text  # noqa: E402
 
 PROGRAMS = {"r4b_vs": "r4b_vs.s", "r4b_ps": "r4b_ps.s"}
-# The entry contracts d3d12_xs::pipeline derives from r4b_scene.cpp's containers. The pixel program is translated
-# first; it stores, so the vertex program gets "title_memory": "rw".
+# The entry contracts d3d12_xs::pipeline derives from r4b_scene.cpp's containers. The pixel program stores, so the
+# shim translates the vertex program ("memory ro" without the role) again with "title_memory": "rw".
 VS_ROLES = {"user_sgprs": {"2": {"role": "base_vertex"}, "4": {"role": "descriptors", "set": 0}},
             "title_memory": "rw"}
 PS_ROLES = {"sgprs": {"s2": "interp", "s3": "descriptors"}}
@@ -121,8 +121,10 @@ def check(assembler=None, objcopy=None):
     # Without the shim's role the vertex program reads title memory through SRVs, and says nothing about writes.
     program = pixel_aot.name_branch_targets(gfx_text.decode(programs["r4b_vs"]), len(programs["r4b_vs"]))
     source, _, refs = pso_translate.lower("vertex", program, {"user_sgprs": VS_ROLES["user_sgprs"]})
-    if pso_translate.writable_memory(source, {})[1] or "memory rw" in pso_translate.bindings_text(refs):
-        raise AssertionError("r4b_vs: title memory is writable without the role")
+    source, writes = pso_translate.writable_memory(source, {})
+    reads = pso_translate.READ_ONLY_MEMORY in source
+    if writes or not reads or "memory ro\n" not in pso_translate.bindings_text(refs, writes, reads):
+        raise AssertionError("r4b_vs: without the role title memory is not read-only, or the bindings do not say so")
     for name, line, replacement, reason in REFUSED:
         program = source_lines(name)
         at = program.index(line)

@@ -16,8 +16,10 @@
 // pixel program exports red and green from the colour, blue and alpha from slots 0 and 1, and stores slot 3's word at
 // the index in slot 2 (quad k: index k, so quad 3's store is past num_records and dropped).
 //
-//   r4b_scene warp|hardware cold             X2W_CACHE_DIR\r4b_scene emptied first: both shaders translated
-//   r4b_scene warp|hardware warm             after cold: both shaders from the on-disk cache
+//   r4b_scene warp|hardware cold             X2W_CACHE_DIR\r4b_scene emptied first: three translations (the vertex
+//                                            program read-only, the pixel program, which stores, and the vertex
+//                                            program again with title memory writable)
+//   r4b_scene warp|hardware warm             after cold: all three from the on-disk cache
 //   r4b_scene warp|hardware wrong_reference  control: green one step higher in every covered pixel and every stored
 //                                            word one higher; passes only if exactly those pixels and words differ
 //   r4b_scene warp|hardware missing_view     control: draw 1's position SRV is never created. One TextureLookup miss
@@ -523,10 +525,12 @@ int scene_check(bool warp, std::string_view mode)
                     translated, cached, dxil, bind, recorded.refused, draws_refused, title_misses, texture_misses,
                     debug_errors, static_cast<unsigned long long>(end.unknown_slot_calls),
                     static_cast<unsigned long long>(end.unknown_iid_calls));
-        good = good && debug_errors == 0 && end.unknown_slot_calls == 0 && end.unknown_iid_calls == 0 && dxil == 2 &&
-               bind == 2 && title_misses == 0 && end.pipelines_refused == start.pipelines_refused;
-        if (cold) good = good && translated == 2 && cached == 0;
-        if (warm) good = good && translated == 0 && cached == 2;
+        // Three translations: the vertex program read-only, the pixel program (which stores), and the vertex program
+        // again with title memory writable (d3d12_xs_pipeline.cpp, create_graphics_pipeline).
+        good = good && debug_errors == 0 && end.unknown_slot_calls == 0 && end.unknown_iid_calls == 0 && dxil == 3 &&
+               bind == 3 && title_misses == 0 && end.pipelines_refused == start.pipelines_refused;
+        if (cold) good = good && translated == 3 && cached == 0;
+        if (warm) good = good && translated == 0 && cached == 3;
         good = good && texture_misses == (missing_view ? frames : 0);
         if (missing_view) good = good && recorded.details.find("TextureLookup miss") != std::string::npos;
         if (wrong_format) {

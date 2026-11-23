@@ -24,9 +24,9 @@ stage's V#s at words 0..60, the pixel stage's at 64..124). The shader decodes ba
 from them and reaches title memory through TitleLookup, as for any V#. Each buffer read carries flags for how the
 program uses it: 1 typed (buffer_load_format, buffer_store_format; the shim requires an R32_UINT or R32_SINT view,
 the only formats the converter lowers exactly), 2 stored to (the shim requires a UAV). A program that stores binds
-title memory as UAVs (u0..u7 space1001) and says so with "memory rw" in the bindings; the shim then translates the
-other stage of the pipeline with the role "title_memory": "rw", so one draw never sees title memory through both an
-SRV and a UAV.
+title memory as UAVs (u0..u7 space1001) and says so with "memory rw" in the bindings; a program that only reads it
+says "memory ro". When the pixel program stores, the shim translates a "memory ro" vertex program again with the role
+"title_memory": "rw", so one draw never sees title memory through both an SRV and a UAV.
 
 The translated HLSL may declare only the bindings the shim fills at draw time, all in the runtime's register spaces
 (src/d3d12_xs_pipeline.h, ConverterParam):
@@ -40,7 +40,8 @@ Any other declaration (storage images) is refused with the register it needs.
 
 --bindings receives the descriptor-table reads the shim resolves at draw time, one per line after the header line
 "x2w-bindings 2": "<texture|sampler|constants|buffer> <slot, or a buffer's first descriptor word> <set> <byte offset>
-<flags>", and the line "memory rw" when the program writes title memory. The shim caches it beside the DXIL.
+<flags>", and the line "memory rw" when the program writes title memory ("memory ro" when it only reads it). The
+shim caches it beside the DXIL.
 
 Exit status: 0 translated (one JSON line on stdout), 1 refused (the reason on stderr, one line starting "refused:"),
 2 a tool failure (disassembler library, DXC).
@@ -305,10 +306,10 @@ def writable_memory(source, roles):
     return source, WRITABLE_MEMORY in source
 
 
-def bindings_text(refs, writes=False):
+def bindings_text(refs, writes=False, reads=False):
     return ("x2w-bindings 2\n" + "".join(f"{kind} {slot} {table} {offset} {flags}\n"
                                          for kind, slot, table, offset, flags in refs)
-            + ("memory rw\n" if writes else ""))
+            + ("memory rw\n" if writes else "memory ro\n" if reads else ""))
 
 
 def main():
@@ -349,7 +350,8 @@ def main():
         if result.returncode or not dxil.exists():
             print(f"tool failure: DXC exit {result.returncode}: {result.stderr.strip()[-2000:]}", file=sys.stderr)
             return 2
-        args.bindings.write_text(bindings_text(refs, writes), encoding="ascii", newline="\n")
+        args.bindings.write_text(bindings_text(refs, writes, READ_ONLY_MEMORY in source), encoding="ascii",
+                                 newline="\n")
         os.replace(dxil, args.output)
     print(json.dumps({"stage": args.stage, "instructions": len(instructions), "bindings": len(refs), "writes": writes,
                       **layout}))
