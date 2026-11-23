@@ -310,9 +310,11 @@ public:
     }
     ~List()
     {
+        pipeline::release_blocks(device_views(device_), blocks_);
         delete args_;
         delete compute_.args;
     }
+    pipeline::BlockUse* blocks() { return &blocks_; }
     static bool implements(REFIID riid)
     {
         return is_d3d12_child_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandList)) ||
@@ -357,7 +359,7 @@ public:
             return false;
         }
         return pipeline::bind_for_draw(device_views(device_), real_, root_, pso_, *args_, heaps_,
-                                       {base_vertex, start_instance}, &ours_bound_);
+                                       {base_vertex, start_instance}, &ours_bound_, &blocks_);
     }
 
     X2W_D3D12_OBJECT_METHODS
@@ -375,6 +377,8 @@ public:
     HRESULT STDMETHODCALLTYPE Reset(ID3D12CommandAllocator* allocator, ID3D12PipelineState* state) override
     {
         X2W_USE();
+        // A new recording: the blocks the previous one read are protected by its submissions' stamps only.
+        pipeline::release_blocks(device_views(device_), blocks_);
         reset_state(state);
         return real_->Reset(unwrap(allocator), state);
     }
@@ -404,7 +408,7 @@ public:
     void STDMETHODCALLTYPE Dispatch(UINT x, UINT y, UINT z) override
     {
         X2W_USE();
-        if (compute_.bind(device_views(device_), real_, heaps_, &ours_bound_)) real_->Dispatch(x, y, z);
+        if (compute_.bind(device_views(device_), real_, heaps_, &ours_bound_, &blocks_)) real_->Dispatch(x, y, z);
     }
     void STDMETHODCALLTYPE CopyBufferRegion(ID3D12Resource* dst, UINT64 dst_offset, ID3D12Resource* src,
                                             UINT64 src_offset, UINT64 bytes) override
@@ -729,6 +733,7 @@ private:
     bool translated_ = false;
     bool ours_bound_ = false;
     pipeline::BoundHeaps heaps_;
+    pipeline::BlockUse blocks_;  // the shim heap blocks this recording reads (R5 recycling)
     // Compute state (runtime rung R5): the compute root signature and arguments are separate from the graphics
     // ones in D3D12; the pipeline and the descriptor heaps are shared.
     struct ComputeState {
@@ -758,7 +763,7 @@ private:
         }
         // Before a dispatch: the converter parameters of a translated pipeline. False skips it (logged).
         bool bind(pipeline::TitleViews* views, ID3D12GraphicsCommandList* list, const pipeline::BoundHeaps& heaps,
-                  bool* ours_bound)
+                  bool* ours_bound, pipeline::BlockUse* use)
         {
             if (!translated) {
                 if (has_root) pipeline::set_compute_placeholders(list, root);
@@ -771,7 +776,7 @@ private:
                             true);
                 return false;
             }
-            return pipeline::bind_for_dispatch(views, list, root, pso, *args, heaps, ours_bound);
+            return pipeline::bind_for_dispatch(views, list, root, pso, *args, heaps, ours_bound, use);
         }
     } compute_;
 };
@@ -813,6 +818,15 @@ public:
             return;
         }
         real_->ExecuteCommandLists(count, desktop.data());
+        // Stamp the shim heap blocks the lists read with a fence the shim signals after them on this queue.
+        std::vector<pipeline::BlockUse*> uses;
+        for (UINT i = 0; i < count; ++i) {
+            Kind kind;
+            if (lists[i] && wrapper_kind(lists[i], &kind) && kind == Kind::list)
+                uses.push_back(static_cast<List*>(lists[i])->blocks());
+        }
+        if (!uses.empty())
+            pipeline::submitted_blocks(device_views(device_), real_, uses.data(), static_cast<unsigned>(uses.size()));
     }
     void STDMETHODCALLTYPE SetMarker(UINT metadata, const void* data, UINT size) override
     {

@@ -40,6 +40,7 @@
 #include <d3d12.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace d3d12_xs {
 namespace pipeline {
@@ -120,6 +121,16 @@ struct RootArgs {
 
 class TitleViews;
 
+// The blocks of the shim's shader-visible heaps (title-memory views, texture and sampler tables) one command list's
+// recorded draws and dispatches read (R5). bind_for_draw/bind_for_dispatch add to it; the list releases it when it is
+// reset or destroyed (release_blocks), and the queue stamps it on each submission (submitted_blocks), so a block is
+// rewritten only once no list holds it and the GPU has finished with it.
+struct BlockUse {
+    std::vector<std::uint32_t> blocks;  // kind << 24 | index
+};
+void release_blocks(TitleViews* views, BlockUse& use);
+void submitted_blocks(TitleViews* views, ID3D12CommandQueue* queue, BlockUse* const* uses, unsigned count);
+
 HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* blob, SIZE_T size, REFIID riid,
                               void** out);
 HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid,
@@ -140,7 +151,7 @@ void destroy_title_views(TitleViews* views);
 // zero base vertex and start instance. `ours_bound` tracks whether the shim's heaps are bound. Returns false, after
 // logging, when the draw cannot be bound; the caller then skips the draw.
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound);
+                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound, BlockUse* use);
 // The placeholders of the title's descriptor-table parameters, for a draw of a desktop pipeline with a title root
 // signature (their registers are in space 1004, which desktop shaders do not declare).
 void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root);
@@ -152,7 +163,7 @@ std::uint64_t title_lookup_misses();
 // The compute counterpart (runtime rung R5): the converter parameters of a translated compute pipeline through the
 // compute root arguments, before a Dispatch. Same contract as bind_for_draw.
 bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound);
+                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound, BlockUse* use);
 // set_placeholders for the compute root arguments.
 void set_compute_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root);
 

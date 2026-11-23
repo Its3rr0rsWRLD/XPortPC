@@ -2721,11 +2721,12 @@ if(EXISTS "${INTAKE_PYTHON}")
         add_test(NAME runtime_r5_frames_cold_${adapter} COMMAND r5_frames ${adapter} cold)
         add_test(NAME runtime_r5_frames_warm_${adapter} COMMAND r5_frames ${adapter} warm)
         add_test(NAME runtime_r5_wrong_reference_${adapter} COMMAND r5_frames ${adapter} wrong_reference)
+        add_test(NAME runtime_r5_view_churn_${adapter} COMMAND r5_frames ${adapter} view_churn)
         set_tests_properties(runtime_r5_frames_cold_${adapter} PROPERTIES FIXTURES_SETUP r5_cache_${adapter})
-        set_tests_properties(runtime_r5_frames_warm_${adapter} runtime_r5_wrong_reference_${adapter} PROPERTIES
-            FIXTURES_REQUIRED r5_cache_${adapter})
+        set_tests_properties(runtime_r5_frames_warm_${adapter} runtime_r5_wrong_reference_${adapter}
+            runtime_r5_view_churn_${adapter} PROPERTIES FIXTURES_REQUIRED r5_cache_${adapter})
         set_tests_properties(runtime_r5_frames_cold_${adapter} runtime_r5_frames_warm_${adapter}
-            runtime_r5_wrong_reference_${adapter} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
+            runtime_r5_wrong_reference_${adapter} runtime_r5_view_churn_${adapter} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
             ENVIRONMENT "${r5_environment}" RUN_SERIAL TRUE)
     endforeach()
     add_test(NAME runtime_r5_refused_warp COMMAND r5_frames warp refused)

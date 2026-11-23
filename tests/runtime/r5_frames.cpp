@@ -19,6 +19,9 @@
 //   r5_frames warp|hardware wrong_reference  control: the sampled frames against a reference 16 compute steps stale
 //                                            (what a missing cross-queue wait could show); passes only if exactly
 //                                            the pixels that differ between the two references mismatch, and some do
+//   r5_frames warp|hardware view_churn       after cold: as warm, and each frame allocates title memory and frees
+//                                            an older allocation, so the title-memory view changes 600 times (the
+//                                            shim recycles its 256 view blocks once the GPU is done with them)
 //   r5_frames warp refused                   a compute program the translator refuses (s_barrier, card C-6) fails
 //                                            CreateComputePipelineState with E_NOTIMPL and one REFUSED event; a
 //                                            compute container in a vertex slot and a vertex container in the
@@ -435,8 +438,13 @@ struct Loop {
 
 // The 600-frame loop. Everything it creates is released before it returns.
 bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso, ID3D12RootSignature* croot,
-                ID3D12PipelineState* cpso, std::uintptr_t title, const std::vector<std::uint8_t>* expected, Loop& loop)
+                ID3D12PipelineState* cpso, std::uintptr_t title, const std::vector<std::uint8_t>* expected, bool churn,
+                Loop& loop)
 {
+    // churn: each frame allocates graphics title memory and frees the allocation of three frames before, so the
+    // title-memory view changes every frame (600 views, more than the shim's 256 view blocks): the shim must reuse
+    // blocks the GPU has finished with. An allocation is freed only after every frame whose view held it is done.
+    void* churned[frames] = {};
     ID3D12Device* device = gpu.device.Get();
     HWND window = make_window(width, height);
     if (!window) return false;
@@ -506,6 +514,19 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
             if (f >= 2 && !wait_fence(gpu.fence.Get(), f - 1, gpu.event)) {
                 good = false;
                 break;
+            }
+            if (churn) {
+                churned[f] = XMemAlloc(64 * 1024, graphics_word);
+                if (!churned[f]) {
+                    std::fputs("r5: XMemAlloc(graphics) failed in the churn loop\n", stderr);
+                    good = false;
+                    break;
+                }
+                // Frame f - 3's view was the last to hold it, and frame f - 2 is done (waited above).
+                if (f >= 3) {
+                    XMemFree(churned[f - 3], graphics_word);
+                    churned[f - 3] = nullptr;
+                }
             }
             // Compute: move the particles, write the quads.
             good = ok(callocators[slot]->Reset(), "compute allocator Reset") &&
@@ -589,6 +610,11 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
             }
         }
         loop.api_good = good;
+        for (void*& block : churned)
+            if (block) {
+                XMemFree(block, graphics_word);
+                block = nullptr;
+            }
         std::puts("loop: releasing");
         for (auto& b : back) b.Reset();
         chain.Reset();
@@ -604,6 +630,7 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
 int frames_check(bool warp, std::string_view mode)
 {
     const bool cold = mode == "cold", warm = mode == "warm", control = mode == "wrong_reference";
+    const bool churn = mode == "view_churn";
     const std::wstring cache = cache_directory();
     if (cache.empty()) {
         std::fputs("r5: X2W_CACHE_DIR must name the test's cache root\n", stderr);
@@ -683,7 +710,7 @@ int frames_check(bool warp, std::string_view mode)
         Loop loop;
         if (good)
             good = run_frames(gpu, groot.Get(), gpso.Get(), croot.Get(), cpso.Get(),
-                              reinterpret_cast<std::uintptr_t>(title), expected, loop);
+                              reinterpret_cast<std::uintptr_t>(title), expected, churn, loop);
         const auto after_loop = counters();
 
         // Title memory after the loop, as the CPU sees it through the alias.
@@ -736,7 +763,7 @@ int frames_check(bool warp, std::string_view mode)
                states_ok && vertices_ok && handle_growth <= 16 && private_growth < 8 * 1024 * 1024 &&
                loop.frame_ms.size() == frames;
         if (cold) good = good && translated == 3 && cached == 0;
-        if (warm) good = good && translated == 0 && cached == 3;
+        if (warm || churn) good = good && translated == 0 && cached == 3;
         bool frames_ok = true;
         for (UINT s = 0; s < sample_count; ++s) {
             if (control)
@@ -812,7 +839,8 @@ int main(int argc, char** argv)
     const std::string_view mode = argv[2];
     if (adapter != "warp" && adapter != "hardware") return 2;
     const bool warp = adapter == "warp";
-    if (mode == "cold" || mode == "warm" || mode == "wrong_reference") return frames_check(warp, mode);
+    if (mode == "cold" || mode == "warm" || mode == "wrong_reference" || mode == "view_churn")
+        return frames_check(warp, mode);
     if (mode == "refused" && warp) return refused_check();
     return 2;
 }

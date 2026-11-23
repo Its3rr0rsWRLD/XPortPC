@@ -1018,13 +1018,15 @@ public:
 
     // The shim's heaps, the table of title-memory SRVs and the miss counter, and the ranges buffer for the current
     // xmem.dll view.
-    bool current(D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges, UINT* count, std::string& why)
+    bool current(D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges, UINT* count, BlockUse* use,
+                 std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         const bool good = ensure(why) && refresh(why);
         if (good) {
+            hold(use, kind_view, block_);
             *table = views_gpu(block_ * memory_block);
-            *ranges = ranges_.back()->GetGPUVirtualAddress();
+            *ranges = ranges_[block_]->GetGPUVirtualAddress();
             *count = static_cast<UINT>(last_.size());
         }
         ReleaseSRWLockExclusive(&lock_);
@@ -1038,17 +1040,21 @@ public:
     // a point sampler). Blocks are cached by the identity of their descriptors, so a draw never changes a block an
     // earlier draw reads.
     bool texture_block(const BlockKey<texture_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[texture_table],
-                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, BlockUse* use, std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         bool good = true;
         auto it = texture_blocks_.find(key);
         if (it == texture_blocks_.end()) {
-            if (texture_blocks_.size() == texture_block_count) {
-                why = "more than 4096 distinct texture tables on one device (blocks are not recycled yet)";
+            const int found = texture_next_ < texture_block_count ? static_cast<int>(texture_next_++)
+                                                                   : free_block(kind_texture, texture_block_count, ~0u);
+            if (found < 0) {
+                why = "all 4096 texture-table blocks are held by recorded lists or unfinished GPU work";
                 good = false;
             } else {
-                const UINT block = static_cast<UINT>(texture_blocks_.size());
+                const UINT block = static_cast<UINT>(found);
+                if (texture_keys_.size() <= block) texture_keys_.resize(block + 1);
+                if (texture_keys_[block].second) texture_blocks_.erase(texture_keys_[block].first);
                 const UINT first = texture_first + block * texture_table;
                 for (UINT i = 0; i < texture_table; ++i) {
                     if (sources[i].ptr) {
@@ -1064,25 +1070,33 @@ public:
                     }
                 }
                 it = texture_blocks_.emplace(key, block).first;
+                texture_keys_[block] = {key, true};
             }
         }
-        if (good) *out = views_gpu(texture_first + it->second * texture_table);
+        if (good) {
+            hold(use, kind_texture, it->second);
+            *out = views_gpu(texture_first + it->second * texture_table);
+        }
         ReleaseSRWLockExclusive(&lock_);
         return good;
     }
 
     bool sampler_block(const BlockKey<sampler_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[sampler_table],
-                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, BlockUse* use, std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         bool good = true;
         auto it = sampler_blocks_.find(key);
         if (it == sampler_blocks_.end()) {
-            if (sampler_blocks_.size() == sampler_block_count) {
-                why = "more than 512 distinct sampler tables on one device (blocks are not recycled yet)";
+            const int found = sampler_next_ < sampler_block_count ? static_cast<int>(sampler_next_++)
+                                                                   : free_block(kind_sampler, sampler_block_count, ~0u);
+            if (found < 0) {
+                why = "all 512 sampler-table blocks are held by recorded lists or unfinished GPU work";
                 good = false;
             } else {
-                const UINT block = static_cast<UINT>(sampler_blocks_.size());
+                const UINT block = static_cast<UINT>(found);
+                if (sampler_keys_.size() <= block) sampler_keys_.resize(block + 1);
+                if (sampler_keys_[block].second) sampler_blocks_.erase(sampler_keys_[block].first);
                 for (UINT i = 0; i < sampler_table; ++i) {
                     D3D12_CPU_DESCRIPTOR_HANDLE dst = samplers_->GetCPUDescriptorHandleForHeapStart();
                     dst.ptr += static_cast<SIZE_T>(block * sampler_table + i) * sampler_increment_;
@@ -1097,14 +1111,57 @@ public:
                     }
                 }
                 it = sampler_blocks_.emplace(key, block).first;
+                sampler_keys_[block] = {key, true};
             }
         }
         if (good) {
+            hold(use, kind_sampler, it->second);
             *out = samplers_->GetGPUDescriptorHandleForHeapStart();
             out->ptr += static_cast<UINT64>(it->second * sampler_table) * sampler_increment_;
         }
         ReleaseSRWLockExclusive(&lock_);
         return good;
+    }
+
+    // Block recycling (R5). A list holds every block a draw or dispatch it recorded reads until it is reset or
+    // destroyed; each submission stamps the blocks of its lists with the next value of a fence the shim signals on
+    // that queue right after it. A block is reused only when no list holds it and every stamp has completed.
+    void release(BlockUse& use)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        for (std::uint32_t code : use.blocks) {
+            BlockState& b = state(code >> 24, code & 0xffffff);
+            if (b.holders) --b.holders;
+        }
+        use.blocks.clear();
+        ReleaseSRWLockExclusive(&lock_);
+    }
+    void submitted(ID3D12CommandQueue* queue, BlockUse* const* uses, UINT count)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        UINT slot = 0;
+        while (slot < queue_count_ && queue_ids_[slot] != queue) ++slot;
+        if (slot == queue_count_ && queue_count_ < max_queues &&
+            SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fences_[slot])))) {
+            queue_ids_[slot] = queue;
+            ++queue_count_;
+        }
+        if (slot < queue_count_) {
+            const std::uint64_t value = ++fence_values_[slot];
+            for (UINT i = 0; i < count; ++i)
+                for (std::uint32_t code : uses[i]->blocks) state(code >> 24, code & 0xffffff).stamp[slot] = value;
+            queue->Signal(fences_[slot].Get(), value);
+        } else {
+            // More queues than the shim tracks: their blocks stay held for the device's lifetime.
+            for (UINT i = 0; i < count; ++i)
+                for (std::uint32_t code : uses[i]->blocks) ++state(code >> 24, code & 0xffffff).holders;
+            if (!queue_overflow_noted_) {
+                queue_overflow_noted_ = true;
+                log_note("d3d12_xs!ID3D12CommandQueue::ExecuteCommandLists",
+                         "more than 16 queues submit translated work; their descriptor blocks are not recycled", nullptr);
+            }
+        }
+        ReleaseSRWLockExclusive(&lock_);
     }
 
     // Whether a miss at (serial, index) is the first of its kind on this device (it is logged then).
@@ -1123,6 +1180,47 @@ private:
     static constexpr UINT texture_block_count = 4096;
     static constexpr UINT sampler_block_count = 512;  // 2048 samplers, the desktop limit of a shader-visible heap
     static constexpr UINT texture_first = blocks * memory_block;
+    static constexpr UINT max_queues = 16;
+    enum : UINT { kind_view = 0, kind_texture = 1, kind_sampler = 2 };
+    struct BlockState {
+        std::uint32_t holders = 0;
+        std::uint64_t stamp[max_queues] = {};
+    };
+    BlockState& state(UINT kind, UINT index)
+    {
+        std::vector<BlockState>& all = states_[kind];
+        if (all.size() <= index) all.resize(index + 1);
+        return all[index];
+    }
+    void hold(BlockUse* use, UINT kind, UINT index)
+    {
+        if (!use) return;
+        const std::uint32_t code = kind << 24 | index;
+        for (std::uint32_t held : use->blocks)
+            if (held == code) return;
+        use->blocks.push_back(code);
+        ++state(kind, index).holders;
+    }
+    // A block of `kind` below `limit` that no list holds and no unfinished submission reads, other than `except`;
+    // -1 when there is none.
+    int free_block(UINT kind, UINT limit, UINT except)
+    {
+        std::uint64_t completed[max_queues];
+        for (UINT q = 0; q < queue_count_; ++q) completed[q] = fences_[q]->GetCompletedValue();
+        for (UINT n = 0; n < limit; ++n) {
+            // Start after the last block handed out, so recently used blocks are reused last.
+            const UINT index = (cursor_[kind] + 1 + n) % limit;
+            if (index == except) continue;
+            const BlockState& b = state(kind, index);
+            bool done = b.holders == 0;
+            for (UINT q = 0; done && q < queue_count_; ++q) done = b.stamp[q] <= completed[q];
+            if (done) {
+                cursor_[kind] = index;
+                return static_cast<int>(index);
+            }
+        }
+        return -1;
+    }
 
     D3D12_CPU_DESCRIPTOR_HANDLE views_cpu(UINT index) const
     {
@@ -1235,18 +1333,20 @@ private:
             why = "more than 8 title memory ranges; the converter's title_memory table has 8 slots";
             return false;
         }
-        if (!ranges_.empty() && ranges.size() == last_.size() && resources == last_resources_ &&
+        if (have_view_ && ranges.size() == last_.size() && resources == last_resources_ &&
             (ranges.empty() || std::memcmp(ranges.data(), last_.data(), ranges.size() * sizeof(ranges[0])) == 0)) {
             release();
             return true;
         }
-        // A new block per view, so descriptors that recorded draws still read stay unchanged until the heap wraps.
-        if (++used_ > blocks) {
+        // A new block per view, so descriptors that recorded draws still read stay unchanged: a block is written
+        // again only when no list holds it and the GPU has finished every submission that read it.
+        const int next = have_view_ ? free_block(kind_view, blocks, block_) : 0;
+        if (next < 0) {
             release();
-            why = "the title memory view changed more than 256 times on one device";
+            why = "all 256 title-memory view blocks are held by recorded lists or unfinished GPU work";
             return false;
         }
-        block_ = (block_ + 1) % blocks;
+        block_ = static_cast<UINT>(next);
         D3D12_CPU_DESCRIPTOR_HANDLE handle = views_cpu(block_ * memory_block);
         D3D12_CPU_DESCRIPTOR_HANDLE uav_handle = views_cpu(block_ * memory_block + title_memory_slots + 1);
         for (UINT i = 0; i < title_memory_slots; ++i) {
@@ -1303,7 +1403,8 @@ private:
         std::memset(mapped, 0, static_cast<std::size_t>(desc.Width));
         if (!ranges.empty()) std::memcpy(mapped, ranges.data(), ranges.size() * sizeof(ranges[0]));
         buffer->Unmap(0, nullptr);
-        ranges_.push_back(buffer);
+        ranges_[block_] = buffer;  // the block's previous ranges buffer is no longer read (see free_block)
+        have_view_ = true;
         release();
         last_ = ranges;
         last_resources_ = resources;
@@ -1317,8 +1418,18 @@ private:
     volatile std::uint32_t* counter_word_ = nullptr;
     UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
-    UINT used_ = 0;
-    std::vector<ComPtr<ID3D12Resource>> ranges_;
+    bool have_view_ = false;
+    ComPtr<ID3D12Resource> ranges_[blocks];  // the ranges buffer of each title-memory view block
+    std::vector<BlockState> states_[3];
+    UINT cursor_[3] = {};
+    UINT texture_next_ = 0, sampler_next_ = 0;  // blocks never handed out start here
+    std::vector<std::pair<BlockKey<texture_table>, bool>> texture_keys_;  // the key each block holds, if any
+    std::vector<std::pair<BlockKey<sampler_table>, bool>> sampler_keys_;
+    ComPtr<ID3D12Fence> fences_[max_queues];
+    std::uint64_t fence_values_[max_queues] = {};
+    const void* queue_ids_[max_queues] = {};
+    UINT queue_count_ = 0;
+    bool queue_overflow_noted_ = false;
     std::vector<X2WTitleGpuRange> last_;
     std::vector<void*> last_resources_;  // identity only; not referenced
     std::map<BlockKey<texture_table>, UINT> texture_blocks_;
@@ -1327,6 +1438,16 @@ private:
 };
 
 TitleViews* create_title_views(ID3D12Device* device) { return new (std::nothrow) TitleViews(device); }
+void release_blocks(TitleViews* views, BlockUse& use)
+{
+    if (views && !use.blocks.empty()) views->release(use);
+}
+void submitted_blocks(TitleViews* views, ID3D12CommandQueue* queue, BlockUse* const* uses, unsigned count)
+{
+    bool any = false;
+    for (unsigned i = 0; i < count; ++i) any = any || !uses[i]->blocks.empty();
+    if (views && any) views->submitted(queue, uses, count);
+}
 void destroy_title_views(TitleViews* views) { delete views; }
 
 void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
@@ -1336,7 +1457,7 @@ void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
 }
 
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound)
+                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound, BlockUse* use)
 {
     const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Draw";
     std::string why;
@@ -1350,7 +1471,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
                     true);
         return false;
     }
-    if (!views || !views->current(&table, &ranges, &count, why)) {
+    if (!views || !views->current(&table, &ranges, &count, use, why)) {
         log_refused(symbol, ("draw skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(), true);
         return false;
     }
@@ -1406,8 +1527,8 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
         }
     }
     D3D12_GPU_DESCRIPTOR_HANDLE texture_table_at{}, sampler_table_at{};
-    if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, why)) ||
-        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why))) {
+    if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, use, why)) ||
+        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, use, why))) {
         log_refused(symbol, ("draw skipped: " + why).c_str(), true);
         return false;
     }
@@ -1449,7 +1570,7 @@ void set_compute_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& r
 // The compute counterpart of bind_for_draw (R5): title memory, its ranges and the push words through the compute
 // root arguments. A translated compute pipeline reads no descriptor table (create_compute_pipeline refuses one).
 bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound)
+                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound, BlockUse* use)
 {
     const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Dispatch";
     std::string why;
@@ -1463,7 +1584,7 @@ bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const
                     true);
         return false;
     }
-    if (!views || !views->current(&table, &ranges, &count, why)) {
+    if (!views || !views->current(&table, &ranges, &count, use, why)) {
         log_refused(symbol, ("dispatch skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(),
                     true);
         return false;
