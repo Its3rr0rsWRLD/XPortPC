@@ -25,7 +25,7 @@ typedef struct X2WTitleGpuRange {
     uint32_t end_low;
     uint32_t end_high;
     uint32_t slot;
-    uint32_t reserved;
+    uint32_t base;  // byte offset of begin in the slot's buffer; ranges of one arena or pool share a slot
 } X2WTitleGpuRange;
 
 #ifdef __cplusplus

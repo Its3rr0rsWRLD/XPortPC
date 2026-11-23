@@ -84,7 +84,7 @@ int check_shader()
     expect(packed.size() == 2, "two packed ranges");
     if (packed.size() == 2) {
         expect(packed[0].begin_low == 0x10000 && packed[0].begin_high == 0 && packed[0].end_low == 0x11000 &&
-                   packed[0].end_high == 0 && packed[0].slot == 0 && packed[0].reserved == 0,
+                   packed[0].end_high == 0 && packed[0].slot == 0 && packed[0].base == 0,
                "low range words and slot");
         expect(packed[1].begin_low == 0xffff0000 && packed[1].begin_high == 1 && packed[1].end_low == 0x10000 &&
                    packed[1].end_high == 2 && packed[1].slot == 1,

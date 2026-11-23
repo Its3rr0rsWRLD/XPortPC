@@ -51,14 +51,14 @@ add_test(NAME era_title_gpu_alloc COMMAND era_title_gpu_alloc_check)
 set_tests_properties(era_title_gpu_alloc PROPERTIES TIMEOUT 30)
 
 # Desktop xmem.dll for the package DLLs' four named xmem imports.
-add_library(xmem_shim SHARED src/xmem_shim.cpp src/xmem_shim.def src/xmem_gpu_usage.cpp src/adapter_identity.cpp src/era_heap.cpp src/era_query.cpp
-    src/era_title_gpu.cpp src/era_gpu_alias.cpp src/era_title_va.cpp)
+add_library(xmem_shim SHARED src/xmem_shim.cpp src/xmem_shim.def src/xmem_title.cpp src/xmem_gpu_usage.cpp src/adapter_identity.cpp
+    src/era_heap.cpp src/era_query.cpp src/era_title_gpu.cpp src/era_gpu_alias.cpp src/era_title_va.cpp)
 set_target_properties(xmem_shim PROPERTIES OUTPUT_NAME xmem)
 target_include_directories(xmem_shim PRIVATE src)
 target_compile_features(xmem_shim PRIVATE cxx_std_20)
 target_compile_definitions(xmem_shim PRIVATE X2W_TITLE_GPU_EXPORTS)
 # Delay-loaded: only XMemGetWorkingSetStatistics uses DXGI and D3DKMT (gdi32).
-target_link_libraries(xmem_shim PRIVATE dxgi gdi32 delayimp)
+target_link_libraries(xmem_shim PRIVATE dxgi gdi32 advapi32 delayimp)
 target_link_options(xmem_shim PRIVATE /DELAYLOAD:dxgi.dll /DELAYLOAD:gdi32.dll)
 add_executable(xmem_shim_check tests/xmem_shim_check.cpp src/adapter_identity.cpp)
 # D3D12 and DXGI are delay-loaded so the exports scenario can check that xmem.dll loads neither.
@@ -70,6 +70,10 @@ target_compile_features(xmem_shim_check PRIVATE cxx_std_17)
 foreach(scenario IN ITEMS exports allocation query working_set working_set_aggregation)
     add_test(NAME xmem_shim_${scenario} COMMAND xmem_shim_check ${scenario})
 endforeach()
+# The allocation scenario checks with VirtualQuery that XMemFree returns graphics memory to MEM_FREE, which holds for
+# the standalone layout (src/xmem_title_api.h); arena memory reads as free through XMemVirtualQuery instead
+# (xmem_shim_query, xmem_title_attributes).
+set_tests_properties(xmem_shim_allocation PROPERTIES ENVIRONMENT "X2W_XMEM_LAYOUT=standalone")
 # XMemGetWorkingSetStatistics differences around D3D12 heap and committed-resource lifetimes.
 foreach(adapter IN ITEMS warp hardware)
     add_test(NAME xmem_shim_working_set_${adapter} COMMAND xmem_shim_check working_set_${adapter})
@@ -88,6 +92,27 @@ target_include_directories(xmem_gpu_cross_dll_check PRIVATE src)
 
 add_test(NAME xmem_gpu_cross_dll_warp COMMAND xmem_gpu_cross_dll_check "$<TARGET_FILE:xmem_gpu_client>")
 set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
+
+# Title memory layer (src/xmem_title.h) through xmem.dll's exports, one scenario per process (tests/xmem_title_check.cpp).
+add_executable(xmem_title_check tests/xmem_title_check.cpp)
+target_include_directories(xmem_title_check PRIVATE src)
+target_compile_features(xmem_title_check PRIVATE cxx_std_17)
+target_link_libraries(xmem_title_check PRIVATE xmem_shim d3d12 dxgi)
+foreach(scenario IN ITEMS attributes reuse standalone windows reserve hooks physical write_watch large_pages config)
+    add_test(NAME xmem_title_${scenario} COMMAND xmem_title_check ${scenario})
+    set_tests_properties(xmem_title_${scenario} PROPERTIES TIMEOUT 60)
+endforeach()
+set_tests_properties(xmem_title_standalone PROPERTIES ENVIRONMENT "X2W_XMEM_LAYOUT=standalone")
+set_tests_properties(xmem_title_reserve PROPERTIES ENVIRONMENT
+    "X2W_XMEM_WINDOWS=reserve:graphics=0x300000000000-0x300040000000,system=0x310000000000-0x310040000000;X2W_XMEM_GPU_TYPES=0x7e")
+set_tests_properties(xmem_title_write_watch PROPERTIES ENVIRONMENT "X2W_XMEM_WRITE_WATCH=1")
+set_tests_properties(xmem_title_large_pages PROPERTIES ENVIRONMENT "X2W_XMEM_LARGE_PAGES=1")
+set_tests_properties(xmem_title_config PROPERTIES ENVIRONMENT
+    "X2W_XMEM_ARENA_MB=16;X2W_XMEM_GPU_TYPES=0x7e;X2W_XMEM_PHYSICAL_MB=8;X2W_XMEM_LAYOUT=bogus")
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME xmem_title_gpu_${adapter} COMMAND xmem_title_check gpu_${adapter})
+    set_tests_properties(xmem_title_gpu_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+endforeach()
 
 # Measurement fixture for the title memory layer: which desktop memory kinds D3D12 can alias (tests/xmem_alias_probe.cpp).
 add_executable(xmem_alias_probe tests/xmem_alias_probe.cpp)
@@ -2430,7 +2455,7 @@ if(EXISTS "${INTAKE_PYTHON}")
             "$<TARGET_FILE:cpu_shim_startup_guest>" "$<TARGET_FILE:cpu_exe_io>" "$<TARGET_FILE:xmem_shim>"
             "$<TARGET_FILE:d3d12_xs_shim>")
         set_tests_properties(cpu_shim_compute_${adapter} PROPERTIES TIMEOUT 120
-            ENVIRONMENT "X2W_SHIM_COMPUTE_ADAPTER=${adapter};X2W_SHIM_DRAW_CASE=")
+            ENVIRONMENT "X2W_SHIM_COMPUTE_ADAPTER=${adapter};X2W_SHIM_DRAW_CASE=;X2W_XMEM_LAYOUT=standalone")
     endforeach()
     set_tests_properties(cpu_shim_compute_hardware PROPERTIES SKIP_RETURN_CODE 77)
     foreach(adapter IN ITEMS warp hardware)
@@ -2695,6 +2720,20 @@ if(EXISTS "${INTAKE_PYTHON}")
         set_tests_properties(runtime_r3_triangle_cold_${adapter} runtime_r3_triangle_warm_${adapter}
             runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
             ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
+        # The title memory layer (src/xmem_title.h) on the R3 path: every kind of GPU-visible title memory read by the
+        # translated vertex program, in the default layout, in a reserved fixed graphics window, and the standalone
+        # layout's slot exhaustion as the control.
+        add_test(NAME runtime_r3_xmem_sources_${adapter} COMMAND r3_triangle ${adapter} xmem_sources)
+        add_test(NAME runtime_r3_xmem_window_${adapter} COMMAND r3_triangle ${adapter} xmem_sources)
+        add_test(NAME runtime_r3_xmem_slots_control_${adapter} COMMAND r3_triangle ${adapter} xmem_slots_control)
+        set_tests_properties(runtime_r3_xmem_sources_${adapter} runtime_r3_xmem_window_${adapter}
+            runtime_r3_xmem_slots_control_${adapter} PROPERTIES FIXTURES_REQUIRED r3_cache_${adapter}
+            TIMEOUT 120 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+        set_tests_properties(runtime_r3_xmem_sources_${adapter} PROPERTIES ENVIRONMENT "${r3_environment}")
+        set_tests_properties(runtime_r3_xmem_window_${adapter} PROPERTIES ENVIRONMENT
+            "${r3_environment};X2W_XMEM_WINDOWS=reserve:graphics=0x200000000000-0x200080000000")
+        set_tests_properties(runtime_r3_xmem_slots_control_${adapter} PROPERTIES ENVIRONMENT
+            "${r3_environment};X2W_XMEM_LAYOUT=standalone")
     endforeach()
     # Runtime ladder R4 (tests/runtime/r4_scene.cpp): cold run first (empties the cache), then warm and the controls.
     add_test(NAME runtime_r4_programs COMMAND "${INTAKE_PYTHON}" -B

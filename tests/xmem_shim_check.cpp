@@ -100,11 +100,12 @@ bool allocation_checks()
     XMemFree(gpu, amd_word);
     if (VirtualQuery(gpu, &info, sizeof(info)) != sizeof(info) || info.State != MEM_FREE) return false;
 
-    // Rejections pass straight through, and freeing null is a no-op for both types.
+    // Rejections pass straight through, and freeing null is a no-op for both types. Memory type 10 is undefined
+    // (types 7-9, the ERA physical types, are served since the title memory layer; xmem_title_attributes).
     XMemFree(nullptr, bink_word);
     XMemFree(nullptr, amd_word);
     return XMemAlloc(0, bink_word) == nullptr && XMemAlloc(64, bink_word | (ULONGLONG{1} << 40)) == nullptr &&
-           XMemAlloc(512, (amd_word & ~(ULONGLONG{15} << 29)) | (ULONGLONG{7} << 29)) == nullptr;
+           XMemAlloc(512, (amd_word & ~(ULONGLONG{15} << 29)) | (ULONGLONG{10} << 29)) == nullptr;
 }
 
 bool query_checks()

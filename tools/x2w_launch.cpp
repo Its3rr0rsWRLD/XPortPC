@@ -1,7 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
-//                   program.exe
+//                   [--xmem NAME=VALUE]... program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -29,6 +29,9 @@
 // thread's registers and memory and resumes after the instruction; any other #UD in the program's code is
 // logged as module+RVA and a mnemonic and then crashes as usual. The log starts with the Zen 2 features the
 // host lacks and ends with a count per trapped instruction, since a trap in a hot loop is slow.
+// --xmem NAME=VALUE sets X2W_XMEM_<NAME> (upper-cased) for the run before anything is mapped, configuring the title
+// memory layer of the xmem.dll shim (src/xmem_title_api.h; for example --xmem layout=standalone or
+// --xmem windows=reserve:graphics=0x100000000-0x10000000000). Each setting is logged.
 // --force-cpu-traps is for tests: it overwrites each address listed by the program's export
 // x2w_cpu_trap_sites (a null-terminated array of code addresses) with UD2 and keeps the original bytes in a
 // side table, so the handler's path runs on every host, whether or not the CPU has the instruction.
@@ -40,6 +43,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <cwctype>
+#include <utility>
 #include <map>
 #include <set>
 #include <string>
@@ -721,6 +726,7 @@ extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch
 #pragma comment(linker, "/include:_tls_used")
 
 int wmain(int argc, wchar_t** argv) {
+    std::vector<std::pair<std::wstring, std::wstring>> xmem_settings;
     std::wstring program, log_path;
     unsigned long timeout = 0;
     bool usage = false, force_cpu_traps = false;
@@ -736,6 +742,16 @@ int wmain(int argc, wchar_t** argv) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
+        } else if (argument == L"--xmem" && i + 1 < argc) {
+            const std::wstring setting = argv[++i];
+            const auto equals = setting.find(L'=');
+            if (equals == std::wstring::npos || equals == 0) {
+                usage = true;
+                continue;
+            }
+            std::wstring name = L"X2W_XMEM_";
+            for (wchar_t c : setting.substr(0, equals)) name.push_back(static_cast<wchar_t>(std::towupper(c)));
+            xmem_settings.emplace_back(name, setting.substr(equals + 1));
         } else if (program.empty()) {
             program = argument;
         } else {
@@ -744,7 +760,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (program.empty() || usage) {
         std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] program.exe\n");
+                     "[--host-identity] [--xmem NAME=VALUE]... program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -763,6 +779,11 @@ int wmain(int argc, wchar_t** argv) {
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
+    }
+    for (const auto& [name, value] : xmem_settings) {
+        SetEnvironmentVariableW(name.c_str(), value.c_str());
+        std::fprintf(stderr, "[x2w] xmem setting %ls=%ls\n", name.c_str(), value.c_str());
+        log_line("xmem setting %ls=%ls", name.c_str(), value.c_str());
     }
     // Added last, so it runs before the first-chance logger and a performed instruction is not logged as one.
     AddVectoredExceptionHandler(1, cpu_trap);
