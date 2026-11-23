@@ -285,13 +285,13 @@ std::string scrub_program_name(std::string text) {
 // The whole line is formatted, scrubbed, and only then cut to the old caps (2047 / 4094 bytes): cutting first could
 // leave a path or program name too short for the scrub to recognize (a prefix of it would be printed).
 std::string format_line(const char* format, va_list args) {
-    char small[1024];
+    char stack_buf[1024];
     va_list copy;
     va_copy(copy, args);
-    const int length = std::vsnprintf(small, sizeof small, format, copy);
+    const int length = std::vsnprintf(stack_buf, sizeof stack_buf, format, copy);
     va_end(copy);
     if (length < 0) return {};
-    if (length < static_cast<int>(sizeof small)) return std::string(small, static_cast<std::size_t>(length));
+    if (length < static_cast<int>(sizeof stack_buf)) return std::string(stack_buf, static_cast<std::size_t>(length));
     std::string text(static_cast<std::size_t>(length) + 1, '\0');
     std::vsnprintf(text.data(), text.size(), format, args);
     text.resize(static_cast<std::size_t>(length));
