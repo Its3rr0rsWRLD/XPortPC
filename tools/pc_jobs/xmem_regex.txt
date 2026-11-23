@@ -1,1 +1,2 @@
-^(xmem_.*|era_.*|desktop_memory_query|gpu_alias_.*|runtime_r2_.*|runtime_r3_(triangle|wrong|refused|xmem|programs).*|runtime_r4_.*|runtime_r5_.*|native_launch_.*|cpu_shim_compute_.*|cpu_native_shim_startup|pixel_memory_.*)$
+^(era_title_gpu_alloc|era_title_va_.*|era_query_.*)$
+20
