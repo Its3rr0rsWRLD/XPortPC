@@ -43,7 +43,7 @@ PARTS = Path("docs/status-parts.json")
 STATES = ("done", "partial", "not_started")
 ADAPTERS = ["NVIDIA GeForce RTX 4070 Ti", "WARP"]
 STAGES = ("pixel", "vertex", "compute", "other")
-STAGES_SUPPORTED = ["pixel"]  # shader stages the converter handles today; edit by hand when another lands
+STAGES_SUPPORTED = ["pixel", "vertex", "compute"]  # shader stages the converter handles today; edit by hand when another lands
 
 
 HISTORY_MAX = 2000

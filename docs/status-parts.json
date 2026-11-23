@@ -1,14 +1,14 @@
 {
-  "parts": [
-    {"name": "Shader converter: instruction forms", "state": "partial", "note": "Counts and shares are in the figures above."},
-    {"name": "Shader converter: control flow", "state": "partial", "note": "Uniform branches and loops work. Branches that split lanes (exec masks) are partial: exec-mask algebra, skip branches, discard and divergent loops work; branch mode and the remaining shapes are not done."},
-    {"name": "Shader converter: other stages", "state": "partial", "note": "Vertex and compute translators exist with checks in code; their draws are not yet confirmed on both adapters, so only the pixel stage counts as supported. Other stages are not started."},
-    {"name": "GPU memory access", "state": "partial", "note": "Buffer, global and image loads are done. Buffer, global and typed stores, 32-bit atomics and 2D image stores and atomics are partial: lowered only while the lane is provably active; float and 64-bit atomics are refused. LDS is not started."},
-    {"name": "Console Direct3D 12 layer", "state": "not_started", "note": "Planned in docs/design/runtime.md: console D3D12 calls translated to desktop D3D12, shaders translated at pipeline creation."},
-    {"name": "System libraries", "state": "partial", "note": "Desktop xmem.dll (graphics and heap memory) only."},
-    {"name": "Native launcher", "state": "partial", "note": "Maps a program and resolves imports through shims, Windows or logged stubs; tested with source-built programs. Implicit TLS and the process's own module identity are not done."},
-    {"name": "Runtime milestone ladder", "state": "not_started", "note": "Furthest rung reached: none. Next is R1, a source-built program that starts and exits under the launcher with a machine-readable import report (docs/design/runtime.md, section 6)."},
-    {"name": "CPU patch layer", "state": "not_started", "note": "No CPU code is patched yet. Only needed for instructions a host CPU lacks."},
-    {"name": "Running a title", "state": "not_started", "note": "No title runs yet."}
-  ]
+ "parts": [
+  {"name": "Shader converter: instruction forms", "state": "partial", "note": "Counts and shares are in the figures above."},
+  {"name": "Shader converter: control flow", "state": "partial", "note": "Uniform branches, loops and exec-mask divergence (skip branches, discard, divergent loops) work; the remaining branch shapes are not done."},
+  {"name": "Shader converter: stages", "state": "partial", "note": "Pixel, vertex and compute draw on a real GPU. Geometry (NGG ES+GS to VS+GS) and tessellation (LS+HS to VS+HS, TES to DS) translate; fractional_odd tessellation is refused. Mesh shaders are not started."},
+  {"name": "GPU memory access", "state": "partial", "note": "Buffer, global, image and typed loads and stores, LDS and barriers, 32-bit atomics, raw T#/S#/V# descriptors from heap memory and a gfx10 detiler work. Float and 64-bit atomics are refused."},
+  {"name": "Console Direct3D 12 layer", "state": "partial", "note": "Console D3D12 over desktop D3D12: Device1-10, CommandList1-7, ExecuteIndirect, enhanced barriers, title GPU addresses. Console device creation (D3D12XboxCreateDevice) is in progress."},
+  {"name": "Runtime and system libraries", "state": "partial", "note": "Game-runtime gateway (QueryApiImpl) with task queues, async, user, saves, packages and system; XMem memory layer; paths, threading, timing, GameInput, XAudio2 and DirectStorage forwarding. Console audio hardware DLLs run silent."},
+  {"name": "Native launcher", "state": "partial", "note": "Maps a program, resolves imports through shims, the package, Windows or logged stubs; implicit TLS, module identity, C++ exceptions and dynamic lookups work. Every run log ends with a summary."},
+  {"name": "Runtime milestone ladder", "state": "partial", "note": "R1 to R5 reached: report and launch, clear/present, translated triangle, textures and depth, compute and a 600-frame loop. Next is R6, a real title."},
+  {"name": "CPU patch layer", "state": "done", "note": "Zen 2 instructions a host CPU lacks (SHA, CLWB, RDPID, SSE4a, MWAITX, CLZERO, RDPRU) are trapped and handled."},
+  {"name": "Running a title", "state": "partial", "note": "Microsoft GDK PC samples run on our runtime. A permitted Xbox Series test title maps, runs its TLS callbacks and reaches its entry point; it does not render yet."}
+ ]
 }
