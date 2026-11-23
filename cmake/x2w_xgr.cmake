@@ -24,6 +24,8 @@ add_dependencies(x2w_gdk_shims x2w_xgr)
 
 add_test(NAME xgr_table COMMAND "${x2w_shimgen_python}" -B "${CMAKE_SOURCE_DIR}/tools/xgr_gen.py" --check)
 set_tests_properties(xgr_table PROPERTIES TIMEOUT 60)
+add_test(NAME xgr_audit COMMAND "${x2w_shimgen_python}" -B "${CMAKE_SOURCE_DIR}/tools/xgr_gen.py" --audit)
+set_tests_properties(xgr_audit PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "xgr_audit xuser: ")
 
 # Magic statics in a /MD title, run by tools/pc_jobs/run_xgr.ps1 under Windows and under x2w_launch.
 add_executable(x2w_xgr_statics_title tests/xgr/statics_title.cpp)
@@ -45,3 +47,12 @@ if(TARGET x2w_launch)
         "$<TARGET_FILE:x2w_launch>" "$<TARGET_FILE:x2w_xgr_statics_title>" "$<TARGET_FILE:x2w_xgr_statics_ltcg_title>")
     set_tests_properties(xgr_launch_statics PROPERTIES TIMEOUT 120)
 endif()
+
+# The gateway under a title-shaped driver: unknown CLSID/IID/slot fallbacks, XNetworking, XUserAddAsync.
+add_executable(x2w_xgr_gateway_title tests/xgr/gateway_title.cpp)
+target_include_directories(x2w_xgr_gateway_title PRIVATE "${CMAKE_SOURCE_DIR}/src/gdk")
+target_compile_features(x2w_xgr_gateway_title PRIVATE cxx_std_17)
+add_dependencies(x2w_xgr_gateway_title x2w_xgr)
+add_test(NAME xgr_gateway COMMAND "${x2w_shimgen_python}" -B "${CMAKE_SOURCE_DIR}/tests/xgr/gateway_check.py"
+    "$<TARGET_FILE:x2w_xgr_gateway_title>" "$<TARGET_FILE:x2w_xgr>")
+set_tests_properties(xgr_gateway PROPERTIES TIMEOUT 120)

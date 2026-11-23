@@ -9,8 +9,14 @@
 //
 //   ours    (default) the classes and slots learned into tools/xgr/interfaces.toml (generated into
 //           xgr_table.inc by tools/xgr_gen.py) forward into x2w_gdk.dll's family implementations.
-//           An unknown CLSID or IID returns 0x80070032 (HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) and is
-//           logged with its caller; a slot with no implementation logs its index and returns E_NOTIMPL.
+//           A query this table does not list (unknown CLSID, unknown IID, or an IID of another class) still
+//           succeeds: it returns a logging fallback object (log "xgr-fallback"), whose every slot logs its
+//           index and first four arguments ("xgr-unknown-slot") and answers E_NOTIMPL (or, for a known class
+//           with a `fallback` in the table, that class's "not available" HRESULT, E_GAMEUSER_NO_DEFAULT_USER
+//           for XUser). A slot with no implementation in a listed interface answers the same way. A title
+//           therefore never gets E_NOINTERFACE / a null interface from a missing class, and a missing method
+//           is a logged failure code, never a jump into unmapped memory. X2W_XGR_STRICT=1 restores the old
+//           answer to an unlisted query, 0x80070032 (HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)).
 //   trace   every query goes to Windows' own xgameruntime.dll (System32) and the returned interface is
 //           wrapped in a proxy whose slots log their index, arguments, caller and result, then call the
 //           real slot. This is how the table was learned (the dummy-object technique, but forwarding).
@@ -41,6 +47,7 @@
 #include <vector>
 
 #include "x2w_gdk.h"
+#include "xgr_types.h"
 
 extern "C" void* const xgr_stub_table[];
 constexpr unsigned xgr_slots = 256;  // XGR_SLOTS in xgr_thunks.asm
@@ -48,6 +55,7 @@ constexpr unsigned xgr_slots = 256;  // XGR_SLOTS in xgr_thunks.asm
 struct XgrClass {
     const char* name;
     GUID clsid;
+    long fallback_hr;  // what a slot with no implementation answers (tools/xgr/interfaces.toml, `fallback`)
 };
 struct XgrInterface {
     const char* name;
@@ -70,6 +78,7 @@ struct Object {
     GUID clsid;
     GUID iid;
     std::string name;
+    long fallback_hr;  // ours: what an unimplemented slot answers (E_NOTIMPL unless the class says otherwise)
     volatile LONG refs;
 };
 
@@ -185,6 +194,15 @@ std::string where(const void* address)
     return format("0x%llx", static_cast<unsigned long long>(value));
 }
 
+bool strict()
+{
+    static const bool value = [] {
+        char text[8] = {};
+        return GetEnvironmentVariableA("X2W_XGR_STRICT", text, sizeof text) && text[0] == '1';
+    }();
+    return value;
+}
+
 Mode mode()
 {
     static const Mode m = [] {
@@ -244,8 +262,10 @@ const XgrClass* find_class(REFCLSID clsid)
 
 std::string label(REFCLSID clsid, REFIID iid)
 {
-    if (const XgrInterface* known = find_interface(iid)) return known->name;
-    if (const XgrClass* klass = find_class(clsid)) return std::string(klass->name) + "{" + guid_text(iid) + "}";
+    const XgrClass* klass = find_class(clsid);
+    if (const XgrInterface* known = find_interface(iid))
+        if (klass && &xgr_classes[known->class_index] == klass) return known->name;
+    if (klass) return std::string(klass->name) + "{" + guid_text(iid) + "}";
     return "{" + guid_text(clsid) + "}{" + guid_text(iid) + "}";
 }
 
@@ -258,6 +278,8 @@ Object* new_object(REFCLSID clsid, REFIID iid, const XgrInterface* iface, void* 
     object->clsid = clsid;
     object->iid = iid;
     object->name = label(clsid, iid);
+    const XgrClass* klass = find_class(clsid);
+    object->fallback_hr = klass && klass->fallback_hr ? klass->fallback_hr : static_cast<long>(E_NOTIMPL);
     object->refs = 1;
     return object;
 }
@@ -302,11 +324,19 @@ HRESULT STDMETHODCALLTYPE object_QueryInterface(Object* self, REFIID iid, void**
     static const GUID agile = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
     static const GUID inspectable = {0xAF86E2E0, 0xB12D, 0x4c6a, {0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90}};
     const XgrInterface* known = find_interface(iid);
+    // A fallback object (no table entry behind it) says yes to every IID: refusing would hard-fail a title
+    // whose next step is a slot call we log and answer anyway.
+    const bool fallback = !self->iface;
     bool ok = IsEqualGUID(iid, self->iid) || IsEqualGUID(iid, unknown) || IsEqualGUID(iid, agile) ||
-              IsEqualGUID(iid, inspectable) || mode() == Mode::record ||
+              IsEqualGUID(iid, inspectable) || mode() == Mode::record || fallback ||
               (known && self->iface && known->class_index == self->iface->class_index);
     emit_once("xgr-qi", self->name, format("%s -> %s", label(self->clsid, iid).c_str(), ok ? "ok" : "E_NOINTERFACE"));
     if (!ok) return E_NOINTERFACE;
+    if (fallback) {
+        const bool plain = IsEqualGUID(iid, unknown) || IsEqualGUID(iid, agile) || IsEqualGUID(iid, inspectable);
+        *out = singleton(self->clsid, plain ? self->iid : iid, nullptr);
+        return S_OK;
+    }
     *out = singleton(self->clsid, known && self->iface ? iid : self->iid, known && self->iface ? known : self->iface);
     return S_OK;
 }
@@ -348,6 +378,19 @@ void summary()
 
 }  // namespace
 
+// What a slot with no implementation runs when its object's class has a "not available" HRESULT other than
+// E_NOTIMPL (the thunk answers E_NOTIMPL itself when given no function). The values are tools/xgr_gen.py FALLBACKS.
+namespace {
+HRESULT fallback_no_default_user() noexcept { return static_cast<HRESULT>(0x89245106L); }  // E_GAMEUSER_NO_DEFAULT_USER
+
+void* fallback_function(long hr)
+{
+    if (static_cast<HRESULT>(hr) == static_cast<HRESULT>(0x89245106L))
+        return reinterpret_cast<void*>(&fallback_no_default_user);
+    return nullptr;
+}
+}  // namespace
+
 // ---------------------------------------------------------------- the thunks' C half (xgr_thunks.asm)
 extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* caller)
 {
@@ -377,9 +420,13 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
         }
     }
     if (!known) {
+        const bool ours = current == Mode::ours;
         emit_once("xgr-unknown-slot", self->name,
-                  format("slot %u args 0x%llx 0x%llx 0x%llx caller=%s", slot, (unsigned long long)args[1],
-                         (unsigned long long)args[2], (unsigned long long)args[3], where(caller).c_str()));
+                  format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx caller=%s", slot,
+                         (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
+                         (unsigned long long)args[4], ours ? static_cast<unsigned long>(self->fallback_hr) : 0x80004001ul,
+                         where(caller).c_str()));
+        if (current == Mode::ours) return fallback_function(self->fallback_hr);  // null: E_NOTIMPL
         if (current != Mode::record) return nullptr;
         // record: also an xgr-call line, so the argument shapes of every new slot are seen.
         emit("xgr-call", self->name,
@@ -507,8 +554,17 @@ HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
         const XgrClass* klass = find_class(clsid);
         if (known && klass && &xgr_classes[known->class_index] == klass) {
             *out = singleton(clsid, iid, known);
-        } else {
+        } else if (strict()) {
             hr = static_cast<HRESULT>(0x80070032L);  // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
+        } else {
+            // Not in the table: a logging fallback object, so the title's next call is a logged failure code
+            // (E_NOTIMPL, or the class's own) and not a null interface it may dereference or stall on.
+            const char* why = klass ? "unlisted IID of a known class" : known ? "IID of another class" : "unknown CLSID";
+            *out = singleton(clsid, iid, nullptr);
+            emit_once("xgr-fallback", label(clsid, iid),
+                      format("clsid=%s iid=%s %s: slots log and answer 0x%08lx caller=%s", guid_text(clsid).c_str(),
+                             guid_text(iid).c_str(), why, static_cast<unsigned long>(static_cast<Object*>(*out)->fallback_hr),
+                             where(caller).c_str()));
         }
     }
     emit_once("xgr-query", label(clsid, iid),

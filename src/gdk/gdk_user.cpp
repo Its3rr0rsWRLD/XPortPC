@@ -1,7 +1,7 @@
 // XUser: one offline local user, always signed in, never a guest, an adult with every privilege.
 // Public reference: https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xuser/xuser_members
 // XUserAddAsync completes with that user whatever its options (no account picker exists). Its gamertag is
-// X2W_GAMERTAG (default "XPortPC") and its id X2W_USER_ID (decimal; default 0x0009000000000001), both
+// X2W_GAMERTAG (default "Player") and its id X2W_USER_ID (decimal; default 0x0009000000000001), both
 // fixed for the process. No change event ever fires.
 #include "gdk_internal.h"
 
@@ -26,7 +26,7 @@ XUserObject* the_user()
     static XUserObject* user = [] {
         auto* u = new XUserObject;
         u->gamertag = x2w::env("X2W_GAMERTAG");
-        if (u->gamertag.empty()) u->gamertag = "XPortPC";
+        if (u->gamertag.empty()) u->gamertag = "Player";
         if (u->gamertag.size() > 96) u->gamertag.resize(96);
         const std::string id = x2w::env("X2W_USER_ID");
         if (!id.empty()) u->id = std::strtoull(id.c_str(), nullptr, 10);

@@ -4,11 +4,15 @@
 // x2w_gdk families (docs/design/runtime.md, section 2).
 #include <windows.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 
-#include "x2w_gdk.h"
+#include "xgr_types.h"
 
 // https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xthread/functions/xthreadassertnottimesensitive
 // A debugging aid: the runtime breaks when the calling thread was marked time-sensitive. Nothing here is
@@ -88,4 +92,187 @@ HRESULT xgr_impl_XUserGetGamerPictureResult(XAsyncBlock* async, size_t bufferSiz
                                              size_t* bufferUsed) noexcept
 {
     return x2w_impl_XAsyncGetResult(async, &gamer_picture_identity, bufferSize, buffer, bufferUsed);
+}
+
+// ---------------------------------------------------------------- XNetworking
+// The title's device is always online on an unmetered wired connection with the network initialized: the offline
+// runtime has no network state to report, and "connected, unconstrained" is what lets a title past its
+// "wait for the network" step. https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/
+// Every out-parameter is checked for writability first (a wrong slot guess must not fault the title); the
+// slot-to-function mapping of tools/xgr/interfaces.toml is an inference, logged on its first use.
+namespace {
+
+constexpr uint16_t preferred_udp_port = 3074;  // "This port defaults to UDP 3074" (xnetworkingquerypreferredlocaludpmultiplayerport)
+constexpr uint32_t iana_ethernet_csmacd = 6;
+
+bool writable(const void* p, size_t n)
+{
+    MEMORY_BASIC_INFORMATION info;
+    if (!p || !VirtualQuery(p, &info, sizeof info) || info.State != MEM_COMMIT) return false;
+    if (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+    constexpr DWORD any_write = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(info.Protect & any_write)) return false;
+    return reinterpret_cast<uintptr_t>(p) + n <= reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+}
+
+void assumed(const char* function, unsigned slot)
+{
+    char detail[160];
+    std::snprintf(detail, sizeof detail, "XNetworking slot %u taken to be %s (tools/xgr/interfaces.toml: inferred, not traced)",
+                  slot, function);
+    x2w_note("xgr-assume", detail);
+}
+
+XNetworkingConnectivityHint connected_hint()
+{
+    XNetworkingConnectivityHint hint = {};
+    hint.connectivityLevel = XNetworkingConnectivityLevelHint::InternetAccess;
+    hint.connectivityCost = XNetworkingConnectivityCostHint::Unrestricted;
+    hint.ianaInterfaceType = iana_ethernet_csmacd;
+    hint.networkInitialized = true;
+    return hint;
+}
+
+// Registrations: the token's callbacks still alive (an unregister before the initial notification cancels it).
+std::mutex g_net_lock;
+std::set<uint64_t> g_net_tokens;
+std::atomic<uint64_t> g_net_next{0x584e455400000001ull};  // "XNET" high half, so a token is easy to spot in a log
+
+struct Notification {
+    uint64_t token;
+    void* context;
+    XNetworkingConnectivityHintChangedCallback* hint_callback;
+    XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* port_callback;
+};
+
+void CALLBACK deliver(void* raw, bool canceled)
+{
+    std::unique_ptr<Notification> note(static_cast<Notification*>(raw));
+    if (canceled) return;
+    {
+        std::lock_guard<std::mutex> hold(g_net_lock);
+        if (!g_net_tokens.count(note->token)) return;
+    }
+    if (note->hint_callback) {
+        const XNetworkingConnectivityHint hint = connected_hint();
+        note->hint_callback(note->context, &hint);
+    } else if (note->port_callback) {
+        note->port_callback(note->context, preferred_udp_port);
+    }
+}
+
+// Both Register functions: the registration is kept and the documented initial notification is queued on the
+// completion port of the title's queue (null: the process queue).
+HRESULT register_changed(XTaskQueueHandle queue, void* context, XNetworkingConnectivityHintChangedCallback* hint_callback,
+                         XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* port_callback,
+                         XTaskQueueRegistrationToken* token)
+{
+    if (token) token->token = 0;
+    if (!token || !writable(token, sizeof *token)) return E_POINTER;
+    if (!hint_callback && !port_callback) return E_INVALIDARG;
+    const uint64_t value = g_net_next.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> hold(g_net_lock);
+        g_net_tokens.insert(value);
+    }
+    token->token = value;
+    auto* note = new Notification{value, context, hint_callback, port_callback};
+    if (FAILED(x2w_impl_XTaskQueueSubmitCallback(queue, XTaskQueuePort::Completion, note, &deliver))) {
+        delete note;  // no usable queue: the registration stands, only the initial notification is lost
+        x2w_note("xgr-networking", "initial notification not queued (no usable task queue)");
+    }
+    return S_OK;
+}
+
+bool unregister(XTaskQueueRegistrationToken token)
+{
+    std::lock_guard<std::mutex> hold(g_net_lock);
+    return g_net_tokens.erase(token.token) != 0;
+}
+
+const char port_identity = 0;
+
+HRESULT CALLBACK port_provider(XAsyncOp op, const XAsyncProviderData* data)
+{
+    switch (op) {
+    case XAsyncOp::Begin: return x2w_impl_XAsyncSchedule(data->async, 0);
+    case XAsyncOp::DoWork: x2w_impl_XAsyncComplete(data->async, S_OK, sizeof(uint16_t)); return S_OK;
+    case XAsyncOp::GetResult:
+        if (data->bufferSize < sizeof(uint16_t)) return E_NOT_SUFFICIENT_BUFFER;
+        *static_cast<uint16_t*>(data->buffer) = preferred_udp_port;
+        return S_OK;
+    default: return S_OK;
+    }
+}
+
+}  // namespace
+
+// .../xnetworking/functions/xnetworkinggetconnectivityhint
+HRESULT xgr_impl_XNetworkingGetConnectivityHint(XNetworkingConnectivityHint* connectivityHint) noexcept
+{
+    assumed("XNetworkingGetConnectivityHint", 3);
+    if (!writable(connectivityHint, sizeof *connectivityHint)) return E_POINTER;
+    *connectivityHint = connected_hint();
+    return S_OK;
+}
+
+// .../xnetworking/functions/xnetworkingregisterconnectivityhintchanged
+HRESULT xgr_impl_XNetworkingRegisterConnectivityHintChanged(XTaskQueueHandle queue, void* context,
+                                                            XNetworkingConnectivityHintChangedCallback* callback,
+                                                            XTaskQueueRegistrationToken* token) noexcept
+{
+    assumed("XNetworkingRegisterConnectivityHintChanged", 4);
+    return register_changed(queue, context, callback, nullptr, token);
+}
+
+// .../xnetworking/functions/xnetworkingunregisterconnectivityhintchanged
+bool xgr_impl_XNetworkingUnregisterConnectivityHintChanged(XTaskQueueRegistrationToken token, bool /*wait*/) noexcept
+{
+    assumed("XNetworkingUnregisterConnectivityHintChanged", 5);
+    return unregister(token);
+}
+
+// .../xnetworking/functions/xnetworkingregisterpreferredlocaludpmultiplayerportchanged
+HRESULT xgr_impl_XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged(
+    XTaskQueueHandle queue, void* context, XNetworkingPreferredLocalUdpMultiplayerPortChangedCallback* callback,
+    XTaskQueueRegistrationToken* token) noexcept
+{
+    assumed("XNetworkingRegisterPreferredLocalUdpMultiplayerPortChanged", 6);
+    return register_changed(queue, context, nullptr, callback, token);
+}
+
+// .../xnetworking/functions/xnetworkingunregisterpreferredlocaludpmultiplayerportchanged
+bool xgr_impl_XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged(XTaskQueueRegistrationToken token,
+                                                                           bool /*wait*/) noexcept
+{
+    assumed("XNetworkingUnregisterPreferredLocalUdpMultiplayerPortChanged", 7);
+    return unregister(token);
+}
+
+// .../xnetworking/functions/xnetworkingquerypreferredlocaludpmultiplayerport
+// Slot 15, the call a title made first (one pointer argument): the documented default port.
+HRESULT xgr_impl_XNetworkingQueryPreferredLocalUdpMultiplayerPort(uint16_t* preferredLocalUdpMultiplayerPort) noexcept
+{
+    assumed("XNetworkingQueryPreferredLocalUdpMultiplayerPort", 15);
+    if (!writable(preferredLocalUdpMultiplayerPort, sizeof(uint16_t))) return E_POINTER;
+    *preferredLocalUdpMultiplayerPort = preferred_udp_port;
+    return S_OK;
+}
+
+// .../xnetworking/functions/xnetworkingquerypreferredlocaludpmultiplayerportasync
+HRESULT xgr_impl_XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync(XAsyncBlock* asyncBlock) noexcept
+{
+    assumed("XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync", 16);
+    if (!asyncBlock) return E_INVALIDARG;
+    return x2w_impl_XAsyncBegin(asyncBlock, nullptr, &port_identity, "XNetworkingQueryPreferredLocalUdpMultiplayerPortAsync",
+                                port_provider);
+}
+
+// .../xnetworking/functions/xnetworkingquerypreferredlocaludpmultiplayerportasyncresult
+HRESULT xgr_impl_XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult(
+    XAsyncBlock* asyncBlock, uint16_t* preferredLocalUdpMultiplayerPort) noexcept
+{
+    assumed("XNetworkingQueryPreferredLocalUdpMultiplayerPortAsyncResult", 17);
+    if (!writable(preferredLocalUdpMultiplayerPort, sizeof(uint16_t))) return E_POINTER;
+    return x2w_impl_XAsyncGetResult(asyncBlock, &port_identity, sizeof(uint16_t), preferredLocalUdpMultiplayerPort, nullptr);
 }
