@@ -2969,7 +2969,6 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
 
-<<<<<<< HEAD
     # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
     # each one and compares with software references, naturally and with --force-cpu-traps.
     add_executable(x2w_cpu_trap_title tests/native/cpu_trap_title.cpp tests/native/cpu_trap_ops.asm)
@@ -2982,7 +2981,6 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "${CMAKE_SOURCE_DIR}/tests/native/cpu_trap_check.py" "$<TARGET_FILE:x2w_launch>"
         "$<TARGET_FILE:x2w_cpu_trap_title>")
     set_tests_properties(native_cpu_traps PROPERTIES TIMEOUT 120)
-=======
     # Implicit TLS data and module identity of a mapped title, each compared with the Windows loader running
     # the same EXE (tests/native/launch_title_check.py). The TLS title brings its own TLS directory with a
     # template and a zero fill; the second one is built with the static C runtime and uses thread_local.
@@ -3008,7 +3006,6 @@ if(TARGET pe_map AND TARGET xmem_shim)
             "$<TARGET_FILE:x2w_${title_check}_title>")
         set_tests_properties(native_launch_${title_check} PROPERTIES TIMEOUT 120)
     endforeach()
->>>>>>> launch1
 
     # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
     # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a

@@ -232,7 +232,6 @@ cmake --build --preset dev --target x2w_launch x2w_shims x2w_rung1_title
 ctest --preset dev --no-tests=error -R '^native_(launch_fake_title|report_synthetic|report_rung1|run_log_rung1)$' -V
 ```
 
-<<<<<<< HEAD
 ## Zen 2 instructions the host lacks
 
 Scarlett titles are x64 code for Zen 2 and run natively under `x2w_launch`. A vectored handler ([`tools/x2w_cpu_trap.h`](../tools/x2w_cpu_trap.h)) catches `STATUS_ILLEGAL_INSTRUCTION` in the program's mapped images and performs SHA-NI (`sha1rnds4`, `sha1nexte`, `sha1msg1`, `sha1msg2`, `sha256rnds2`, `sha256msg1`, `sha256msg2`), CLZERO, RDPID (TSC_AUX through RDTSCP), MONITORX and MWAITX (no wait), SSE4a (`extrq`, `insertq`, `movntsd`, `movntss`), RDPRU (MPERF and APERF both read the TSC; other registers return 0 with CF clear) and CLWB (as CLFLUSH) on the CONTEXT, then resumes after the instruction. The decoder handles the legacy prefixes, REX, ModRM, SIB, disp8/disp32, RIP-relative operands and a GS override. Any other #UD is logged as `cpu-unhandled MNEMONIC at module+RVA` (a mnemonic or family such as `ud2`, `avx-256`, `pdep`, `fma3`, never bytes) and crashes as before. The run log gains `cpu-host-missing emulated=... unhandled=... silent=...` (CPUID against the Zen 2 user-mode set; `silent` is LZCNT, which an older CPU runs as BSR), one `cpu-trap first` line per instruction and a `cpu-traps` count line before each summary, because each trap is an exception round trip and a hot loop of them is slow.
@@ -243,7 +242,9 @@ On the i7-9700F (Coffee Lake) the host lacks `clwb,sha,rdpid,sse4a,mwaitx,clzero
 
 ```powershell
 ctest --preset dev --no-tests=error -R '^native_(cpu_traps|run_log_rung1)$' -V
-=======
+
+```
+
 ## Implicit TLS data and module identity under x2w_launch
 
 **Implicit TLS.** Title code reaches `__declspec(thread)` and `thread_local` data as `ThreadLocalStoragePointer[_tls_index] + offset`, with the array at TEB+0x58 (`gs:[0x58]`). The array, the index allocator and every thread's block belong to ntdll, which grows all threads' arrays when a later `LoadLibrary` needs another index and copies only the entries it allocated, so a slot that `pe_map` invented would be lost or reused. `pe_map_image` therefore lets ntdll do the work: for an image whose template or zero fill is non-empty it writes a small carrier DLL to `%TEMP%\x2w-pe-map-tls\` (one code byte sequence as its entry point, one kernel32 import, a TLS directory whose template is a copy of the image's template after base relocations, with the image's `SizeOfZeroFill` and `Characteristics`), loads it with `LoadLibraryW` and writes the carrier's index into the image's `AddressOfIndex`. ntdll then fills the block on every existing thread and on every later thread before `DLL_THREAD_ATTACH`, frees it at thread exit and keeps it across later TLS loads. Before attaching the image, `pe_map` checks that the index was written and that this thread's block holds the template; `pe_map_release` frees the carrier and deletes its file. A process that ends without releasing leaves the file; carriers older than ten minutes are deleted at the next carrier creation (a loaded one cannot be).
@@ -267,7 +268,6 @@ Measured on Windows 11 build 26300 with MSVC 14.51: all three tests, the changed
 ```powershell
 cmake --build --preset dev --target x2w_launch pe_map x2w_tls_title x2w_tls_crt_title x2w_identity_title cpu_tls_value cpu_tls_original cpu_tls_sink
 ctest --preset dev --no-tests=error -R '^native_launch_(tls|tls_crt|identity)$|^cpu_native_tls(_value)?$' -V
->>>>>>> launch1
 ```
 
 ## Pipeline readiness from shader manifests
