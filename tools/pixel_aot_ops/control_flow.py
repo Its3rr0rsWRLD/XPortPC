@@ -364,7 +364,7 @@ def program(st, blocks, labels, latch_of):
         return {"scalar": dict(st.scalar), "vector": dict(st.vector), "pending": set(st.pending), "scc": st.scc,
                 "ex": st.ex, "wqm": st.wqm, "samples": st.samples, "vm_issued": st.vm_issued,
                 "sample_dest": dict(st.sample_dest), "exports": st.exports, "exported": st.exported, "ended": st.ended,
-                "broke": st.broke}
+                "broke": st.broke, "lds": st.lds_epoch}
 
     def restore(state):
         st.scalar.clear(), st.vector.clear(), st.pending.clear(), st.sample_dest.clear()
@@ -374,6 +374,11 @@ def program(st, blocks, labels, latch_of):
         st.vm_issued, st.exported, st.ended = state["vm_issued"], state["exported"], state["ended"]
         st.exports = state["exports"]
         st.broke = state.get("broke", False)
+        st.lds_epoch = state.get("lds", frozenset())
+
+    def lds_union(*states):
+        """C-6: the LDS accesses since the last barrier on any of the paths (forms/lds.py)."""
+        return frozenset().union(*(state["lds"] for state in states))
 
     def forget_scc():
         st.scc = None
@@ -381,13 +386,43 @@ def program(st, blocks, labels, latch_of):
     def same_provenance(first, second, where, carried=False):
         """carried: `first` is a loop's entry whose outstanding scalar loads include those of every back edge
         (carried_pending), so `second` may have fewer outstanding."""
+        settled = carried and fewer_vector_loads(first, second)
         for key in ("ex", "wqm", "pending", "sample_dest", "exports"):
             if key == "pending" and carried and second[key] <= first[key]:
                 continue
+            if key == "sample_dest" and settled:
+                continue
             if first[key] != second[key]:
                 raise ValueError(f"Execution or load state differs at {where}")
-        if first["sample_dest"] and first["vm_issued"] != second["vm_issued"]:
+        if first["sample_dest"] and first["vm_issued"] != second["vm_issued"] and not settled:
             raise ValueError(f"Execution or load state differs at {where}")
+
+    def fewer_vector_loads(entry, end):
+        """Compute stage (C-6, the n-body shaders' loops): a loop end whose outstanding vector loads are some of the
+        entry's loads (the register holds the value the entry's load gave it, and no load of the body is outstanding)
+        may come around the back edge or leave. Keeping the entry's set, in the entry's issue order, at the header and
+        after the loop then claims at least the loads really in flight, and the body's own loads rank after them as
+        they do; so a read is refused at least wherever it would be early. (A skipped region in the body counts the
+        entry's loads as the newest, a conservative number that the entry's order replaces.)"""
+        return st.stage == "compute" and all(
+            reg in entry["sample_dest"] and entry["sample_dest"][reg][1] == kind
+            and end["vector"].get(reg) == entry["vector"].get(reg) for reg, (_, kind) in end["sample_dest"].items())
+
+    def join_vector_loads(paths):
+        """Compute stage (C-6): the paths of a uniform branch that leave different vector loads outstanding (one arm
+        waits, the other loads nothing) join with every load outstanding on any path, each counted as the newest
+        (as after a skipped region), so that only vmcnt(0) or enough later loads complete it."""
+        if st.stage != "compute" or all(state["sample_dest"] == paths[0]["sample_dest"]
+                                        and state["vm_issued"] == paths[0]["vm_issued"] for state in paths):
+            return paths
+        issued = max(state["vm_issued"] for state in paths)
+        outstanding = {}
+        for state in paths:
+            for reg, (_, kind) in state["sample_dest"].items():
+                if outstanding.setdefault(reg, kind) != kind:
+                    raise ValueError("A register is loaded by loads of two kinds at a join")
+        merged = {reg: (issued, kind) for reg, kind in outstanding.items()}
+        return [dict(state, sample_dest=merged, vm_issued=issued) for state in paths]
 
     def condition(term):
         """Capture the SCC of a branch in a local, so that join assignments cannot change it. The SCC comes from uniform
@@ -419,7 +454,9 @@ def program(st, blocks, labels, latch_of):
         for name in {m[1] for m in IDENTIFIER.finditer(relation) if not m[2]}:
             if any(re.match(rf"\s*(?:[\w ]+\s)?{re.escape(name)}(?:\.\w+)?\s*=(?!=)", line) for line in st.lines[position:]):
                 raise ValueError("s_cbranch_vccz/vccnz: an operand of the compare changed before the branch")
-        uniform_claims.append(relation)
+        if getattr(st, "workgroup_threads", None) != 1:
+            # A one-thread workgroup (compute) is a wave of one lane: its compare is the wave's.
+            uniform_claims.append(relation)
         return f"({relation})"
 
     def check_exec(before):
@@ -505,10 +542,11 @@ def program(st, blocks, labels, latch_of):
             raise ValueError("Color export or program end inside a skipped region")
         if after["wqm"] != before["wqm"]:
             raise ValueError("Whole-quad mode changes inside a skipped region")
+        st.lds_epoch = lds_union(before, after)  # C-6: the wave may have skipped the region or run it
         if before["ex"] == "true" and term[1]:
             # The wave always takes the branch: the region never runs.
             restore(dict(after, ex=before["ex"], scalar=before["scalar"], scc=before["scc"], pending=before["pending"],
-                         sample_dest=before["sample_dest"], vm_issued=before["vm_issued"]))
+                         sample_dest=before["sample_dest"], vm_issued=before["vm_issued"], lds=before["lds"]))
             return
         if term[1]:
             st.ex = before["ex"]
@@ -644,6 +682,7 @@ def program(st, blocks, labels, latch_of):
                 raise ValueError("Every path of an if leaves the loop; the control flow is not structured")
             restore(dict(before, exported=True, ended=True, samples=total))
             return
+        paths = join_vector_loads(paths)
         exs = list(dict.fromkeys(state["ex"] for state in paths))
         join_ex = len(exs) > 1 and not paths[0]["exported"]
         for state in paths[1:]:
@@ -676,7 +715,7 @@ def program(st, blocks, labels, latch_of):
             st.lines[position:position] = fixes
         st.lines[decl_at:decl_at] = declarations
         restore(dict(paths[0], scalar=dict(registers["scalar"]), vector=dict(registers["vector"]), scc=None,
-                     samples=total))
+                     samples=total, lds=lds_union(*paths)))
         if join_ex:
             st.ex = name
 
@@ -752,10 +791,12 @@ def program(st, blocks, labels, latch_of):
             if not carried_pending(entry, ends):
                 break
         for state in ends:
+            settled = fewer_vector_loads(entry, state)
             for key in ("wqm", "pending", "sample_dest", "exports"):
-                if entry[key] != state[key] and not (key == "pending" and state[key] <= entry[key]):
+                if entry[key] != state[key] and not (key == "pending" and state[key] <= entry[key]) \
+                        and not (key == "sample_dest" and settled):
                     raise ValueError("Execution or load state differs at a loop exit or back edge")
-            if entry["sample_dest"] and entry["vm_issued"] != state["vm_issued"]:
+            if entry["sample_dest"] and entry["vm_issued"] != state["vm_issued"] and not settled:
                 raise ValueError("Execution or load state differs at a loop exit or back edge")
             if state["exported"] or state["ended"] and not state["broke"]:
                 raise ValueError("Color export or program end inside a loop")
@@ -775,6 +816,10 @@ def program(st, blocks, labels, latch_of):
             entry_live = entry["ex"] in live or entry["ex"] in dead_skips
             if entry_live and backs_continue:
                 live.append(carry)  # every lane that comes around is active
+        # C-6: the accesses since the last barrier at the header are the entry's and those of every back edge; one
+        # dry run reaches that set, since a path's accesses after the header do not depend on the header's.
+        header_lds = lds_union(entry, *ends)
+        st.lds_epoch = header_lds
         starting = snapshot()
         again, again_backs = [], []
         yield from general_body(header, latch, joined, held, again, again_backs, set(), divergent, carry)
@@ -790,6 +835,7 @@ def program(st, blocks, labels, latch_of):
         del live[depth:]
         exit_samples = st.samples
         restore(entry)
+        st.lds_epoch = lds_union({"lds": header_lds}, *again)
         for key in joined:
             (st.scalar if key[0] == "scalar" else st.vector)[key[1]] = joined_state[key[0]][key[1]]
         st.scalar.update(poisoned)
@@ -871,6 +917,8 @@ def program(st, blocks, labels, latch_of):
             (st.scalar if key[0] == "scalar" else st.vector)[key[1]] = joined_state[key[0]][key[1]]
         poisoned = {reg: value for reg, value in joined_state["scalar"].items() if value in (POISON, JOIN_POISON)}
         st.scalar.update(poisoned)
+        header_lds = lds_union(entry, *ends)  # C-6, as in general_loop
+        st.lds_epoch = header_lds
         starting = snapshot()
         again = []
         yield from loop_body(header, latch, joined, held, again)
@@ -883,6 +931,7 @@ def program(st, blocks, labels, latch_of):
                 raise ValueError("Loop state is not stable; the program is refused")
         exit_samples = st.samples
         restore(entry)
+        st.lds_epoch = lds_union({"lds": header_lds}, *again)
         for key in joined:
             (st.scalar if key[0] == "scalar" else st.vector)[key[1]] = joined_state[key[0]][key[1]]
         st.scalar.update(poisoned)

@@ -18,10 +18,16 @@ signature is embedded in the HLSL (COMPUTE_ROOT) and matches tests/compute_aot_r
 A store while the lane may be inactive (a narrowed EXEC, a skipped region) is emitted under `if (ex)`, so only the
 active lanes write (forms/stores.guarded).
 
+Card C-6 (forms/lds.py): LDS as `groupshared uint lds[lds_size / 4]` (the contract's lds_size), the DS reads, writes,
+read2/write2 and atomics without return, s_barrier as GroupMemoryBarrierWithGroupSync in workgroup-uniform flow
+(check_barriers, check_barrier_skips), the lgkmcnt wait for ds_read results, and LDS words read at a uniform address
+as roots of the uniformity lattice (uniform_roots), so v_readfirstlane_b32 of them is lowered.
+
 Usage:
     python tools/compute_aot.py translate PROGRAM.s --numthreads X Y Z --wave 64 --sgpr s2=descriptors
         --sgpr s3=group_id.x [--local-ids N] [--constant-descriptor OFFSET] [--buffer-descriptor OFFSET=WORD]...
-        [--texture OFFSET=INDEX]... [--storage-image OFFSET=SLOT:FORMAT]... [--sampler OFFSET] --output OUT.hlsl
+        [--texture OFFSET=INDEX]... [--storage-image OFFSET=SLOT:FORMAT]... [--sampler OFFSET] [--lds-size BYTES]
+        --output OUT.hlsl
     python tools/compute_aot.py survey --isa DIR [--status site/status.json] [--json OUT]
 
 PROGRAM.s is instruction text, one per line, as llvm-mc prints it or as a RADV dump writes it (a leading "BB0:" label and
@@ -39,8 +45,9 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 from pixel_aot_ops.dispatch import dispatch  # noqa: E402
 from pixel_aot_ops.hlsl import MEMORY_HELPERS, PREAMBLE, SALU_HELPERS, TITLE_LOOKUP  # noqa: E402
-from pixel_aot_ops.control_flow import (find_loops, poisoned_operands, program, split_blocks,  # noqa: E402
-                                       uniform_names)
+from pixel_aot_ops.control_flow import (find_loops, poisoned_operands, program, pure_functions,  # noqa: E402
+                                       reads_uniform, split_blocks, uniform_names)
+from pixel_aot_ops.forms.lds import D3D12_GROUPSHARED_LIMIT  # noqa: E402
 from pixel_aot_ops.forms.image_writes import FORMATS as IMAGE_FORMATS, UNORM_FORMATS  # noqa: E402
 from pixel_aot_ops.bindings import RADV_DESCRIPTOR_HIGH, SET_STRIDE, overlap, pointer_role, valid_key  # noqa: E402
 from pixel_aot_ops.lowering import Lowering, masked_writes, poison_message  # noqa: E402
@@ -70,8 +77,10 @@ LOCAL_IDS = ("local_id.x", "local_id.y", "local_id.z")
 # Instructions this card refuses, with the card that lowers them (docs/design/compute-stage.md). The forms would
 # refuse most of them anyway; naming the reason makes the refusal controls and the survey read the same.
 LATER = (
-    (r"ds_\w+.*", "LDS (groupshared) access is card C-6"),
-    (r"s_barrier", "s_barrier is card C-6"),
+    (r"(ds_swizzle_b32|ds_permute_b32|ds_bpermute_b32)\b.*", "a cross-lane permutation is refused (no card)"),
+    (r"ds_\w+\b.*\bgds\b.*", "GDS is refused in the compute stage"),
+    (r"(ds_append|ds_consume|ds_ordered_count|ds_gws_\w+)\b.*",
+     "ordered, append and global-wave-sync DS operations are refused"),
     (r"(v_readlane_b32|v_writelane_b32)\b.*",
      "a cross-lane read or write by lane index is refused (C-7 lowers v_readfirstlane_b32 of a wave-uniform value)"),
     (r"(v_mbcnt_\w+|s_bcnt[01]_i32_b(32|64)|s_ff[01]_i32_b(32|64)|s_flbit_i32\w*|s_bitreplicate_b64_b32)\b.*exec.*",
@@ -105,8 +114,8 @@ def parse_role(token):
 
 def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_ids=False, constant_descriptor=None,
                   buffer_descriptors=None, textures=None, storage_images=None, sampler=None,
-                  descriptor_high=RADV_DESCRIPTOR_HIGH, descriptor_data=None):
-    """Lower a gfx1013 compute program to HLSL source (cards C-1 to C-4).
+                  descriptor_high=RADV_DESCRIPTOR_HIGH, descriptor_data=None, lds_size=0):
+    """Lower a gfx1013 compute program to HLSL source (cards C-1 to C-4, C-6 and C-7's lane reads).
 
     numthreads: the workgroup size (x, y, z). wave: 32 or 64, the console wave size the program was compiled for; it
     only decides which lane-mask spellings are legal, since no accepted program depends on it. sgprs: {"sN": role}
@@ -120,7 +129,9 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     0xffff8000; a title's container may use another, such as 0 in R0Y00/Xbox2Windows#483's fixtures).
     descriptor_data: {key of a declared T#, storage image or S#: index of its first word in params}: the runtime writes
     the descriptor's words (8, or 4 for an S#) there, and a scalar form that reads a word of it as data (the T#'s
-    WIDTH field for imageSize) reads that params word; the forms that use the descriptor still bind it as before."""
+    WIDTH field for imageSize) reads that params word; the forms that use the descriptor still bind it as before.
+    lds_size: the program's LDS allocation in bytes (C-6, forms/lds.py; COMPUTE_PGM_RSRC2.LDS_SIZE times its
+    granule in a title's shader metadata), 0 for none: a multiple of 16, at most D3D12's 32 KiB of groupshared."""
     if not isinstance(descriptor_high, int) or not 0 <= descriptor_high <= 0xffffffff:
         raise ValueError("Invalid descriptor high word")
     if (len(numthreads) != 3 or any(not isinstance(n, int) or n < 1 for n in numthreads) or numthreads[0] > 1024
@@ -128,6 +139,9 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
         raise ValueError("Invalid workgroup size: D3D12 allows x, y <= 1024, z <= 64 and at most 1024 threads")
     if wave not in (32, 64):
         raise ValueError("gfx1013 waves have 32 or 64 lanes")
+    if (not isinstance(lds_size, int) or isinstance(lds_size, bool) or not 0 <= lds_size <= D3D12_GROUPSHARED_LIMIT
+            or lds_size % 16):
+        raise ValueError("Invalid LDS size: a multiple of 16 bytes up to D3D12's 32 KiB of groupshared memory")
     if packed_ids:
         raise ValueError("gfx1013 passes the local ids unpacked in v0, v1 and v2 (packed ids are gfx11 and gfx90a)")
     if local_ids not in (1, 2, 3):
@@ -192,6 +206,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
     st.storage_images.update(storage_images)
     st.sampler_offsets = {} if sampler is None else {sampler: "sampler"}
     st.descriptor_data = descriptor_data  # forms/smem.data_word
+    st.lds_size, st.numthreads = lds_size, tuple(numthreads)  # forms/lds.py (C-6)
     for i, line in enumerate(instructions):
         for pattern, reason in LATER:
             if re.fullmatch(pattern, line):
@@ -202,6 +217,7 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(f"Instruction {i} writes a 64-bit lane mask in a wave32 program: {line}")
         if wave == 64 and re.fullmatch(r"v_cmpx?_\w+_e64 s\d+,.*", line):
             raise ValueError(f"Instruction {i} writes a 32-bit lane mask in a wave64 program: {line}")
+    check_barrier_skips(instructions)
     blocks, labels = split_blocks(instructions)
     latch_of = find_loops(blocks, labels)
     for i, line in program(st, blocks, labels, latch_of):
@@ -211,6 +227,10 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             st.ended = True
             continue
         poisoned = poisoned_operands(st.scalar, line)
+        if not line.startswith("s_waitcnt") and (outstanding := st.pending & vector_registers(line)):
+            # C-6: a ds_read result is outstanding until lgkmcnt(0); reading or overwriting it before is refused.
+            raise ValueError(f"Instruction {i}: LDS result {', '.join(sorted(outstanding))} used before s_waitcnt "
+                             f"lgkmcnt(0): {line}")
         try:
             if st.ex == "true":
                 dispatch(st, i, line)
@@ -226,14 +246,99 @@ def lower_compute(instructions, *, numthreads, wave, sgprs, local_ids=3, packed_
             raise ValueError(poison_message(st, poisoned))
     if not st.ended:
         raise ValueError("Missing s_endpgm")
+    roots = uniform_roots(st)
     if st.uniform_claims:
         # C-7: each v_readfirstlane_b32 result (forms/lanes.py) must be the same on every thread of the workgroup:
-        # built from constants, params[] words, group_id and pure functions of them.
-        uniform = uniform_names(st.lines, st.lane_values, roots=("group_id",))
+        # built from constants, params[] words, group_id, LDS words read at such an address (C-6) and pure
+        # functions of them.
+        uniform = uniform_names(st.lines, st.lane_values, roots=roots)
         for name in st.uniform_claims:
             if name not in uniform:
                 raise ValueError(f"v_readfirstlane_b32 of a value that is not provably wave-uniform ({name})")
+    check_barriers(st, roots)
     return emit(st, numthreads)
+
+
+def vector_registers(line):
+    """The VGPR names an instruction's text names, ranges expanded."""
+    names = set(re.findall(r"(?<![\w\[:])v\d+\b", line))
+    for first, last in re.findall(r"v\[(\d+):(\d+)\]", line):
+        names.update(f"v{n}" for n in range(int(first), int(last) + 1))
+    return names
+
+
+def uniform_roots(st):
+    """The lattice roots of the compute stage: group_id, and (C-6) each LDS word read at an address the lattice
+    shows uniform; a read word may feed another read's address, so this repeats until no root is added."""
+    roots, pure = {"group_id"}, pure_functions()
+    while st.lds_reads:
+        uniform = uniform_names(st.lines, st.lane_values, roots=tuple(sorted(roots)))
+        added = {name for name, address in st.lds_reads.items() if name not in roots
+                 and reads_uniform(address, uniform | roots, pure, st.lane_values)}
+        if not added:
+            break
+        roots |= added
+    return tuple(sorted(roots))
+
+
+def check_barrier_skips(instructions):
+    """C-6: a wave that skips a region (s_cbranch_execz) does not take part in its barriers. That leaves the other
+    waves' barriers paired as on desktop only when the region holds every barrier of the program and is in no loop."""
+    labels = {line[:-1]: k for k, line in enumerate(instructions) if re.fullmatch(r"\w+:", line)}
+    barriers = [k for k, line in enumerate(instructions) if line == "s_barrier"]
+    if not barriers:
+        return
+    loops = []
+    for k, line in enumerate(instructions):
+        if (m := re.fullmatch(r"s_(?:branch|cbranch_\w+) (\w+)", line)) and labels.get(m[1], k + 1) <= k:
+            loops.append((labels[m[1]], k))
+    for k, line in enumerate(instructions):
+        if not (m := re.fullmatch(r"s_cbranch_exec(?:z|nz) (\w+)", line)) or labels.get(m[1], -1) <= k:
+            continue
+        stop = labels[m[1]]
+        inside = [b for b in barriers if k < b < stop]
+        if inside and (len(inside) != len(barriers) or any(a <= k and stop <= b for a, b in loops)):
+            raise ValueError(f"Instruction {k}: s_barrier in a region a wave may skip, with barriers outside it or in "
+                             "a loop (the skipping wave's later barriers would pair with the others' earlier ones)")
+
+
+def check_barriers(st, roots):
+    """C-6: GroupMemoryBarrierWithGroupSync must be reached by every thread of the group: each enclosing if's
+    condition and each break condition of an enclosing loop must be workgroup-uniform (the lattice with `roots`)."""
+    if not any(line.strip() == "GroupMemoryBarrierWithGroupSync();" for line in st.lines):
+        return
+    uniform = uniform_names(st.lines, st.lane_values, roots=roots)
+    pure = pure_functions()
+    stack, found = [], []
+    for line in st.lines:
+        if "\n" in line:
+            continue  # the preamble: helper definitions and the entry, not the body's scopes
+        text = line.strip()
+        if text == "GroupMemoryBarrierWithGroupSync();":
+            found.append(list(stack))
+        elif m := re.fullmatch(r"if \((.*)\) break;|(break;)", text):
+            loop = next((n for n in range(len(stack) - 1, -1, -1) if stack[n]["kind"] == "loop"), None)
+            if loop is None:
+                raise ValueError("A break outside a loop")
+            stack[loop]["breaks"].extend(scope["cond"] for scope in stack[loop + 1:])
+            if m[1] is not None:
+                stack[loop]["breaks"].append(m[1])
+        elif text == "} else {":
+            stack[-1] = dict(stack[-1])
+        elif m := re.fullmatch(r"if \((.*)\) \{", text):
+            stack.append({"kind": "if", "cond": m[1]})
+        elif re.fullmatch(r"(?:\[\w+\] )?while \(true\) \{", text):
+            stack.append({"kind": "loop", "cond": "true", "breaks": []})
+        elif text.endswith("{"):
+            raise ValueError(f"Unexpected HLSL scope around a barrier check: {text}")
+        elif text == "}":
+            stack.pop()
+    for scopes in found:
+        conditions = [c for scope in scopes for c in ([scope["cond"]] if scope["kind"] == "if" else scope["breaks"])]
+        for condition in conditions:
+            if not reads_uniform(condition, uniform | set(roots), pure, st.lane_values):
+                raise ValueError(f"s_barrier in flow that is not workgroup-uniform ({condition}): HLSL needs every "
+                                 "thread of the group to reach GroupMemoryBarrierWithGroupSync")
 
 
 def emit(st, numthreads):
@@ -391,6 +496,7 @@ def main():
     tr.add_argument("--sampler", type=key_arg)
     tr.add_argument("--descriptor-data", action="append", default=[],
                     help="OFFSET=WORD: the image or sampler descriptor's words as data, from constant word WORD")
+    tr.add_argument("--lds-size", type=int, default=0, help="the program's LDS allocation in bytes (C-6)")
     tr.add_argument("--output", type=Path, required=True)
     sv = sub.add_parser("survey")
     sv.add_argument("--isa", type=Path, required=True)
@@ -430,7 +536,8 @@ def main():
                                buffer_descriptors=buffers, textures=textures, storage_images=images,
                                sampler=args.sampler,
                                descriptor_data={key_arg(k): int(v, 0) for k, v in
-                                                (item.split("=", 1) for item in args.descriptor_data)})
+                                                (item.split("=", 1) for item in args.descriptor_data)},
+                               lds_size=args.lds_size)
     except (ValueError, KeyError, OSError) as exc:
         parser.exit(1, f"Translation failed: {exc}\n")
     dest.parent.mkdir(parents=True, exist_ok=True)
