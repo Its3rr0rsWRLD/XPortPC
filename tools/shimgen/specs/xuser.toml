@@ -1,0 +1,157 @@
+# XUser: an offline local user. https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xuser/xuser_members
+# Functions whose public pages do not give a full signature (token and signature, gamer picture, UI flows)
+# are not listed: shimgen gives them its generic stub, which returns E_NOTIMPL for *Async/*Result names.
+# Format: see xgameruntime.toml.
+family = "xuser"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XUserAddAsync"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xuser/functions/"
+
+[[functions]]
+name = "XUserAddAsync"
+returns = "HRESULT"
+params = "XUserAddOptions options, XAsyncBlock* async"
+doc = "xuseraddasync"
+impl = true
+
+[[functions]]
+name = "XUserAddResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, XUserHandle* newUser"
+doc = "xuseraddresult"
+impl = true
+out = ["newUser"]
+
+[[functions]]
+name = "XUserDuplicateHandle"
+returns = "HRESULT"
+params = "XUserHandle handle, XUserHandle* duplicatedHandle"
+doc = "xuserduplicatehandle"
+impl = true
+out = ["duplicatedHandle"]
+
+[[functions]]
+name = "XUserCloseHandle"
+returns = "void"
+params = "XUserHandle user"
+doc = "xuserclosehandle"
+impl = true
+
+[[functions]]
+name = "XUserCompare"
+returns = "int32_t"
+params = "XUserHandle user1, XUserHandle user2"
+doc = "xusercompare"
+impl = true
+
+[[functions]]
+name = "XUserGetMaxUsers"
+returns = "HRESULT"
+params = "uint32_t* maxUsers"
+doc = "xusergetmaxusers"
+impl = true
+out = ["maxUsers"]
+
+[[functions]]
+name = "XUserGetId"
+returns = "HRESULT"
+params = "XUserHandle user, uint64_t* userId"
+doc = "xusergetid"
+impl = true
+out = ["userId"]
+
+[[functions]]
+name = "XUserFindUserById"
+returns = "HRESULT"
+params = "uint64_t userId, XUserHandle* handle"
+doc = "xuserfinduserbyid"
+impl = true
+out = ["handle"]
+
+[[functions]]
+name = "XUserGetLocalId"
+returns = "HRESULT"
+params = "XUserHandle user, XUserLocalId* userLocalId"
+doc = "xusergetlocalid"
+impl = true
+out = ["userLocalId"]
+
+[[functions]]
+name = "XUserFindUserByLocalId"
+returns = "HRESULT"
+params = "XUserLocalId userLocalId, XUserHandle* handle"
+doc = "xuserfinduserbylocalid"
+impl = true
+out = ["handle"]
+
+[[functions]]
+name = "XUserGetIsGuest"
+returns = "HRESULT"
+params = "XUserHandle user, bool* isGuest"
+doc = "xusergetisguest"
+impl = true
+out = ["isGuest"]
+
+[[functions]]
+name = "XUserGetState"
+returns = "HRESULT"
+params = "XUserHandle user, XUserState* state"
+doc = "xusergetstate"
+impl = true
+out = ["state"]
+
+[[functions]]
+name = "XUserGetGamertag"
+returns = "HRESULT"
+params = "XUserHandle user, XUserGamertagComponent gamertagComponent, size_t gamertagSize, char* gamertag, size_t* gamertagUsed"
+doc = "xusergetgamertag"
+impl = true
+out = ["gamertagUsed"]
+out_buffers = ["gamertag:gamertagSize"]
+
+[[functions]]
+name = "XUserGetAgeGroup"
+returns = "HRESULT"
+params = "XUserHandle user, XUserAgeGroup* ageGroup"
+doc = "xusergetagegroup"
+impl = true
+out = ["ageGroup"]
+
+[[functions]]
+name = "XUserCheckPrivilege"
+returns = "HRESULT"
+params = "XUserHandle user, XUserPrivilegeOptions options, XUserPrivilege privilege, bool* hasPrivilege, XUserPrivilegeDenyReason* reason"
+doc = "xusercheckprivilege"
+impl = true
+out = ["hasPrivilege", "reason"]
+
+[[functions]]
+name = "XUserRegisterForChangeEvent"
+returns = "HRESULT"
+params = "XTaskQueueHandle queue, void* context, XUserChangeEventCallback* callback, XTaskQueueRegistrationToken* token"
+doc = "xuserregisterforchangeevent"
+impl = true
+out = ["token"]
+
+[[functions]]
+name = "XUserUnregisterForChangeEvent"
+returns = "bool"
+params = "XTaskQueueRegistrationToken token, bool wait"
+doc = "xuserunregisterforchangeevent"
+impl = true
+
+[[functions]]
+name = "XUserGetSignOutDeferral"
+returns = "HRESULT"
+params = "XUserSignOutDeferralHandle* deferral"
+doc = "xusergetsignoutdeferral"
+impl = true
+out = ["deferral"]
+
+[[functions]]
+name = "XUserCloseSignOutDeferralHandle"
+returns = "void"
+params = "XUserSignOutDeferralHandle deferral"
+doc = "xuserclosesignoutdeferralhandle"
+impl = true

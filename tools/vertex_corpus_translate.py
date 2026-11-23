@@ -62,12 +62,15 @@ def _uses(lines, at, quad):
     return out
 
 
-def binding_contract(program):
-    """(user-SGPR role map, PA_CL_VS_OUT_CNTL or None) for a program (see the module docstring)."""
+def binding_contract(program, stage=None):
+    """(user-SGPR role map, PA_CL_VS_OUT_CNTL or None) for a program (see the module docstring). With a stage
+    ("legacy" or "ngg"), program is a body without a frame (tools/geometry_aot.py passes the two halves of an ES+GS
+    wave) and its entry registers are that stage's."""
     lines = vertex_aot._clean(program)
-    stage = "ngg" if vertex_aot.is_ngg(lines) else "legacy"
-    if stage == "ngg":
-        lines, _ = vertex_aot.match_ngg_frame(lines)
+    if stage is None:
+        stage = "ngg" if vertex_aot.is_ngg(lines) else "legacy"
+        if stage == "ngg":
+            lines, _ = vertex_aot.match_ngg_frame(lines)
     lines = [line for line in lines if not vertex_aot._is_label(line)]
     roles_of = {name: reg for reg, name in vertex_aot.ENTRY_VGPRS[stage].items()}
     inputs = [int(r[1:]) for r in features(lines)["inputs_sgpr"]]

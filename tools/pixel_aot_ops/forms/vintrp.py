@@ -20,6 +20,7 @@ to a channel (the `high` operand picks the half). A PC input is interpolated as 
 packed half has no input whose interpolation matches it; they are refused (interp_attrs controls).
 """
 from ..dispatch import form
+from ..control_flow import interpolation_half
 
 ATTRIBUTES = range(32)  # TEXCOORD0..31
 
@@ -29,7 +30,9 @@ def attribute_name(attr):
 
 
 def check_context(st, dst):
-    if st.ex != "true" or st.scalar.get("m0") != "interp_base":
+    # While the lane may be inactive (st.ex not "true": after a v_cmpx, a discard or inside a skipped region) the
+    # interpolation is lowered as every VALU write is (lowering.masked_writes): an inactive lane keeps its old value.
+    if st.scalar.get("m0") != "interp_base":
         raise ValueError("Unknown interpolation context")
     if dst in st.sample_dest:
         raise ValueError("Write overlaps an outstanding sample")
@@ -49,15 +52,31 @@ def interpolate(st, i, m):
     if attr not in ATTRIBUTES:
         raise ValueError("Only attributes 0 to 31 can be interpolated")
     mode = "quad" if st.wqm else "entry"
+    # While the lane may be inactive (CF-2), p1 and p2 are one masked write: on the console a lane off in EXEC runs
+    # neither half and keeps the register's old value, an active lane gets P0 + I * P10 + J * P20. So the half records
+    # the bit it ran under and the old value it replaced, p2 must run under the same bit (EXEC changed between the
+    # halves would leave some lane with the half-done P0 + I * P10, no word), and lowering.masked_writes selects
+    # `ex ? interpolated : old` at p2. A helper lane (whole-quad mode) runs with ex true, as every desktop helper
+    # invocation does; a lane that discarded or failed a v_cmpx has ex false and keeps its old value. The value is
+    # then the masked word, not a helper-lane value (Lowering.quad_values), which an implicit-level sample refuses.
+    half = ("partial", attr, component, mode) if st.ex == "true" else \
+        ("partial", attr, component, mode, st.ex, st.hidden.get(dst, st.vector.get(dst)))
     if phase == "1" and st.vector.get(src) == "bary_i":
-        st.vector[dst] = ("partial", attr, component, mode)
+        st.vector[dst] = half
         return
-    if not (phase == "2" and st.vector.get(src) == "bary_j" and st.vector.get(dst) == ("partial", attr, component, mode)):
+    current = st.vector.get(dst)
+    # Under ex the half must be p1's under the same ex; its carried old value is whatever p1 found.
+    paired = current == half if st.ex == "true" else interpolation_half(current, st.ex) and current[:4] == half[:4]
+    if not (phase == "2" and st.vector.get(src) == "bary_j" and paired):
         raise ValueError("Unpaired interpolation")
     st.interp_attrs.add(attr)
     if attr == 0 and component in "zw":
         st.attribute_input = True
     name = f"{attribute_name(attr)}.{component}"
+    if st.ex != "true":
+        st.vector[dst] = f"alu{i}"
+        st.lines.append(f"    float alu{i} = {name};")
+        return
     if mode == "quad" and attr == 0 and component in "xy":
         st.vector[dst] = name
         return

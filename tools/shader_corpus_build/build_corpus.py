@@ -1,5 +1,10 @@
 """Compile shader sources to gfx1013 ISA through RADV's null winsys; one ISA dump per shader.
 Usage: build_corpus.py <source-name> <shader-root> <work-dir> <isa-out-dir> [--ext e1,e2] [--inc dir]...
+                       [--pair-geom] [--mesh]
+--pair-geom gives a geometry shader without a vertex shader of its own the vertex shader of its directory whose
+outputs cover its inputs, so RADV builds a real ES+GS pipeline (one dump per pairing, named <geom>+<vert>.s).
+--mesh also compiles mesh and task shaders (VK_EXT_mesh_shader; FORCE_FAMILY selects the chip, which must be gfx10.3
+or later for RADV to expose the extension). NONGG=1 adds nongg to RADV_DEBUG.
 Layout of the output: <isa-out-dir>/<stage>/<id>.s (stage = vertex|pixel|compute|other)."""
 import hashlib, json, os, re, subprocess, sys
 from collections import defaultdict
@@ -8,13 +13,15 @@ sys.path.insert(0, HERE)
 import reflect as R
 
 PIPE = os.path.join(HERE, "pipe")
-ENV = dict(os.environ, XDG_RUNTIME_DIR="/tmp/xdg", RADV_FORCE_FAMILY="GFX1013", RADV_DEBUG="shaders,nocache",
+ENV = dict(os.environ, XDG_RUNTIME_DIR="/tmp/xdg", RADV_FORCE_FAMILY=os.environ.get("FORCE_FAMILY", "GFX1013"), RADV_DEBUG="shaders,nocache",
            VK_ICD_FILENAMES="/usr/share/vulkan/icd.d/radeon_icd.json")
 if os.environ.get("NONGG"): ENV["RADV_DEBUG"] += ",nongg"
-STAGES = {"vert": "vertex", "frag": "pixel", "comp": "compute", "geom": "other", "tesc": "other", "tese": "other"}
+STAGES = {"vert": "vertex", "frag": "pixel", "comp": "compute", "geom": "other", "tesc": "other", "tese": "other",
+          "mesh": "other", "task": "other"}
 HDR = {"Vertex Shader": "vertex", "Pixel Shader": "pixel", "Compute Shader": "compute", "Geometry Shader": "other",
        "Tessellation Control Shader": "other", "Tessellation Evaluation Shader": "other", "Vertex Shader as ES": "other",
-       "Vertex Shader as LS": "other", "Vertex Shader as VS": "vertex", "NGG Shader": "ngg"}
+       "Vertex Shader as LS": "other", "Vertex Shader as VS": "vertex", "NGG Shader": "ngg",
+       "Mesh Shader": "other", "Task Shader": "other"}
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.pop("timeout", 120), **kw)
@@ -33,13 +40,15 @@ def split_sections(text):
 
 def main():
     name, root, work, isa_out = sys.argv[1:5]
-    exts = ["vert", "frag", "comp", "geom", "tesc", "tese"]; incs = []; skipdirs = []
+    exts = ["vert", "frag", "comp", "geom", "tesc", "tese"]; incs = []; skipdirs = []; pair_geom = False; mesh = False
     a = sys.argv[5:]
     while a:
         k = a.pop(0)
         if k == "--ext": exts = a.pop(0).split(",")
         elif k == "--inc": incs += ["-I" + a.pop(0)]
         elif k == "--skip": skipdirs.append(a.pop(0))
+        elif k == "--pair-geom": pair_geom = True
+        elif k == "--mesh": mesh = True; exts += ["mesh", "task"]; ENV["PIPE_MESH"] = "1"
     work = os.path.abspath(work); isa_out = os.path.abspath(isa_out); root = os.path.abspath(root)
     os.makedirs(work, exist_ok=True)
     files = []
@@ -62,7 +71,7 @@ def main():
         try: ref = R.reflect(out)
         except Exception as ex:
             st["reflect_fail"] += 1; continue
-        if ref["bad"] or any(m not in (0, 1, 2, 3, 4, 5) for m in ref["models"]):
+        if ref["bad"] or any(m not in ((0, 1, 2, 3, 4, 5) + ((5364, 5365) if mesh else ())) for m in ref["models"]):
             st["unsupported"] += 1; log.write(json.dumps({"f": rel, "err": "unsupported", "msg": str(ref["bad"] or ref["models"])}) + "\n"); continue
         spv[p] = (out, ref)
     # group into programs by (dir, stem)
@@ -74,24 +83,40 @@ def main():
         g = groups[stem]
         if "comp" in g and len(g) > 1:
             groups[stem + "#c"] = {"comp": g.pop("comp")}
+        if "mesh" in g and g.keys() & {"vert", "tesc", "tese", "geom"}:
+            groups[stem + "#m"] = dict({"mesh": g.pop("mesh")}, **({"task": g.pop("task")} if "task" in g else {}),
+                                       **({"frag": g["frag"]} if "frag" in g else {}))
     # frag-only: pair with a vertex shader of the same dir whose outputs cover its inputs
     vert_by_dir = defaultdict(list)
     for p in spv:
         if p.endswith(".vert"): vert_by_dir[os.path.dirname(p)].append(p)
     programs = []
     for stem, g in sorted(groups.items()):
-        if "frag" in g and "vert" not in g and "comp" not in g:
+        if "frag" in g and "vert" not in g and "comp" not in g and "mesh" not in g:
+            if mesh and any(p.endswith(".mesh") and os.path.dirname(p) == os.path.dirname(stem) for p in spv): continue
             need = set(spv[g["frag"]][1]["vin"])
             cand = [v for v in vert_by_dir[os.path.dirname(stem)] if need <= set(spv[v][1]["fout"])]
             if cand: g = dict(g, vert=cand[0], _borrowed=cand[0])
             else: st["frag_unpaired"] += 1; log.write(json.dumps({"f": os.path.relpath(g["frag"], root), "err": "unpaired"}) + "\n"); continue
+        if mesh and "mesh" in g and "frag" not in g:
+            frags = sorted(p for p in spv if p.endswith(".frag") and os.path.dirname(p) == os.path.dirname(stem))
+            if frags: g = dict(g, frag=frags[0])
+        if pair_geom and "geom" in g and "vert" not in g and "tese" not in g:
+            # A lone geometry shader gets the vertex shader of its directory whose outputs cover its inputs, and the
+            # fragment shader whose inputs its outputs cover, so the pipeline is a real VS+GS(+FS) one.
+            need = set(spv[g["geom"]][1]["vin"]); have = set(spv[g["geom"]][1]["fout"])
+            cand = [v for v in vert_by_dir[os.path.dirname(stem)] if need <= set(spv[v][1]["fout"])]
+            if not cand: st["geom_unpaired"] += 1; continue
+            frags = sorted(p for p in spv if p.endswith(".frag") and os.path.dirname(p) == os.path.dirname(stem)
+                           and set(spv[p][1]["vin"]) <= have and set(spv[p][1]["vin"]))
+            g = dict(g, vert=cand[0], _borrowed=cand[0], **({"frag": frags[0]} if frags and "frag" not in g else {}))
         programs.append(g)
     programs.sort(key=lambda g: 0 if "frag" in g else 1)  # paired first, so vertex ISA comes from the paired build
     done = set()
     for g in programs:
         members = [(e, p) for e, p in g.items() if e != "_borrowed"]
         spec = []; binds = {}; push = 0; vin = {}; fout = {}; depth = False
-        order = ["vert", "tesc", "tese", "geom", "frag", "comp"]
+        order = ["task", "mesh", "vert", "tesc", "tese", "geom", "frag", "comp"]
         for e in order:
             if e in g:
                 p = g[e]; out, ref = spv[p]; spec.append("stage %s %s" % (e, out))
@@ -108,6 +133,7 @@ def main():
         for l, t in fout.items(): spec.append("fout %s %s" % (l, t))
         if depth or "frag" in g: spec.append("depth 1")
         if "frag" not in g and "comp" not in g: spec.append("rastdisc 1")
+        if "mesh" in g and "frag" not in g: st["mesh_unpaired"] += 1; continue
         stem = next(iter(members))[1].rsplit(".", 1)[0]
         specf = os.path.join(work, hashlib.md5(stem.encode()).hexdigest() + ".spec")
         open(specf, "w").write("\n".join(spec) + "\n")
@@ -121,18 +147,21 @@ def main():
         secs = split_sections(r.stderr)
         # attribute sections to member shaders by the header's stage prefix
         pre = [("Vertex Shader", "vert"), ("Tessellation Control", "tesc"), ("Tessellation Evaluation", "tese"),
-               ("Geometry", "geom"), ("Pixel", "frag"), ("Compute", "comp")]
+               ("Geometry", "geom"), ("Pixel", "frag"), ("Compute", "comp"), ("Mesh", "mesh"), ("Task", "task")]
         exts_in = {e for e, _ in members}
         merged = bool(exts_in & {"tesc", "tese", "geom"})
+        if pair_geom and "_borrowed" in g: done.discard(g["vert"])  # the borrowed VS is dumped again, merged
         for hdr, body in secs:
             e = next((x for pfx, x in pre if hdr.startswith(pfx)), None)
             if e is None or e not in g:
                 st["unknown_header"] += 1; log.write(json.dumps({"f": os.path.relpath(stem, root), "err": "hdr", "msg": hdr}) + "\n"); continue
             p = g[e]
-            if p in done or (salvage and not body[-1].strip().startswith('s_endpgm')): continue
+            if (p in done and not (pair_geom and e in ("vert", "geom"))) or (salvage and not body[-1].strip().startswith('s_endpgm')): continue
             done.add(p)
             k = "other" if (e == "vert" and merged) else STAGES[e]
             rel = os.path.relpath(p, root)
+            if e == "vert" and merged and "_borrowed" in g:  # one merged ES+GS dump per geometry shader it pairs with
+                rel = os.path.relpath(g["geom"], root) + "+" + os.path.basename(p)
             dest = os.path.join(isa_out, k, name + "__" + rel.replace("/", "__") + ".s")
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             open(dest, "w").write("# " + hdr + "\n" + "\n".join(body) + "\n")

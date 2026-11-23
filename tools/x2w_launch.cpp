@@ -18,11 +18,24 @@
 // first thread created, the first call into a d3d12* import), the first exception and the first unhandled
 // crash (code, module + RVA, last stub called) and the exit code. Each line is written with its own
 // WriteFile call, so the log survives a crash. Addresses are given as module+RVA. --timeout ends a run that
-// is still going after that many seconds with exit code 124, after logging how far it got.
+// is still going after that many seconds with exit code 124, after logging how far it got. Each distinct C++
+// throw (0xe06d7363) is logged as "cpp-throw TYPE at SITE from CALLER": the thrown type's decorated name from
+// the ThrowInfo (".?AVruntime_error@std@@") and the first two frames in mapped images, at most 16 lines.
 //
-// The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
-// ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
-// leaves them naming the launcher, for comparison.
+// Dynamic loads. The program's imports of LoadLibraryA/W, LoadLibraryExA/W, GetModuleHandleA/W and
+// GetProcAddress (from kernel32, kernelbase or the libraryloader API set) bind to hooks here, because PC
+// GDK titles reach the Gaming Runtime only that way (xgameruntime.lib loads xgameruntime.dll and resolves
+// names at run time). A load whose file name is in a --shims directory loads that shim; anything else goes
+// to the Windows loader unchanged. GetProcAddress on a shim answers from the shim's exports; a name the shim
+// lacks comes from the Windows DLL of that name when one exists ("windows-fallback"), else null, as
+// Windows would. Each distinct load and resolve is logged once, as
+// "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|windows-fallback|missing|windows", on
+// stderr and in the run log; tools/shimgen.py --run-log turns those lines into shims.
+// Shims are loaded with LOAD_WITH_ALTERED_SEARCH_PATH, so DLLs beside a shim (x2w_gdk.dll) resolve.
+// The program's environment gets X2W_TITLE (its file name without extension) and X2W_TITLE_DIR (its
+// folder) unless they are set; the generated shims use them for save folders and the package path.
+// Shims report their own unimplemented paths through the exported x2w_launch_log_shim, as
+// "shim-<kind> SYMBOL DETAIL" lines in the run log.
 //
 // Zen 2 instructions the host CPU lacks fault with STATUS_ILLEGAL_INSTRUCTION. A vectored handler performs
 // the ones x2w_cpu_trap.h knows (SHA-NI, CLZERO, RDPID, MONITORX/MWAITX, SSE4a, RDPRU, CLWB) on the faulting
@@ -35,6 +48,10 @@
 // --force-cpu-traps is for tests: it overwrites each address listed by the program's export
 // x2w_cpu_trap_sites (a null-terminated array of code addresses) with UD2 and keeps the original bytes in a
 // side table, so the handler's path runs on every host, whether or not the CPU has the instruction.
+//
+// The title sees itself as the process image: its GetModuleHandle(NULL), GetModuleFileName(NULL) and the PEB's
+// ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
+// leaves them naming the launcher, for comparison.
 #include <windows.h>
 
 #include <cctype>
@@ -363,6 +380,43 @@ const Region* region_named(const wchar_t* name) {
     return nullptr;
 }
 
+// ---------------------------------------------------------------- dynamic loads (see the header comment)
+SRWLOCK dynamic_lock = SRWLOCK_INIT;
+std::set<std::string> dynamic_logged;
+std::map<HMODULE, std::string> shim_names;  // shim modules loaded by a dynamic load, by handle
+
+void log_dynamic_once(const std::string& line) {
+    AcquireSRWLockExclusive(&dynamic_lock);
+    const bool first = dynamic_logged.insert(line).second;
+    ReleaseSRWLockExclusive(&dynamic_lock);
+    if (!first) return;
+    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    log_line("%s", line.c_str());
+}
+
+// "name.dll" for a load request: the file component, lower case, with ".dll" when it has no extension.
+std::string dll_file_name(const std::wstring& request) {
+    std::string name = lower(narrow(file_of(request)));
+    if (name.find('.') == std::string::npos) name += ".dll";
+    return name;
+}
+
+// The shim for a DLL name from a --shims directory, loading it if needed, or null.
+HMODULE shim_for(const std::string& name) {
+    for (const auto& directory : shim_dirs) {
+        const std::wstring path = directory + L"\\" + widen(name);
+        if (!is_file(path)) continue;
+        AcquireSRWLockExclusive(&dynamic_lock);
+        HMODULE& module = shim_modules[name];
+        if (!module) module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (module) shim_names[module] = name;
+        HMODULE result = module;
+        ReleaseSRWLockExclusive(&dynamic_lock);
+        return result;
+    }
+    return nullptr;
+}
+
 std::wstring from_ansi(const char* text) {
     const int size = MultiByteToWideChar(CP_ACP, 0, text, -1, nullptr, 0);
     if (size <= 0) return {};
@@ -498,6 +552,133 @@ void end_identity() {
     if (host_image_base) InterlockedExchangePointer(peb_image_base(), host_image_base);
 }
 
+// The Windows DLL of a shim's name (the loader's search path, then System32), loaded by full path so it is
+// not the shim, or null. Cached.
+HMODULE windows_twin(const std::string& name) {
+    static std::map<std::string, HMODULE> twins;
+    AcquireSRWLockExclusive(&dynamic_lock);
+    auto it = twins.find(name);
+    if (it == twins.end()) {
+        wchar_t found[MAX_PATH];
+        std::wstring path;
+        if (SearchPathW(nullptr, widen(name).c_str(), nullptr, MAX_PATH, found, nullptr)) path = found;
+        bool ours = false;
+        for (const auto& directory : shim_dirs)
+            if (_wcsicmp(directory_of(path).c_str(), directory.c_str()) == 0) ours = true;
+        if (path.empty() || ours) {
+            const UINT length = GetSystemDirectoryW(found, MAX_PATH);
+            path = std::wstring(found, length) + L"\\" + widen(name);
+        }
+        HMODULE module = is_file(path) ? LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH) : nullptr;
+        if (module && GetProcAddress(module, "x2w_shimgen_dll")) module = nullptr;  // our own shim again
+        it = twins.emplace(name, module).first;
+    }
+    HMODULE module = it->second;
+    ReleaseSRWLockExclusive(&dynamic_lock);
+    return module;
+}
+
+std::string shim_name_of(HMODULE module) {
+    AcquireSRWLockShared(&dynamic_lock);
+    auto it = shim_names.find(module);
+    std::string name = it == shim_names.end() ? std::string() : it->second;
+    if (name.empty())
+        for (const auto& [key, handle] : shim_modules)
+            if (handle == module) name = key;
+    ReleaseSRWLockShared(&dynamic_lock);
+    return name;
+}
+
+HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
+    if (!request) return LoadLibraryExW(request, file, flags);
+    const std::string name = dll_file_name(request);
+    if (!(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE))) {
+        if (HMODULE shim = shim_for(name)) {
+            log_dynamic_once("dynamic-load " + name + " -> shim");
+            return shim;
+        }
+    }
+    HMODULE module = LoadLibraryExW(request, file, flags);
+    const DWORD error = GetLastError();
+    log_dynamic_once("dynamic-load " + name + (module ? " -> loader" : " -> failed"));
+    SetLastError(error);
+    return module;
+}
+HMODULE WINAPI hook_LoadLibraryW(LPCWSTR request) { return hook_LoadLibraryExW(request, nullptr, 0); }
+HMODULE WINAPI hook_LoadLibraryExA(LPCSTR request, HANDLE file, DWORD flags) {
+    if (!request) return LoadLibraryExA(request, file, flags);
+    return hook_LoadLibraryExW(from_ansi(request).c_str(), file, flags);
+}
+HMODULE WINAPI hook_LoadLibraryA(LPCSTR request) { return hook_LoadLibraryExA(request, nullptr, 0); }
+
+HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
+    if (request) {
+        const std::string name = dll_file_name(request);
+        AcquireSRWLockShared(&dynamic_lock);
+        auto it = shim_modules.find(name);
+        HMODULE shim = it == shim_modules.end() ? nullptr : it->second;
+        ReleaseSRWLockShared(&dynamic_lock);
+        if (shim) return shim;
+    }
+    return keep_host_identity ? GetModuleHandleW(request) : identity_GetModuleHandleW(request);
+}
+HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
+    if (!request) return keep_host_identity ? GetModuleHandleA(request) : identity_GetModuleHandleA(request);
+    return hook_GetModuleHandleW(from_ansi(request).c_str());
+}
+
+void* hook_for(const std::string& dll, const char* name);
+
+FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
+    const bool by_ordinal = (reinterpret_cast<std::uintptr_t>(name) >> 16) == 0;
+    const std::string symbol = by_ordinal ? "#" + std::to_string(reinterpret_cast<std::uintptr_t>(name))
+                                          : std::string(name ? name : "(null)");
+    const std::string shim = shim_name_of(module);
+    FARPROC address = GetProcAddress(module, name);
+    const char* route = address ? "shim" : "missing";
+    if (!shim.empty() && !address) {
+        // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
+        // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
+        // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
+        if (HMODULE windows = windows_twin(shim))
+            if ((address = GetProcAddress(windows, name))) route = "windows-fallback";
+    }
+    const DWORD error = GetLastError();
+    std::string dll = shim;
+    if (dll.empty()) {
+        wchar_t path[MAX_PATH];
+        const DWORD length = module ? GetModuleFileNameW(module, path, MAX_PATH) : 0;
+        dll = length ? lower(narrow(file_of(std::wstring(path, length)))) : "?";
+        // A dynamic lookup of a hooked loader function gets the hook too.
+        if (address && !by_ordinal) {
+            if (void* hook = hook_for(dll, name)) address = reinterpret_cast<FARPROC>(hook);
+            else if (void* identity = identity_hook(dll, name)) address = reinterpret_cast<FARPROC>(identity);
+        }
+    }
+    log_dynamic_once("dynamic-resolve " + dll + "!" + symbol + " -> " +
+                     (!shim.empty() ? route : (address ? "windows" : "missing")));
+    SetLastError(error);
+    return address;
+}
+
+void* hook_for(const std::string& dll, const char* name) {
+    if (!name) return nullptr;
+    if (dll != "kernel32.dll" && dll != "kernelbase.dll" && dll.rfind("api-ms-win-core-libraryloader", 0) != 0)
+        return nullptr;
+    static const std::pair<const char*, void*> hooks[] = {
+        {"LoadLibraryA", reinterpret_cast<void*>(&hook_LoadLibraryA)},
+        {"LoadLibraryW", reinterpret_cast<void*>(&hook_LoadLibraryW)},
+        {"LoadLibraryExA", reinterpret_cast<void*>(&hook_LoadLibraryExA)},
+        {"LoadLibraryExW", reinterpret_cast<void*>(&hook_LoadLibraryExW)},
+        {"GetModuleHandleA", reinterpret_cast<void*>(&hook_GetModuleHandleA)},
+        {"GetModuleHandleW", reinterpret_cast<void*>(&hook_GetModuleHandleW)},
+        {"GetProcAddress", reinterpret_cast<void*>(&hook_GetProcAddress)},
+    };
+    for (const auto& [hooked, address] : hooks)
+        if (std::strcmp(hooked, name) == 0) return address;
+    return nullptr;
+}
+
 void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) {
     const std::string key = lower(dll);
     const std::string symbol = name ? std::string(name) : "#" + std::to_string(ordinal);
@@ -506,7 +687,7 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
         const std::wstring path = directory + L"\\" + widen(key);
         if (!is_file(path)) continue;
         HMODULE& module = shim_modules[key];
-        if (!module) module = LoadLibraryW(path.c_str());
+        if (!module) module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (module)
             if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup)))
                 return report(key, symbol, "shim", "shim", address);
@@ -532,6 +713,10 @@ void* __cdecl resolve(const char* dll, const char* name, std::uint32_t ordinal) 
             if (void* address = map_export(base, name)) return report(key, symbol, "package", "package", address);
         return report(key, symbol, "stub (package)", "stub", make_stub(key, symbol, false));
     }
+    // GetModuleHandleA/W have both hooks: the shim lookup first, then the title identity answer.
+    if (void* hook = hook_for(key, name))
+        return report(key, symbol, identity_hook(key, name) ? "windows (title identity)" : "windows (x2w hook)", "windows",
+                      hook);
     if (HMODULE module = LoadLibraryA(dll)) {
         if (void* address = reinterpret_cast<void*>(GetProcAddress(module, lookup))) {
             if (void* hook = identity_hook(key, name)) return report(key, symbol, "windows (title identity)", "windows", hook);
@@ -579,10 +764,122 @@ void exception_text(const EXCEPTION_RECORD* record, char* out, std::size_t capac
     }
 }
 
+// ---------------------------------------------------------------- C++ exceptions (0xe06d7363)
+// An MSVC throw passes its ThrowInfo in the record: ExceptionInformation[0] is a magic number, [2] the
+// ThrowInfo address and [3] the image base its 32-bit RVAs are relative to. The first catchable type is the
+// thrown (most derived) type; its TypeDescriptor holds the decorated name (".?AVruntime_error@std@@").
+// A rethrow ("throw;") carries no ThrowInfo and is logged as "rethrow". Only that name and the throw site (the first frame in a mapped image, found by unwinding from the
+// RaiseException context) are logged, never the exception object.
+constexpr DWORD cpp_exception = 0xe06d7363;
+constexpr std::size_t kCppThrowLines = 16;
+volatile long cpp_throws;
+SRWLOCK cpp_lock = SRWLOCK_INIT;
+std::set<std::string> cpp_seen;
+
+bool readable(const void* address, std::size_t size) {
+    MEMORY_BASIC_INFORMATION info;
+    if (!address || !VirtualQuery(address, &info, sizeof info) || info.State != MEM_COMMIT) return false;
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    const auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    return reinterpret_cast<std::uintptr_t>(address) + size <= end;
+}
+
+std::string thrown_type(const EXCEPTION_RECORD* record) {
+    if (record->NumberParameters < 4) return "unknown_parameters";
+    const ULONG_PTR magic = record->ExceptionInformation[0];
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown_magic";
+    const auto base = static_cast<std::uintptr_t>(record->ExceptionInformation[3]);
+    const auto* throw_info = reinterpret_cast<const std::int32_t*>(record->ExceptionInformation[2]);
+    if (!throw_info) return "rethrow";  // "throw;": the runtime takes the type from the exception in flight
+    if (!readable(throw_info, 16)) return "unknown_throw_info";
+    const auto* types = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(throw_info[3]));
+    if (!readable(types, 8) || types[0] < 1) return "unknown_type_array";
+    const auto* catchable = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(types[1]));
+    if (!readable(catchable, 8)) return "unknown_catchable_type";
+    const char* name = reinterpret_cast<const char*>(base + static_cast<std::uint32_t>(catchable[1]) + 16);
+    std::string out;
+    for (std::size_t i = 0; i < 160 && readable(name + i, 1) && name[i]; ++i) {
+        const char c = name[i];
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                        c == '.' || c == '?' || c == '@' || c == '$';
+        out += ok ? c : '_';
+    }
+    return out.empty() ? "unknown_name" : out;
+}
+
+// The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
+// runtime the first is the title's own _CxxThrowException and the second the throwing function.
+std::string throw_site(const CONTEXT* start) {
+    CONTEXT context = *start;
+    std::string out;
+    int found = 0;
+    for (int depth = 0; depth < 32 && context.Rip && found < 2; ++depth) {
+        if (region_at(context.Rip)) {
+            char where[160];
+            describe(reinterpret_cast<void*>(context.Rip), where, sizeof where);
+            out += (found++ ? " from " : "") + std::string(where);
+        }
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &image, nullptr);
+        if (function) {
+            void* handler_data = nullptr;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, context.Rip, function, &context, &handler_data, &frame, nullptr);
+        } else {
+            if (!readable(reinterpret_cast<void*>(context.Rsp), 8)) break;
+            context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+        }
+    }
+    if (found) return out;
+    char where[160];
+    describe(reinterpret_cast<void*>(start->Rip), where, sizeof where);  // no mapped frame found
+    return where;
+}
+
+void log_cpp_throw(EXCEPTION_POINTERS* info) {
+    InterlockedIncrement(&cpp_throws);
+    const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord);
+    AcquireSRWLockExclusive(&cpp_lock);
+    const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
+    ReleaseSRWLockExclusive(&cpp_lock);
+    if (!first) return;
+    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    log_line("%s", line.c_str());
+}
+
+// The runtime's _CxxThrowException fills ExceptionInformation[3] with RtlPcToFileHeader(ThrowInfo), which
+// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped. With no base
+// it also changes the magic number to the /clr:pure one (0x01994000), which native catch blocks ignore, so
+// the throw would go unhandled. Before any frame handler runs, this handler gives a throw whose ThrowInfo lies
+// in a mapped image that image's base and, unless the ThrowInfo itself is marked pure (TI_IsPure, 0x8), the
+// native magic number back (whichever C runtime threw it). It is registered whether or not there is a run log.
+LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
+    EXCEPTION_RECORD* record = info->ExceptionRecord;
+    if (record->ExceptionCode != cpp_exception || record->NumberParameters < 4) return EXCEPTION_CONTINUE_SEARCH;
+    const ULONG_PTR magic = record->ExceptionInformation[0];
+    const bool native = magic == 0x19930520 || magic == 0x19930521 || magic == 0x19930522;
+    if (!native && magic != 0x01994000) return EXCEPTION_CONTINUE_SEARCH;
+    const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[2]);
+    const Region* region = region_at(address);
+    if (!region || record->ExceptionInformation[3] == region->base) return EXCEPTION_CONTINUE_SEARCH;
+    if (!native) {
+        // Pure magic with no base is the runtime's fallback; a real pure throw has TI_IsPure set.
+        if (record->ExceptionInformation[3] != 0 || !readable(reinterpret_cast<const void*>(address), 4) ||
+            (*reinterpret_cast<const std::uint32_t*>(address) & 0x8))
+            return EXCEPTION_CONTINUE_SEARCH;
+        record->ExceptionInformation[0] = 0x19930520;
+    }
+    record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // The first error-severity exception the program raises, whether or not it handles it. Codes with the
-// customer bit (such as C++ exceptions, 0xe06d7363) are the program's own and are not logged.
+// customer bit are the program's own and are not logged as such; C++ exceptions (0xe06d7363) get their own
+// "cpp-throw TYPE at SITE" lines, once per distinct line and at most 16.
 LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
     const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (armed && code == cpp_exception) log_cpp_throw(info);
     if (armed && (code & 0xc0000000u) == 0xc0000000u && !(code & 0x20000000u)
         && InterlockedExchange(&first_exception, 1) == 0) {
         char text[512];
@@ -720,6 +1017,12 @@ DWORD WINAPI watchdog(void* seconds) {
 
 }  // namespace
 
+// Shims (x2w_gdk.dll) find this with GetProcAddress(GetModuleHandle(nullptr), ...) and log through it.
+extern "C" __declspec(dllexport) void __cdecl x2w_launch_log_shim(const char* kind, const char* symbol,
+                                                                  const char* detail) {
+    log_line("shim-%s %s %s", kind ? kind : "?", symbol ? symbol : "?", detail ? detail : "");
+}
+
 #pragma section(".CRT$XLB", long, read)
 extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch_tls = launch_tls;
 #pragma comment(linker, "/include:x2w_launch_tls")
@@ -787,6 +1090,8 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "[x2w] xmem setting %ls=%ls\n", name.c_str(), value.c_str());
         log_line("xmem setting %ls=%ls", name.c_str(), value.c_str());
     }
+    // After the logger, so the logger sees the corrected base.
+    AddVectoredExceptionHandler(1, cpp_throw_base);
     // Added last, so it runs before the first-chance logger and a performed instruction is not logged as one.
     AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];
@@ -808,6 +1113,14 @@ int wmain(int argc, wchar_t** argv) {
     const std::string program_name = lower(narrow(file_of(full)));
     log_line("x2w-run-log 1");
     log_line("program %s", program_name.c_str());
+    {
+        std::wstring stem = file_of(full);
+        const auto dot = stem.find_last_of(L'.');
+        if (dot != std::wstring::npos) stem = stem.substr(0, dot);
+        if (!GetEnvironmentVariableW(L"X2W_TITLE", nullptr, 0)) SetEnvironmentVariableW(L"X2W_TITLE", stem.c_str());
+        if (!GetEnvironmentVariableW(L"X2W_TITLE_DIR", nullptr, 0))
+            SetEnvironmentVariableW(L"X2W_TITLE_DIR", package_dir.c_str());
+    }
     log_host_features();
     std::uint32_t status = 0;
     char detail[512] = {};

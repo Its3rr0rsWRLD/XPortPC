@@ -141,6 +141,25 @@ def dimensioned_coordinate(st, i, dim, coords):
     return f"face{i}"
 
 
+def explicit_coordinate(st, i, dim, coords):
+    """The HLSL float3 location of an explicit-level sample (image_sample_lz and _l) of a 2D-array or cube texture: the
+    location of dimensioned_coordinate, but its s and t are any value, since no derivative is taken: the same
+    integral-slice rule for an array, and for a cube the v_cubeid face with s - 1 and t - 1 of the program's own
+    face coordinates."""
+    xy = [coordinate(st, f"v{n}") for n in coords[:2]]
+    third = coordinate(st, f"v{coords[2]}")
+    value = st.vector[f"v{coords[2]}"]
+    if dim == "2d_array":
+        if _name(value) not in st.integral:
+            raise ValueError("An array slice must be an integer value (v_rndne, v_floor, v_ceil, v_trunc, v_cvt_f32 or "
+                             "an integral constant): the texture unit's slice rounding is not modelled")
+        return f"float3({xy[0]}, {xy[1]}, {third})"
+    if _name(value) not in st.cube_faces:
+        raise ValueError("A cube face must be a v_cubeid result")
+    st.lines.append(f"    precise float3 face{i} = float3({xy[0]} - 1.0f, {xy[1]} - 1.0f, {third});")
+    return f"face{i}"
+
+
 def _name(value):
     if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
         value = value[1]
@@ -255,8 +274,8 @@ def load_query_gather(st, i, m):
     st.vm_issue(dests, "sample")
 
 
-@form(r"image_sample_(lz_o|lz|l_o|l|b|d) (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\]), s\[(\d+):(\d+)\], "
-      r"s\[(\d+):(\d+)\] dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D((?: (?:glc|slc|dlc|d16))*)")
+@form(r"image_sample_(lz_o|lz|l_o|l|b|d|o) (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)*\]), s\[(\d+):(\d+)\], "
+      r"s\[(\d+):(\d+)\] dmask:0x([0-9a-f]) dim:(SQ_RSRC_IMG_2D|SQ_RSRC_IMG_2D_ARRAY|SQ_RSRC_IMG_CUBE)((?: (?:glc|slc|dlc|d16))*)")
 def sample_level(st, i, m):
     # Samples whose level does not come from the coordinate's derivatives, plus the biased one. The address is a
     # range or a non-sequential (NSA) list, in the hardware order offset, bias, derivatives, coordinates, level:
@@ -268,11 +287,20 @@ def sample_level(st, i, m):
     # The descriptor provenance rules are those of image_sample. Cache modifiers do not change the value; d16 packs
     # two channels per VGPR (store_results). unorm, a16, tfe, lwe, r128 and other dimensions do not match this
     # grammar. The implicit level of image_sample_b comes from derivatives, so, as for image_sample, its coordinates
-    # must be the interpolated texture coordinate; the explicit-level forms read any coordinate. Refused neighbours:
-    # image_sample_o, _b_o and _d_o (an offset needs the size of the level, and these pick it from derivatives, which
-    # this translator cannot see), _cl (clamped implicit level), _c (a depth comparison needs a comparison sampler,
-    # and the desktop sampler is a plain point one) and _cd.
-    op, dst_token, addr_token, f0, f1, s0, s1, dmask_digit, modifiers = m.groups()
+    # must be the interpolated texture coordinate; the explicit-level forms read any coordinate.
+    # image_sample_o (offset: x, y; the implicit level) takes the level from CalculateLevelOfDetail of the coordinate
+    # (a helper-lane value, as for image_sample), rounded and clamped to the levels that exist like an explicit lod
+    # (image_level), and applies the offset in texels of that level (image_offset_uv); it is lowered for a 2D texture.
+    # The 2D-array and cube textures are lowered for lz, l (x, y, slice or face, lod) and b (bias, x, y, slice or
+    # face), as an implicit-level image_sample of them is (dimensioned_coordinate for b; explicit_coordinate for the
+    # explicit levels, whose coordinates need no helper-lane definition); the other forms on them, and a16, tfe, lwe,
+    # are refused. Refused neighbours: _b_o and _d_o (an offset needs the size of the level, and these pick it from
+    # derivatives of a bias or gradients the translator cannot add to the level), _cl (clamped implicit level), _c
+    # (a depth comparison needs a comparison sampler, and the desktop sampler is a plain point one) and _cd.
+    op, dst_token, addr_token, f0, f1, s0, s1, dmask_digit, dim_field, modifiers = m.groups()
+    dim = binding_names.INSTRUCTION_DIMS[dim_field]
+    if dim != "2d" and op not in ("lz", "l", "b"):
+        raise ValueError(f"image_sample_{op} of a {dim} texture is not lowered")
     flags = modifiers.split()
     if len(set(flags)) != len(flags):
         raise ValueError("Repeated image modifier")
@@ -284,7 +312,7 @@ def sample_level(st, i, m):
     if d16 and len(channels) % 2:
         raise ValueError("A d16 image read needs an even number of channels")
     dests = vgprs(dst_token, len(channels) // 2 if d16 else len(channels))
-    width = {"lz": 2, "b": 3, "l": 3, "lz_o": 3, "l_o": 4, "d": 6}[op]
+    width = {"lz": 2, "b": 3, "l": 3, "lz_o": 3, "l_o": 4, "d": 6, "o": 3}[op] + (dim != "2d")
     if addr_token.startswith("["):
         addrs = addr_token[1:-1].split(", ")
         if len(addrs) != width:
@@ -298,13 +326,32 @@ def sample_level(st, i, m):
     if (texture is None or int(f0) % 4 or int(s0) % 4 or int(f1) > 105 or int(s1) > 105
             or any(r in st.pending for r in (*image, *state)) or (samp := sampler_of(st, state)) is None):
         raise ValueError("Unsupported image or sampler binding")
-    require_2d(st, texture)
+    if texture_dimension(st, texture) != dim:
+        raise ValueError(f"Image dimension {dim_field} does not match the texture binding "
+                         f"({texture_dimension(st, texture)})")
     if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
         raise ValueError("Write overlaps an outstanding sample")
     offset = None
-    if op.endswith("_o"):
+    if op.endswith("_o") or op == "o":
         offset, addrs = vector_u32(addrs[0], st.scalar, st.vector, st.pending, st.sample_pending), addrs[1:]
-    if op == "b":
+    if dim != "2d":
+        coords = [int(r[1:]) for r in (addrs[1:] if op == "b" else addrs[:3])]
+        if op == "b":
+            bias = fp_operand(addrs[0], st.scalar, st.vector, st.pending, st.sample_pending)
+            call = f"{texture}.SampleBias({samp}, {dimensioned_coordinate(st, i, dim, coords)}, {bias})"
+        else:
+            location = explicit_coordinate(st, i, dim, coords)
+            lod = coordinate(st, addrs[3]) if op == "l" else "0.0f"
+            call = f"{texture}.SampleLevel({samp}, {location}, {lod})"
+    elif op == "o":
+        uv = [quad_coordinate(st, st.vector.get(r)) for r in addrs[:2]]
+        if None in uv:
+            raise ValueError("Unsupported texture coordinate")
+        st.helpers.update(("image_offset_uv", "image_level"))
+        position = f"float2({uv[0]}, {uv[1]})"
+        st.lines.append(f"    float level{i} = image_level({texture}, {texture}.CalculateLevelOfDetail({samp}, {position}));")
+        call = f"{texture}.SampleLevel({samp}, image_offset_uv({texture}, {position}, level{i}, {offset}), level{i})"
+    elif op == "b":
         uv = [st.vector.get(r) for r in addrs[1:]]
         if any(v not in ("uv.x", "uv.y") for v in uv):
             raise ValueError("Unsupported texture coordinate")

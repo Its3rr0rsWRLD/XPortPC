@@ -1,0 +1,62 @@
+# XGameUI: no system UI exists, so each dialog completes at once with a logged, documented answer:
+# message dialogs pick their default button, text entry returns its default text, error dialogs complete.
+# https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameui/xgameui_members
+# Other XGameUi* names get shimgen's generic stub (E_NOTIMPL for *Async/*Result names, so nothing waits).
+# Format: see xgameruntime.toml.
+family = "xgameui"
+forward_dll = "xgameruntime.dll"
+forward_anchor = "XGameUiShowErrorDialogAsync"
+forward_default = false
+doc_root = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameui/functions/"
+
+[[functions]]
+name = "XGameUiShowErrorDialogAsync"
+returns = "HRESULT"
+params = "XAsyncBlock* async, HRESULT errorCode, const char* context"
+doc = "xgameuishowerrordialogasync"
+impl = true
+
+[[functions]]
+name = "XGameUiShowErrorDialogResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async"
+doc = "xgameuishowerrordialogresult"
+impl = true
+
+[[functions]]
+name = "XGameUiShowMessageDialogAsync"
+returns = "HRESULT"
+params = "XAsyncBlock* async, const char* titleText, const char* contentText, const char* firstButtonText, const char* secondButtonText, const char* thirdButtonText, XGameUiMessageDialogButton defaultButton, XGameUiMessageDialogButton cancelButton"
+doc = "xgameuishowmessagedialogasync"
+impl = true
+
+[[functions]]
+name = "XGameUiShowMessageDialogResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, XGameUiMessageDialogButton* resultButton"
+doc = "xgameuishowmessagedialogresult"
+impl = true
+out = ["resultButton"]
+
+[[functions]]
+name = "XGameUiShowTextEntryAsync"
+returns = "HRESULT"
+params = "XAsyncBlock* async, const char* titleText, const char* descriptionText, const char* defaultText, XGameUiTextEntryInputScope inputScope, uint32_t maxTextLength"
+doc = "xgameuishowtextentryasync"
+impl = true
+
+[[functions]]
+name = "XGameUiShowTextEntryResultSize"
+returns = "HRESULT"
+params = "XAsyncBlock* async, uint32_t* resultTextBufferSize"
+doc = "xgameuishowtextentryresultsize"
+impl = true
+out = ["resultTextBufferSize"]
+
+[[functions]]
+name = "XGameUiShowTextEntryResult"
+returns = "HRESULT"
+params = "XAsyncBlock* async, uint32_t resultTextBufferSize, char* resultTextBuffer, uint32_t* resultTextBufferUsed"
+doc = "xgameuishowtextentryresult"
+impl = true
+out = ["resultTextBufferUsed"]

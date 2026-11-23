@@ -9,9 +9,78 @@ import re
 LABEL = r"[A-Za-z_.$][\w.$]*"
 
 
+class LaneOnly(str):
+    """A VGPR value written by a masked write (lowering.masked_writes) whose old value is no 32-bit word on some lanes
+    (a barycentric, a half-done interpolation): on a lane whose bit at the write was one of `bits` (a disjunction of
+    lane bits) the register holds the HLSL value `name`; on every other lane it still holds `rest`, the value from
+    before the first such write (provenance, or LANE_GONE when unknown). lowering.lane_views reads it as `name` while
+    the lane's current bit is covered by `bits`, as `rest` while it is disjoint from them, and as LANE_GONE otherwise.
+    It equals only a LaneOnly of the same name, bits and rest, and is never joined (word_expr is None)."""
+    def __new__(cls, name, bits, rest):
+        value = super().__new__(cls, name)
+        value.bits, value.rest = frozenset(bits), rest
+        return value
+
+    def __eq__(self, other):
+        return (type(other) is type(self) and str.__eq__(self, other) and other.bits == self.bits
+                and other.rest == self.rest)
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = str.__hash__
+
+
+class LaneOnlyWord(tuple):
+    """LaneOnly for a raw word ("uint", name): a masked write over a LaneOnly value, `ex ? new : old` on the lanes of
+    old.bits or ex, and old.rest on the others."""
+    def __new__(cls, name, bits, rest):
+        value = super().__new__(cls, ("uint", name))
+        value.bits, value.rest = frozenset(bits), rest
+        return value
+
+    def __eq__(self, other):
+        return (type(other) is type(self) and tuple.__eq__(self, other) and other.bits == self.bits
+                and other.rest == self.rest)
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = tuple.__hash__
+
+
+# A register read where its value on some lane active now has no HLSL expression (a LaneOnly value whose bits neither
+# cover nor exclude the lane's current bit). Unreadable; an instruction may overwrite it.
+LANE_GONE = ("lane_gone",)
+LANE_GONE_MESSAGE = "Read of a register whose value on a lane that was inactive is not a 32-bit word"
+
+
+def lane_view(lines, ex, value):
+    """What a LaneOnly value reads as on a lane whose bit is `ex`: the value itself when `ex` implies one of its bits,
+    its rest when `ex` excludes all of them (the lane was inactive at every write: an if-else's else arm reads the
+    barycentric its then arm overwrote), LANE_GONE otherwise. Any other value reads as itself."""
+    if not isinstance(value, (LaneOnly, LaneOnlyWord)):
+        return value
+    if covers(lines, ex, value.bits):
+        return value
+    if covers(lines, ex, {"!(" + " || ".join(sorted(value.bits)) + ")"}):
+        return value.rest
+    return LANE_GONE
+
+
+def interpolation_half(value, ex=None):
+    """Whether a VGPR value is the half-done interpolation v_interp_p1_f32 wrote while the lane's bit was `ex` (any bit
+    but "true" when ex is None): ("partial", attr, component, mode, ex, old), carrying the register's old value
+    (forms/vintrp.py)."""
+    return (isinstance(value, tuple) and len(value) == 6 and value[0] == "partial"
+            and (ex is None or value[4] == ex))
+
+
 def word_expr(value):
     """A register value as an unsigned expression, or None when it is provenance (a descriptor word, an
-    interpolation value or a lane mask) and not 32 bits of data."""
+    interpolation value or a lane mask) and not 32 bits of data, or a value only some lanes hold (LaneOnly)."""
+    if isinstance(value, (LaneOnly, LaneOnlyWord)):
+        return None
     if isinstance(value, int):
         return f"{value}u"
     if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
@@ -118,6 +187,91 @@ def atoms(lines, expression, depth=0):
         else:
             out |= atoms(lines, definition, depth + 1)
     return frozenset(out)
+
+
+def covers(lines, name, bits):
+    """Whether the lane bit `name` can be true only when one of `bits` is (a disjunction): implies(), or else a check
+    of every assignment of the conditions they are built of. The bool names the HLSL text defines once are expanded
+    into their definitions (&&, ||, ! and parentheses); anything else is an opaque condition, the same one wherever its
+    text recurs only if no name in it is ever reassigned (a join variable may hold another value at another point;
+    each occurrence of such text is a condition of its own).
+    So the check is sound for any values of the opaque conditions: an if-else's then bit `c` and else bit `s && !c`
+    cover the restored save `s`. At most 12 opaque conditions; beyond that, False."""
+    bits = set(bits)
+    if implies(lines, name, bits):
+        return True
+    names = {}  # opaque condition key -> variable index
+
+    def stable(text):
+        return not any(re.fullmatch(rf"\s*{re.escape(word)}(?:\.\w+)?\s*=(?!=).*;", line)
+                       for word in set(re.findall(r"[A-Za-z_]\w*", text)) for line in lines)
+
+    def parse(expression, side, depth=0):
+        e = strip_parens(expression)
+        if depth > 16:
+            return None
+        for op in ("||", "&&"):
+            parts = split_top(e, op)
+            if len(parts) > 1:
+                nodes = [parse(part, side, depth + 1) for part in parts]
+                return None if None in nodes else (op, nodes)
+        if e in ("true", "false"):
+            return ("const", e == "true")
+        if e.startswith("!") and not e.startswith("!="):
+            rest = e[1:].strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", rest) or strip_parens(rest) != rest:
+                node = parse(rest, side, depth + 1)
+                return None if node is None else ("!", node)
+        if (definition := defined_once(lines, e)) is not None:
+            return parse(definition, side, depth + 1)
+        # Text naming a reassigned variable may hold another value at each occurrence: a fresh condition for each.
+        key = e if stable(e) else ("fresh", len(names))
+        if key not in names:
+            names[key] = len(names)
+        return ("var", names[key])
+
+    def value(node, assignment):
+        kind = node[0]
+        if kind == "const":
+            return node[1]
+        if kind == "var":
+            return assignment >> node[1] & 1 == 1
+        if kind == "!":
+            return not value(node[1], assignment)
+        results = (value(n, assignment) for n in node[1])
+        return all(results) if kind == "&&" else any(results)
+
+    left = parse(name, "left")
+    right = [parse(bit, "right") for bit in bits]
+    if left is None or None in right or len(names) > 12:
+        return False
+    return all(not value(left, a) or any(value(r, a) for r in right) for a in range(1 << len(names)))
+
+
+def strip_parens(expression):
+    """The expression without parentheses that enclose all of it."""
+    e = expression.strip()
+    while e.startswith("(") and e.endswith(")"):
+        depth = 0
+        for n, ch in enumerate(e):
+            depth += {"(": 1, ")": -1}.get(ch, 0)
+            if depth == 0 and n < len(e) - 1:
+                return e
+        e = e[1:-1].strip()
+    return e
+
+
+def split_top(expression, op):
+    """The operands of the top-level operator `op` (&& or ||) of an expression."""
+    parts, depth, start, n = [], 0, 0, 0
+    while n < len(expression):
+        depth += {"(": 1, ")": -1}.get(expression[n], 0)
+        if depth == 0 and expression.startswith(op, n):
+            parts.append(expression[start:n].strip())
+            start = n = n + len(op)
+            continue
+        n += 1
+    return parts + [expression[start:].strip()]
 
 
 def alias(lines, name):

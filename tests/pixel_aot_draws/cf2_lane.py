@@ -7,6 +7,8 @@ CF-2a can make `ex` anything but true in a program that lowers, so the draws cov
 EXEC), and the controls drive the inner states (a lane that may be inactive, masked writes, EXEC narrowing) through
 the forms directly."""
 from pixel_aot_ops.dispatch import dispatch
+from pixel_aot_ops.control_flow import LaneOnly
+from pixel_aot_ops.registers import PackedPair
 from pixel_aot_ops.lowering import Lowering, masked_writes
 
 from .cf_uniform import CF_IF_ELSE_BODY, CF_LOOP_BODY, CF_PROGRAMS, check_cf_uniform_draws, must_reject_for
@@ -130,18 +132,29 @@ def check_cf2_lane_controls():
     lines = list(st.lines)
     step(st, 14, "s_mov_b32 s45, s44")  # scalar ALU is not masked: no VGPR changes, no select
     assert st.lines == lines and st.scalar["s45"] == st.scalar["s44"]
-    refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v23, 1.0")
-    refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v0, 1.0")
+    # The whole-quad attr0.x is the binary32 uv.x: a word through asuint (family interp_ex).
+    step(st, 15, "v_mov_b32_e32 v23, 1.0")
+    assert st.lines[-1] == "    uint exw15_23 = ex9 ? asuint(alu15) : asuint(uv.x);", st.lines[-1]
+    # Over a barycentric, which is no word, the inactive lanes keep it: the register is LaneOnly (family interp_ex).
+    step(st, 15, "v_mov_b32_e32 v0, 1.0")
+    assert isinstance(st.vector["v0"], LaneOnly) and st.vector["v0"].bits == {"ex9"} and st.vector["v0"].rest == "bary_i"
+    st.vector["v0"] = "bary_i"
+    # A packed pair is no word either, and not provenance a lane can keep reading: refused.
+    st.vector["v22"] = PackedPair(("sample4.x", "sample4.y"))
+    refused("Masked write of a register that does not hold a 32-bit word", st, 15, "v_mov_b32_e32 v22, v20")
+    st.vector["v22"] = ("uint", "params[4].y")
     # What cannot be masked yet is refused while the lane may be inactive: SDWA lane-mask writes (VOPC ones are masked
-    # since CF-2b, family cf2_exec), interpolation and loads. The pack is not masked but recorded, and the export
-    # discards the lane when it is off (CF-2d, family cf2_discard).
+    # since CF-2b, family cf2_exec) and loads. Interpolation is masked as a pair (family interp_ex), and needs m0 as
+    # everywhere. The pack is not masked but recorded, and the export discards the lane when it is off (CF-2d, family
+    # cf2_discard).
     st.wqm = True
-    st.scalar.update({"m0": "interp_base", "vcc": ("condition", "cmp1", 0, 1)})
+    st.scalar.update({"vcc": ("condition", "cmp1", 0, 1)})
     for text, line in (("Invalid comparison", "v_cmp_lt_f32_sdwa vcc_lo, v12, v13 src0_sel:DWORD src1_sel:DWORD"),
                        ("Unknown interpolation context", "v_interp_p1_f32_e32 v8, v0, attr0.x"),
                        ("Unknown interpolation context", "v_interp_mov_f32_e32 v8, p0, attr1.x"),
                        ("Unsupported instruction", "s_wqm_b64 exec, exec")):
         refused(text, st, 16, line)
+    st.scalar["m0"] = "interp_base"
     step(st, 16, "v_cvt_pkrtz_f16_f32_e32 v16, v12, v13")
     assert st.vector["v16"] == ("sample4.x", "sample4.y") and st.pack_ex == {"v16": {16: "ex9"}}, st.pack_ex
     st.vector.update({"v17": ("sample4.z", "sample4.w")})

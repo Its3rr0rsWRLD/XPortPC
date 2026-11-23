@@ -3,7 +3,7 @@
 width S1[22:16] and SCC = (D != 0). A width of zero gives zero; a field running past bit 63 gives S0 >> offset (the same
 convention as the 32-bit helper). s_cselect_b64 takes S0 when SCC is set and leaves SCC alone."""
 from ..dispatch import form
-from .exec_mask import UniformMask, is_mask, mask_op
+from .exec_mask import UniformMask, is_mask, mask_op, write_mask
 from ..hlsl import SALU_HELPERS
 from ..registers import sgpr_name, sgpr_pair, scalar_u32, scalar_u64
 
@@ -124,6 +124,22 @@ def bitfield_extract_64(st, i, m):
     st.lines.append(f"    uint2 salu{i} = {op}(uint2({a0}, {a1}), {ctrl});")
     st.scalar[regs[0]], st.scalar[regs[1]] = ("uint", f"salu{i}.x"), ("uint", f"salu{i}.y")
     st.scc = f"((salu{i}.x | salu{i}.y) != 0u)"
+
+
+@form(r"s_cselect_b64 vcc, (-1|0), (-1|0)")
+def select_vcc(st, i, m):
+    # s_cselect_b64 vcc, -1, 0 (RADV's SCC to VCC for a v_cndmask): VCC takes the same bit for every lane, SCC, its
+    # negation or a constant, as the lane mask the comparisons and v_cndmask read (exec_mask.write_mask).
+    src0, src1 = m.groups()
+    if "vcc" in st.pending:
+        raise ValueError("Write overlaps an outstanding scalar load")
+    if st.scc is None:
+        raise ValueError("Select requires a tracked SCC")
+    if src0 == src1:
+        bit = "true" if src0 == "-1" else "false"
+    else:
+        bit = st.scc if src0 == "-1" else f"!({st.scc})"
+    write_mask(st, i, "vcc", bit)
 
 
 @form(r"s_cselect_b64 (s\[\d+:\d+\]), ([^,]+), ([^,]+)")
