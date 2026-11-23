@@ -26,6 +26,7 @@ foreach ($dir in Get-ChildItem -Directory $Samples) {
     $p = Start-Process -FilePath $launcher -WorkingDirectory $dir.FullName -WindowStyle Hidden -PassThru `
         -RedirectStandardError $err -RedirectStandardOutput $outFile `
         -ArgumentList @("--shims", "`"$shims`"", "--log", "`"$log`"", "--timeout", "$Timeout", "`"$($exe.FullName)`"")
+    $null = $p.Handle  # cache the handle, or ExitCode is empty after the process ends
     if (-not $p.WaitForExit(($Timeout + 30) * 1000)) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         $code = "killed"
