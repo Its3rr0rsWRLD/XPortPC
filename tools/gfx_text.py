@@ -40,6 +40,8 @@ VERIFIED = VERIFIED | frozenset({
     "buffer_load_dwordx4", "buffer_store_dwordx2", "ds_bpermute_b32", "buffer_store_dwordx4", "s_lshl_b32", "s_movk_i32",
     "s_barrier", "v_add_f32_e32", "v_add_nc_u32_e32", "v_subrev_f32_e32",
 })
+# Added for the programs of runtime rung R6 (tests/runtime/r6_*.s), compared by tests/runtime/r6_programs_check.py.
+VERIFIED = VERIFIED | frozenset({"image_load", "image_sample_lz", "v_cvt_f32_u32_e32"})
 # 64-bit scalar operations whose operands disasm_rdna2 prints as their low 32-bit register.
 PAIR_OPERANDS = frozenset({"s_and_b64", "s_mov_b64", "s_wqm_b64"})
 

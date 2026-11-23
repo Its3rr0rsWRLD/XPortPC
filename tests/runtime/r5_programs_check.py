@@ -82,25 +82,28 @@ def check(assembler=None, objcopy=None):
         if name == "r5_refused_cs":
             raise AssertionError("r5_refused_cs was translated")
         registers = sorted(set(re.findall(r"register\([^)]*\)", source)))
-        expected = ["register(b1, space1000)", "register(b3, space1000)", "register(t2, space1000)",
+        # b3 space1000 is the frame words (push words and the title range count, formerly b1 space1000).
+        expected = ["register(b3, space1000)", "register(t2, space1000)",
                     "register(u0, space1000)", "register(u0, space1001)"]
         if registers != expected or "RootSignature" in source or "[numthreads(4, 1, 1)]" not in source:
             raise AssertionError(f"{name}: unexpected bindings {registers}")
         print(f"{name}: {len(program)} instructions decode to the source text and translate; bindings {registers}")
-    # The contract is checked: a word past the push words and a missing workgroup size are refused.
+    # The contract is checked: a word past the frame words and a missing workgroup size are refused.
     try:
         pso_translate.lower("compute", ["s_endpgm"], {**CS_ROLES, "numthreads": None})
     except ValueError as error:
         assert "workgroup size" in str(error), error
     else:
         raise AssertionError("a compute contract without a workgroup size was accepted")
-    far = {**CS_ROLES, "sgprs": {"s2": "user:40"}}
+    # The frame words hold 64 constant words (R6): the last is readable, the next is not a user-data word.
+    pso_translate.lower("compute", ["v_mov_b32_e32 v1, s2", "s_endpgm"], {**CS_ROLES, "sgprs": {"s2": "user:63"}})
+    far = {**CS_ROLES, "sgprs": {"s2": "user:64"}}
     try:
         pso_translate.lower("compute", ["v_mov_b32_e32 v1, s2", "s_endpgm"], far)
     except ValueError as error:
-        assert "push words" in str(error), error
+        assert "user:64" in str(error), error
     else:
-        raise AssertionError("a read past the push words was accepted")
+        raise AssertionError("a read past the frame words was accepted")
     if not assembler:
         print("llvm-mc not given: committed bytes and LLVM text comparison skipped")
         return 0

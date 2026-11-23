@@ -39,9 +39,6 @@ EXPECTED = {"r4_vs": [("constants", 0, 0, 0)],
             "r4_ps": [("texture", 0, 0, 0x20), ("sampler", 0, 1, 0), ("constants", 0, 0, 0x40)]}
 # Forms the runtime does not bind yet, as one-line changes of the pixel or vertex program, and the reason they give.
 REFUSED = [
-    ("r4_ps", "s_load_dwordx4 s[32:35], s[22:23], null", ["s_mov_b32 s32, 0", "s_mov_b32 s33, 0", "s_mov_b32 s34, 0",
-                                                          "s_mov_b32 s35, 0"],
-     "an inline (immutable) sampler"),
     ("r4_ps", "s_mov_b32 s22, s4", ["s_mov_b32 s22, s6"], "does not bind as a descriptor table"),
     ("r4_vs", "s_buffer_load_dwordx2 s[16:17], s[12:15], null", ["buffer_load_dwordx2 v[16:17], v1, s[12:15], 0 offen"],
      "b4 descriptor words"),
@@ -107,6 +104,17 @@ def check(assembler=None, objcopy=None):
         if name == "r4_vs" and "CountedTitleLookup(title_ranges" not in source:
             raise AssertionError("r4_vs: title-memory loads do not count TitleLookup misses")
         print(f"{name}: {len(program)} instructions decode to the source text and translate; reads {refs}")
+    # An inline (immutable) sampler (rung R6): the S# words the program sets with s_mov become an inline_sampler
+    # read the shim decodes, in place of the sampler table's S#.
+    program = source_lines("r4_ps")
+    at = program.index("s_load_dwordx4 s[32:35], s[22:23], null")
+    words = ["0x91", "0xf00000", "0x4000000", "0"]
+    inline = program[:at] + [f"s_mov_b32 s{32 + i}, {w}" for i, w in enumerate(words)] + program[at + 1:]
+    _, refs = translate("r4_ps", inline)
+    want = [("texture", 0, 0, 0x20), ("inline_sampler", 0, 0x91, 0xf00000, 0x4000000, 0), ("constants", 0, 0, 0x40)]
+    if refs != want:
+        raise AssertionError(f"r4_ps with an inline sampler: reads {refs}, expected {want}")
+    print(f"r4_ps with an inline sampler: translates; reads {refs}")
     for name, line, replacement, reason in REFUSED:
         program = source_lines(name)
         at = program.index(line)

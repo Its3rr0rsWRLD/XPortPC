@@ -74,6 +74,13 @@ typedef struct X2WGfxCounters {
     // where the table's heap holds no view of that kind (the draw reads a null view, a point sampler or zeros).
     uint64_t title_lookup_misses;
     uint64_t texture_lookup_misses;
+    // Hardware descriptor words (runtime rung R6): descriptor reads of translated draws and dispatches (and inline
+    // samplers) resolved from T#, S# or V# words the title wrote into descriptor memory itself, desktop textures the
+    // shim created and filled (detiled) from the title's texture memory for those T#s, and desktop samplers it
+    // created for those S#s.
+    uint64_t raw_descriptor_reads;
+    uint32_t raw_texture_uploads;
+    uint32_t raw_samplers_created;
 } X2WGfxCounters;
 
 typedef enum X2WGfxTitleGpuState {
