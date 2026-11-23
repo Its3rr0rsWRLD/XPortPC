@@ -7,11 +7,13 @@
 // shows the real contract.
 //
 // D3D12XboxCreateDevice assumes, by analogy with the public D3D12CreateDevice(adapter, minimum level, REFIID,
-// void**), that one argument points at the IID of the requested interface and a later argument is the
-// void** that receives it. The first argument pointing at a known device IID (ID3D12Device..ID3D12Device10,
-// IUnknown) and the first writable, pointer-aligned argument after it are taken as that pair; the device is
-// the one D3D12CreateDevice hands out (desktop default adapter, WARP when that fails), wrapped. Without such
-// a pair it returns E_NOTIMPL and logs "d3d12x-create-device unknown-contract".
+// void**), that one argument (or a field of a creation-parameters struct an argument points at) is the IID of the
+// requested interface and another argument (or struct field) is the void** that receives it; find_contract lists
+// the search order, ending with two assumed shapes, (params*, REFIID, void**) and (REFIID, params*, void**), that
+// accept an IID the shim does not know. The device is the one D3D12CreateDevice hands out (desktop default
+// adapter, WARP when that fails), wrapped. Every call logs the first 128 bytes of each readable pointer argument
+// as dwords and one "d3d12x-create-device contract ..." line naming where the IID and the out slot were found.
+// Without any fit it returns E_NOTIMPL and logs "d3d12x-create-device unknown-contract".
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
@@ -31,6 +33,8 @@ using d3d12_xs::log_note;
 
 constexpr unsigned arg_count = 8;  // RCX, RDX, R8, R9, then the first four stack arguments
 constexpr std::size_t dump_bytes = 64;
+// D3D12XboxCreateDevice: bytes of every readable pointer argument logged as dwords, and searched for an IID.
+constexpr std::size_t create_dump_bytes = 128;
 // Calls logged in full per export; later calls are counted only (both are expected once per process).
 constexpr unsigned logged_calls = 16;
 
@@ -72,7 +76,7 @@ bool writable_slot(std::uintptr_t value)
 }
 
 // One line with the caller and all arguments, then one line per readable pointer argument.
-void log_call(const char* symbol, const std::uintptr_t (&args)[arg_count], const void* caller)
+void log_call(const char* symbol, const std::uintptr_t (&args)[arg_count], const void* caller, bool hexdump = true)
 {
     char where[MAX_PATH + 48];
     describe_caller(caller, where, sizeof(where));
@@ -83,7 +87,7 @@ void log_call(const char* symbol, const std::uintptr_t (&args)[arg_count], const
                            static_cast<unsigned long long>(args[i]));
     }
     log_note(symbol, line, nullptr);
-    for (unsigned i = 0; i < arg_count; ++i) {
+    for (unsigned i = 0; hexdump && i < arg_count; ++i) {
         const std::size_t bytes = readable_bytes(args[i], dump_bytes);
         if (!bytes) continue;
         const auto* p = reinterpret_cast<const unsigned char*>(args[i]);
@@ -97,14 +101,15 @@ void log_call(const char* symbol, const std::uintptr_t (&args)[arg_count], const
     }
 }
 
-// The first 64 readable bytes at value as little-endian words of `width` bytes (4: dwords, 8: qwords), one line.
-void log_words(const char* symbol, const char* name, std::uintptr_t value, unsigned width)
+// The first `limit` readable bytes at value as little-endian words of `width` bytes (4: dwords, 8: qwords), one line.
+void log_words(const char* symbol, const char* name, std::uintptr_t value, unsigned width,
+               std::size_t limit = dump_bytes)
 {
-    const std::size_t bytes = readable_bytes(value, dump_bytes) / width * width;
+    const std::size_t bytes = readable_bytes(value, limit) / width * width;
     if (!bytes) return;
-    char line[dump_bytes * 3 + 128];
-    int n = std::snprintf(line, sizeof(line), "%s=0x%llx as %s:", name, static_cast<unsigned long long>(value),
-                          width == 4 ? "dwords" : "qwords");
+    char line[create_dump_bytes * 3 + 160];
+    int n = std::snprintf(line, sizeof(line), "%s=0x%llx as %s (%zu bytes):", name,
+                          static_cast<unsigned long long>(value), width == 4 ? "dwords" : "qwords", bytes);
     for (std::size_t off = 0; off < bytes && n > 0 && static_cast<std::size_t>(n) < sizeof(line); off += width) {
         unsigned long long word = 0;
         std::memcpy(&word, reinterpret_cast<const void*>(value + off), width);
@@ -153,6 +158,153 @@ HRESULT create_desktop_device(ID3D12Device** real, const char** adapter)
     if (FAILED(warp_hr)) return hr;
     *adapter = "warp";
     return warp_hr;
+}
+
+void format_guid(const GUID& g, char* out, std::size_t size)
+{
+    std::snprintf(out, size, "{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}", static_cast<unsigned long>(g.Data1),
+                  g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6],
+                  g.Data4[7]);
+}
+
+// How D3D12XboxCreateDevice's arguments were read: where the IID and the void** were found.
+struct Contract {
+    GUID iid{};
+    const KnownIid* known = nullptr;  // null: an IID the shim does not know (assumed contract)
+    std::uintptr_t out = 0;
+    bool assumed = false;
+    const char* shape = "";  // the assumed shape's name
+    char iid_where[48]{};
+    char out_where[48]{};
+};
+
+// Among the candidate void** slots, the first that holds null (a title clears its out pointer, or a ComPtr starts
+// empty), else the first. A params struct passed beside the out slot is writable too but usually not null at +0.
+std::uintptr_t pick_out(const std::uintptr_t* slots, unsigned count, unsigned* picked)
+{
+    for (unsigned k = 0; k < count; ++k) {
+        if (*reinterpret_cast<void* const*>(slots[k]) == nullptr) {
+            *picked = k;
+            return slots[k];
+        }
+    }
+    *picked = 0;
+    return count ? slots[0] : 0;
+}
+
+// The contract search, in order:
+//  1. an argument pointing at a known IID, and a writable void** argument after it;
+//  2. a known IID inside the first create_dump_bytes of a pointed-at struct in writable memory whose first qword is not
+//     null (inline, or a pointer to it at an 8-aligned offset), and a writable void** argument other than the struct (or, failing that, a pointer to a writable
+//     void** at an 8-aligned offset of the same struct);
+//  3. assumed (params*, REFIID, void**): rdx points at 16 readable bytes and r8 is a writable void** holding null;
+//  4. assumed (REFIID, params*, void**): rcx points at 16 readable bytes and r8 is a writable void** holding null.
+//  When both 3 and 4 fit, 4 goes first if rcx alone points into read-only memory (where IID constants live).
+bool find_contract(const std::uintptr_t (&args)[arg_count], Contract* c)
+{
+    // 1.
+    for (unsigned i = 0; i < arg_count; ++i) {
+        const KnownIid* known = known_iid_at(args[i]);
+        if (!known) continue;
+        std::uintptr_t slots[arg_count];
+        unsigned slot_args[arg_count], n = 0;
+        for (unsigned j = i + 1; j < arg_count; ++j) {
+            if (args[j] == args[i] || !writable_slot(args[j])) continue;
+            slot_args[n] = j;
+            slots[n++] = args[j];
+        }
+        if (!n) continue;
+        unsigned picked = 0;
+        c->out = pick_out(slots, n, &picked);
+        c->known = known;
+        c->iid = *known->iid;
+        std::snprintf(c->iid_where, sizeof(c->iid_where), "%s", arg_names[i]);
+        std::snprintf(c->out_where, sizeof(c->out_where), "%s", arg_names[slot_args[picked]]);
+        return true;
+    }
+    // 2.
+    for (unsigned i = 0; i < arg_count; ++i) {
+        // Only a struct in writable memory (stack, heap or data): IID constants sit together in read-only data, so
+        // the bytes after one unknown IID can hold a known one that is no argument.
+        const std::size_t bytes = readable_bytes(args[i], create_dump_bytes);
+        // A writable slot holding null is taken for an out pointer, not a struct: scanning past it would read the
+        // caller's neighbouring locals.
+        if (bytes < sizeof(IID) || !writable_slot(args[i] & ~std::uintptr_t{7})) continue;
+        if (writable_slot(args[i]) && *reinterpret_cast<void* const*>(args[i]) == nullptr) continue;
+        const KnownIid* known = nullptr;
+        std::size_t at = 0;
+        bool inline_iid = false;
+        for (std::size_t off = 0; off + sizeof(IID) <= bytes && !known; off += 4) {
+            if ((known = known_iid_at(args[i] + off)) != nullptr) {
+                at = off;
+                inline_iid = true;
+            }
+        }
+        for (std::size_t off = 0; off + 8 <= bytes && !known; off += 8) {
+            std::uintptr_t p = 0;
+            std::memcpy(&p, reinterpret_cast<const void*>(args[i] + off), 8);
+            if (p != args[i] && (known = known_iid_at(p)) != nullptr) at = off;
+        }
+        if (!known) continue;
+        std::uintptr_t slots[arg_count];
+        unsigned slot_args[arg_count], n = 0;
+        for (unsigned j = 0; j < arg_count; ++j) {
+            if (j == i || args[j] == args[i] || !writable_slot(args[j]) || known_iid_at(args[j])) continue;
+            slot_args[n] = j;
+            slots[n++] = args[j];
+        }
+        c->known = known;
+        c->iid = *known->iid;
+        std::snprintf(c->iid_where, sizeof(c->iid_where), inline_iid ? "%s+0x%zx" : "%s->[+0x%zx]", arg_names[i], at);
+        if (n) {
+            unsigned picked = 0;
+            c->out = pick_out(slots, n, &picked);
+            std::snprintf(c->out_where, sizeof(c->out_where), "%s", arg_names[slot_args[picked]]);
+            return true;
+        }
+        for (std::size_t off = 0; off + 8 <= bytes; off += 8) {
+            std::uintptr_t p = 0;
+            std::memcpy(&p, reinterpret_cast<const void*>(args[i] + off), 8);
+            if (p == args[i] || (inline_iid && off + 8 > at && off < at + sizeof(IID)) || !writable_slot(p) ||
+                known_iid_at(p)) {
+                continue;
+            }
+            c->out = p;
+            std::snprintf(c->out_where, sizeof(c->out_where), "%s->[+0x%zx]", arg_names[i], off);
+            return true;
+        }
+    }
+    // 3. and 4.
+    struct Shape {
+        unsigned iid, out;
+        const char* name;
+    };
+    Shape shapes[] = {{1, 2, "(params*, REFIID, void**)"}, {0, 2, "(REFIID, params*, void**)"}};
+    // When rcx and rdx both point at 16 readable bytes, both shapes fit. IID constants live in read-only data and a
+    // params struct usually on the stack or heap, so when exactly rcx is read-only, (REFIID, params*, void**) is tried
+    // first.
+    const auto read_only = [](std::uintptr_t v) {
+        return readable_bytes(v, sizeof(IID)) >= sizeof(IID) && !writable_slot(v & ~std::uintptr_t{7});
+    };
+    if (read_only(args[0]) && !read_only(args[1])) std::swap(shapes[0], shapes[1]);
+    for (const Shape& shape : shapes) {
+        const std::uintptr_t iid = args[shape.iid], out = args[shape.out];
+        // The out slot must hold null (a cleared out pointer), so a writable GUID or struct in that position is not
+        // taken for one.
+        if (readable_bytes(iid, sizeof(IID)) < sizeof(IID) || !writable_slot(out) || out == iid ||
+            *reinterpret_cast<void* const*>(out) != nullptr) {
+            continue;
+        }
+        std::memcpy(&c->iid, reinterpret_cast<const void*>(iid), sizeof(IID));
+        c->known = known_iid_at(iid);
+        c->assumed = true;
+        c->out = out;
+        c->shape = shape.name;
+        std::snprintf(c->iid_where, sizeof(c->iid_where), "%s", arg_names[shape.iid]);
+        std::snprintf(c->out_where, sizeof(c->out_where), "%s", arg_names[shape.out]);
+        return true;
+    }
+    return false;
 }
 
 std::atomic<unsigned> g_create_calls;
@@ -209,36 +361,42 @@ extern "C" HRESULT WINAPI d3d12_xs_XboxCreateDevice(std::uintptr_t a0, std::uint
     const char* symbol = "d3d12_xs!D3D12XboxCreateDevice";
     const std::uintptr_t args[arg_count] = {a0, a1, a2, a3, s0, s1, s2, s3};
     const bool log = g_create_calls.fetch_add(1) < logged_calls;
-    if (log) log_call(symbol, args, caller);
-
-    for (unsigned i = 0; i < arg_count; ++i) {
-        const KnownIid* known = known_iid_at(args[i]);
-        if (!known) continue;
-        for (unsigned j = i + 1; j < arg_count; ++j) {
-            if (args[j] == args[i] || !writable_slot(args[j])) continue;
-            void** out = reinterpret_cast<void**>(args[j]);
-            *out = nullptr;
-            ID3D12Device* real = nullptr;
-            const char* adapter = "default";
-            HRESULT hr = create_desktop_device(&real, &adapter);
-            if (SUCCEEDED(hr)) hr = d3d12_xs::wrap_device(real, *known->iid, out, caller);
-            if (log) {
-                char detail[256];
-                std::snprintf(detail, sizeof(detail),
-                              "d3d12x-create-device contract iid=%s(%s) out=%s(void**) adapter=%s -> 0x%08lx",
-                              arg_names[i], known->name, arg_names[j], adapter, static_cast<unsigned long>(hr));
-                log_note(symbol, detail, known->iid);
-            }
-            return hr;
-        }
-    }
     if (log) {
-        log_note(symbol,
-                 "d3d12x-create-device unknown-contract: no argument points at a known device IID with a writable "
-                 "void** after it -> E_NOTIMPL",
-                 nullptr);
+        log_call(symbol, args, caller, false);
+        for (unsigned i = 0; i < arg_count; ++i) log_words(symbol, arg_names[i], args[i], 4, create_dump_bytes);
     }
-    return E_NOTIMPL;
+
+    Contract contract;
+    if (!find_contract(args, &contract)) {
+        if (log) {
+            log_note(symbol,
+                     "d3d12x-create-device unknown-contract: no known device IID (as an argument or inside a "
+                     "pointed-at struct) with a writable void**, and neither (params*, REFIID, void**) nor (REFIID, "
+                     "params*, void**) fits -> E_NOTIMPL",
+                     nullptr);
+        }
+        return E_NOTIMPL;
+    }
+    void** out = reinterpret_cast<void**>(contract.out);
+    *out = nullptr;
+    ID3D12Device* real = nullptr;
+    const char* adapter = "default";
+    HRESULT hr = create_desktop_device(&real, &adapter);
+    // An IID the shim does not know (an assumed contract) hands out the device wrapper as ID3D12Device, whose vtable
+    // is the start of the wrapper's, and makes the device answer QueryInterface for that IID from then on.
+    if (SUCCEEDED(hr) && !contract.known) d3d12_xs::alias_device_iid(contract.iid);
+    if (SUCCEEDED(hr)) hr = d3d12_xs::wrap_device(real, contract.known ? *contract.known->iid : __uuidof(ID3D12Device),
+                                                  out, caller);
+    if (log) {
+        char guid[64], detail[512];
+        format_guid(contract.iid, guid, sizeof(guid));
+        std::snprintf(detail, sizeof(detail),
+                      "d3d12x-create-device contract iid=%s(%s) out=%s(void**)%s%s adapter=%s iid_value=%s -> 0x%08lx",
+                      contract.iid_where, contract.known ? contract.known->name : "unknown", contract.out_where,
+                      contract.assumed ? " assumed " : "", contract.shape, adapter, guid, static_cast<unsigned long>(hr));
+        log_note(symbol, detail, &contract.iid);
+    }
+    return hr;
 }
 
 extern "C" HRESULT WINAPI d3d12_xs_ConfigureVirtualMemoryX(std::uintptr_t a0, std::uintptr_t a1, std::uintptr_t a2,

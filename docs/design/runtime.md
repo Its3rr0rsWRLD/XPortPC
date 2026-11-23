@@ -258,7 +258,21 @@ The title gets objects from our graphics shim and calls them through vtables. Ea
 Vtable slots. The wrappers use the public desktop method order. That the console interfaces share this order is an
 assumption that the first owner logs test: every slot past the public ones, and every slot at all in dev builds, first
 goes through a logging thunk (interface, slot index, caller RVA, four argument registers). A title calling a slot we
-have not implemented stops with that line as its first unimplemented call.
+have not implemented stops with that line as its first unimplemented call. The line reads `d3d12x-<kind>-unknown-slot N args rdx=.. r8=.. r9=.. stack0=.. stack1=.. stack2=..`
+(kind: `device`, `queue`, `allocator`, `list`, `fence`, `swap-chain`, `descriptor-heap`, `view-heap` for RTV/DSV
+heaps, `resource`, `heap`, `command-signature`); the stack values are the caller's next argument slots and mean
+something only when the method takes that many arguments. The thunk returns `E_NOTIMPL` in EAX with the upper half of
+RAX clear; nothing is dereferenced. A console present without a window (a queue or list method past the desktop
+slots) shows up here by index. RTV and DSV heaps are wrapped for this reason only; they forward unchanged.
+
+DXGI. A title's `dxgi.dll` imports go to the desktop DXGI, so the shim hooks it at the first device creation
+(`src/d3d12_xs_dxgi.cpp`): the swap chain methods of DXGI's factory vtables (`CreateSwapChain`,
+`CreateSwapChainForHwnd`, `ForCoreWindow`, `ForComposition`) unwrap a wrapped queue before DXGI sees it and wrap the
+swap chain DXGI returns (presents counted, `GetDevice` is the wrapped queue); any other device argument passes through.
+Each call logs `d3d12x-dxgi-swap-chain <method> device=<wrapped-queue|not-a-shim-queue> <desc> -> <HRESULT>`. The
+`CreateDXGIFactory*` imports of the image that created the device are routed through wrappers that log
+`d3d12x-dxgi-factory <name> flags=.. iid=.. -> <HRESULT>` and hook the new factory's vtable; a factory created before
+the device is not logged, though its swap chains are hooked when it shares the patched vtable.
 
 ### Console device creation
 
@@ -271,14 +285,23 @@ Neither is publicly documented, so their contracts are **assumptions**, kept in 
   loader does not name, such as a title mapped by `pe_map`) and all eight values, then one line per argument that is a
   committed, readable pointer (checked with `VirtualQuery`) with up to its first 64 bytes in hex. Stack slots the caller
   did not pass are logged as whatever the caller's frame holds there.
-- `D3D12XboxCreateDevice`, by analogy with the public `D3D12CreateDevice(adapter, minimum level, REFIID, void**)`: the
-  first argument pointing at a known device IID (`ID3D12Device` through `ID3D12Device10`, or `IUnknown`), and the first
-  writable, 8-byte-aligned pointer argument after it, are taken as the requested IID and the `void**` that receives the
-  device. The device is the one our `D3D12CreateDevice` export hands out (desktop default adapter, WARP when that fails;
-  the adapter and the creation-parameters struct, if the title passes them, are logged but not read), wrapped and
-  queried for that IID. The chosen mapping is logged as `d3d12x-create-device contract iid=<arg>(<interface>)
-  out=<arg>(void**) adapter=<default|warp> -> <HRESULT>`. With no such pair it returns `E_NOTIMPL` and logs
-  `d3d12x-create-device unknown-contract`, so the owner's next log shows the arguments to read the real contract from.
+- `D3D12XboxCreateDevice`, by analogy with the public `D3D12CreateDevice(adapter, minimum level, REFIID, void**)`.
+  Its readable pointer arguments are logged as dwords (up to the first 128 bytes) instead of hex bytes. The contract
+  search, in order: (1) the first argument pointing at a known device IID (`ID3D12Device` through `ID3D12Device10`,
+  or `IUnknown`) and a writable, 8-byte-aligned pointer argument after it (the first one holding null when there are
+  several, so a params struct beside the out slot is not written); (2) a known IID inside the first 128 bytes of a
+  struct an argument points at, in writable memory with a non-null first qword (inline, or a pointer to it at an
+  8-aligned offset), with a writable `void**` argument or, failing that, a pointer to one inside the same struct;
+  (3) assumed `(params*, REFIID, void**)` and (4) assumed `(REFIID, params*, void**)`: the IID slot points at 16
+  readable bytes, which may be an IID the shim does not know (a console-only device IID), and the `void**` slot is
+  writable and holds null; when both fit, (4) is tried first if only RCX points into read-only memory, where IID
+  constants live. An unknown IID gets the device wrapper as `ID3D12Device`, and every device answers
+  `QueryInterface` for that IID with itself from then on. The device is the one our `D3D12CreateDevice` export hands
+  out (desktop default adapter, WARP when that fails; the adapter and the rest of the parameters are logged, not
+  read), wrapped. The chosen mapping is logged as `d3d12x-create-device contract iid=<where>(<interface|unknown>)
+  out=<where>(void**) [assumed <shape>] adapter=<default|warp> iid_value=<GUID> -> <HRESULT>`, where `<where>` is an
+  argument (`r8`), a field (`rcx+0x20` inline, `rcx->[+0x10]` through a pointer). With no fit it returns `E_NOTIMPL`
+  and logs `d3d12x-create-device unknown-contract`.
 - `D3D12ConfigureVirtualMemoryX` is logged the same way and returns `S_OK` with no effect: desktop D3D12 has no
   virtual-memory configuration for the shim to forward to. It writes nothing through any argument. The struct at RCX
   is also logged as dwords and the array at RDX as qwords. In a real title's call the struct started 0, 4, RDX
