@@ -1,6 +1,6 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
-// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] program.exe
+// Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);
@@ -18,6 +18,15 @@
 // crash (code, module + RVA, last stub called) and the exit code. Each line is written with its own
 // WriteFile call, so the log survives a crash. Addresses are given as module+RVA. --timeout ends a run that
 // is still going after that many seconds with exit code 124, after logging how far it got.
+//
+// Zen 2 instructions the host CPU lacks fault with STATUS_ILLEGAL_INSTRUCTION. A vectored handler performs
+// the ones x2w_cpu_trap.h knows (SHA-NI, CLZERO, RDPID, MONITORX/MWAITX, SSE4a, RDPRU, CLWB) on the faulting
+// thread's registers and memory and resumes after the instruction; any other #UD in the program's code is
+// logged as module+RVA and a mnemonic and then crashes as usual. The log starts with the Zen 2 features the
+// host lacks and ends with a count per trapped instruction, since a trap in a hot loop is slow.
+// --force-cpu-traps is for tests: it overwrites each address listed by the program's export
+// x2w_cpu_trap_sites (a null-terminated array of code addresses) with UD2 and keeps the original bytes in a
+// side table, so the handler's path runs on every host, whether or not the CPU has the instruction.
 #include <windows.h>
 
 #include <cctype>
@@ -30,6 +39,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#include "x2w_cpu_trap.h"
 
 namespace {
 
@@ -84,6 +95,17 @@ struct Watch {
     volatile long calls = 0;
 };
 std::vector<Watch*> watches;
+
+// Instructions performed by the #UD handler, and the forced sites (--force-cpu-traps) with their original bytes.
+volatile long trap_counts[x2w_cpu::kOpCount];
+volatile long trap_seen[x2w_cpu::kOpCount];
+volatile long unhandled_logged;
+constexpr long kUnhandledLines = 16;
+struct Site {
+    std::uint8_t bytes[x2w_cpu::kMaxLength];
+    std::size_t length;
+};
+std::map<std::uintptr_t, Site> forced_sites;  // written before the program runs, read-only after
 
 std::string lower(std::string text) {
     for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -174,7 +196,19 @@ std::string last_stub_name() {
     return stub->dll + "!" + stub->symbol;
 }
 
+void log_cpu_traps() {
+    char line[900];
+    long total = 0;
+    for (int op = 0; op < x2w_cpu::kOpCount; ++op) total += trap_counts[op];
+    int used = std::snprintf(line, sizeof line, "cpu-traps total=%ld", total);
+    for (int op = 0; op < x2w_cpu::kOpCount && used > 0 && static_cast<std::size_t>(used) < sizeof line; ++op)
+        if (trap_counts[op])
+            used += std::snprintf(line + used, sizeof line - used, " %s=%ld", x2w_cpu::op_name(op), trap_counts[op]);
+    log_line("%s", line);
+}
+
 void log_summary(const char* how) {
+    log_cpu_traps();
     log_line("summary %s: tls-callbacks=%s entry=%s first-thread=%s d3d12-call=%s crash=%s last-stub=%s", how,
              tls_done ? "done" : "not-done", entry_reached ? "reached" : "not-reached",
              first_thread ? "yes" : "no", first_d3d12 ? "yes" : "no", crashed ? "yes" : "no",
@@ -386,6 +420,90 @@ LONG WINAPI unhandled(EXCEPTION_POINTERS* info) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+bool in_program(std::uintptr_t at) {
+    for (const auto& region : regions)
+        if (at >= region.base && at - region.base < region.size) return true;
+    return false;
+}
+
+// #UD in the program's code (the EXE or a mapped package DLL): perform the instruction if it is one the
+// host lacks and x2w_cpu_trap.h knows, else name it in the log and let the exception go on.
+LONG CALLBACK cpu_trap(EXCEPTION_POINTERS* info) {
+    if (info->ExceptionRecord->ExceptionCode != STATUS_ILLEGAL_INSTRUCTION) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* context = info->ContextRecord;
+    const std::uintptr_t at = static_cast<std::uintptr_t>(context->Rip);
+    if (!in_program(at)) return EXCEPTION_CONTINUE_SEARCH;
+    std::uint8_t code[x2w_cpu::kMaxLength];
+    std::size_t available;
+    const auto site = forced_sites.find(at);
+    if (site != forced_sites.end()) {
+        std::memcpy(code, site->second.bytes, site->second.length);
+        available = site->second.length;
+    } else {
+        available = x2w_cpu::read_code(reinterpret_cast<const void*>(at), code);
+    }
+    const x2w_cpu::Result result = x2w_cpu::emulate(context, code, available);
+    char where[160];
+    if (result.op != x2w_cpu::kUnhandled) {
+        InterlockedIncrement(&trap_counts[result.op]);
+        if (InterlockedExchange(&trap_seen[result.op], 1) == 0) {
+            describe(reinterpret_cast<const void*>(at), where, sizeof where);
+            std::fprintf(stderr, "[x2w] cpu trap %s at %s\n", x2w_cpu::op_name(result.op), where);
+            log_line("cpu-trap first %s at %s", x2w_cpu::op_name(result.op), where);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (InterlockedIncrement(&unhandled_logged) <= kUnhandledLines) {
+        describe(reinterpret_cast<const void*>(at), where, sizeof where);
+        const char* mnemonic = x2w_cpu::name(code, available);
+        std::fprintf(stderr, "[x2w] illegal instruction %s at %s\n", mnemonic, where);
+        log_line("cpu-unhandled %s at %s", mnemonic, where);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The Zen 2 features this CPU lacks, by what happens to them: emulated by cpu_trap, unhandled (#UD and a
+// crash), or silent (an older CPU runs the encoding as another instruction, so nothing traps).
+void log_host_features() {
+    std::string lists[3];
+    std::size_t count = 0;
+    const x2w_cpu::Feature* features = x2w_cpu::zen2_features(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (x2w_cpu::host_has(features[i])) continue;
+        std::string& list = lists[features[i].handling];
+        if (!list.empty()) list += ",";
+        list += features[i].name;
+    }
+    for (auto& list : lists)
+        if (list.empty()) list = "none";
+    if (lists[0] != "none" || lists[1] != "none" || lists[2] != "none")
+        std::fprintf(stderr, "[x2w] host lacks Zen 2 features: emulated=%s unhandled=%s silent=%s\n",
+                     lists[0].c_str(), lists[1].c_str(), lists[2].c_str());
+    log_line("cpu-host-missing emulated=%s unhandled=%s silent=%s", lists[0].c_str(), lists[1].c_str(),
+             lists[2].c_str());
+}
+
+// --force-cpu-traps: UD2 over each listed site, the original bytes kept for cpu_trap.
+bool force_traps(void* base) {
+    const auto* sites = static_cast<const std::uint64_t*>(map_export(base, "x2w_cpu_trap_sites"));
+    if (!sites) return false;
+    for (; *sites; ++sites) {
+        auto* at = reinterpret_cast<std::uint8_t*>(*sites);
+        if (!in_program(reinterpret_cast<std::uintptr_t>(at))) return false;
+        Site site{};
+        site.length = x2w_cpu::read_code(at, site.bytes);
+        DWORD old = 0;
+        if (site.length < 2 || !VirtualProtect(at, 2, PAGE_EXECUTE_READWRITE, &old)) return false;
+        at[0] = 0x0f;
+        at[1] = 0x0b;
+        VirtualProtect(at, 2, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), at, 2);
+        forced_sites[reinterpret_cast<std::uintptr_t>(at)] = site;
+    }
+    log_line("cpu-trap-forced sites %zu", forced_sites.size());
+    return true;
+}
+
 using QueryThread = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 QueryThread query_thread;
 
@@ -425,7 +543,7 @@ extern "C" __declspec(allocate(".CRT$XLB")) const PIMAGE_TLS_CALLBACK x2w_launch
 int wmain(int argc, wchar_t** argv) {
     std::wstring program, log_path;
     unsigned long timeout = 0;
-    bool usage = false;
+    bool usage = false, force_cpu_traps = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring argument = argv[i];
         if (argument == L"--shims" && i + 1 < argc) {
@@ -434,6 +552,8 @@ int wmain(int argc, wchar_t** argv) {
             log_path = argv[++i];
         } else if (argument == L"--timeout" && i + 1 < argc) {
             timeout = wcstoul(argv[++i], nullptr, 10);
+        } else if (argument == L"--force-cpu-traps") {
+            force_cpu_traps = true;
         } else if (program.empty()) {
             program = argument;
         } else {
@@ -441,7 +561,8 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (program.empty() || usage) {
-        std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] program.exe\n");
+        std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
+                     "program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -461,6 +582,8 @@ int wmain(int argc, wchar_t** argv) {
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
     }
+    // Added last, so it runs before the first-chance logger and a performed instruction is not logged as one.
+    AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     HMODULE pe_map = LoadLibraryW((directory_of(self) + L"\\pe_map.dll").c_str());
@@ -480,6 +603,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::string program_name = lower(narrow(file_of(full)));
     log_line("x2w-run-log 1");
     log_line("program %s", program_name.c_str());
+    log_host_features();
     std::uint32_t status = 0;
     char detail[512] = {};
     void* base = map_image(full, resolve, &status, detail, sizeof detail);
@@ -494,6 +618,11 @@ int wmain(int argc, wchar_t** argv) {
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
     log_line("imports shim=%u package=%u windows=%u stub=%u missing=%u", route_counts["shim"],
              route_counts["package"], route_counts["windows"], route_counts["stub"], route_counts["missing"]);
+    if (force_cpu_traps && !force_traps(base)) {
+        std::fprintf(stderr, "[x2w] --force-cpu-traps: no usable x2w_cpu_trap_sites export\n");
+        log_line("error no usable x2w_cpu_trap_sites export");
+        return 2;
+    }
     if (log_file != INVALID_HANDLE_VALUE && timeout) {
         // Suspended until its ID is known, so the thread callback can tell it from the program's threads.
         HANDLE thread = CreateThread(nullptr, 0, watchdog, reinterpret_cast<void*>(static_cast<std::uintptr_t>(timeout)),

@@ -2969,6 +2969,19 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
 
+    # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
+    # each one and compares with software references, naturally and with --force-cpu-traps.
+    add_executable(x2w_cpu_trap_title tests/native/cpu_trap_title.cpp tests/native/cpu_trap_ops.asm)
+    target_compile_options(x2w_cpu_trap_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_cpu_trap_title PRIVATE /ENTRY:cpu_trap_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO /EXPORT:x2w_cpu_trap_sites,DATA)
+    set_target_properties(x2w_cpu_trap_title PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(x2w_cpu_trap_title PRIVATE kernel32)
+    add_test(NAME native_cpu_traps COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/cpu_trap_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_cpu_trap_title>")
+    set_tests_properties(native_cpu_traps PROPERTIES TIMEOUT 120)
+
     # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
     # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a
     # title"). The rung 1 title imports names the shims export, one the xmem shim does not, kernel32 and
