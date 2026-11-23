@@ -2972,7 +2972,7 @@ indirect commands of a translated pipeline, address-bearing indirect records in 
 | `runtime_d3d12_enhanced_*`, `runtime_d3d12_enhanced_wrong_reference_*` | The same frame with resources from `CreateCommittedResource3` and only enhanced barriers (`Barrier`), so the shim's rewrite uses enhanced buffer barriers. Skip (77) without `EnhancedBarriersSupported`. |
 | `runtime_r3_triangle_stream_*`, `runtime_r3_stream_wrong_reference_*` | After `runtime_r3_triangle_cold_*`: the R3 pipeline created as a stream through `ID3D12Device2::CreatePipelineState`, with an input layout the shim must drop; both shaders from the cache, frame bit for bit against the R3 reference, and its control. `runtime_r3_refused_warp` also refuses the refused vertex program when it comes in a stream (3 refusals). |
 
-@@PCRESULTS@@
+PC results at merge tip `b52b12f5` (RTX 4070 Ti and WARP, `^runtime_|^d3d12_xs_`): 60 of 60 pass, including `runtime_d3d12_versions_*`, `runtime_d3d12_indirect_*`, `runtime_d3d12_enhanced_*`, `runtime_r3_triangle_stream_*` and all `runtime_r4_*`. Runs at `0c891d81`/`1b99fd6e` failed R4 and `runtime_r3_translator_paths_warp` with "cannot create the title ranges buffer": title-created UPLOAD buffers became shader-visible in TitleLookup, the title-memory table made a raw UAV of each slot, the debug layer rejected the UAV of a buffer without `ALLOW_UNORDERED_ACCESS` and removed the device, and the next `CreateCommittedResource` (the ranges buffer) failed. Such slots now get a null UAV (`581e865d`). One run of the merge timed out `runtime_r3_translator_bench` (CPU, 600 s) while other jobs shared the PC; the rerun passed in 97 s.
 
 ### Attribute words at xmem call sites
 
