@@ -112,6 +112,8 @@ def derive_bindings(program):
       s[r:r+3] as its sampler, a constant-buffer V# where s_buffer_load names s[r:r+3], a buffer V# where a buffer or
       tbuffer instruction does (its words at the top of params). A load of x8 or x16 is split into its descriptors
       that way; a word with no use stays undeclared, and lower() refuses a program that loads it;
+    - a T#'s dimension is the dim: field of the image instruction that first uses it (2D, 2D array, cube or 3D), as
+      the layout's image view type would give it;
     - a sampler whose four registers s_mov_b32/s_movk_i32 set to constants is an inline (immutable) sampler with
       those words.
     Slots are given in order of first use. Nothing in the program is rewritten."""
@@ -183,7 +185,7 @@ def derive_bindings(program):
         sgprs[reg] = f"push:{n}"
     highs = {pointers[r] for r in sets if pointers[r] is not None}
     high = highs.pop() if len(highs) == 1 else bindings.RADV_DESCRIPTOR_HIGH
-    textures, samplers, cbvs, buffers, images = {}, {}, {}, {}, {}
+    textures, samplers, cbvs, buffers, images, dims = {}, {}, {}, {}, {}, {}
     sampler_keys, inline_order = [], []
     spans = []  # (key, size) of the descriptors declared so far
 
@@ -199,16 +201,20 @@ def derive_bindings(program):
             reg0, at = first + q, key + 4 * q
             if declared(at):
                 continue
-            use = None
+            use = dim = None
             for later in program[k + 1:]:
                 if later.startswith("image_") and f"s[{reg0}:{reg0 + 7}]" in later:
                     use = "image_store" if later.startswith("image_store") else "image"
+                    field = re.search(r"\bdim:(SQ_RSRC_IMG_\w+)", later)
+                    dim = bindings.INSTRUCTION_DIMS.get(field[1]) if field else None
                     break
                 if f"s[{reg0}:{reg0 + 3}]" in later:
                     use = ("sampler" if later.startswith("image_") else "constants" if later.startswith("s_buffer_load")
                            else "buffer" if later.startswith(("buffer_", "tbuffer_")) else None)
                     break
             if use == "image" and len(dst) - q >= 8 and not declared(at + 16):
+                if dim not in (None, "2d"):
+                    dims[len(textures)] = dim
                 textures[at] = len(textures)
                 spans.append((at, 32))
             elif use == "image_store" and len(dst) - q >= 8 and not declared(at + 16):
@@ -238,7 +244,7 @@ def derive_bindings(program):
         sgprs=sgprs, textures={k: v for k, v in textures.items() if v < bindings.TEXTURE_SLOTS},
         samplers=samplers, constant_buffers={k: v for k, v in cbvs.items() if v < bindings.CONSTANT_SLOTS},
         push_constants=push, buffers=buffers, storage_images={k: v for k, v in images.items() if v[0] < 4},
-        descriptor_high=high)
+        descriptor_high=high, dimensions={k: v for k, v in dims.items() if k < bindings.TEXTURE_SLOTS})
 
 
 # Refusals that come from the binding description (bindings.PixelBindings.check) or from resolving a program's
@@ -250,7 +256,8 @@ CONTRACT = ("Unresolved constant buffer binding", "Unresolved descriptor-list po
             "Unknown entry SGPR role", "Entry SGPR role", "Invalid texture key", "Invalid sampler slot",
             "A sampler is a descriptor key", "Two inline samplers", "Invalid constant-buffer key",
             "Buffer descriptors need", "Invalid buffer descriptor", "Invalid storage image key",
-            "Descriptor-table entries overlap", "A push-constant", "Scalar load offset register must hold a known constant")
+            "Descriptor-table entries overlap", "A push-constant", "Scalar load offset register must hold a known constant",
+            "Image dimension", "A texture dimension", "Unsupported T# type")
 
 
 class _Dispatch:

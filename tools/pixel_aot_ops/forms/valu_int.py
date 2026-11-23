@@ -173,6 +173,8 @@ def convert_to_float(st, i, m):
         expression = f"({expression}) * {OMOD[omod]}"
     if clamp:
         expression = f"saturate({expression})"
+    if omod != " div:2":  # an integer, also scaled by 2 or 4 or clamped (Lowering.integral)
+        st.integral.add(f"alu{i}")
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = {expression};")
 

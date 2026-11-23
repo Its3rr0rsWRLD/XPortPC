@@ -1,4 +1,5 @@
 """MIMG: image_sample, loads, level queries and gathers of a 2D T#."""
+from .. import bindings as binding_names
 from ..dispatch import form
 from ..registers import fp_operand, registers, vector_u32, vgprs
 
@@ -35,17 +36,26 @@ def sampler_of(st, state):
     return next((name for name, words in st.samplers.items() if values == list(words)), None)
 
 
-@form(r"image_sample (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+, v\d+\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
-      r"dmask:0x([0-9a-f]) dim:SQ_RSRC_IMG_2D( d16)?")
+def texture_dimension(st, texture):
+    """The dimension a texture is bound with: st.texture_dims (a binding description's dimensions), else 2D."""
+    return st.texture_dims.get(texture, "2d")
+
+
+@form(r"image_sample (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)+\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
+      r"dmask:0x([0-9a-f]) dim:(SQ_RSRC_IMG_2D|SQ_RSRC_IMG_2D_ARRAY|SQ_RSRC_IMG_CUBE|SQ_RSRC_IMG_3D)( d16)?")
 def sample(st, i, m):
     # The dmask selects the channels that are written, in order, to consecutive destination VGPRs: 0x7 is an RGB-only
     # read (R0Y00/Xbox2Windows#303 by Vonsek) that leaves the fourth VGPR of a v[N:N+3] block alone, 0x1 or 0x8 one
     # channel to a single VGPR, and a mask with holes (0x5, 0xa, ...) the set channels packed together, as for the
     # other MIMG reads (load_query_gather). dmask 0 is refused. A d16 read of an odd channel count would leave half a
     # register undefined, so it is refused with the other odd counts (store_results).
-    # The coordinate is a pair v[N:N+1] or a non-sequential (NSA) pair [vA, vB], as RADV writes it.
-    dst_token, addr_token, f0, f1, s0, s1, dmask_digit, d16 = m.groups()
+    # The coordinate is a range v[N:N+k] or a non-sequential (NSA) list [vA, vB, ...], as RADV writes it: two words
+    # for 2D, three for the other dimensions (docs/design/pixel-bindings.md, "Texture dimensions"). The instruction's
+    # dim: must be the dimension the texture is bound with.
+    dst_token, addr_token, f0, f1, s0, s1, dmask_digit, dim_field, d16 = m.groups()
     d16 = d16 is not None
+    dim = binding_names.INSTRUCTION_DIMS[dim_field]
+    width = 2 if dim == "2d" else 3
     channels = [c for c in range(4) if int(dmask_digit, 16) >> c & 1]
     if not channels:
         raise ValueError("Invalid image operation")
@@ -56,8 +66,10 @@ def sample(st, i, m):
         coords = [int(r[1:]) for r in addr_token[1:-1].split(", ")]
         if any(n > 255 for n in coords):
             raise ValueError("Image address register out of range")
+        if len(coords) != width:
+            raise ValueError("Image address width mismatch")
     else:
-        coords = [int(r[1:]) for r in vgprs(addr_token, 2)]
+        coords = [int(r[1:]) for r in vgprs(addr_token, width)]
     image, state = registers(f0, f1, 8), registers(s0, s1, 4)
     if any(f"v{n}" in st.sample_dest for n in dest):
         raise ValueError("Write overlaps an outstanding sample")
@@ -70,23 +82,87 @@ def sample(st, i, m):
             or texture is None
             or samp is None):
         raise ValueError("Unsupported image or sampler binding")
-    uv = [quad_coordinate(st, st.vector[f"v{n}"]) for n in coords]
-    # The implicit level comes from the derivatives of the coordinates, so each must be defined on helper lanes.
-    if None in uv:
-        raise ValueError("Unsupported texture coordinate")
-    st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, float2({', '.join(uv)}));")
+    if texture_dimension(st, texture) != dim:
+        raise ValueError(f"Image dimension {dim_field} does not match the texture binding "
+                         f"({texture_dimension(st, texture)})")
+    if dim == "2d":
+        uv = [quad_coordinate(st, st.vector[f"v{n}"]) for n in coords]
+        # The implicit level comes from the derivatives of the coordinates, so each must be defined on helper lanes.
+        if None in uv:
+            raise ValueError("Unsupported texture coordinate")
+        st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, float2({', '.join(uv)}));")
+    else:
+        st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, {dimensioned_coordinate(st, i, dim, coords)});")
     st.samples += 1
     names = [f"v{n}" for n in dest]
     store_results(st, i, names, [f"sample{i}.{'xyzw'[c]}" for c in channels], d16)
     st.vm_issue(names, "sample")
 
 
-def quad_coordinate(st, value):
+def dimensioned_coordinate(st, i, dim, coords):
+    """The HLSL float3 location of an implicit-level sample of a 2D-array, cube or 3D texture
+    (docs/design/pixel-bindings.md, "Texture dimensions"):
+    - 3D: (s, t, r), all normalized, read as a Texture3D. All three enter the level, so each must be a helper-lane
+      value that is affine in the interpolated coordinate, as for 2D.
+    - 2D array: (s, t, slice) with s and t normalized and the slice an unnormalized index. Whether the texture unit
+      rounds or truncates a fractional slice is not established (Mesa rounds it to even in the shader, v_rndne, under
+      an option), and the S# is not interpreted here, so the slice must be an integer
+      value (Lowering.integral): then it reads that slice under either rule, as Direct3D's rounded and clamped array
+      index does. A slice beyond the array is clamped to [0, size - 1] on both. s and t enter the level as for 2D.
+    - cube: (s, t, face) as the v_cube* sequence produces them: s = sc / |2 ma| + 1.5 and t likewise lie in [1, 2] on
+      the face, and face is a v_cubeid result (Lowering.cube_faces). The cube is bound as a Texture2DArray of its six
+      faces and sampled at (s - 1, t - 1, face): the program's own face and face coordinates, so the face choice at
+      ties, the projection's rounding and the level's derivatives are the console's, not the desktop's TextureCube
+      projection of a direction. s - 1 and t - 1 are exact for s, t in [0.5, 2]. s and t are quotients, not affine in
+      the interpolated coordinate, so they need only be helper-lane values (Lowering.quad_defined); how the adapter
+      takes their derivatives (coarse or fine) is not proven. A coordinate outside [1, 2], which the hardware's
+      seamless addressing may read from the next face, reads the clamped edge of the face here (not modelled)."""
+    values = [st.vector[f"v{n}"] for n in coords]
+    if dim == "3d":
+        xyz = [quad_coordinate(st, v) for v in values]
+        if None in xyz:
+            raise ValueError("Unsupported texture coordinate")
+        return f"float3({', '.join(xyz)})"
+    if dim == "2d_array":
+        xy = [quad_coordinate(st, v) for v in values[:2]]
+        if None in xy:
+            raise ValueError("Unsupported texture coordinate")
+        if _name(values[2]) not in st.integral:
+            raise ValueError("An array slice must be an integer value (v_rndne, v_floor, v_ceil, v_trunc, v_cvt_f32 or "
+                             "an integral constant): the texture unit's slice rounding is not modelled")
+        return f"float3({xy[0]}, {xy[1]}, {coordinate(st, f'v{coords[2]}')})"
+    st_values = [quad_coordinate(st, v, defined=True) for v in values[:2]]
+    if None in st_values:
+        raise ValueError("Unsupported texture coordinate")
+    if _name(values[2]) not in st.cube_faces:
+        raise ValueError("A cube face must be a v_cubeid result")
+    face = coordinate(st, f"v{coords[2]}")
+    st.lines.append(f"    precise float3 face{i} = float3({st_values[0]} - 1.0f, {st_values[1]} - 1.0f, {face});")
+    return f"face{i}"
+
+
+def _name(value):
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint":
+        value = value[1]
+    return value if isinstance(value, str) else None
+
+
+def require_2d(st, texture):
+    """The reads below index a Texture2D: a texture bound with another dimension is refused."""
+    if texture is not None and texture_dimension(st, texture) != "2d":
+        raise ValueError(f"Image dimension SQ_RSRC_IMG_2D does not match the texture binding "
+                         f"({texture_dimension(st, texture)})")
+
+
+def quad_coordinate(st, value, defined=False):
     """The HLSL binary32 expression of a coordinate an implicit-level sample may read, or None: a value defined on the
-    helper lanes (Lowering.quad_values), a float name or a raw word, which is a constant (valu_f32.move)."""
-    if isinstance(value, str) and value in st.quad_values:
+    helper lanes (Lowering.quad_values), a float name or a raw word, which is a constant (valu_f32.move). defined:
+    also any helper-lane value (Lowering.quad_defined), for a cube sample's face coordinates."""
+    known = (lambda name: name in st.quad_values or name in st.quad_defined) if defined else \
+        (lambda name: name in st.quad_values)
+    if isinstance(value, str) and known(value):
         return value
-    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint" and value[1] in st.quad_values:
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "uint" and known(value[1]):
         return f"asfloat({value[1]})"
     return None
 
@@ -136,6 +212,7 @@ def load_query_gather(st, i, m):
     texture = next((name for name in st.bindings.values() if descriptor == [(name, j) for j in range(8)]), None)
     if texture is None or int(f0) % 4 or int(f1) > 105 or any(r in st.pending for r in image):
         raise ValueError("Unsupported image binding")
+    require_2d(st, texture)
     if gather:
         state = [f"s{n}" for n in registers(s0, s1, 4)]
         samp = sampler_of(st, state)
@@ -221,6 +298,7 @@ def sample_level(st, i, m):
     if (texture is None or int(f0) % 4 or int(s0) % 4 or int(f1) > 105 or int(s1) > 105
             or any(r in st.pending for r in (*image, *state)) or (samp := sampler_of(st, state)) is None):
         raise ValueError("Unsupported image or sampler binding")
+    require_2d(st, texture)
     if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
         raise ValueError("Write overlaps an outstanding sample")
     offset = None
