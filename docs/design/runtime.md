@@ -276,7 +276,8 @@ Neither is publicly documented, so their contracts are **assumptions**, kept in 
   8-aligned offset), with a writable `void**` argument or, failing that, a pointer to one inside the same struct;
   (3) assumed `(params*, REFIID, void**)` and (4) assumed `(REFIID, params*, void**)`: the IID slot points at 16
   readable bytes, which may be an IID the shim does not know (a console-only device IID), and the `void**` slot is
-  writable and holds null. An unknown IID gets the device wrapper as `ID3D12Device`, and every device answers
+  writable and holds null; when both fit, (4) is tried first if only RCX points into read-only memory, where IID
+  constants live. An unknown IID gets the device wrapper as `ID3D12Device`, and every device answers
   `QueryInterface` for that IID with itself from then on. The device is the one our `D3D12CreateDevice` export hands
   out (desktop default adapter, WARP when that fails; the adapter and the rest of the parameters are logged, not
   read), wrapped. The chosen mapping is logged as `d3d12x-create-device contract iid=<where>(<interface|unknown>)

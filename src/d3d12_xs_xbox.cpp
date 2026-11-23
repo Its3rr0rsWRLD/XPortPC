@@ -199,6 +199,7 @@ std::uintptr_t pick_out(const std::uintptr_t* slots, unsigned count, unsigned* p
 //     void** at an 8-aligned offset of the same struct);
 //  3. assumed (params*, REFIID, void**): rdx points at 16 readable bytes and r8 is a writable void** holding null;
 //  4. assumed (REFIID, params*, void**): rcx points at 16 readable bytes and r8 is a writable void** holding null.
+//  When both 3 and 4 fit, 4 goes first if rcx alone points into read-only memory (where IID constants live).
 bool find_contract(const std::uintptr_t (&args)[arg_count], Contract* c)
 {
     // 1.
@@ -278,7 +279,14 @@ bool find_contract(const std::uintptr_t (&args)[arg_count], Contract* c)
         unsigned iid, out;
         const char* name;
     };
-    const Shape shapes[] = {{1, 2, "(params*, REFIID, void**)"}, {0, 2, "(REFIID, params*, void**)"}};
+    Shape shapes[] = {{1, 2, "(params*, REFIID, void**)"}, {0, 2, "(REFIID, params*, void**)"}};
+    // When rcx and rdx both point at 16 readable bytes, both shapes fit. IID constants live in read-only data and a
+    // params struct usually on the stack or heap, so when exactly rcx is read-only, (REFIID, params*, void**) is tried
+    // first.
+    const auto read_only = [](std::uintptr_t v) {
+        return readable_bytes(v, sizeof(IID)) >= sizeof(IID) && !writable_slot(v & ~std::uintptr_t{7});
+    };
+    if (read_only(args[0]) && !read_only(args[1])) std::swap(shapes[0], shapes[1]);
     for (const Shape& shape : shapes) {
         const std::uintptr_t iid = args[shape.iid], out = args[shape.out];
         // The out slot must hold null (a cleared out pointer), so a writable GUID or struct in that position is not
