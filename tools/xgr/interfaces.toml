@@ -189,7 +189,7 @@ evidence = "GUID loaded by the XSystemAnalytics thunks (lea rcx before QueryApiI
 [[classes.interfaces]]
 name = "IXSystemAnalyticsImpl"
 iid = "b884675d-b738-4a9c-815d-9a9a1e0c6c9b"
-evidence = "thunk XSystemGetAnalyticsInfo loads only this GUID; IID taken to be the same GUID (job xgrgate-544d7903)"
+evidence = "thunk XSystemGetAnalyticsInfo loads only this GUID; IID taken to be the same GUID (job xgrgate-544d7903); trace queries confirm it (job xgrgate-755802ed-r2)"
 
 [[classes.interfaces.slots]]
 index = 3
@@ -279,7 +279,7 @@ evidence = "GUID loaded by the XUser thunks (lea rcx before QueryApiImpl) in our
 [[classes.interfaces]]
 name = "IXUserImpl"
 iid = "01acd177-91f9-4763-a38e-ccbb55ce32e0"
-evidence = "XUser thunks load only this GUID; IID taken to be the same GUID (job xgrgate-544d7903)"
+evidence = "XUser thunks load only this GUID; IID taken to be the same GUID (job xgrgate-544d7903); trace queries confirm it (job xgrgate-755802ed-r2)"
 
 [[classes.interfaces.slots]]
 index = 4
