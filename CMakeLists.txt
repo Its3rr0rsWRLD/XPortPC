@@ -89,6 +89,15 @@ target_include_directories(xmem_gpu_cross_dll_check PRIVATE src)
 add_test(NAME xmem_gpu_cross_dll_warp COMMAND xmem_gpu_cross_dll_check "$<TARGET_FILE:xmem_gpu_client>")
 set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 
+# Measurement fixture for the title memory layer: which desktop memory kinds D3D12 can alias (tests/xmem_alias_probe.cpp).
+add_executable(xmem_alias_probe tests/xmem_alias_probe.cpp)
+target_compile_features(xmem_alias_probe PRIVATE cxx_std_17)
+target_link_libraries(xmem_alias_probe PRIVATE d3d12 dxgi psapi advapi32)
+foreach(adapter IN ITEMS warp hardware)
+    add_test(NAME xmem_alias_probe_${adapter} COMMAND xmem_alias_probe ${adapter})
+    set_tests_properties(xmem_alias_probe_${adapter} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+endforeach()
+
 # Desktop d3d12_xs.dll, the graphics shim: the package DLLs' two named root-signature imports, and
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
