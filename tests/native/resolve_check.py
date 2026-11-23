@@ -8,7 +8,7 @@ GetModuleHandleW + GetProcAddress, as a C++ runtime does; the title also asks fo
 for an API set by name. Checked:
   - the clean run exits 0x3f and logs those lookups as "-> windows" with kernel32's name (never "?"), the
     package DLL's own lookups as "-> mapped", and ends with "summary exit";
-  - fault mode: lstrlenA's handled access violation inside Windows is logged with the frames in the mapped
+  - fault mode: lstrlenA's handled access violation inside Windows (ntdll, kernel32 or kernelbase) is logged with the frames in the mapped
     images that led there (package DLL, then title), a provisional "summary first-fault" follows it, and the
     program's ExitProcess still writes the exit line and "summary exit";
   - crash mode: the crash line and "summary crash" are written before the program's own unhandled-exception
@@ -75,7 +75,7 @@ def main():
 
         code, lines = run(launcher, folder, shims, "fault")
         assert code == 0x7F, f"fault mode exit {code:#x}, expected 0x7f"
-        first = index_of(lines, rf"first-chance exception 0xc0000005 at (?:kernel32|kernelbase)\.dll\+0x[0-9a-f]+ "
+        first = index_of(lines, rf"first-chance exception 0xc0000005 at (?:ntdll|kernel32|kernelbase)\.dll\+0x[0-9a-f]+ "
                                 rf"thread program(?: thread-name \S+)? reading 0x10 last-stub none callers {re.escape(PKG)}\+0x[0-9a-f]+ "
                                 rf"from {re.escape(TITLE)}\+0x[0-9a-f]+(?: from \S+)?")
         provisional = index_of(lines, r"summary first-fault: .* entry=reached .* crash=no last-stub=none")
