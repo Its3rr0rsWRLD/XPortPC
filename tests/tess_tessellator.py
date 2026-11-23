@@ -226,12 +226,18 @@ def measure(directory, compiler, renderer, backend, tool, domain, partitioning, 
                 del w
     mismatch = None
     exact_patches = 0
+    kinds = Counter()
+    degenerate = lambda t: len(set(t)) < 3  # noqa: E731 - a triangle with a repeated domain point has no area
     for j, (points, tris) in enumerate(references):
         want = reference_triangles(points, tris)
         got = by_patch.pop(j, Counter())
         if got == want:
             exact_patches += 1
             continue
+        same_points = {p for t in want for p in t} == {p for t in got for p in t}
+        proper = lambda c: Counter({t: n for t, n in c.items() if not degenerate(t)})  # noqa: E731
+        kinds["points_differ" if not same_points else
+              "degenerate_triangles_differ" if proper(want) == proper(got) else "triangles_differ"] += 1
         if mismatch is None:
             only_ref = sorted(want - got)[:2]
             only_gpu = sorted(got - want)[:2]
@@ -244,7 +250,7 @@ def measure(directory, compiler, renderer, backend, tool, domain, partitioning, 
                         f"the desktop {only_gpu}")
     if by_patch:
         mismatch = mismatch or f"captured triangles of patches the reference has no rows for: {sorted(by_patch)[:4]}"
-    summary = {"patches": len(rows), "exact": exact_patches, "records": len(records),
+    summary = {"patches": len(rows), "exact": exact_patches, **kinds, "records": len(records),
                "reference_records": expected_records, **third}
     return summary, mismatch
 

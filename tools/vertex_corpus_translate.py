@@ -125,7 +125,7 @@ def binding_contract(program, stage=None):
         roles[number] = ("descriptors", vertex_aot.RADV_ADDRESS_HIGH, entries)
     push = 0
     for number in sorted(inputs):
-        if number not in roles and not (stage == "ngg" and number < vertex_aot.NGG_FIRST_USER_SGPR):
+        if number not in roles and not (stage in ("ngg", "ls") and number < vertex_aot.NGG_FIRST_USER_SGPR):
             roles[number] = ("inline", push)
             push += 1
     cntl = None

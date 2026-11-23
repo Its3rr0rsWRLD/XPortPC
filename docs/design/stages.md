@@ -2,8 +2,11 @@
 
 Status: card G-1 (NGG geometry shader to an HLSL vertex and geometry shader pair) is implemented in
 `tools/geometry_aot.py` and checked by `tests/geometry_aot_check.py` (CTest `geometry_aot_controls` and
-`geometry_aot_<family>_<adapter>`, families `corpus`, `explode`, `strips`). Every other card below is designed only;
-the translator refuses those programs with the card's name. `stages_supported` in `site/status.json` is unchanged.
+`geometry_aot_<family>_<adapter>`, families `corpus`, `explode`, `strips`). Cards T-1 and T-2 (merged LS+HS to a
+vertex and hull shader, TES to a domain shader) are implemented in `tools/tess_aot.py` and checked by
+`tests/tess_aot_check.py` (CTest `tess_aot_controls`, `tess_aot_tessellator_<adapter>` and
+`tess_aot_<family>_<adapter>`, families `scene`, `eds2`, `pervertex`). Every other card below is designed only; the
+translator refuses those programs with the card's name. `stages_supported` in `site/status.json` is unchanged.
 
 The pixel, vertex ([vertex-stage.md](vertex-stage.md)) and compute ([compute-stage.md](compute-stage.md)) stages map
 one console program onto one desktop shader. The stages here do not. On gfx10 the hardware runs two API stages as one
@@ -29,9 +32,16 @@ shader (`build_corpus.py --pair-geom`; see [tests/corpus/README.md](../../tests/
 | Hardware stage (dump header) | NGG | Programs | Translated |
 |---|---|---|---|
 | Vertex Shader as ES + Geometry Shader (merged ES+GS) | yes | 6 | 3 (G-1) |
-| Vertex Shader as LS + Tessellation Control Shader (merged LS+HS) | no | 5 | 0 (T-1) |
+| Vertex Shader as LS + Tessellation Control Shader (merged LS+HS) | no | 5 | 2 (T-1) |
 | Tessellation Control Shader (HS alone: builder pipelines without a VS) | no | 3 | 0 (T-1) |
-| Tessellation Evaluation Shader as ESGS | yes | 8 | 0 (T-2) |
+| Tessellation Evaluation Shader as ESGS | yes | 8 | 3 (T-2) |
+
+Before T-1 and T-2 the 16 tessellation programs were all refused with the card names (3 of 22 programs translated);
+now 5 translate (8 of 22). The refusals: 4 `tessellation` programs (`passthrough`, `pntriangles`) use
+`fractional_odd_spacing`, refused by the measurement below; 3 TES sample a heightmap (`image_sample_lz`, card V-5);
+3 LS halves (`terraintessellation`, `terrain_tessellation`, `patch_control_points`) hand their outputs to the HS
+through LDS, which is not lowered; `displacement.tesc` (an HS without its LS) is refused by the role map ("Unresolved constant buffer
+binding"). `patch_control_points.tese` translates but is not drawn, since its control program is refused.
 | Mesh / Task Shader | - | 0 | - |
 
 - **ES+GS.** The 6 programs are 4 `shader_object` and `geometryshader` geometry shaders built behind a borrowed vertex
@@ -150,7 +160,7 @@ slot-to-export mapping are only in that copy shader and in `VGT_GS_MAX_VERT_OUT`
 matches the copy shader as a frame and maps ring stores to output words. The ES-to-GS hand-off is LDS as in G-1
 (gfx10 merges ES and GS here too).
 
-## Card T-1: LS+HS to a vertex shader and an HLSL hull shader (designed)
+## Card T-1: LS+HS to a vertex shader and an HLSL hull shader (implemented)
 
 - **LS half** becomes a vertex shader whose outputs are the LDS words it stores (`ds_write` at
   `rel_patch_id * input_patch_stride + vertex * vertex_stride + slot * 16`, ac_nir_lower_tess_io_to_mem.c LDS layout)
@@ -167,10 +177,11 @@ matches the copy shader as a frame and maps ring stores to output words. The ES-
   become `[domain]`, `[partitioning]`, `[outputtopology]`. The ring layout needs the patch count and attribute counts
   (`tcs_offchip_layout` user SGPR) at translation time to decompose a store offset into (vertex, attribute).
 - **Risk.** The desktop tessellator must produce the same domain points. D3D11 specifies the tessellator exactly; the
-  console's partitioning modes have to be checked against it point by point on both adapters before any card claims a
-  bit-exact draw. Tests compare per domain point (stream output keyed by `SV_DomainLocation`), not by order.
+  console's partitioning modes are checked against it point by point on both adapters ("The tessellator" below), and
+  the one that is not bit-exact is refused. Tests compare per domain point (stream output keyed by
+  `SV_DomainLocation`), not by order.
 
-## Card T-2: TES to an HLSL domain shader (designed)
+## Card T-2: TES to an HLSL domain shader (implemented)
 
 The TES body sits in V-2's passthrough frame, so the frame matcher is reused with TES entry roles (v5, v6 tess
 coordinates; v7 relative patch id; v8 patch id). It becomes a domain shader with `SV_DomainLocation` (u, v; the
@@ -179,6 +190,61 @@ shader computes w itself, as the corpus does with `1 - u - v`), `SV_PrimitiveID`
 point and attribute by the same layout as T-1. The domain shader's outputs are the exports (pos0, paramN). A TES that
 feeds a GS runs as the ES half of a G-1 wave and gets the ES outputs instead. T-1 and T-2 land together: one cannot
 be drawn without the other.
+
+### What is implemented
+
+`tools/tess_aot.py` matches RADV's LS+HS frame (the LS exec region, the HS exec region, invocation 0's TF region,
+the tess-level group vote and the output-store tail) and lowers the LS half to a vertex shader whose `LsOutput` holds
+the VGPRs live into the HS half (`tcs_inputs_via_temp`; LDS inputs are refused), the HS half to the control-point
+function, and invocation 0's region, run with `cpid = 0`, to the patch-constant function, whose `SV_TessFactor` and
+`SV_InsideTessFactor` are the TF ring words. The vote (whose only effect is to skip the output stores of a workgroup
+whose patches are all culled) is folded to "not all culled": a culled patch runs no domain shader on either side.
+The TES body is matched in V-2's frame and lowered to a domain shader reading `OutputPatch<HsControlPoint, N>` and
+`SV_DomainLocation.xy`. Pipeline state (domain, partitioning, winding, patch sizes, ring stride and slot counts) is an
+input; tools/stage_corpus_report.py takes it from each corpus pipeline's public GLSL (`TESS_PIPELINES`).
+
+`tests/tess_aot_check.py` draws three families on both adapters and compares the stream output of the domain shader
+with a reference from `tests/tess_model.py`: the LS+HS waves run instruction by instruction, frame included, with
+radv_shader_args.c's merged entry registers and write a TF ring and an off-chip ring; the D3D11 reference
+tessellator turns each patch's TF words into domain points and triangles; the TES waves run over those points with
+v5, v6 the coordinates and v7 the relative patch id. The comparison is of the multiset of triangles, each a
+rotation-normalized triple of output records, bit for bit (the emission order is not part of the contract; the
+winding is). Wrong references that each family must separate: two edge factors swapped, the winding flipped, u and v
+swapped, and (`pervertex`, whose first edge factor is `max(uniform, x of control point 0)`) the patch constants
+written by control point 1. `pervertex` is drawn with every accepted partitioning. The controls add 25 refusals
+(state, frame, rings, entry registers, control flow, LDS) and the `binary` mode an LLVM 15 wave64 round trip.
+
+## The tessellator
+
+The console's domain points are what its fixed-function tessellator computes from the TF ring words: RADV programs
+partitioning and winding in `VGT_TF_PARAM` and does not transform the points it hands the evaluation shader
+(radv_cmd_buffer.c `radv_emit_tess_domain_origin_state`; Vulkan's `cw` with the default upper-left origin is the
+hardware's `OUTPUT_TRIANGLE_CW`). The gfx10 tessellator implements the D3D11 fixed-function specification, whose
+reference code (`CHWTessellator`, MIT) is vendored in `tests/third_party/d3d11_tessellator` and wrapped by
+`tests/tess_reference.cpp`. The console side of the measurement is that reference; a capture on the console is not
+available.
+
+`tess_aot_tessellator_<adapter>` (tests/tess_tessellator.py) draws 84 triangle and 87 quad patches per configuration
+(uniform and mixed integer factors, fractional factors on both sides of each odd and even step, the clamps below 1
+and above 64, 48 seeded random factor sets, unequal edge and inside factors, and culled patches) through a probe hull
+shader and a probe domain shader whose stream output holds `SV_DomainLocation` as raw words and `SV_PrimitiveID`, and
+compares each patch's multiset of triangles, keyed by their domain points, with the reference. Measured on the PC
+(NVIDIA RTX 4070 Ti and WARP; run `tess-f9365ac7`):
+
+| Partitioning | tri cw / ccw | quad cw / ccw | WARP |
+|---|---|---|---|
+| integer | exact (84 of 84) | exact (87 of 87) | exact |
+| pow2 | exact | exact | exact |
+| fractional_even | exact | exact | exact |
+| fractional_odd | 82 of 84 | 86 of 87 | exact |
+
+Every captured `w` is `1 - u - v` rounded in binary32. On the hardware adapter `fractional_odd` gives the same domain
+points as the reference in every patch, but 2 triangle patches and 1 quad patch (for example factors 2, 2, 2, 2; 1, 1)
+connect them with different degenerate (zero-area) triangles. A degenerate triangle rasterizes nothing, but it is
+still a domain shader invocation, a primitive in a stream-output or geometry-shader consumer and a pipeline-statistics
+count, so the partitioning is not bit-exact and `tools/tess_aot.py` refuses it (`REFUSED_PARTITIONINGS`, with the
+measured reason). The check fails if an accepted partitioning stops being exact on either adapter. Isolines and point
+mode are not measured and are refused.
 
 ## Cards M-1 and M-2: mesh and amplification shaders (designed, no corpus)
 
@@ -200,8 +266,12 @@ gfx1013.
 ```bash
 python3 -B tools/stage_corpus_report.py --summary docs/coverage/stage-corpus.tsv
 python3 -B tests/geometry_aot_check.py controls
+g++ -std=c++17 -Itests -Itests/third_party/d3d11_tessellator tests/tess_reference.cpp \
+    tests/third_party/d3d11_tessellator/tessellator.cpp -o tess_reference
+python3 -B tests/tess_aot_check.py controls ./tess_reference
+L=<llvm15>/bin; python3 -B tests/tess_aot_check.py binary $L/llvm-mc $L/llvm-objcopy
 L=<llvm15>/bin; python3 -B tests/geometry_aot_check.py binary $L/llvm-mc $L/llvm-objcopy
-ctest --preset dev --no-tests=error -R '^geometry_aot_' -V          # Windows, DXC and a D3D12 adapter
+ctest --preset dev --no-tests=error -R '^(geometry|tess)_aot_' -V   # Windows, DXC and a D3D12 adapter
 # Rebuild the stage corpus (Linux, RADV 25.2.8 null winsys; see docs/coverage/corpus-sources.md):
 python3 tools/shader_corpus_build/build_corpus.py sascha <Vulkan>/shaders/glsl <work> <out> --pair-geom
 ```

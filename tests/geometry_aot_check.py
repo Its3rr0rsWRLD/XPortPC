@@ -771,10 +771,12 @@ def check_translation_shape():
     program, roles = corpus_program()
     _, gs, out = lower(program, roles)
     assert out["primitives"] == [(0, 1, 2)] and out["es_words"] == 4, out
-    # The remaining corpus programs: the report's counts (3 of the 6 ES+GS programs translate).
+    # The remaining corpus programs: the report's counts (3 of the 6 ES+GS programs translate; the tessellation
+    # programs are tests/tess_aot_check.py's).
     rows = [stage_corpus_report.translate(path) for path in sorted(CORPUS.parent.glob("*.s"))]
-    translated = [row for row in rows if row[3] == "translated"]
-    assert len(rows) == 22 and len(translated) == 3, [(r[0], r[3], r[5]) for r in rows]
+    esgs = [row for row in rows if row[0] == "esgs"]
+    translated = [row for row in esgs if row[3] == "translated"]
+    assert len(rows) == 22 and len(esgs) == 6 and len(translated) == 3, [(r[0], r[3], r[5]) for r in esgs]
 
 
 def check_refusals():

@@ -1,5 +1,5 @@
 """Survey the corpus programs of the stages after vertex, pixel and compute (docs/design/stages.md), and translate the
-NGG geometry shaders with tools/geometry_aot.py.
+NGG geometry shaders with tools/geometry_aot.py and the tessellation programs with tools/tess_aot.py.
 
 Usage:
     python tools/stage_corpus_report.py [--isa DIR ...] [--summary FILE] [--hlsl-dir DIR]
@@ -15,8 +15,15 @@ translated by geometry_aot, or the first refusal reason. Stages with no lowering
 
 Binding contract for an ES+GS wave: the user-SGPR role map tools/vertex_corpus_translate.py reads off a vertex
 program, applied to the two halves, plus the two NGG SGPRs the frame names (the LDS layout in the GS head's
-s_pack_ll_b32_b16 and the NGG state in the GS body's s_bfe_u32 of bit field 0x30006). Python standard library only.
-Reads no game files.
+s_pack_ll_b32_b16 and the NGG state in the GS body's s_bfe_u32 of bit field 0x30006). Binding contract and pipeline state for the tessellation programs: the role map read off the LS/HS or TES body the
+same way (the LS half's vertex id in v2, RADV's tcs_offchip_layout SGPR where the HS reads the LS output count from it
+with s_bfe_u32 ..., 0x60011), and the pipeline state of TESS_PIPELINES: domain, spacing and winding from each
+pipeline's public GLSL (the evaluation shader's input layout qualifier; Vulkan's defaults, equal spacing and ccw, where
+it names none), the patch sizes from the control shader, the ring attribute stride the dumps' offsets show (1024 bytes:
+RADV's align(patch count * vertices * 16, 256) for the patch count it chose), and the ring and LDS slot counts the two
+halves use. Vulkan's cw with the default upper-left domain origin is the hardware's OUTPUT_TRIANGLE_CW
+(radv_cmd_buffer.c radv_emit_tess_domain_origin_state), which tools/tess_aot.py lowers to triangle_cw. Python
+standard library only. Reads no game files.
 """
 import argparse
 from collections import Counter
@@ -28,16 +35,67 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import corpus_translate  # noqa: E402
 import geometry_aot  # noqa: E402
+import tess_aot  # noqa: E402
+import vertex_aot  # noqa: E402
 import vertex_corpus_translate  # noqa: E402
 
 STAGE_REASONS = {
-    "lshs": "LS+HS (tessellation control): card T-1 in docs/design/stages.md, not lowered",
-    "hs": "HS without LS (tessellation control): card T-1 in docs/design/stages.md, not lowered",
-    "tes": "TES (tessellation evaluation): card T-2 in docs/design/stages.md, not lowered",
     "gs_legacy": "legacy (GSVS ring) geometry shader: card G-3 in docs/design/stages.md, not lowered",
     "mesh": "mesh shader: card M-1 in docs/design/stages.md, not lowered",
     "task": "task shader: card M-2 in docs/design/stages.md, not lowered",
 }
+
+
+# Pipeline state of the corpus's tessellation pipelines, by the file-name stem the control and evaluation programs share
+# (the GLSL layout qualifier is quoted from each source at the commit tests/corpus/README.md names).
+TESS_PIPELINES = {
+    # "layout (triangles) in;": equal spacing and ccw by default.
+    "sascha__pipelinestatistics__scene": {"domain": "tri", "partitioning": "integer", "topology": "triangle_ccw",
+                                          "output_control_points": 3, "vertex_slots": 10},
+    # "layout (triangles, fractional_odd_spacing, cw) in;"
+    "sascha__tessellation__passthrough": {"domain": "tri", "partitioning": "fractional_odd", "topology": "triangle_cw",
+                                          "output_control_points": 3, "vertex_slots": 1, "ls_slots": 1},
+    "sascha__tessellation__pntriangles": {"domain": "tri", "partitioning": "fractional_odd", "topology": "triangle_cw",
+                                          "output_control_points": 3, "vertex_slots": 7, "ls_slots": 6},
+    # "layout(triangles, equal_spacing, cw) in;"
+    "sascha__displacement__displacement": {"domain": "tri", "partitioning": "integer", "topology": "triangle_cw",
+                                           "output_control_points": 3, "vertex_slots": 7, "ls_slots": 6},
+    "vksamples__extended_dynamic_state2__glsl__tess": {"domain": "tri", "partitioning": "integer",
+                                                       "topology": "triangle_cw", "output_control_points": 3,
+                                                       "vertex_slots": 1},
+    "vksamples__patch_control_points__glsl__tess": {"domain": "tri", "partitioning": "integer",
+                                                    "topology": "triangle_cw", "output_control_points": 3,
+                                                    "vertex_slots": 4},
+    # "layout(quads, equal_spacing, cw) in;"
+    "sascha__terraintessellation__terrain": {"domain": "quad", "partitioning": "integer", "topology": "triangle_cw",
+                                             "output_control_points": 4, "vertex_slots": 4},
+    "vksamples__terrain_tessellation__glsl__terrain": {"domain": "quad", "partitioning": "integer",
+                                                       "topology": "triangle_cw", "output_control_points": 4,
+                                                       "vertex_slots": 4},
+}
+CORPUS_ATTR_STRIDE = 1024
+
+
+def tess_state(name):
+    stem = re.sub(r"\.(tesc|tese|vert)\.s$", "", name)
+    state = dict(TESS_PIPELINES[stem])
+    state.setdefault("input_control_points", state["output_control_points"])
+    state["attr_stride"] = CORPUS_ATTR_STRIDE
+    return state
+
+
+def tess_contract(program, stage):
+    """The role map of a tessellation program (see the module docstring)."""
+    lines = [line for line in vertex_aot._clean(program) if not vertex_aot._is_label(line)]
+    if stage == "tes":
+        roles, _ = vertex_corpus_translate.binding_contract(program)
+    else:
+        roles, _ = vertex_corpus_translate.binding_contract(["s_setprio 3", *lines], stage="ls")
+    roles = {n: r for n, r in roles.items() if n >= vertex_aot.NGG_FIRST_USER_SGPR}
+    for line in lines:
+        if m := re.fullmatch(r"s_bfe_u32 s\d+, s(\d+), 0x60011", line):
+            roles[int(m[1])] = ("tcs_offchip_layout",)
+    return roles
 
 
 def classify(header, lines):
@@ -101,12 +159,27 @@ def translate(path):
     lines = [line for line in program if line and not line.endswith(":")]
     stage, ngg = classify(header, lines)
     feats = io_features(lines)
+    if stage in ("tes", "lshs", "hs"):
+        try:
+            state = tess_state(path.name)
+            roles = tess_contract(program, stage)
+            if stage == "tes":
+                ds, layout = tess_aot.lower_tes(program, roles, state)
+                return stage, ngg, feats, "translated", {"ds": ds}, f"domain shader, params {layout['params']}"
+            vs, hs, layout = tess_aot.lower_lshs(program, roles, state)
+            sources = {"hs": hs, **({"vs": vs} if vs else {})}
+            detail = f"{'vertex and ' if vs else ''}hull shader, inputs {layout['inputs']}" + \
+                (", vote folded" if layout["vote"] else "")
+            return stage, ngg, feats, "translated", sources, detail
+        except Exception as exc:  # noqa: BLE001 - a non-ValueError is a translator crash and is marked so
+            reason = str(exc) if isinstance(exc, ValueError) else f"crash {type(exc).__name__}: {exc}"
+            return stage, ngg, feats, "refused", None, re.sub(r"'[^']*'", "'...'", reason)
     if stage != "esgs":
         return stage, ngg, feats, "refused", None, STAGE_REASONS.get(stage, f"unknown stage {header!r}")
     try:
         roles = geometry_contract(program)
         vs, gs, layout = geometry_aot.lower(program, roles)
-        return stage, ngg, feats, "translated", (vs, gs), f"{len(layout['primitives'])} triangles"
+        return stage, ngg, feats, "translated", {"vs": vs, "gs": gs}, f"{len(layout['primitives'])} triangles"
     except Exception as exc:  # noqa: BLE001 - a non-ValueError is a translator crash and is marked so
         reason = str(exc) if isinstance(exc, ValueError) else f"crash {type(exc).__name__}: {exc}"
         return stage, ngg, feats, "refused", None, re.sub(r"'[^']*'", "'...'", reason)
@@ -136,8 +209,8 @@ def main(argv=None):
                 if args.hlsl_dir:
                     out = args.hlsl_dir / isa.name
                     out.mkdir(parents=True, exist_ok=True)
-                    (out / (path.name[:-2] + ".vs.hlsl")).write_text(sources[0], encoding="ascii")
-                    (out / (path.name[:-2] + ".gs.hlsl")).write_text(sources[1], encoding="ascii")
+                    for kind, source in sources.items():
+                        (out / (path.name[:-2] + f".{kind}.hlsl")).write_text(source, encoding="ascii")
             else:
                 reasons[detail] += 1
         print(f"{isa}: {done} of {len(paths)} programs translate")

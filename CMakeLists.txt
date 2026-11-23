@@ -2921,6 +2921,32 @@ if(EXISTS "${INTAKE_PYTHON}")
             set_tests_properties(tess_aot_tessellator_hardware PROPERTIES SKIP_RETURN_CODE 77)
         endif()
     endforeach()
+    # The translated LS+HS and TES programs drawn as vertex, hull and domain shaders, one test per draw family and
+    # adapter, listed by the script as for geometry_aot.
+    execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/tess_aot_check.py" --list-families
+        OUTPUT_VARIABLE TESS_AOT_FAMILIES RESULT_VARIABLE tess_aot_list_status OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT tess_aot_list_status EQUAL 0 OR TESS_AOT_FAMILIES STREQUAL "")
+        message(FATAL_ERROR "tests/tess_aot_check.py --list-families failed (status ${tess_aot_list_status})")
+    endif()
+    string(REPLACE "\r" "" TESS_AOT_FAMILIES "${TESS_AOT_FAMILIES}")
+    string(REPLACE "\n" ";" TESS_AOT_FAMILIES "${TESS_AOT_FAMILIES}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/tess_aot_check.py")
+    add_test(NAME tess_aot_controls COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/tess_aot_check.py" controls "$<TARGET_FILE:tess_reference>")
+    set_tests_properties(tess_aot_controls PROPERTIES TIMEOUT 300
+        ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/tess_aot_controls.txt")
+    foreach(adapter IN ITEMS hardware warp)
+        foreach(family IN LISTS TESS_AOT_FAMILIES)
+            add_test(NAME tess_aot_${family}_${adapter} COMMAND "${INTAKE_PYTHON}" -B
+                "${CMAKE_SOURCE_DIR}/tests/tess_aot_check.py" draw "${DXC_EXECUTABLE}"
+                "$<TARGET_FILE:offscreen_check>" ${adapter} "$<TARGET_FILE:tess_reference>" --family ${family})
+            set_tests_properties(tess_aot_${family}_${adapter} PROPERTIES TIMEOUT 600
+                ENVIRONMENT "FORM_COVERAGE_RECORD=${CMAKE_BINARY_DIR}/form_coverage/tess_aot_${family}_${adapter}.txt")
+            if(adapter STREQUAL "hardware")
+                set_tests_properties(tess_aot_${family}_hardware PROPERTIES SKIP_RETURN_CODE 77)
+            endif()
+        endforeach()
+    endforeach()
     # One compute_aot test per draw family and adapter (docs/design/compute-stage.md), listed by the script itself as
     # for pixel_aot, with the programs each test translated recorded for tools/form_coverage.py.
     execute_process(COMMAND "${INTAKE_PYTHON}" -B "${CMAKE_SOURCE_DIR}/tests/compute_aot_check.py" --list-families
