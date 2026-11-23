@@ -55,6 +55,9 @@ void check_pixel_outputs(ID3D12Device* device, const char* path, const char* ref
 // A translated vertex shader drawn as a point list, its stream output compared with a case (tests/vertex_aot_render.cpp).
 void check_translated_vertex(ID3D12Device* device, const char* shader, const char* reference);
 void check_translated_geometry(ID3D12Device* device, const char* shader, const char* geometry, const char* reference);
+// Translated vertex, hull and domain shaders drawn as a patch list; the domain shader's stream output written to a file.
+void capture_translated_tess(ID3D12Device* device, const char* vertex, const char* hull, const char* domain,
+                             const char* reference, const char* output);
 void check_bc7_pixel(ID3D12Device* device, const char* shader, const char* input,
                      const char* capture, const char* mip1 = nullptr);
 void check_bc7_tail(ID3D12Device* device, const char* shader, const char* firstMip, int count, char** paths);

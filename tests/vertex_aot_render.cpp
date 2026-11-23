@@ -367,3 +367,180 @@ void check_translated_geometry(ID3D12Device* device, const char* shader, const c
 {
     draw_case(device, shader, geometry, casePath);
 }
+
+namespace {
+// Tessellation case (docs/design/stages.md, cards T-1 and T-2; tests/tess_aot_check.py), little-endian 32-bit words:
+//   header[32]: magic 'X2WT', control points per patch N (1..32), patch count P (1..1024), stream-output entry count E
+//               (1..16), the E semantic codes in words 4..19 (0 SV_Position, 1 + n TEXCOORDn, n below 32), the
+//               stream-output capacity R in records in word 20 (1..1<<20), the constant word count C in word 21 (0
+//               for 64, else a multiple of 4 from 64 to 16384), the push-word count W in word 22 (0..32), zero words
+//   constants[C], descriptors[64], push[W], then optionally the 'X2WM' title-memory section.
+// The vertex, hull and domain shaders are drawn as N * P vertices of an N-control-point patch list, with no input
+// layout and no rasterized stream, and the domain shader's output is captured by stream output. The output file holds
+// the filled byte count, the record stride in bytes and the captured words: the comparison is the script's, which keys
+// each tessellated triangle by its domain points (the tessellator's emission order is not part of the contract).
+constexpr UINT tessMagic = 0x54573258u;
+
+struct TessCase {
+    UINT controlPoints = 0, patches = 0, capacity = 0;
+    std::vector<UINT> semantics;
+    VertexCase data;  // constants, descriptors, push words and title memory, as for a vertex case
+};
+
+TessCase read_tess_case(const char* path)
+{
+    std::ifstream file(path, std::ios::binary);
+    const std::vector<char> bytes{std::istreambuf_iterator<char>(file), {}};
+    if (file.bad()) throw BadCase("Cannot read the tessellation case");
+    size_t at = 0;
+    const auto words = [&](size_t count, const char* what) {
+        if ((bytes.size() - at) / 4 < count) throw BadCase(std::string("Tessellation case is truncated in ") + what);
+        std::vector<UINT> out(count);
+        if (count) std::memcpy(out.data(), bytes.data() + at, count * 4);
+        at += count * 4;
+        return out;
+    };
+    const auto header = words(headerWords, "the header");
+    if (header[0] != tessMagic) throw BadCase("Tessellation case has the wrong magic");
+    TessCase c;
+    c.controlPoints = header[1];
+    c.patches = header[2];
+    if (!c.controlPoints || c.controlPoints > 32) throw BadCase("Tessellation case control points are not 1..32");
+    if (!c.patches || c.patches > 1024) throw BadCase("Tessellation case patch count is not 1..1024");
+    const UINT entries = header[3];
+    if (!entries || entries > 16) throw BadCase("Tessellation case stream-output entries are not 1..16");
+    for (UINT i = 0; i < 16; ++i) {
+        if (i < entries) {
+            if (header[4 + i] > 32) throw BadCase("Tessellation case semantic code is above TEXCOORD31");
+            for (UINT seen : c.semantics)
+                if (seen == header[4 + i]) throw BadCase("Tessellation case semantic codes repeat");
+            c.semantics.push_back(header[4 + i]);
+        } else if (header[4 + i]) {
+            throw BadCase("Tessellation case unused semantic code is not zero");
+        }
+    }
+    c.capacity = header[20];
+    if (!c.capacity || c.capacity > (1u << 20)) throw BadCase("Tessellation case capacity is not 1..1<<20 records");
+    const UINT constantWords = header[21] ? header[21] : 64;
+    if (constantWords < 64 || constantWords > maxConstantWords || constantWords % 4)
+        throw BadCase("Tessellation case constant word count is not a multiple of 4 from 64 to 16384");
+    const UINT push = header[22];
+    if (push > pushWords) throw BadCase("Tessellation case has more than 32 push words");
+    for (UINT i = 23; i < headerWords; ++i)
+        if (header[i]) throw BadCase("Tessellation case reserved header words are not zero");
+    c.data.constants = words(constantWords, "the constants");
+    c.data.descriptors = words(64, "the descriptors");
+    const auto pushed = words(push, "the push words");
+    std::copy(pushed.begin(), pushed.end(), c.data.push.begin());
+    if (at != bytes.size()) parse_memory(bytes.data() + at, bytes.size() - at, c.data);
+    return c;
+}
+}
+
+void capture_translated_tess(ID3D12Device* device, const char* vertex, const char* hull, const char* domain,
+                             const char* casePath, const char* outPath)
+{
+    const TessCase c = read_tess_case(casePath);
+    const std::vector<char> vs = read_shader(vertex, "vertex shader"), hs = read_shader(hull, "hull shader"),
+                            ds = read_shader(domain, "domain shader");
+    // The three stages read the same user data (the LS, HS and TES halves of the console waves).
+    auto root = vertex_root(device, D3D12_SHADER_VISIBILITY_ALL);
+    std::vector<D3D12_SO_DECLARATION_ENTRY> entries;
+    for (UINT code : c.semantics)
+        entries.push_back({0, code ? "TEXCOORD" : "SV_Position", code ? code - 1 : 0, 0, 4, 0});
+    const UINT stride = static_cast<UINT>(16 * entries.size());
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = root.Get();
+    desc.VS = {vs.data(), vs.size()};
+    desc.HS = {hs.data(), hs.size()};
+    desc.DS = {ds.data(), ds.size()};
+    desc.StreamOutput = {entries.data(), static_cast<UINT>(entries.size()), &stride, 1, D3D12_SO_NO_RASTERIZED_STREAM};
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.RasterizerState.DepthClipEnable = TRUE;
+    desc.SampleMask = UINT_MAX;
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    desc.SampleDesc.Count = 1;
+    ComPtr<ID3D12PipelineState> pso;
+    check(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso)), "Translated tessellation pipeline");
+
+    std::vector<TitleRangeRecord> rangeRecords = c.data.ranges;
+    const UINT rangeCount = static_cast<UINT>(rangeRecords.size());
+    if (rangeRecords.empty()) rangeRecords.push_back({});
+    auto rangeBuffer = upload(device, rangeRecords);
+    auto cb = upload(device, c.data.constants);
+    auto descriptorCb = upload(device, c.data.descriptors);
+    const std::vector<BYTE> zeroBytes(16);
+    auto zeroBuffer = upload(device, zeroBytes);
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 8,
+                                        D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+    ComPtr<ID3D12DescriptorHeap> srvs;
+    check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&srvs)), "Tessellation memory heap");
+    const UINT increment = device->GetDescriptorHandleIncrementSize(heapDesc.Type);
+    std::vector<ComPtr<ID3D12Resource>> slotBuffers;
+    for (UINT i = 0; i < 8; ++i) {
+        const bool present = i < c.data.slots.size() && !c.data.slots[i].empty();
+        slotBuffers.push_back(present ? upload(device, c.data.slots[i]) : zeroBuffer);
+        D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
+        raw.Format = DXGI_FORMAT_R32_TYPELESS;
+        raw.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        raw.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        raw.Buffer.NumElements = present ? static_cast<UINT>(c.data.slots[i].size() / 4) : 4;
+        raw.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        auto handle = srvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += size_t(i) * increment;
+        device->CreateShaderResourceView(slotBuffers.back().Get(), &raw, handle);
+    }
+
+    constexpr UINT64 counterBytes = 256;
+    const UINT64 dataBytes = UINT64(c.capacity) * stride;
+    std::vector<Word> initial((counterBytes + dataBytes) / 4, 0xa5a5a5a5u);
+    std::fill(initial.begin(), initial.begin() + counterBytes / 4, 0u);
+    auto initialUpload = upload(device, initial);
+    auto so = make_buffer(device, counterBytes + dataBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    auto back = make_buffer(device, counterBytes + dataBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    ComputeCommands cmd(device, pso.Get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
+    auto* list = cmd.list.Get();
+    transition(list, so.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyBufferRegion(so.Get(), 0, initialUpload.Get(), 0, counterBytes + dataBytes);
+    transition(list, so.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_STREAM_OUT);
+    ID3D12DescriptorHeap* heaps[]{srvs.Get()};
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetGraphicsRootSignature(root.Get());
+    list->SetGraphicsRootConstantBufferView(0, cb->GetGPUVirtualAddress());
+    list->SetGraphicsRootShaderResourceView(1, rangeBuffer->GetGPUVirtualAddress());
+    list->SetGraphicsRootDescriptorTable(2, srvs->GetGPUDescriptorHandleForHeapStart());
+    list->SetGraphicsRoot32BitConstants(3, 1, &rangeCount, 0);
+    const UINT vertexRoot[2]{0, 0};
+    list->SetGraphicsRoot32BitConstants(4, 2, vertexRoot, 0);
+    list->SetGraphicsRoot32BitConstants(5, pushWords, c.data.push.data(), 0);
+    list->SetGraphicsRootConstantBufferView(6, descriptorCb->GetGPUVirtualAddress());
+    const D3D12_STREAM_OUTPUT_BUFFER_VIEW view{so->GetGPUVirtualAddress() + counterBytes, dataBytes,
+                                               so->GetGPUVirtualAddress()};
+    list->SOSetTargets(0, 1, &view);
+    const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor{0, 0, 1, 1};
+    list->RSSetViewports(1, &viewport);
+    list->RSSetScissorRects(1, &scissor);
+    list->IASetPrimitiveTopology(
+        static_cast<D3D_PRIMITIVE_TOPOLOGY>(D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + c.controlPoints - 1));
+    list->DrawInstanced(c.controlPoints * c.patches, 1, 0, 0);
+    transition(list, so.Get(), D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->CopyBufferRegion(back.Get(), 0, so.Get(), 0, counterBytes + dataBytes);
+    cmd.submit_and_wait(device);
+
+    const auto words = read(back.Get(), (counterBytes + dataBytes) / 4);
+    const UINT filled = words[0];
+    if (filled % stride || filled > dataBytes) {
+        std::fprintf(stderr, "tess_filled_bytes=%u stride=%u capacity_bytes=%llu\n", filled, stride,
+                     static_cast<unsigned long long>(dataBytes));
+        throw std::runtime_error("Stream output filled size is not a whole number of records within the buffer");
+    }
+    std::ofstream out(outPath, std::ios::binary);
+    const UINT head[2]{filled, stride};
+    out.write(reinterpret_cast<const char*>(head), sizeof(head));
+    out.write(reinterpret_cast<const char*>(words.data() + counterBytes / 4), filled);
+    if (!out) throw std::runtime_error("Cannot write the tessellation capture");
+    std::printf("patches=%u control_points=%u records=%u\n", c.patches, c.controlPoints, filled / stride);
+}

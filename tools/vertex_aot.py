@@ -51,6 +51,10 @@ RADV_ADDRESS_HIGH = 0xffff8000
 # (the ES half of a merged ESGS wave): v5 vertex id, v8 instance id, v0 the primitive payload; v1..v4 carry the other
 # GS inputs. Reading any other entry VGPR before writing it is refused with its own reason.
 ENTRY_VGPRS = {"legacy": {"v0": "vid", "v3": "iid"}, "ngg": {"v5": "vid", "v8": "iid"}}
+# The LS half of a merged LS+HS wave (radv_shader_args.c declare_vs_input_vgprs with merged_vs_tcs on gfx10: v0 the
+# patch id and v1 the relative ids of the HS half, then v2 vertex id, v3 vs_rel_patch_id, v4 unused, v5 instance id);
+# tools/tess_aot.py lowers it with its own reasons for the other entry VGPRs.
+ENTRY_VGPRS["ls"] = {"v2": "vid", "v5": "iid"}
 ENTRY_VGPR_REASONS = {
     "legacy": {f"v{n}": f"entry VGPR v{n} of a legacy VS has no role in the vertex contract (v0 is the vertex id, "
                "v3 the instance id)" for n in (1, 2)},
