@@ -373,10 +373,10 @@ void write_summary(const char* how) {
 void heap_guard_summary();
 void log_summary(const char* how) {
     if (InterlockedExchange(&summary_written, 1) != 0) return;
-    log_cpu_traps();
-    if (breakpoints_continued) log_line("breakpoints continued %ld", breakpoints_continued);
     heap_milestone(how);
     heap_guard_summary();
+    log_cpu_traps();
+    if (breakpoints_continued) log_line("breakpoints continued %ld", breakpoints_continued);
     write_summary(how);
 }
 
@@ -1178,17 +1178,19 @@ void* crash_hook(const std::string& dll, const char* name) {
 // The program's and its package DLLs' HeapFree, HeapReAlloc, HeapSize, LocalFree and GlobalFree (kernel32, kernelbase,
 // api-ms-win-core-heap-*) and the C runtime's free, _free_base, realloc, _realloc_base, _aligned_free, _aligned_realloc,
 // _msize and _msize_base (ucrtbase.dll, api-ms-win-crt-heap-*, or a ucrtbase.dll mapped from the package), imported
-// or found with GetProcAddress, bind to the hooks below. Each checks that the pointer is a block of the heap it is
-// handed to (HeapValidate(heap, 0, p); for the C runtime the runtime's _get_heap_handle()) before forwarding. A
-// pointer that is not ("heap-guard invalid API ptr=P heap=H owner=O callers ...") is not forwarded: a free or size is
-// skipped (the block leaks), a realloc gets a new block with the bytes that are known to be readable copied. The
-// owner says what the pointer is: xmem-alloc / xmem-virtual (xmem.dll's records and address windows), image,
-// stack, other-heap(H) (a block of another heap), aligned-block(H) (an _aligned_malloc block given to plain free),
-// or unknown(...). The first 50 are logged, the rest counted.
+// or found with GetProcAddress, bind to the hooks below. Each checks whether the pointer can be a block of the heap
+// it is handed to (foreign_reason: HeapValidate of a single pointer cannot be used, since with termination on
+// corruption a non-block ends the process inside it). A pointer that cannot ("heap-guard invalid API ptr=P heap=H
+// owner=O callers ...") is not forwarded: a free or size is skipped (the block leaks), a realloc gets a new block with
+// the bytes known to be readable copied. The owner says what the pointer is: xmem-alloc / xmem-virtual (xmem.dll's
+// records), image, stack, aligned-block(B) (an _aligned_malloc block given to a plain free), other-heap(H) (in a
+// region another heap starts), or unknown(free|reserved|mapped|no-access|misaligned|...). The first 50 are logged,
+// the rest counted.
 // heap_milestone() validates the whole process heap at the first thread, each xgr query and call (the gateway calls
 // x2w_launch_heap_milestone), each d3d12 import call and every 256th stub or shim call; the first failure is
 // logged as "heap-guard corrupted-before M after P", P being the last milestone that passed, which brackets the
-// call that corrupted it.
+// call that corrupted it. A heap-corruption exception (0xc0000374) raised anywhere is bracketed the same way
+// ("corrupted-before heap-failure at SITE after P", or the check in progress when the check itself raised it).
 constexpr long kHeapGuardLines = 50;
 volatile long heap_invalid;       // invalid pointers seen
 volatile long heap_corrupt;       // a milestone check failed
@@ -1225,77 +1227,80 @@ bool copy_guarded(void* to, const void* from, std::size_t bytes) {
 
 // _aligned_malloc keeps the heap block's address in the pointer-sized slot below the aligned pointer it returns.
 void* aligned_base(const void* p) {
-    const auto slot = (reinterpret_cast<std::uintptr_t>(p) & ~std::uintptr_t{7}) - sizeof(void*);
+    const auto at = reinterpret_cast<std::uintptr_t>(p);
+    const auto slot = (at & ~std::uintptr_t{7}) - sizeof(void*);
     if (!readable(reinterpret_cast<const void*>(slot), sizeof(void*))) return nullptr;
     void* base = *reinterpret_cast<void* const*>(slot);
-    const auto at = reinterpret_cast<std::uintptr_t>(base);
-    return at && at < reinterpret_cast<std::uintptr_t>(p) && reinterpret_cast<std::uintptr_t>(p) - at < 0x10000 ? base : nullptr;
+    const auto start = reinterpret_cast<std::uintptr_t>(base);
+    return start && !(start & 0xf) && start < at && at - start <= 0x1008 ? base : nullptr;
 }
 
 using XMemDescribeFn = HRESULT(WINAPI*)(const void*, X2WXMemAllocationInfo*);
-using XMemWindowsFn = HRESULT(WINAPI*)(X2WXMemWindow*, uint32_t, uint32_t*);
+XMemDescribeFn volatile xmem_describe;
+volatile long xmem_describe_looked;
 
-// What a pointer the guard refused is, and how many of its bytes are known to be readable (for a realloc's copy).
-std::string pointer_owner(const void* p, HANDLE heap, std::size_t* known) {
+XMemDescribeFn describe_fn() {
+    if (!xmem_describe_looked) {
+        if (HMODULE xmem = GetModuleHandleW(L"xmem.dll")) {
+            xmem_describe = reinterpret_cast<XMemDescribeFn>(GetProcAddress(xmem, "X2WXMemDescribe"));
+            InterlockedExchange(&xmem_describe_looked, 1);
+        }
+    }
+    return xmem_describe;
+}
+
+// Why `p` cannot be a block of `heap`, or empty when nothing says so (the call is then forwarded). HeapValidate(heap,
+// 0, p) cannot be asked: with heap termination on corruption (always on for 64-bit processes) a pointer that is not a
+// block ends the process inside that very call. Only facts that rule a block out count: an xmem.dll allocation or
+// mapping (not one adopted from the title's own hooks), an image, the calling thread's stack, memory that is not
+// committed private memory, a pointer heaps never return (not 16-byte aligned), an _aligned_malloc block handed to a
+// plain free, a region another heap's first segment starts. `known` gets the bytes known readable at p.
+std::string foreign_reason(const void* p, HANDLE heap, bool aligned_api, std::size_t* known) {
     char text[96];
     const auto at = reinterpret_cast<std::uintptr_t>(p);
     *known = 0;
-    if (HMODULE xmem = GetModuleHandleW(L"xmem.dll")) {
-        if (auto describe_fn = reinterpret_cast<XMemDescribeFn>(GetProcAddress(xmem, "X2WXMemDescribe"))) {
-            X2WXMemAllocationInfo info{};
-            info.size = sizeof info;
-            if (describe_fn(p, &info) == S_OK) {
-                if (at - info.base < info.bytes) *known = static_cast<std::size_t>(info.bytes - (at - info.base));
-                return info.backing == X2W_XMEM_BACKING_PHYSICAL ? "xmem-virtual" : "xmem-alloc";
-            }
-        }
-        if (auto windows_fn = reinterpret_cast<XMemWindowsFn>(GetProcAddress(xmem, "X2WXMemGetWindows"))) {
-            X2WXMemWindow windows[X2W_XMEM_WINDOW_KINDS] = {};
-            uint32_t count = 0;
-            if (SUCCEEDED(windows_fn(windows, X2W_XMEM_WINDOW_KINDS, &count)))
-                for (uint32_t i = 0; i < count && i < X2W_XMEM_WINDOW_KINDS; ++i)
-                    if (at >= windows[i].begin && at < windows[i].end) return "xmem-virtual";
+    if (XMemDescribeFn describe_xmem = describe_fn()) {
+        X2WXMemAllocationInfo info{};
+        info.size = sizeof info;
+        if (describe_xmem(p, &info) == S_OK && info.backing != X2W_XMEM_BACKING_ADOPTED) {
+            if (at - info.base < info.bytes) *known = static_cast<std::size_t>(info.bytes - (at - info.base));
+            return info.backing == X2W_XMEM_BACKING_PHYSICAL ? "xmem-virtual" : "xmem-alloc";
         }
     }
     if (region_at(at)) return "image";
-    HMODULE module = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCWSTR>(p), &module) && module)
-        return "image";
     ULONG_PTR low = 0, high = 0;
     GetCurrentThreadStackLimits(&low, &high);
     if (at >= low && at < high) {
         *known = static_cast<std::size_t>(high - at);
         return "stack";
     }
-    HANDLE heaps[256];
-    const DWORD count = GetProcessHeaps(256, heaps);
-    for (DWORD i = 0; i < count && i < 256; ++i) {
-        if (heaps[i] == heap || !heap_block_ok(heaps[i], p)) continue;
-        *known = HeapSize(heaps[i], 0, p);
-        if (*known == static_cast<SIZE_T>(-1)) *known = 0;
-        if (heaps[i] == GetProcessHeap()) return "other-heap(process)";
-        std::snprintf(text, sizeof text, "other-heap(0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heaps[i])));
-        return text;
-    }
-    if (void* base = aligned_base(p)) {
-        for (DWORD i = 0; i < count && i < 256; ++i) {
-            if (!heap_block_ok(heaps[i], base)) continue;
-            const SIZE_T size = HeapSize(heaps[i], 0, base);
-            const std::size_t skip = static_cast<std::size_t>(at - reinterpret_cast<std::uintptr_t>(base));
-            if (size != static_cast<SIZE_T>(-1) && size > skip) *known = size - skip;
-            std::snprintf(text, sizeof text, "aligned-block(0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heaps[i])));
-            return text;
-        }
-    }
     MEMORY_BASIC_INFORMATION info{};
     if (!VirtualQuery(p, &info, sizeof info)) return "unknown(unmapped)";
     if (info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
         *known = static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize - at);
-    std::snprintf(text, sizeof text, "unknown(%s %s)",
-                  info.State == MEM_FREE ? "free" : info.State == MEM_RESERVE ? "reserved" : "committed",
-                  info.Type == MEM_IMAGE ? "image" : info.Type == MEM_MAPPED ? "mapped" : info.Type == MEM_PRIVATE ? "private" : "none");
-    return text;
+    if (info.Type == MEM_IMAGE) return "image";
+    if (info.State != MEM_COMMIT) return info.State == MEM_FREE ? "unknown(free)" : "unknown(reserved)";
+    if (info.Type == MEM_MAPPED) return "unknown(mapped)";
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return "unknown(no-access)";
+    if (aligned_api) return {};
+    if (void* base = aligned_base(p)) {
+        MEMORY_BASIC_INFORMATION block{};
+        if (VirtualQuery(base, &block, sizeof block) && block.AllocationBase == info.AllocationBase) {
+            std::snprintf(text, sizeof text, "aligned-block(0x%llx)",
+                          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(base)));
+            return text;
+        }
+    }
+    if (at & 0xf) return "unknown(misaligned)";
+    HANDLE heaps[256];
+    const DWORD count = GetProcessHeaps(256, heaps);
+    for (DWORD i = 0; i < count && i < 256; ++i) {
+        if (heaps[i] == heap || heaps[i] != info.AllocationBase) continue;
+        if (heaps[i] == GetProcessHeap()) return "other-heap(process)";
+        std::snprintf(text, sizeof text, "other-heap(0x%llx)", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heaps[i])));
+        return text;
+    }
+    return {};
 }
 
 // The frames in mapped images that called the hook, as the crash lines give them.
@@ -1309,31 +1314,34 @@ std::string guard_callers() {
     return " callers none";
 }
 
-// Logs a refused pointer; returns the bytes known to be readable at it.
-std::size_t guard_refuse(const char* api, const void* p, HANDLE heap) {
+// Logs a refused pointer.
+void guard_refuse(const char* api, const void* p, HANDLE heap, const std::string& owner) {
     const DWORD error = GetLastError();
-    std::size_t known = 0;
     const long count = InterlockedIncrement(&heap_invalid);
     if (count <= kHeapGuardLines) {
-        const std::string owner = pointer_owner(p, heap, &known);
         char text[256];
         std::snprintf(text, sizeof text, "heap-guard invalid %s ptr=0x%llx heap=0x%llx owner=%s", api,
                       static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(p)),
                       static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(heap)), owner.c_str());
         heap_guard_line(text + guard_callers() + " not-forwarded");
         if (count == kHeapGuardLines) heap_guard_line("heap-guard more invalid pointers are counted only");
-    } else {
-        pointer_owner(p, heap, &known);
     }
     SetLastError(error);
-    return known;
 }
+
+// A whole-heap HeapValidate that finds corruption may end the process inside the call (0xc0000374), so the name of
+// the check in progress is kept where the first-chance handler finds it (heap_guard_fault).
+volatile DWORD checking_thread;
+char checking_name[200];
 
 void heap_milestone(const char* name) {
     if (!heap_guard || heap_corrupt) return;
     const DWORD error = GetLastError();
-    const bool ok = heap_block_ok(GetProcessHeap(), nullptr);
     AcquireSRWLockExclusive(&milestone_lock);
+    std::snprintf(checking_name, sizeof checking_name, "%s", name);
+    InterlockedExchange(reinterpret_cast<volatile long*>(&checking_thread), static_cast<long>(GetCurrentThreadId()));
+    const bool ok = heap_block_ok(GetProcessHeap(), nullptr);
+    InterlockedExchange(reinterpret_cast<volatile long*>(&checking_thread), 0);
     if (ok) {
         std::snprintf(last_good_milestone, sizeof last_good_milestone, "%s", name);
         ReleaseSRWLockExclusive(&milestone_lock);
@@ -1346,6 +1354,26 @@ void heap_milestone(const char* name) {
         ReleaseSRWLockExclusive(&milestone_lock);
     }
     SetLastError(error);
+}
+
+// The first-chance handler's part: a heap-corruption exception (0xc0000374) brackets the corruption between the
+// last check that passed and either the check in progress on this thread or the faulting heap call itself.
+void heap_guard_fault(const EXCEPTION_RECORD* record) {
+    if (!heap_guard || record->ExceptionCode != 0xc0000374u || InterlockedExchange(&heap_corrupt, 1) != 0) return;
+    std::string what, previous;
+    if (checking_thread == GetCurrentThreadId()) {  // this thread holds milestone_lock
+        what = checking_name;
+        previous = last_good_milestone;
+    } else {
+        char where[160];
+        describe(record->ExceptionAddress, where, sizeof where);
+        what = std::string("heap-failure at ") + where;
+        AcquireSRWLockShared(&milestone_lock);
+        previous = last_good_milestone;
+        ReleaseSRWLockShared(&milestone_lock);
+    }
+    heap_guard_line("heap-guard corrupted-before " + what + " after " + previous);
+    log_flush();
 }
 
 // d3d12 calls are checked every time, other stub and shim calls every 256th call over all of them.
@@ -1369,16 +1397,22 @@ void heap_guard_summary() {
 
 // Windows' heap functions.
 BOOL WINAPI guard_HeapFree(HANDLE heap, DWORD flags, LPVOID p) {
-    if (p && !heap_block_ok(heap, p)) {
-        guard_refuse("HeapFree", p, heap);
-        return TRUE;
+    std::size_t known = 0;
+    if (p) {
+        const std::string owner = foreign_reason(p, heap, false, &known);
+        if (!owner.empty()) {
+            guard_refuse("HeapFree", p, heap, owner);
+            return TRUE;
+        }
     }
     return HeapFree(heap, flags, p);
 }
 
 LPVOID WINAPI guard_HeapReAlloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T bytes) {
-    if (!p || heap_block_ok(heap, p)) return HeapReAlloc(heap, flags, p, bytes);
-    const std::size_t known = guard_refuse("HeapReAlloc", p, heap);
+    std::size_t known = 0;
+    const std::string owner = p ? foreign_reason(p, heap, false, &known) : std::string();
+    if (owner.empty()) return HeapReAlloc(heap, flags, p, bytes);
+    guard_refuse("HeapReAlloc", p, heap, owner);
     if (flags & HEAP_REALLOC_IN_PLACE_ONLY) {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return nullptr;
@@ -1389,8 +1423,10 @@ LPVOID WINAPI guard_HeapReAlloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T bytes
 }
 
 SIZE_T WINAPI guard_HeapSize(HANDLE heap, DWORD flags, LPCVOID p) {
-    if (heap_block_ok(heap, p)) return HeapSize(heap, flags, p);
-    guard_refuse("HeapSize", p, heap);
+    std::size_t known = 0;
+    const std::string owner = p ? foreign_reason(p, heap, false, &known) : std::string();
+    if (owner.empty()) return HeapSize(heap, flags, p);
+    guard_refuse("HeapSize", p, heap, owner);
     SetLastError(ERROR_INVALID_PARAMETER);
     return static_cast<SIZE_T>(-1);
 }
@@ -1399,14 +1435,18 @@ SIZE_T WINAPI guard_HeapSize(HANDLE heap, DWORD flags, LPCVOID p) {
 bool movable_handle(const void* handle) { return (reinterpret_cast<std::uintptr_t>(handle) & 0xf) == 8; }
 
 HLOCAL WINAPI guard_LocalFree(HLOCAL handle) {
-    if (!handle || movable_handle(handle) || heap_block_ok(GetProcessHeap(), handle)) return LocalFree(handle);
-    guard_refuse("LocalFree", handle, GetProcessHeap());
+    std::size_t known = 0;
+    const std::string owner = handle && !movable_handle(handle) ? foreign_reason(handle, GetProcessHeap(), false, &known) : std::string();
+    if (owner.empty()) return LocalFree(handle);
+    guard_refuse("LocalFree", handle, GetProcessHeap(), owner);
     return nullptr;
 }
 
 HGLOBAL WINAPI guard_GlobalFree(HGLOBAL handle) {
-    if (!handle || movable_handle(handle) || heap_block_ok(GetProcessHeap(), handle)) return GlobalFree(handle);
-    guard_refuse("GlobalFree", handle, GetProcessHeap());
+    std::size_t known = 0;
+    const std::string owner = handle && !movable_handle(handle) ? foreign_reason(handle, GetProcessHeap(), false, &known) : std::string();
+    if (owner.empty()) return GlobalFree(handle);
+    guard_refuse("GlobalFree", handle, GetProcessHeap(), owner);
     return nullptr;
 }
 
@@ -1446,17 +1486,23 @@ bool crt_init(int instance, Lookup lookup) {
 
 template <int I, int F>
 void __cdecl guard_crt_free(void* p) {
-    if (p && !heap_block_ok(crts[I].heap, p)) {
-        guard_refuse(kCrtNames[F], p, crts[I].heap);
-        return;
+    std::size_t known = 0;
+    if (p) {
+        const std::string owner = foreign_reason(p, crts[I].heap, false, &known);
+        if (!owner.empty()) {
+            guard_refuse(kCrtNames[F], p, crts[I].heap, owner);
+            return;
+        }
     }
     reinterpret_cast<FreeFn>(crts[I].fn[F])(p);
 }
 
 template <int I, int F>
 void* __cdecl guard_crt_realloc(void* p, std::size_t bytes) {
-    if (!p || heap_block_ok(crts[I].heap, p)) return reinterpret_cast<ReallocFn>(crts[I].fn[F])(p, bytes);
-    const std::size_t known = guard_refuse(kCrtNames[F], p, crts[I].heap);
+    std::size_t known = 0;
+    const std::string owner = p ? foreign_reason(p, crts[I].heap, false, &known) : std::string();
+    if (owner.empty()) return reinterpret_cast<ReallocFn>(crts[I].fn[F])(p, bytes);
+    guard_refuse(kCrtNames[F], p, crts[I].heap, owner);
     if (!bytes) return nullptr;
     void* fresh = reinterpret_cast<MallocFn>(crts[I].fn[kMalloc])(bytes);
     if (fresh && known) copy_guarded(fresh, p, known < bytes ? known : bytes);
@@ -1465,31 +1511,40 @@ void* __cdecl guard_crt_realloc(void* p, std::size_t bytes) {
 
 template <int I, int F>
 std::size_t __cdecl guard_crt_msize(void* p) {
-    if (heap_block_ok(crts[I].heap, p)) return reinterpret_cast<MsizeFn>(crts[I].fn[F])(p);
-    guard_refuse(kCrtNames[F], p, crts[I].heap);
+    std::size_t known = 0;
+    const std::string owner = p ? foreign_reason(p, crts[I].heap, false, &known) : std::string();
+    if (owner.empty()) return reinterpret_cast<MsizeFn>(crts[I].fn[F])(p);
+    guard_refuse(kCrtNames[F], p, crts[I].heap, owner);
     return static_cast<std::size_t>(-1);
 }
 
+// _aligned_free/_aligned_realloc: the pointer itself must not be foreign, and the slot below it must hold its block.
 template <int I>
-bool aligned_ok(void* p) {
-    void* base = aligned_base(p);
-    return base && heap_block_ok(crts[I].heap, base);
+std::string aligned_reason(void* p, std::size_t* known) {
+    std::string owner = foreign_reason(p, crts[I].heap, true, known);
+    if (owner.empty() && !aligned_base(p)) owner = "unknown(no-aligned-header)";
+    return owner;
 }
 
 template <int I>
 void __cdecl guard_crt_aligned_free(void* p) {
-    if (p && !aligned_ok<I>(p)) {
-        guard_refuse("_aligned_free", p, crts[I].heap);
-        return;
+    std::size_t known = 0;
+    if (p) {
+        const std::string owner = aligned_reason<I>(p, &known);
+        if (!owner.empty()) {
+            guard_refuse("_aligned_free", p, crts[I].heap, owner);
+            return;
+        }
     }
     reinterpret_cast<FreeFn>(crts[I].fn[kAlignedFree])(p);
 }
 
 template <int I>
 void* __cdecl guard_crt_aligned_realloc(void* p, std::size_t bytes, std::size_t alignment) {
-    if (!p || aligned_ok<I>(p))
-        return reinterpret_cast<AlignedReallocFn>(crts[I].fn[kAlignedRealloc])(p, bytes, alignment);
-    const std::size_t known = guard_refuse("_aligned_realloc", p, crts[I].heap);
+    std::size_t known = 0;
+    const std::string owner = p ? aligned_reason<I>(p, &known) : std::string();
+    if (owner.empty()) return reinterpret_cast<AlignedReallocFn>(crts[I].fn[kAlignedRealloc])(p, bytes, alignment);
+    guard_refuse("_aligned_realloc", p, crts[I].heap, owner);
     if (!bytes || !crts[I].fn[kAlignedMalloc]) return nullptr;
     void* fresh = reinterpret_cast<AlignedMallocFn>(crts[I].fn[kAlignedMalloc])(bytes, alignment);
     if (fresh && known) copy_guarded(fresh, p, known < bytes ? known : bytes);
@@ -1863,6 +1918,7 @@ SRWLOCK first_chance_lock = SRWLOCK_INIT;
 LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
     const DWORD code = info->ExceptionRecord->ExceptionCode;
     if (armed && code == cpp_exception) log_cpp_throw(info);
+    if (armed && code == 0xc0000374u) heap_guard_fault(info->ExceptionRecord);
     if (armed && (code & 0xc0000000u) == 0xc0000000u && !(code & 0x20000000u) && first_chance_lines < kFirstChanceLines) {
         char site[200];
         describe(info->ExceptionRecord->ExceptionAddress, site, sizeof site);
