@@ -1,0 +1,385 @@
+# The PC Gaming Runtime's interface layer, as learned from our own evidence (docs/design/runtime.md,
+# section 2, "The Gaming Runtime gateway"). tools/xgr_gen.py turns this into the xgameruntime.dll
+# gateway's table (src/xgr/xgr_gateway.cpp).
+#
+# Sources allowed here: x2w_launch --xgr trace runs of Microsoft's public GDK samples (Xbox-GDK-Samples,
+# MIT, built by us for PC: cards/standin-titles), with each caller resolved to a function name through
+# the PDB of our own build of the sample (dbghelp, tools/pc_jobs/run_xgr.ps1), and the public PC GDK
+# NuGet packages (Microsoft.GDK.Core/Windows 2610.0.9661) as facts. No other project's code or docs.
+#
+# [[classes]]: name (our label), clsid, evidence. interfaces: name, iid, evidence (and optionally slots,
+# the number of slots that version has when known). [[classes.slots]]: index (3.. ; 0-2 are IUnknown),
+# function (the flat function whose thunk makes this call, or "" when unknown), evidence.
+#
+# Slots 0-2 are IUnknown; the thunks call slot 2 (Release) after each call. Slots not listed are unknown
+# and answer E_NOTIMPL through the gateway's logging thunks. impl = "xgr" marks a function x2w_gdk.dll does
+# not have, implemented in src/xgr/xgr_extra.cpp (returns/params give its signature).
+
+[[classes]]
+name = "XThreading"
+clsid = "073b7dcb-1fcf-4030-94be-e3c9eb623428"
+evidence = "GUID loaded by the XThreading thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXThreadingImpl"
+iid = "073b7dcb-1fcf-4030-94be-e3c9eb623428"
+evidence = "thunks load only this GUID (lea rcx) before QueryApiImpl; the IID is taken to be the same GUID (CLSID == first IID); trace queries confirm IID == CLSID (job xgrgate-755802ed-r2) (job xgrgate-544d7903)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XAsyncGetStatus"
+evidence = "static: thunk XAsyncGetStatus in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0x18], CFG call"
+
+[[classes.interfaces.slots]]
+index = 4
+function = "XAsyncGetResultSize"
+evidence = "static: thunk XAsyncGetResultSize in GameSaveCombo: mov rax,[rax+0x20], CFG call"
+
+[[classes.interfaces.slots]]
+index = 5
+function = "XAsyncCancel"
+evidence = "static: thunk XAsyncCancel in AsynchronousProgramming: mov rax,[rax+0x28], CFG call"
+
+[[classes.interfaces.slots]]
+index = 6
+function = "XAsyncRun"
+evidence = "static: thunk XAsyncRun in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0x30], CFG call"
+
+[[classes.interfaces.slots]]
+index = 7
+function = "XAsyncBegin"
+evidence = "static: thunk XAsyncBegin in AsynchronousProgramming: mov rax,[rax+0x38], CFG call"
+
+[[classes.interfaces.slots]]
+index = 9
+function = "XAsyncSchedule"
+evidence = "static: thunk XAsyncSchedule in AsynchronousProgramming: mov rax,[rax+0x48], CFG call"
+
+[[classes.interfaces.slots]]
+index = 10
+function = "XAsyncComplete"
+evidence = "static: thunk XAsyncComplete in AsynchronousProgramming: mov rax,[rax+0x50], CFG call"
+
+[[classes.interfaces.slots]]
+index = 11
+function = "XAsyncGetResult"
+evidence = "static: thunk XAsyncGetResult in AsynchronousProgramming: mov rax,[rax+0x58], CFG call"
+
+[[classes.interfaces.slots]]
+index = 12
+function = "XTaskQueueCreate"
+evidence = "static: thunk XTaskQueueCreate in AsynchronousProgramming, GameSaveCombo: mov rax,[rax+0x60], CFG call"
+
+[[classes.interfaces.slots]]
+index = 13
+function = "XTaskQueueCreateComposite"
+evidence = "static: thunk XTaskQueueCreateComposite in AsynchronousProgramming: mov rax,[rax+0x68], CFG call"
+
+[[classes.interfaces.slots]]
+index = 14
+function = "XTaskQueueGetPort"
+evidence = "static: thunk XTaskQueueGetPort in AsynchronousProgramming: mov rax,[rax+0x70], CFG call"
+
+[[classes.interfaces.slots]]
+index = 15
+function = "XTaskQueueDuplicateHandle"
+evidence = "static: thunk XTaskQueueDuplicateHandle in AsynchronousProgramming: mov rax,[rax+0x78], CFG call"
+
+[[classes.interfaces.slots]]
+index = 16
+function = "XTaskQueueDispatch"
+evidence = "static: thunk XTaskQueueDispatch in AsynchronousProgramming, GameSaveCombo: mov rax,[rax+0x80], CFG call"
+
+[[classes.interfaces.slots]]
+index = 17
+function = "XTaskQueueCloseHandle"
+evidence = "static: thunk XTaskQueueCloseHandle in AsynchronousProgramming, GameSaveCombo: mov rax,[rax+0x88], CFG call"
+
+[[classes.interfaces.slots]]
+index = 18
+function = "XTaskQueueSubmitCallback"
+evidence = "static: thunk XTaskQueueSubmitCallback in AsynchronousProgramming: mov rax,[rax+0x90], CFG call"
+
+[[classes.interfaces.slots]]
+index = 19
+function = "XTaskQueueSubmitDelayedCallback"
+evidence = "static: thunk XTaskQueueSubmitDelayedCallback in AsynchronousProgramming: mov rax,[rax+0x98], CFG call"
+
+[[classes.interfaces.slots]]
+index = 20
+function = "XTaskQueueRegisterWaiter"
+evidence = "static: thunk XTaskQueueRegisterWaiter in AsynchronousProgramming: mov rax,[rax+0xa0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 21
+function = "XTaskQueueUnregisterWaiter"
+evidence = "static: thunk XTaskQueueUnregisterWaiter in AsynchronousProgramming: mov rax,[rax+0xa8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 22
+function = "XTaskQueueTerminate"
+evidence = "static: thunk XTaskQueueTerminate in AsynchronousProgramming, GameSaveCombo: mov rax,[rax+0xb0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 23
+function = "XTaskQueueRegisterMonitor"
+evidence = "static: thunk XTaskQueueRegisterMonitor in AsynchronousProgramming: mov rax,[rax+0xb8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 24
+function = "XTaskQueueUnregisterMonitor"
+evidence = "static: thunk XTaskQueueUnregisterMonitor in AsynchronousProgramming: mov rax,[rax+0xc0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 25
+function = "XTaskQueueGetCurrentProcessTaskQueue"
+evidence = "static: thunk XTaskQueueGetCurrentProcessTaskQueue in AsynchronousProgramming: mov rax,[rax+0xc8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 26
+function = "XTaskQueueSetCurrentProcessTaskQueue"
+evidence = "static: thunk XTaskQueueSetCurrentProcessTaskQueue in AsynchronousProgramming: mov rax,[rax+0xd0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 29
+function = "XThreadAssertNotTimeSensitive"
+evidence = "static: thunk XThreadAssertNotTimeSensitive in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0xe8], CFG call"
+impl = "xgr"
+returns = "HRESULT"
+params = "void"
+
+[[classes]]
+name = "XGame"
+clsid = "973a344e-24bf-4d0f-8457-56c534892b29"
+evidence = "GUID loaded by the XGame thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXGameImpl_2549f142"
+iid = "2549f142-6419-4a06-97b5-931aab7c2f34"
+evidence = "thunk XGameGetXboxTitleId loads CLSID (lea rcx) and this IID (lea rdx) (job xgrgate-544d7903)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XGameGetXboxTitleId"
+evidence = "static: thunk XGameGetXboxTitleId in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0x18], CFG call"
+impl = "xgr"
+returns = "HRESULT"
+params = "uint32_t* titleId"
+
+[[classes]]
+name = "XSystem"
+clsid = "e349bd1a-fc20-4e40-b99c-4178cc6b409f"
+evidence = "GUID loaded by the XSystem thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXSystemImpl_1861cf2e"
+iid = "1861cf2e-e18b-4834-a9f5-b4a4e6efb4cf"
+evidence = "thunk XSystemGetXboxLiveSandboxId loads CLSID (lea rcx) and this IID (lea rdx) (job xgrgate-544d7903)"
+
+[[classes.interfaces.slots]]
+index = 4
+function = "XSystemGetXboxLiveSandboxId"
+evidence = "static: thunk XSystemGetXboxLiveSandboxId in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0x20], CFG call"
+
+[[classes]]
+name = "XSystemAnalytics"
+clsid = "b884675d-b738-4a9c-815d-9a9a1e0c6c9b"
+evidence = "GUID loaded by the XSystemAnalytics thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXSystemAnalyticsImpl"
+iid = "b884675d-b738-4a9c-815d-9a9a1e0c6c9b"
+evidence = "thunk XSystemGetAnalyticsInfo loads only this GUID; IID taken to be the same GUID (job xgrgate-544d7903); trace queries confirm it (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XSystemGetAnalyticsInfo"
+evidence = "static: thunk XSystemGetAnalyticsInfo in AsynchronousProgramming, GameSaveCombo, SystemInfo: mov rax,[rax+0x18], CFG call"
+
+[[classes]]
+name = "XGameSave"
+clsid = "704c3f58-e629-4cc2-b197-30511b996fe2"
+evidence = "GUID loaded by the XGameSave thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXGameSaveImpl_1bfff3af"
+iid = "1bfff3af-f14a-40a3-8e35-9ada906593f9"
+evidence = "every XGameSave thunk in GameSaveCombo loads CLSID (lea rcx) and this IID (lea rdx) (job xgrgate-544d7903)"
+
+[[classes.interfaces.slots]]
+index = 4
+function = "XGameSaveInitializeProviderAsync"
+evidence = "static: thunk XGameSaveInitializeProviderAsync in GameSaveCombo: mov rax,[rax+0x20], CFG call"
+
+[[classes.interfaces.slots]]
+index = 5
+function = "XGameSaveInitializeProviderResult"
+evidence = "static: thunk XGameSaveInitializeProviderResult in GameSaveCombo: mov rax,[rax+0x28], CFG call"
+
+[[classes.interfaces.slots]]
+index = 6
+function = "XGameSaveCloseProvider"
+evidence = "static: thunk XGameSaveCloseProvider in GameSaveCombo: mov rax,[rax+0x30], CFG call"
+
+[[classes.interfaces.slots]]
+index = 10
+function = "XGameSaveDeleteContainer"
+evidence = "static: thunk XGameSaveDeleteContainer in GameSaveCombo: mov rax,[rax+0x50], CFG call"
+
+[[classes.interfaces.slots]]
+index = 15
+function = "XGameSaveEnumerateContainerInfoByName"
+evidence = "static: thunk XGameSaveEnumerateContainerInfoByName in GameSaveCombo: mov rax,[rax+0x78], CFG call"
+
+[[classes.interfaces.slots]]
+index = 16
+function = "XGameSaveCreateContainer"
+evidence = "static: thunk XGameSaveCreateContainer in GameSaveCombo: mov rax,[rax+0x80], CFG call"
+
+[[classes.interfaces.slots]]
+index = 17
+function = "XGameSaveCloseContainer"
+evidence = "static: thunk XGameSaveCloseContainer in GameSaveCombo: mov rax,[rax+0x88], CFG call"
+
+[[classes.interfaces.slots]]
+index = 21
+function = "XGameSaveReadBlobDataAsync"
+evidence = "static: thunk XGameSaveReadBlobDataAsync in GameSaveCombo: mov rax,[rax+0xa8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 22
+function = "XGameSaveReadBlobDataResult"
+evidence = "static: thunk XGameSaveReadBlobDataResult in GameSaveCombo: mov rax,[rax+0xb0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 23
+function = "XGameSaveCreateUpdate"
+evidence = "static: thunk XGameSaveCreateUpdate in GameSaveCombo: mov rax,[rax+0xb8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 24
+function = "XGameSaveCloseUpdate"
+evidence = "static: thunk XGameSaveCloseUpdate in GameSaveCombo: mov rax,[rax+0xc0], CFG call"
+
+[[classes.interfaces.slots]]
+index = 25
+function = "XGameSaveSubmitBlobWrite"
+evidence = "static: thunk XGameSaveSubmitBlobWrite in GameSaveCombo: mov rax,[rax+0xc8], CFG call"
+
+[[classes.interfaces.slots]]
+index = 27
+function = "XGameSaveSubmitUpdate"
+evidence = "static: thunk XGameSaveSubmitUpdate in GameSaveCombo: mov rax,[rax+0xd8], CFG call"
+
+[[classes]]
+name = "XUser"
+clsid = "01acd177-91f9-4763-a38e-ccbb55ce32e0"
+evidence = "GUID loaded by the XUser thunks (lea rcx before QueryApiImpl) in our sample builds, job xgrgate-544d7903"
+
+[[classes.interfaces]]
+name = "IXUserImpl"
+iid = "01acd177-91f9-4763-a38e-ccbb55ce32e0"
+evidence = "XUser thunks load only this GUID; IID taken to be the same GUID (job xgrgate-544d7903); trace queries confirm it (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces.slots]]
+index = 4
+function = "XUserCloseHandle"
+evidence = "static: thunk XUserCloseHandle in GameSaveCombo: mov rax,[rax+0x20], CFG call"
+
+[[classes.interfaces.slots]]
+index = 7
+function = "XUserAddAsync"
+evidence = "static: thunk XUserAddAsync in GameSaveCombo: mov rax,[rax+0x38], CFG call"
+
+[[classes.interfaces.slots]]
+index = 8
+function = "XUserAddResult"
+evidence = "static: thunk XUserAddResult in GameSaveCombo: mov rax,[rax+0x40], CFG call"
+
+[[classes.interfaces.slots]]
+index = 16
+function = "XUserGetGamerPictureAsync"
+evidence = "static: thunk XUserGetGamerPictureAsync in GameSaveCombo: mov rax,[rax+0x80], CFG call"
+impl = "xgr"
+returns = "HRESULT"
+params = "XUserHandle user, uint32_t pictureSize, XAsyncBlock* async"
+
+[[classes.interfaces.slots]]
+index = 17
+function = "XUserGetGamerPictureResultSize"
+evidence = "static: thunk XUserGetGamerPictureResultSize in GameSaveCombo: mov rax,[rax+0x88], CFG call"
+impl = "xgr"
+returns = "HRESULT"
+params = "XAsyncBlock* async, size_t* bufferSize"
+
+[[classes.interfaces.slots]]
+index = 18
+function = "XUserGetGamerPictureResult"
+evidence = "static: thunk XUserGetGamerPictureResult in GameSaveCombo: mov rax,[rax+0x90], CFG call"
+impl = "xgr"
+returns = "HRESULT"
+params = "XAsyncBlock* async, size_t bufferSize, void* buffer, size_t* bufferUsed"
+
+[[classes.interfaces]]
+name = "IXUserGamertagImpl"
+iid = "cef4fac0-7676-4a94-a119-4c43f9eb5b74"
+evidence = "thunk XUserGetGamertag loads the XUser CLSID (lea rcx) and this IID (lea rdx); a separate interface with its own slots (job xgrgate-544d7903)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XUserGetGamertag"
+evidence = "static: thunk XUserGetGamertag in GameSaveCombo: mov rax,[rax+0x18], CFG call"
+
+# Queried by the samples' libHttpClient.dll (Microsoft's GDK build, beside the exe); seen in trace runs
+# (job xgrgate-755802ed-r2). Function names from the call order in libHttpClient's MIT source
+# (Source/HTTP/WinHttp/winhttp_provider.cpp: XGameRuntimeIsFeatureAvailable(XNetworking), then
+# XNetworkingQuerySecurityInformationForUrlAsync/ResultSize/Result; winhttp_connection.cpp:
+# XNetworkingVerifyServerCertificate) matched with the traced slots and their arguments.
+
+[[classes]]
+name = "XGameRuntimeFeature"
+clsid = "8836fe87-edb9-4fe3-8dad-05f0d2cd5b40"
+evidence = "trace: QueryApiImpl from libhttpclient.dll in AsynchronousProgramming and GameSaveCombo (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces]]
+name = "IXGameRuntimeFeatureImpl"
+iid = "8836fe87-edb9-4fe3-8dad-05f0d2cd5b40"
+evidence = "trace: queried with IID == CLSID (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces.slots]]
+index = 3
+function = "XGameRuntimeIsFeatureAvailable"
+evidence = "trace: slot 3 called with 0xa (XGameRuntimeFeature::XNetworking) and a bool result (low byte 1) by libhttpclient.dll, then the XNetworking class is queried; libHttpClient winhttp_provider.cpp makes exactly that call first"
+impl = "xgr"
+returns = "bool"
+params = "uint32_t feature"
+
+[[classes]]
+name = "XNetworking"
+clsid = "37e56907-2f10-41e8-b72f-36edb185331a"
+evidence = "trace: QueryApiImpl from libhttpclient.dll after XGameRuntimeIsFeatureAvailable(XNetworking) returned true (job xgrgate-755802ed-r2)"
+
+[[classes.interfaces]]
+name = "IXNetworkingImpl_bf2346b2"
+iid = "bf2346b2-39af-4658-b5ea-44713c7e83b3"
+evidence = "trace: the IID libhttpclient.dll asks for (job xgrgate-755802ed-r2). The gateway reports XNetworking as unavailable, so libHttpClient does not query it; the slots are recorded, not implemented"
+
+[[classes.interfaces.slots]]
+index = 8
+function = "XNetworkingQuerySecurityInformationForUrlAsync"
+evidence = "trace: args (url string, async block on the stack), first of the three calls per request"
+
+[[classes.interfaces.slots]]
+index = 9
+function = "XNetworkingQuerySecurityInformationForUrlAsyncResultSize"
+evidence = "trace: args (the same async block, pointer to a size) after slot 8"
+
+[[classes.interfaces.slots]]
+index = 10
+function = "XNetworkingQuerySecurityInformationForUrlAsyncResult"
+evidence = "trace: args (async block, size 0x18, buffer, ...) after slot 9"
+
+[[classes.interfaces.slots]]
+index = 14
+function = "XNetworkingVerifyServerCertificate"
+evidence = "trace: args (request handle, the security information from slot 10), called per connection"

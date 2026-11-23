@@ -31,6 +31,9 @@
 // Windows would. Each distinct load and resolve is logged once, as
 // "dynamic-load NAME -> shim|loader|failed" and "dynamic-resolve DLL!NAME -> shim|windows-fallback|missing|windows", on
 // stderr and in the run log; tools/shimgen.py --run-log turns those lines into shims.
+// --xgr ours|trace|record (or X2W_XGR) sends xgameruntime.dll to the Gaming Runtime gateway instead
+// (shims\x2w_xgr.dll, src/xgr/xgr_gateway.cpp, mode passed as X2W_XGR_MODE): "dynamic-load
+// xgameruntime.dll -> gateway (MODE)", resolves route "gateway", and nothing falls back to Windows' DLL.
 // Shims are loaded with LOAD_WITH_ALTERED_SEARCH_PATH, so DLLs beside a shim (x2w_gdk.dll) resolve.
 // The program's environment gets X2W_TITLE (its file name without extension) and X2W_TITLE_DIR (its
 // folder) unless they are set; the generated shims use them for save folders and the package path.
@@ -50,6 +53,7 @@
 // ImageBaseAddress name the mapped program, not this launcher (see "Module identity" below). --host-identity
 // leaves them naming the launcher, for comparison.
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <cctype>
 #include <cstdarg>
@@ -78,6 +82,13 @@ MapRunTraced map_run;
 std::vector<std::wstring> shim_dirs;
 std::wstring package_dir;
 std::map<std::string, HMODULE> shim_modules;
+// --xgr MODE (or X2W_XGR): "shim" (default) leaves xgameruntime.dll to the --shims directories and the
+// windows-fallback; "ours", "trace" and "record" route it to the gateway (shims\x2w_xgr.dll,
+// src/xgr/xgr_gateway.cpp) in that mode, with no fallback to Windows' DLL.
+std::string xgr_mode = "shim";
+std::wstring launcher_dir;
+constexpr const char* kXgrName = "xgameruntime.dll";
+constexpr const wchar_t* kXgrGateway = L"x2w_xgr.dll";
 std::map<std::string, void*> package_images;
 std::set<std::string> mapping;  // package DLLs being mapped, to stop import cycles
 
@@ -396,10 +407,17 @@ std::string dll_file_name(const std::wstring& request) {
     return name;
 }
 
-// The shim for a DLL name from a --shims directory, loading it if needed, or null.
+bool xgr_gateway_on() { return xgr_mode != "shim"; }
+
+// The shim for a DLL name from a --shims directory, loading it if needed, or null. With --xgr other
+// than shim, xgameruntime.dll is the gateway: x2w_xgr.dll from a --shims directory, else from the
+// launcher's own shims directory.
 HMODULE shim_for(const std::string& name) {
-    for (const auto& directory : shim_dirs) {
-        const std::wstring path = directory + L"\\" + widen(name);
+    std::vector<std::wstring> directories = shim_dirs;
+    const bool gateway = name == kXgrName && xgr_gateway_on();
+    if (gateway) directories.push_back(launcher_dir + L"\\shims");
+    for (const auto& directory : directories) {
+        const std::wstring path = directory + L"\\" + (gateway ? std::wstring(kXgrGateway) : widen(name));
         if (!is_file(path)) continue;
         AcquireSRWLockExclusive(&dynamic_lock);
         HMODULE& module = shim_modules[name];
@@ -547,10 +565,91 @@ void end_identity() {
     if (host_image_base) InterlockedExchangePointer(peb_image_base(), host_image_base);
 }
 
+// ---------------------------------------------------------------- the program's implicit TLS in slot 0
+// An EXE built with whole-program optimization (/GL + /LTCG, as every Microsoft GDK sample is) reaches its
+// implicit TLS as ThreadLocalStoragePointer[0] + offset without reading _tls_index, since the Windows
+// loader always gives the process EXE index 0 (measured on the stand-in samples: UITK's magic statics do
+// mov rax, gs:[58h]; mov rcx, [rax], and stayed empty under x2w_launch). Here index 0 is the launcher's.
+// pe_map gives the program a carrier DLL's index N whose block the loader fills from the program's
+// template on every thread, so the launcher makes entry 0 of each thread's TLS vector point at that same
+// block: on every thread that exists when the program is mapped, and in its own TLS callback on each new
+// thread's attach; on thread detach it puts its own entry back, so ntdll frees each block once. The
+// launcher keeps no implicit TLS data of its own (no thread_local, and it is built with
+// /Zc:threadSafeInit-, so function-local statics do not use _Init_thread_epoch), so none of its code reads
+// entry 0. The run log gets "tls-slot0 index N threads T".
+DWORD slot0_index = 0;  // the program's carrier index, 0 when the program has no implicit TLS block
+SRWLOCK slot0_lock = SRWLOCK_INIT;
+std::map<DWORD, void*>* slot0_saved;  // thread ID -> the launcher's own entry 0 (allocated once, never freed)
+
+bool slot0_alias(void** vector, DWORD thread) {
+    if (!vector || !vector[slot0_index] || vector[0] == vector[slot0_index]) return false;
+    AcquireSRWLockExclusive(&slot0_lock);
+    (*slot0_saved)[thread] = vector[0];
+    vector[0] = vector[slot0_index];
+    ReleaseSRWLockExclusive(&slot0_lock);
+    return true;
+}
+
+void slot0_restore(void** vector, DWORD thread) {
+    AcquireSRWLockExclusive(&slot0_lock);
+    auto it = slot0_saved->find(thread);
+    if (it != slot0_saved->end()) {
+        if (vector) vector[0] = it->second;
+        slot0_saved->erase(it);
+    }
+    ReleaseSRWLockExclusive(&slot0_lock);
+}
+
+void** current_tls_vector() { return reinterpret_cast<void**>(__readgsqword(0x58)); }
+
+// After mapping: the carrier index pe_map wrote to the program's AddressOfIndex, then every thread.
+void slot0_start(void* base) {
+    const auto* bytes = static_cast<const std::uint8_t*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(bytes + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (!dir.VirtualAddress) return;
+    const auto* tls = reinterpret_cast<const IMAGE_TLS_DIRECTORY64*>(bytes + dir.VirtualAddress);
+    if (tls->StartAddressOfRawData == tls->EndAddressOfRawData && !tls->SizeOfZeroFill) return;
+    const DWORD index = *reinterpret_cast<const DWORD*>(tls->AddressOfIndex);
+    if (!index) return;
+    slot0_saved = new std::map<DWORD, void*>;
+    slot0_index = index;
+    using QueryInfo = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    struct BasicInfo {
+        LONG exit_status;
+        void* teb;
+        void* client[2];
+        ULONG_PTR affinity;
+        LONG priority, base_priority;
+    };
+    const auto query = reinterpret_cast<QueryInfo>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    unsigned threads = slot0_alias(current_tls_vector(), GetCurrentThreadId()) ? 1 : 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE && query) {
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof entry;
+        for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == GetCurrentThreadId()) continue;
+            HANDLE thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+            if (!thread) continue;
+            BasicInfo info{};
+            if (query(thread, 0 /* ThreadBasicInformation */, &info, sizeof info, nullptr) >= 0 && info.teb) {
+                auto** vector = *reinterpret_cast<void***>(static_cast<std::uint8_t*>(info.teb) + 0x58);
+                if (slot0_alias(vector, entry.th32ThreadID)) ++threads;
+            }
+            CloseHandle(thread);
+        }
+    }
+    if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    log_line("tls-slot0 index %lu threads %u", static_cast<unsigned long>(index), threads);
+}
+
 // The Windows DLL of a shim's name (the loader's search path, then System32), loaded by full path so it is
-// not the shim, or null. Cached.
+// not the shim, or null. Cached (a namespace-scope map: the launcher keeps no function-local statics with
+// dynamic initializers, see "The program's implicit TLS in slot 0").
+std::map<std::string, HMODULE> twins;
 HMODULE windows_twin(const std::string& name) {
-    static std::map<std::string, HMODULE> twins;
     AcquireSRWLockExclusive(&dynamic_lock);
     auto it = twins.find(name);
     if (it == twins.end()) {
@@ -589,7 +688,8 @@ HMODULE WINAPI hook_LoadLibraryExW(LPCWSTR request, HANDLE file, DWORD flags) {
     const std::string name = dll_file_name(request);
     if (!(flags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE))) {
         if (HMODULE shim = shim_for(name)) {
-            log_dynamic_once("dynamic-load " + name + " -> shim");
+            log_dynamic_once("dynamic-load " + name + " -> " +
+                             (name == kXgrName && xgr_gateway_on() ? "gateway (" + xgr_mode + ")" : std::string("shim")));
             return shim;
         }
     }
@@ -630,8 +730,9 @@ FARPROC WINAPI hook_GetProcAddress(HMODULE module, LPCSTR name) {
                                           : std::string(name ? name : "(null)");
     const std::string shim = shim_name_of(module);
     FARPROC address = GetProcAddress(module, name);
-    const char* route = address ? "shim" : "missing";
-    if (!shim.empty() && !address) {
+    const bool gateway = shim == kXgrName && xgr_gateway_on();
+    const char* route = address ? (gateway ? "gateway" : "shim") : "missing";
+    if (!shim.empty() && !address && !gateway) {
         // A name the shim lacks comes from Windows' DLL of the same name when there is one (loaded by its
         // System32 path, so it is not the shim): PC GDK's xgameruntime.lib asks for interface entry points
         // (QueryApiImpl, InitializeApiImpl...) that no public document describes and no shim can provide.
@@ -986,6 +1087,10 @@ QueryThread query_thread;
 
 // The launcher's own TLS callback sees every thread that starts in the process while the program runs.
 void NTAPI launch_tls(PVOID, DWORD reason, PVOID) {
+    if (slot0_index) {
+        if (reason == DLL_THREAD_ATTACH) slot0_alias(current_tls_vector(), GetCurrentThreadId());
+        if (reason == DLL_THREAD_DETACH) slot0_restore(current_tls_vector(), GetCurrentThreadId());
+    }
     if (reason != DLL_THREAD_ATTACH || !armed || log_file == INVALID_HANDLE_VALUE) return;
     if (GetCurrentThreadId() == watchdog_id) return;
     void* start = nullptr;
@@ -1039,15 +1144,22 @@ int wmain(int argc, wchar_t** argv) {
             timeout = wcstoul(argv[++i], nullptr, 10);
         } else if (argument == L"--force-cpu-traps") {
             force_cpu_traps = true;
+        } else if (argument == L"--xgr" && i + 1 < argc) {
+            xgr_mode = lower(narrow(argv[++i]));
         } else if (program.empty()) {
             program = argument;
         } else {
             usage = true;
         }
     }
+    if (xgr_mode == "shim") {
+        wchar_t value[16] = {};
+        if (GetEnvironmentVariableW(L"X2W_XGR", value, 16)) xgr_mode = lower(narrow(value));
+    }
+    if (xgr_mode != "shim" && xgr_mode != "ours" && xgr_mode != "trace" && xgr_mode != "record") usage = true;
     if (program.empty() || usage) {
         std::fprintf(stderr, "usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] "
-                     "[--host-identity] program.exe\n");
+                     "[--host-identity] [--xgr shim|ours|trace|record] program.exe\n");
         return 2;
     }
     if (!log_path.empty()) {
@@ -1073,6 +1185,8 @@ int wmain(int argc, wchar_t** argv) {
     AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
+    launcher_dir = directory_of(self);
+    if (xgr_gateway_on()) SetEnvironmentVariableW(L"X2W_XGR_MODE", widen(xgr_mode).c_str());
     HMODULE pe_map = LoadLibraryW((directory_of(self) + L"\\pe_map.dll").c_str());
     if (pe_map) {
         map_image = reinterpret_cast<MapImage>(GetProcAddress(pe_map, "pe_map_image"));
@@ -1090,6 +1204,7 @@ int wmain(int argc, wchar_t** argv) {
     const std::string program_name = lower(narrow(file_of(full)));
     log_line("x2w-run-log 1");
     log_line("program %s", program_name.c_str());
+    if (xgr_gateway_on()) log_line("xgr %s", xgr_mode.c_str());
     {
         std::wstring stem = file_of(full);
         const auto dot = stem.find_last_of(L'.');
@@ -1109,6 +1224,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     regions.insert(regions.begin(),
                    Region{program_name, reinterpret_cast<std::uintptr_t>(base), image_size(base), full});
+    slot0_start(base);
     unsigned missing_stubs = 0;
     for (const Stub* stub : stubs) missing_stubs += stub->missing;
     log_line("mapped size 0x%llx", static_cast<unsigned long long>(regions[0].size));
@@ -1134,6 +1250,7 @@ int wmain(int argc, wchar_t** argv) {
     start_identity(base);
     const int ran = map_run(base, &exit_code, log_file != INVALID_HANDLE_VALUE ? observe_run : nullptr);
     end_identity();
+    if (slot0_index) slot0_restore(current_tls_vector(), GetCurrentThreadId());
     if (!ran) {
         std::fprintf(stderr, "[x2w] %ls has no runnable entry point\n", full);
         log_line("error no runnable entry point");

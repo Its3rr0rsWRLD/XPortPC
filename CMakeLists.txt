@@ -3039,6 +3039,8 @@ endif()
 if(TARGET pe_map AND TARGET xmem_shim)
     add_executable(x2w_launch tools/x2w_launch.cpp)
     target_compile_features(x2w_launch PRIVATE cxx_std_17)
+    # No implicit TLS of its own: x2w_launch hands TLS slot 0 to the program (tools/x2w_launch.cpp, "slot 0").
+    target_compile_options(x2w_launch PRIVATE /Zc:threadSafeInit-)
     add_dependencies(x2w_launch pe_map)
     set(x2w_missing_lib "${CMAKE_CURRENT_BINARY_DIR}/x2w_missing.lib")
     add_custom_command(OUTPUT "${x2w_missing_lib}"
@@ -3146,3 +3148,5 @@ endif()
 
 # System-library shims: x2w_gdk.dll and the DLLs tools/shimgen.py generates (cmake/x2w_shimgen.cmake).
 include(cmake/x2w_shimgen.cmake)
+# The xgameruntime.dll gateway for PC GDK titles (cmake/x2w_xgr.cmake).
+include(cmake/x2w_xgr.cmake)

@@ -1,0 +1,11 @@
+; x2w_xgr.dll: the xgameruntime.dll gateway (src/xgr/xgr_gateway.cpp). The six names are what PC GDK
+; titles' xgameruntime.lib resolves; x2w_xgr_gateway marks the DLL as ours.
+LIBRARY x2w_xgr
+EXPORTS
+    InitializeApiImpl
+    InitializeApiImplEx
+    InitializeApiImplEx2
+    UninitializeApiImpl
+    QueryApiImpl
+    XErrorReport
+    x2w_xgr_gateway
