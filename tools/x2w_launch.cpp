@@ -1,7 +1,7 @@
 // x2w_launch: map an EXE with pe_map and route each import to a shim, a packaged DLL, Windows or a stub.
 //
 // Usage: x2w_launch [--shims DIR]... [--log FILE] [--timeout SECONDS] [--force-cpu-traps] [--host-identity]
-//        program.exe
+//                   program.exe
 //
 // Imports resolve in this order:
 //   1. DIR\<dll> from a --shims directory, loaded with LoadLibrary (a desktop shim for a console library);

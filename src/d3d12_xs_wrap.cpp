@@ -308,7 +308,13 @@ public:
         if (args_) args_->clear();
         install();
     }
-    ~List() { delete args_; }
+    ~List()
+    {
+        pipeline::release_blocks(device_views(device_), blocks_);
+        delete args_;
+        delete compute_.args;
+    }
+    pipeline::BlockUse* blocks() { return &blocks_; }
     static bool implements(REFIID riid)
     {
         return is_d3d12_child_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12CommandList)) ||
@@ -323,8 +329,13 @@ public:
         heaps_ = {};
         ours_bound_ = false;
         if (args_) args_->clear();
+        compute_.reset();
     }
-    void set_pipeline(ID3D12PipelineState* state) { translated_ = pipeline::pso_info(state, &pso_); }
+    void set_pipeline(ID3D12PipelineState* state)
+    {
+        translated_ = pipeline::pso_info(state, &pso_);
+        compute_.translated = pipeline::compute_pso_info(state, &compute_.pso);
+    }
     void record_address(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address)
     {
         if (args_ && index < pipeline::max_title_params) args_->address[index] = address;
@@ -348,7 +359,7 @@ public:
             return false;
         }
         return pipeline::bind_for_draw(device_views(device_), real_, root_, pso_, *args_, heaps_,
-                                       {base_vertex, start_instance}, &ours_bound_);
+                                       {base_vertex, start_instance}, &ours_bound_, &blocks_);
     }
 
     X2W_D3D12_OBJECT_METHODS
@@ -366,6 +377,8 @@ public:
     HRESULT STDMETHODCALLTYPE Reset(ID3D12CommandAllocator* allocator, ID3D12PipelineState* state) override
     {
         X2W_USE();
+        // A new recording: the blocks the previous one read are protected by its submissions' stamps only.
+        pipeline::release_blocks(device_views(device_), blocks_);
         reset_state(state);
         return real_->Reset(unwrap(allocator), state);
     }
@@ -395,7 +408,7 @@ public:
     void STDMETHODCALLTYPE Dispatch(UINT x, UINT y, UINT z) override
     {
         X2W_USE();
-        real_->Dispatch(x, y, z);
+        if (compute_.bind(device_views(device_), real_, heaps_, &ours_bound_, &blocks_)) real_->Dispatch(x, y, z);
     }
     void STDMETHODCALLTYPE CopyBufferRegion(ID3D12Resource* dst, UINT64 dst_offset, ID3D12Resource* src,
                                             UINT64 src_offset, UINT64 bytes) override
@@ -492,6 +505,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRootSignature(ID3D12RootSignature* root) override
     {
         X2W_USE();
+        compute_.set_root(root);
         real_->SetComputeRootSignature(root);
     }
     void STDMETHODCALLTYPE SetGraphicsRootSignature(ID3D12RootSignature* root) override
@@ -531,6 +545,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT index, UINT data, UINT offset) override
     {
         X2W_USE();
+        compute_.record_constants(index, 1, &data, offset);
         real_->SetComputeRoot32BitConstant(index, data, offset);
     }
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstant(UINT index, UINT data, UINT offset) override
@@ -542,6 +557,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRoot32BitConstants(UINT index, UINT count, const void* data, UINT offset) override
     {
         X2W_USE();
+        if (data) compute_.record_constants(index, count, data, offset);
         real_->SetComputeRoot32BitConstants(index, count, data, offset);
     }
     void STDMETHODCALLTYPE SetGraphicsRoot32BitConstants(UINT index, UINT count, const void* data, UINT offset) override
@@ -556,6 +572,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
+        compute_.record_address(index, address);
         real_->SetComputeRootConstantBufferView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootConstantBufferView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
@@ -567,6 +584,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
+        compute_.record_address(index, address);
         real_->SetComputeRootShaderResourceView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootShaderResourceView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
@@ -578,6 +596,7 @@ public:
     void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
     {
         X2W_USE();
+        compute_.record_address(index, address);
         real_->SetComputeRootUnorderedAccessView(index, pipeline::translate_address(address, 4));
     }
     void STDMETHODCALLTYPE SetGraphicsRootUnorderedAccessView(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address) override
@@ -714,6 +733,52 @@ private:
     bool translated_ = false;
     bool ours_bound_ = false;
     pipeline::BoundHeaps heaps_;
+    pipeline::BlockUse blocks_;  // the shim heap blocks this recording reads (R5 recycling)
+    // Compute state (runtime rung R5): the compute root signature and arguments are separate from the graphics
+    // ones in D3D12; the pipeline and the descriptor heaps are shared.
+    struct ComputeState {
+        pipeline::RootArgs* args = new (std::nothrow) pipeline::RootArgs();
+        pipeline::RootInfo root{};
+        pipeline::PsoInfo pso{};
+        bool has_root = false;
+        bool translated = false;
+        void reset()
+        {
+            has_root = false;
+            if (args) args->clear();
+        }
+        void set_root(ID3D12RootSignature* signature)
+        {
+            has_root = pipeline::root_info(signature, &root);
+            if (args) args->clear();
+        }
+        void record_address(UINT index, D3D12_GPU_VIRTUAL_ADDRESS address)
+        {
+            if (args && index < pipeline::max_title_params) args->address[index] = address;
+        }
+        void record_constants(UINT index, UINT count, const void* data, UINT offset)
+        {
+            if (!args || index >= pipeline::max_title_params || offset >= 64 || count > 64 - offset) return;
+            std::memcpy(&args->constants[index][offset], data, count * 4);
+        }
+        // Before a dispatch: the converter parameters of a translated pipeline. False skips it (logged).
+        bool bind(pipeline::TitleViews* views, ID3D12GraphicsCommandList* list, const pipeline::BoundHeaps& heaps,
+                  bool* ours_bound, pipeline::BlockUse* use)
+        {
+            if (!translated) {
+                if (has_root) pipeline::set_compute_placeholders(list, root);
+                return true;
+            }
+            if (!has_root || !args) {
+                log_refused("d3d12_xs!ID3D12GraphicsCommandList::Dispatch",
+                            "dispatch skipped: a translated pipeline dispatched without a compute root signature "
+                            "created through the shim",
+                            true);
+                return false;
+            }
+            return pipeline::bind_for_dispatch(views, list, root, pso, *args, heaps, ours_bound, use);
+        }
+    } compute_;
 };
 
 class Queue final : public Wrapper<Queue, ID3D12CommandQueue, Kind::queue>, DeviceRef {
@@ -753,6 +818,15 @@ public:
             return;
         }
         real_->ExecuteCommandLists(count, desktop.data());
+        // Stamp the shim heap blocks the lists read with a fence the shim signals after them on this queue.
+        std::vector<pipeline::BlockUse*> uses;
+        for (UINT i = 0; i < count; ++i) {
+            Kind kind;
+            if (lists[i] && wrapper_kind(lists[i], &kind) && kind == Kind::list)
+                uses.push_back(static_cast<List*>(lists[i])->blocks());
+        }
+        if (!uses.empty())
+            pipeline::submitted_blocks(device_views(device_), real_, uses.data(), static_cast<unsigned>(uses.size()));
     }
     void STDMETHODCALLTYPE SetMarker(UINT metadata, const void* data, UINT size) override
     {
@@ -1449,6 +1523,7 @@ HRESULT wrap_device(ID3D12Device* real, REFIID riid, void** out, const void* cal
     }
     count_device();
     device->attach_title_gpu();
+    pipeline::prestart_translator();
     const HRESULT hr = device->query(riid, out, caller);
     device->Release();
     return hr;

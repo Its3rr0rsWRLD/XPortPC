@@ -232,19 +232,6 @@ cmake --build --preset dev --target x2w_launch x2w_shims x2w_rung1_title
 ctest --preset dev --no-tests=error -R '^native_(launch_fake_title|report_synthetic|report_rung1|run_log_rung1)$' -V
 ```
 
-## Zen 2 instructions the host lacks
-
-Scarlett titles are x64 code for Zen 2 and run natively under `x2w_launch`. A vectored handler ([`tools/x2w_cpu_trap.h`](../tools/x2w_cpu_trap.h)) catches `STATUS_ILLEGAL_INSTRUCTION` in the program's mapped images and performs SHA-NI (`sha1rnds4`, `sha1nexte`, `sha1msg1`, `sha1msg2`, `sha256rnds2`, `sha256msg1`, `sha256msg2`), CLZERO, RDPID (TSC_AUX through RDTSCP), MONITORX and MWAITX (no wait), SSE4a (`extrq`, `insertq`, `movntsd`, `movntss`), RDPRU (MPERF and APERF both read the TSC; other registers return 0 with CF clear) and CLWB (as CLFLUSH) on the CONTEXT, then resumes after the instruction. The decoder handles the legacy prefixes, REX, ModRM, SIB, disp8/disp32, RIP-relative operands and a GS override. Any other #UD is logged as `cpu-unhandled MNEMONIC at module+RVA` (a mnemonic or family such as `ud2`, `avx-256`, `pdep`, `fma3`, never bytes) and crashes as before. The run log gains `cpu-host-missing emulated=... unhandled=... silent=...` (CPUID against the Zen 2 user-mode set; `silent` is LZCNT, which an older CPU runs as BSR), one `cpu-trap first` line per instruction and a `cpu-traps` count line before each summary, because each trap is an exception round trip and a hot loop of them is slow.
-
-`native_cpu_traps` runs a CRT-free program ([`tests/native/cpu_trap_title.cpp`](../tests/native/cpu_trap_title.cpp), [`cpu_trap_ops.asm`](../tests/native/cpu_trap_ops.asm)) four times. It computes SHA-1 and SHA-256 of the FIPS 180 examples with the SHA-NI instructions and checks them against a scalar implementation and the published digests, compares random vectors per instruction with references built from the FIPS round functions and the APM's bit-field definitions (bit by bit), and checks the effects of the rest. `--force-cpu-traps` overwrites the 30 sites the program exports with UD2 and keeps their bytes in a side table, so the handler runs every instruction on any CPU and the trap counts must equal the program's own counts. The wrong-reference control must fail all 33 cases; the UD2 control must log `cpu-unhandled ud2` and crash at the same RVA.
-
-On the i7-9700F (Coffee Lake) the host lacks `clwb,sha,rdpid,sse4a,mwaitx,clzero,rdpru` and nothing else of the Zen 2 set. All 17 instructions fault natively there (CLWB and MOVNTSS are not run as XSAVEOPT or MOVNTPS), so the natural run trapped 513 of 513 instructions and all 33 cases passed in both runs.
-
-```powershell
-ctest --preset dev --no-tests=error -R '^native_(cpu_traps|run_log_rung1)$' -V
-
-```
-
 ## Implicit TLS data and module identity under x2w_launch
 
 **Implicit TLS.** Title code reaches `__declspec(thread)` and `thread_local` data as `ThreadLocalStoragePointer[_tls_index] + offset`, with the array at TEB+0x58 (`gs:[0x58]`). The array, the index allocator and every thread's block belong to ntdll, which grows all threads' arrays when a later `LoadLibrary` needs another index and copies only the entries it allocated, so a slot that `pe_map` invented would be lost or reused. `pe_map_image` therefore lets ntdll do the work: for an image whose template or zero fill is non-empty it writes a small carrier DLL to `%TEMP%\x2w-pe-map-tls\` (one code byte sequence as its entry point, one kernel32 import, a TLS directory whose template is a copy of the image's template after base relocations, with the image's `SizeOfZeroFill` and `Characteristics`), loads it with `LoadLibraryW` and writes the carrier's index into the image's `AddressOfIndex`. ntdll then fills the block on every existing thread and on every later thread before `DLL_THREAD_ATTACH`, frees it at thread exit and keeps it across later TLS loads. Before attaching the image, `pe_map` checks that the index was written and that this thread's block holds the template; `pe_map_release` frees the carrier and deletes its file. A process that ends without releasing leaves the file; carriers older than ten minutes are deleted at the next carrier creation (a loaded one cannot be).
@@ -268,6 +255,18 @@ Measured on Windows 11 build 26300 with MSVC 14.51: all three tests, the changed
 ```powershell
 cmake --build --preset dev --target x2w_launch pe_map x2w_tls_title x2w_tls_crt_title x2w_identity_title cpu_tls_value cpu_tls_original cpu_tls_sink
 ctest --preset dev --no-tests=error -R '^native_launch_(tls|tls_crt|identity)$|^cpu_native_tls(_value)?$' -V
+```
+
+## Zen 2 instructions the host lacks
+
+Scarlett titles are x64 code for Zen 2 and run natively under `x2w_launch`. A vectored handler ([`tools/x2w_cpu_trap.h`](../tools/x2w_cpu_trap.h)) catches `STATUS_ILLEGAL_INSTRUCTION` in the program's mapped images and performs SHA-NI (`sha1rnds4`, `sha1nexte`, `sha1msg1`, `sha1msg2`, `sha256rnds2`, `sha256msg1`, `sha256msg2`), CLZERO, RDPID (TSC_AUX through RDTSCP), MONITORX and MWAITX (no wait), SSE4a (`extrq`, `insertq`, `movntsd`, `movntss`), RDPRU (MPERF and APERF both read the TSC; other registers return 0 with CF clear) and CLWB (as CLFLUSH) on the CONTEXT, then resumes after the instruction. The decoder handles the legacy prefixes, REX, ModRM, SIB, disp8/disp32, RIP-relative operands and a GS override. Any other #UD is logged as `cpu-unhandled MNEMONIC at module+RVA` (a mnemonic or family such as `ud2`, `avx-256`, `pdep`, `fma3`, never bytes) and crashes as before. The run log gains `cpu-host-missing emulated=... unhandled=... silent=...` (CPUID against the Zen 2 user-mode set; `silent` is LZCNT, which an older CPU runs as BSR), one `cpu-trap first` line per instruction and a `cpu-traps` count line before each summary, because each trap is an exception round trip and a hot loop of them is slow.
+
+`native_cpu_traps` runs a CRT-free program ([`tests/native/cpu_trap_title.cpp`](../tests/native/cpu_trap_title.cpp), [`cpu_trap_ops.asm`](../tests/native/cpu_trap_ops.asm)) four times. It computes SHA-1 and SHA-256 of the FIPS 180 examples with the SHA-NI instructions and checks them against a scalar implementation and the published digests, compares random vectors per instruction with references built from the FIPS round functions and the APM's bit-field definitions (bit by bit), and checks the effects of the rest. `--force-cpu-traps` overwrites the 30 sites the program exports with UD2 and keeps their bytes in a side table, so the handler runs every instruction on any CPU and the trap counts must equal the program's own counts. The wrong-reference control must fail all 33 cases; the UD2 control must log `cpu-unhandled ud2` and crash at the same RVA.
+
+On the i7-9700F (Coffee Lake) the host lacks `clwb,sha,rdpid,sse4a,mwaitx,clzero,rdpru` and nothing else of the Zen 2 set. All 17 instructions fault natively there (CLWB and MOVNTSS are not run as XSAVEOPT or MOVNTPS), so the natural run trapped 513 of 513 instructions and all 33 cases passed in both runs.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^native_(cpu_traps|run_log_rung1)$' -V
 ```
 
 ## Pipeline readiness from shader manifests
@@ -2829,6 +2828,31 @@ PC results at the R3 tip (RTX 4070 Ti and WARP): all R2 and R3 cases, the `d3d12
 | WARP | 788.5 ms | 13.6, 13.3, 13.1 ms |
 | RTX 4070 Ti | 779.0 ms | 10.9, 10.7, 10.8 ms |
 
+#### Translator service and ahead-of-time cache (runtime rung R3)
+
+Pipeline-time translation now avoids one Python and one `dxc.exe` start per shader ([runtime.md](design/runtime.md), section 3, "Performance, honestly").
+
+- **Service.** `tools/pso_service.py` keeps the converter imported and DXC's library loaded (`pso_translate.DxcLibrary`: `IDxcCompiler3` from the `dxcompiler.dll` beside `X2W_DXC`, with `dxil.dll` from the same directory loaded first, compiling with exactly the arguments `dxc.exe` gets). `src/d3d12_xs_translator.cpp` runs a pool of them: framed requests on each service's stdin/stdout, one shim thread per service on a shared queue, the first service started at device creation (when `X2W_TOOLS\pso_service.py` exists), more started while requests wait, at most `min(cores - 1, 8)` (`X2W_TRANSLATOR_SERVICES` overrides; 0 disables). Services inherit only their pipes and are in a kill-on-close job object. Python's bytecode is cached in `<cache root>\pycache` (`-X pycache_prefix`), never in the converter's directory. A pipeline submits its missing shaders together; as before, a shader after the first refusal is not stored. With no service, or a service failing mid-request, the shim logs one note and uses the per-process path (`tools/pso_translate.py`), which `X2W_TRANSLATE=process` also forces. `X2W_KEEP_HLSL=1` keeps `<key>.hlsl` beside the DXIL on every path.
+- **Ahead of time.** The shim records each console shader it sees once: `manifest.txt` (`<input id> <stage>`), `inputs\<id>.code` and `.roles.json`, and `translator.json` (tools, DXC, LLVM, fingerprint), all in the title's cache directory (`tools/pso_cache.py`). The input id is the key's hash without the fingerprint, so it survives converter updates. `tools/precompile_cache.py <title>` recomputes every key with the current fingerprint (`pso_cache.fingerprint` reproduces the shim's) and translates the missing ones on one process per core. `X2W_TRANSLATE=defer` records shaders and fails their pipelines without translating.
+- **Identity.** Keys and the cache format are unchanged. For every shader below, all paths give the same status and byte-identical DXIL, HLSL and R4 `.bind` sidecar (the service returns the sidecar text, and the shim and `precompile_cache.py` store it before the DXIL). `runtime_r3_translator_paths_warp` runs its comparison on `r4_scene` too, whose shaders read descriptor tables, and on `r5_frames`, whose compute shader (stage 2; its workgroup size, wave and local-id count from the container's `X2WShaderComputeInfo` are in the roles text, so in the key and the recorded inputs) goes through the same service, fallback and precompile paths.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_r3_translator_paths_warp` | `tests/runtime/xl_check.py shim`: `r3_triangle warp` cold with `X2W_TRANSLATE=process`, then cold, warm and cold again with the service, cold with `X2W_TRANSLATOR_SERVICES=0` (fallback note required), and with `X2W_TRANSLATE=defer` (pipeline refused, nothing translated) followed by `precompile_cache.py` (2 translated) and a warm run (2 cached). Every path's `.dxil` and `.hlsl` files must equal the process path's. The manifest has 2 entries, input ids and recomputed keys match the cache file names, and `pso_cache.fingerprint` equals the shim's. |
+| `runtime_r3_translator_bench` | `tests/runtime/xl_bench.py run`: the 2 R3 programs and 200 distinct pixel programs (`xl_batch.json`, from the pixel_aot draw families' controls with descriptor loads and samples rewritten to register moves so the runtime's bindings suffice; given as instruction text because `gfx_text.py` decodes only the R3 mnemonics) through `pso_translate.py` per process, one service, a pool of services, and `precompile_cache.precompile`. Requires identical status, DXIL and HLSL everywhere, DXC's library in the services, and a faster service than process path. |
+
+PC results (RTX 4070 Ti PC, i7-9700F, 8 cores; `xl_bench.py`, 7 services or processes):
+
+| Path | Start-up | R3 ms/shader | Batch ms/shader | Batch shaders/s |
+|---|---|---|---|---|
+| Process per shader (before) | per shader | 414.8 | 297.1 | 3.4 |
+| One service, serial | 0.68 s first start (bytecode written), 0.21 s later (0.34 s with `-B`) | 23.9 | 8.7 | 114.9 |
+| Pool of 7 services (start-up included) | | | 4.0 (202 in 0.81 s) | 250 |
+| `precompile_cache` on 7 processes (start-up included) | | | 6.6 (202 in 1.34 s) | 151 |
+
+`r3_triangle` `pso_create_ms` for its one pipeline (2 shaders, cold): before, 788 ms WARP and 779 ms RTX 4070 Ti. With the service and its bytecode cached (every launch after the first): 292 ms WARP and 258 ms RTX 4070 Ti, i.e. about 0.13-0.15 s per shader, nearly all the service's start-up (0.21-0.24 s), which the short gap after device creation in this test does not hide. On a service's very first start (bytecode not yet cached) 914-1074 ms. Warm: 14-16 ms, also after `precompile_cache`. The R3 programs are the first a fresh service translates, so their 24-30 ms includes the converter's first-call costs; the batch's 8.7-9.7 ms is the steady state.
+
+
 The warm time includes the once-per-process converter fingerprint (a directory walk of `tools/`) and the desktop pipeline compile. The cold time is about 0.39 s per shader, almost all of it Python start-up and DXC. That is acceptable for R3-R5 test programs. It is not acceptable for titles, which is the case for the ahead-of-time pass in runtime.md, section 3.
 
 #### Title descriptor heaps, textures, constants and depth (runtime rung R4)
@@ -2854,7 +2878,44 @@ The warm time includes the once-per-process converter fingerprint (a directory w
 
 PC results at the R4 tip (RTX 4070 Ti and WARP): all R2, R3 and R4 cases, the `d3d12_xs_shim_*` cases and `pixel_aot_controls`/`vertex_aot_controls` pass (30 of 30).
 
-Not covered yet: textures from console tiled bytes (the console's texture upload path is not public; the scene uploads rows through `CopyTextureRegion`), descriptor words written to title memory, recycled descriptor blocks, compute.
+Not covered yet: textures from console tiled bytes (the console's texture upload path is not public; the scene uploads rows through `CopyTextureRegion`), descriptor words written to title memory (descriptor-block recycling and compute came with R5).
+
+#### Compute and a frame loop (runtime rung R5)
+
+`d3d12_xs.dll` translates console compute shaders in `CreateComputePipelineState` and runs them on any queue type ([runtime.md](design/runtime.md), section 6; `src/d3d12_xs_pipeline.h`).
+
+- **Container.** `X2W_SHADER_STAGE_COMPUTE`. The header's last word, formerly `reserved`, is now `stage_info_offset`: for compute it points at an `X2WShaderComputeInfo` record (workgroup size, wave size 32 or 64, local-id VGPR count); the other stages keep it 0. Bindings: root words, which become push words in binding order (the program reads them as inline user data, `compute_aot` role `user:N`), and `X2W_SHADER_BINDING_GROUP_ID` (value 16) for a workgroup id component. A descriptor-table binding is refused, and so is a translation that reads a table (compute tables in title heaps stay refused, as in R4).
+- **Translation.** `tools/pso_translate.py --stage compute` lowers with `compute_aot.lower_compute`, drops its offline `[RootSignature]`, moves its 64 constant words onto the 32 push words (`b3 space1000`), refusing a read of a word past them or at a run-time index, and compiles with `-Gis -T cs_6_0`. Title memory is `RWByteAddressBuffer title_memory[8]` at `u0..u7 space1001`. The key covers the role map, which includes the workgroup and wave size.
+- **Root signatures.** The title-memory table is R4's SRVs and miss counter followed by 8 raw UAVs over the same ranges (17 descriptors per view block). It costs no root DWORD.
+- **Dispatch.** Lists record compute root arguments apart from graphics ones. Before a `Dispatch` of a translated pipeline, `bind_for_dispatch` sets the push words, ranges, title-memory table and the placeholders of descriptor-table parameters through the compute root arguments. Compute queues, allocators, lists and cross-queue `Wait`/`Signal` were already pass-throughs of the R2 wrappers.
+- **Block recycling.** The shim's shader-visible blocks (256 title-memory views, 4096 texture tables, 512 sampler tables) used to be handed out once. Now a list holds every block its draws and dispatches read until it is reset or destroyed. Each `ExecuteCommandLists` stamps those blocks with the next value of a per-queue fence that the shim signals right after the lists (up to 16 queues; more are logged and never recycled). A block is rewritten only when no list holds it and all its stamps have completed. Texture and sampler blocks drop their old key when reused. The ranges of every view block live in one persistently mapped upload buffer with a 256-byte slice per block, replacing one 64 KiB committed buffer per view.
+- **gfx_text.py** verifies `buffer_load_dwordx4`, `buffer_store_dwordx2`, `buffer_store_dwordx4`, `ds_bpermute_b32`, `s_barrier` (printed without its zero immediate), `s_lshl_b32`, `v_subrev_f32`.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_r5_programs` | `tests/runtime/r5_programs_check.py check`. `r5_programs.h` decodes to `r5_cs.s`/`r5_refused_cs.s` line for line. `r5_cs` translates under the shim's role map and declares only `b1`, `b3`, `t2`, `u0` (space 1000) and `u0` (space 1001), with `[numthreads(4, 1, 1)]` and no root signature. `r5_refused_cs` (a `ds_bpermute_b32`) is refused with "a cross-lane permutation is refused". A contract without a workgroup size and a read past the push words are refused. The committed bytes were assembled with llvm-mc 18 (the R3 programs with 15); given llvm-mc, bytes and text are compared for the programs and 15 forms. |
+| `runtime_r5_frames_cold_warp`, `_hardware` | `tests/runtime/r5_frames.cpp`. Title memory holds 8 colours at 256-byte steps, 8 particle states (cx, cy, vx, vy) and 8 x 128 bytes of vertices. Each of 600 frames records a compute list: root UAVs with the title addresses of states and vertices, a root constant with the half-size, `Dispatch(2, 1, 1)`. `r5_cs.s` builds raw V#s around the addresses, adds the velocity, stores the state and writes the six corners of the particle's quad. That list runs on a `COMPUTE` queue, which first waits for the previous frame's graphics fence, and then signals its own fence. The direct queue waits for that fence, clears a 256x256 back buffer, draws each particle with the R3 programs (root SRV = its 6 vertices, root CBV = its colour) and presents with two frames in flight. Frames 0, 1, 149, 299, 449 and 599 are read back and must equal the CPU reference bit for bit. In the reference, every edge sits at an odd multiple of 1/32 pixel and every velocity is even, so no pixel centre lies on an edge in any of the 601 states and all values are exact in binary32. After the loop, the CPU reads the states and vertices through the alias and they must equal the reference's words. Also required: 3 shaders translated, no shader loaded during the loop, no refusal, no TitleLookup miss, no debug-layer error, handle growth <= 16 and private-byte growth < 8 MB between frames 100 and 599, every wrapper released. |
+| `runtime_r5_frames_warm_*` | After cold: the same run with 3 shaders from the cache and none translated. |
+| `runtime_r5_wrong_reference_*` | Control: the reference is 16 compute steps stale, which is what a missing cross-queue wait could show. Passes only when the read-back frames differ in exactly the pixels where the two references differ (48, 48, 614, 606, 601 and 576 pixels on both adapters). |
+| `runtime_r5_view_churn_*` | As warm. Each frame also allocates 64 KiB of graphics title memory and frees the allocation made three frames earlier, so the title-memory view changes 600 times on one device (more than the 256 view blocks). It passes only if blocks are recycled: no draw or dispatch is refused, and frames and memory match. |
+| `runtime_r5_refused_warp` | `r5_refused_cs` fails `CreateComputePipelineState` with `E_NOTIMPL`, and so do a vertex container in the compute slot and a compute container in the vertex slot. There are three REFUSED events, one naming the cross-lane permutation, and no shader is translated. |
+
+PC results at r5 tip `45a9d4a0` (RTX 4070 Ti and WARP): all R2, R3, R4 and R5 cases, the `d3d12_xs_shim_*` cases and `compute_aot_controls` pass (39 of 39).
+
+Frame time, from a diagnostic run of the same code (`r5_frames`, debug layer on, `Present(0, 0)` to a flip-discard swap chain, two frames in flight, 8 draws and one dispatch per frame). The time is the interval between successive Present returns, over frames 1 to 599; the first frame is not counted. These numbers are published, not gated:
+
+| Adapter | Run | avg ms | p50 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| WARP | cold | 3.15 | 1.07 | 34.5 | 317 |
+| WARP | warm (3 runs) | 1.55, 2.38, 1.72 | 0.83, 0.86, 0.89 | 5.2, 19.9, 6.0 | 270, 277, 267 |
+| WARP | view churn | 2.10 | 1.48 | 6.2 | 214 |
+| RTX 4070 Ti | cold | 1.00 | 0.83 | 3.6 | 4.4 |
+| RTX 4070 Ti | warm (3 runs) | 1.24, 1.45, 0.92 | 1.03, 0.93, 0.78 | 4.5, 8.9, 3.1 | 5.9, 30.9, 3.8 |
+| RTX 4070 Ti | view churn | 1.79 | 1.69 | 3.7 | 5.5 |
+
+Pipeline creation: cold 0.60 s for compute and 1.0 to 1.9 s for vertex + pixel; warm 15 to 31 ms for compute and 2 to 10 ms for graphics. WARP's maximum (about 0.2 to 0.3 s, one frame per run) and its heavier p99 tail are single stalls of the software rasterizer. Churn costs about 0.6 to 0.8 ms per frame on top of warm: an `XMemAlloc` (`OpenExistingHeapFromAddress` plus a placed buffer), a free and new view descriptors every frame.
+
+Not covered yet: compute descriptor tables in title heaps, LDS and barriers in the runtime path (C-6), global stores (C-5). The converter parameters still take 46 of 64 root DWORDs, 32 of them push words; a per-draw upload ring for push words would free most of that.
 
 ### Attribute words at xmem call sites
 

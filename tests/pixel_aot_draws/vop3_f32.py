@@ -178,7 +178,7 @@ def controls(directory):
     # Refused neighbours: omod on an e32 spelling or on a rounding form (the arithmetic forms take it: family omod_arith), an unknown omod, omod
     # before clamp, an e32 spelling of a VOP3-only form, a missing operand and omod on a move.
     for line in ("v_rcp_f32_e32 v12, s44 mul:2", "v_exp_f32_e64 v12, s44 mul:3", "v_exp_f32_e64 v12, s44 div:4",
-                 "v_exp_f32_e64 v12, s44 div:2 clamp", "v_floor_f32_e64 v12, s44 mul:2",
+                 "v_exp_f32_e64 v12, s44 div:2 clamp", "v_fract_f32_e64 v12, s44 mul:2",
                  "v_min3_f32_e32 v12, s44, s45, s46",
                  "v_med3_f32 v12, s44, s45", "v_max3_f32 v12, s44, s45, s46, s47",
                  "v_mov_b32_e64 v12, s44 mul:2", "v_rndne_f32_e32 v12, s44, s45"):
