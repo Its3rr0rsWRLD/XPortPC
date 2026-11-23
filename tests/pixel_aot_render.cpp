@@ -78,9 +78,10 @@ struct PixelInput {
     std::vector<BYTE> rows;
     std::vector<Color> expected;
     std::vector<BYTE> secondRows;
-    std::vector<Word> constants = std::vector<Word>(64);
+    std::vector<Word> constants = std::vector<Word>(64);  // params (b0); more words with an 'X2WK' record for slot 0
     // The 'X2WB' bindings section (tests/pixel_aot_draws/bindings.py): textures 2..7 (t3..t8, the rows of each in the
-    // format and extent of the first) and constant buffers params1..params3 (b2..b4, 64 words each).
+    // format and extent of the first) and constant buffers params1..params3 (b2..b4, 64 words each, or the words of
+    // an 'X2WK' constant window record).
     std::vector<std::vector<BYTE>> moreRows;
     std::vector<std::vector<Word>> moreConstants;
     std::vector<ShapedTexture> shaped;  // the 'X2WD' section
@@ -1030,6 +1031,36 @@ static void check_pixel(ID3D12Device* device, const char* path, bool swapRB, con
                 std::vector<Word> words(64);
                 std::memcpy(words.data(), bytes.data() + at, bufferBytes);
                 input.moreConstants.push_back(std::move(words));
+            }
+        }
+        // The optional 'X2WK' section of constant windows (tests/pixel_aot_draws/pxcb.py, PixelBindings.constant_sizes),
+        // after the bindings section: magic, a buffer count N (1..4) and two zero words, then N records of a slot (0..3,
+        // params and params1..params3), a word count W (64 to 16384, a multiple of 4) and W words. A record replaces
+        // that slot's buffer (the fixed case's 64 words for slot 0, the bindings section's or zeros for the others).
+        if (bytes.size() - at >= 4 && readWord(bytes.data() + at) == 0x4b573258u) {
+            if (bytes.size() - at < 16) throw BadCase("Constant window section is truncated");
+            const UINT count = readWord(bytes.data() + at + 4);
+            if (!count || count > 4 || readWord(bytes.data() + at + 8) || readWord(bytes.data() + at + 12))
+                throw BadCase("Constant window section needs 1 to 4 buffers and two zero words");
+            at += 16;
+            bool seen[4] = {};
+            for (UINT n = 0; n < count; ++n) {
+                if (bytes.size() - at < 8) throw BadCase("Constant window section is truncated");
+                const UINT slot = readWord(bytes.data() + at), words = readWord(bytes.data() + at + 4);
+                at += 8;
+                if (slot > 3 || seen[slot] || words < 64 || words > 16384 || words % 4)
+                    throw BadCase("Invalid constant window record");
+                seen[slot] = true;
+                if (bytes.size() - at < size_t(words) * sizeof(Word)) throw BadCase("Constant window is truncated");
+                std::vector<Word> data(words);
+                std::memcpy(data.data(), bytes.data() + at, size_t(words) * sizeof(Word));
+                at += size_t(words) * sizeof(Word);
+                if (slot == 0) {
+                    input.constants = std::move(data);
+                } else {
+                    while (input.moreConstants.size() < slot) input.moreConstants.emplace_back(64);
+                    input.moreConstants[slot - 1] = std::move(data);
+                }
             }
         }
         // The optional 'X2WD' section of textures of other dimensions (tests/pixel_aot_draws/texdims.py), after the

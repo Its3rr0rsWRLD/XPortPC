@@ -200,7 +200,8 @@ def replaced(program, old, new):
 def described(base, **changes):
     fields = {name: getattr(base, name) for name in ("sgprs", "textures", "samplers", "constant_buffers",
                                                         "push_constants", "buffers", "storage_images",
-                                                        "descriptor_high")}
+                                                        "descriptor_high", "dimensions", "constant_sizes",
+                                                        "ps_input_ena", "ps_input_addr")}
     return PixelBindings(**{**fields, **changes})
 
 
@@ -246,9 +247,17 @@ def controls(directory):
             SETS_BINDINGS)
     refuses("Unsupported image or sampler binding", [line for line in SETS if line != "s_waitcnt lgkmcnt(0)"],
             SETS_BINDINGS)
-    refuses("Constant read exceeds binding",
-            replaced(SETS, "s_buffer_load_dword s69, s[64:67], 0x28", "s_buffer_load_dword s69, s[64:67], 0x100"),
-            SETS_BINDINGS)
+    # A read past the 256 bytes of a slot is refused unless the description gives the slot a window that holds it
+    # (constant_sizes, family pxcb): 0x110 bytes hold the dword at 0x100, 0x100 bytes do not, and params1 is then
+    # declared up to that uint4 (17) and no further.
+    far = replaced(SETS, "s_buffer_load_dword s69, s[64:67], 0x28", "s_buffer_load_dword s69, s[64:67], 0x100")
+    refuses("Constant read exceeds binding", far, SETS_BINDINGS)
+    refuses("Constant read exceeds binding", far, described(SETS_BINDINGS, constant_sizes={1: 0x100}))
+    refuses("Constant read exceeds binding", far, described(SETS_BINDINGS, constant_sizes={0: 0x110}))
+    grown = lower(far, bindings=described(SETS_BINDINGS, constant_sizes={1: 0x110}))
+    assert "cbuffer Constants1 : register(b2) { uint4 params1[17]; };" in grown and "params1[16].x" in grown, grown
+    assert lower(far, bindings=described(SETS_BINDINGS, constant_sizes={1: 0x1000})) == grown
+    assert corpus_translate.derive_bindings(far) == described(SETS_BINDINGS, constant_sizes={1: 0x110})
     # An SGPR offset that is not a translation-time constant, and inline sampler words that differ.
     refuses("Scalar load offset register must hold a known constant",
             replaced(INLINE, "s_mov_b32 s70, 0x40", "s_mov_b32 s70, s7"), INLINE_BINDINGS)

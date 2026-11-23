@@ -28,6 +28,8 @@ contract.
 | `storage_images` | key of a storage-image T# -> (slot, format), as `storage_images` of the fixed contract |
 | `descriptor_high` | the high word the program completes a pointer with (default RADV's 0xffff8000) |
 | `dimensions` | texture slot -> `2d`, `2d_array`, `cube` or `3d`, or the T#'s eight words when they are known (see "Texture dimensions"); a slot not listed is 2D |
+| `constant_sizes` | constant slot -> bytes of its window, a multiple of 16 from 256 to 65536 (see "Constant windows"); a slot not listed binds 256 |
+| `ps_input_ena`, `ps_input_addr` | SPI_PS_INPUT_ENA and SPI_PS_INPUT_ADDR (see "Input VGPRs"); default persp_center alone, ADDR equal to ENA |
 
 A key is the byte offset in set 0, or `SET_STRIDE * N + offset` in set N, as in the compute stage. `check()` refuses a
 malformed description: an unknown or repeated role, a slot used twice, a key that is not 16-byte aligned, two
@@ -105,6 +107,48 @@ weights are exactly 1 and 0. Wrong references (the slice truncated, a tie rounde
 opposite, a tie broken toward the other axis, r read as a slice index, the axis order ignored, a neighbouring texel
 for the bilinear reads) must each be reported as mismatches.
 
+## Constant windows
+
+A constant slot binds 256 bytes (16 uint4) unless `constant_sizes` gives it a window, up to 65536 bytes (4096 uint4, a
+D3D12 constant buffer view's limit). An `s_buffer_load` at an immediate offset that is not wholly inside the window is
+refused ("Constant read exceeds binding"). `params<k>[]` is declared with the uint4 up to the highest word the program
+reads, at least 16, so a program that reads no further than 256 bytes declares and reads what it did before whatever
+window it is given; a load at a run-time offset declares the whole window, and a dword of it that is not wholly inside
+the window reads 0, as AMD's range check returns past num_records (the compute stage's dynamic constant loads). The
+vertex stage sizes `params` the same way (vertex_aot.py, CONSTANT_BYTES).
+
+The window is the bytes the runtime binds: `tools/pso_translate.py` writes it as a fifth field of the constants line of
+the bindings sidecar when the translation declares more than 16 uint4, and the shim's root CBV covers that many bytes
+of title memory (`src/d3d12_xs_pipeline.cpp`, TableRef::window; the runtime R4 scene's pixel program reads its tint at
+byte 0x110). The harness binds larger buffers through the case's 'X2WK' section (`tests/pixel_aot_render.cpp`); the
+`pxcb` draw family checks windows of 0x400 and 0x800 bytes, through two slots, and a run-time offset that reads 0 past
+the window though the bound buffer holds words there.
+
+## Input VGPRs
+
+A pixel program's input VGPRs are given by SPI_PS_INPUT_ADDR and SPI_PS_INPUT_ENA (AMD's register layout, Mesa sid.h
+S_0286CC_*_ENA, bits 0..15: persp_sample, persp_center, persp_centroid, persp_pull_model, linear_sample, linear_center,
+linear_centroid, line_stipple, pos_x, pos_y, pos_z, pos_w, front_face, ancillary, sample_coverage, pos_fixed_pt). The
+inputs whose ADDR bit is set take VGPRs from v0 in bit order (two for a barycentric pair, three for pull_model, one for
+the others), and those whose ENA bit is set too are loaded; ENA is a subset of ADDR and has a barycentric input. ACO sets
+ADDR equal to ENA. `bindings.input_vgprs` gives the layout.
+
+Lowered inputs: persp_center (bary_i, bary_j, what `v_interp` reads; the desktop interpolates at the pixel centre), and
+from the HLSL inputs `SV_Position` and `SV_IsFrontFace`: pos_x and pos_y the pixel centre (x + 0.5, y + 0.5), pos_z the
+depth and pos_w the clip-space w (a Direct3D pixel shader's SV_Position.w is w, and the RADV dumps divide by
+gl_FragCoord.w as a product with POS_W, so POS_W is w, not 1 / w); pos_fixed_pt the integer pixel x in bits 0..15 and y
+in bits 16..31 (what an a16 image address reads); front_face a binary32 that is positive for a front face (ACO tests it
+as 0 < v; +1.0 and -1.0 are given). A read of any other input (ancillary, sample_coverage, the other barycentrics,
+line_stipple) or of a VGPR that ADDR reserves and ENA does not load is refused with the input's name ("Read of input
+VGPR v2 (ancillary), ..."). The default description, persp_center alone, is v0 and v1 as before, and its HLSL is
+unchanged.
+
+The RADV dumps do not print the registers, so `tests/corpus/ps-inputs.tsv` records ENA for the corpus shaders whose
+inputs are not persp_center alone, from the GLSL builtins each reads (gl_FragCoord components, ivec2(gl_FragCoord.xy),
+gl_FrontFacing, gl_ShadingRateEXT) and confirmed in the dump. The `pxcb` draw family checks pos_x..pos_w, front_face
+and pos_fixed_pt, arithmetic on the pixel centre, and an ADDR wider than ENA. The harness's triangle has depth 0 and
+w 1 everywhere and is front-facing: z and w are told apart, w from 1 / w and the back face are not drawn.
+
 ## Resolution
 
 Under a description every descriptor load goes through the compute stage's word-by-word resolve
@@ -138,3 +182,9 @@ layout's image view type would give it), 158 translate and all 158 compile with 
 HLSL. Of the 23 shaders that stopped at a cube, 2D-array or 3D `image_sample`, 18 translate; the other five stop
 elsewhere: two irradiance-cube programs and the spherical environment map sample at loop-carried or non-affine
 coordinates ("Unsupported texture coordinate"), and two more at unrelated forms.
+With constant windows and input VGPRs, 173 translate and compile with DXC (167 before; those keep byte-identical HLSL).
+Of the five shaders refused at "Constant read exceeds binding", the shadow-map quad translates; the other four stop at a
+2D-array sample coordinate, a scalar bitfield operand, an interpolation context and an execution-mask move. Of the
+eleven refused at a read of v2 (an input VGPR), five translate (gl_FragCoord.z, .z / .w, .xy); the other six stop at the
+variable-rate shading input (ancillary, not lowered), a storage-image load, a binary16 literal of v_fma_mix (two), a
+masked write and an interpolation context.
