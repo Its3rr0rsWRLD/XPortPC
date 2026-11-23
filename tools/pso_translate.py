@@ -329,6 +329,7 @@ def main():
         instructions = disassemble(code, args.llvm)
         source, layout, refs = lower(args.stage, instructions, roles)
         source, writes = writable_memory(source, roles)
+        reads = READ_ONLY_MEMORY in source  # before placement renames the register
         source = place_in_runtime_spaces(source, args.stage, layout)
     except (ValueError, KeyError) as error:
         print(f"refused: {error}", file=sys.stderr)
@@ -350,7 +351,7 @@ def main():
         if result.returncode or not dxil.exists():
             print(f"tool failure: DXC exit {result.returncode}: {result.stderr.strip()[-2000:]}", file=sys.stderr)
             return 2
-        args.bindings.write_text(bindings_text(refs, writes, READ_ONLY_MEMORY in source), encoding="ascii",
+        args.bindings.write_text(bindings_text(refs, writes, reads), encoding="ascii",
                                  newline="\n")
         os.replace(dxil, args.output)
     print(json.dumps({"stage": args.stage, "instructions": len(instructions), "bindings": len(refs), "writes": writes,
