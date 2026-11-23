@@ -2,7 +2,7 @@
 import struct
 import subprocess
 
-from .common import M32, assembly, byte, half_rtz, must_reject, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, assembly, byte, half_rtz, must_reject, signed, translate, ubyte, with_constants
 from .int import INT_PROGRAMS
 
 
@@ -211,13 +211,12 @@ ARITH_PROGRAMS = (
 
 
 def check_arith_draws(directory, compiler, renderer, backend):
-    case = directory / "arith.case"
     for index, (body, reference, sets, bugs) in enumerate(ARITH_PROGRAMS):
         source = directory / f"arith{index}.hlsl"
         shader = directory / f"arith{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "arith")
         separated = [False] * len(bugs)
         for words in sets:
             constants = bytearray(256)
@@ -225,8 +224,8 @@ def check_arith_draws(directory, compiler, renderer, backend):
             expected = [float(value) for value in reference(*words)]
             for x in expected:
                 assert half_rtz(x) == x, x
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"Program {index} gives a result other than {expected} for words {words}")
             for k, (channel, buggy) in enumerate(bugs):
                 value = float(buggy(*words))
                 if value == expected[channel]:
@@ -235,10 +234,9 @@ def check_arith_draws(directory, compiler, renderer, backend):
                 assert half_rtz(value) == value, value
                 wrong_values = list(expected)
                 wrong_values[channel] = value
-                case.write_bytes(constants + struct.pack("<4f", *wrong_values) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong arithmetic result escaped detection in program {index}, channel {channel}, words {words}")
+                batch.add(constants + struct.pack("<4f", *wrong_values) * 64, "mismatch",
+                          f"A wrong arithmetic result escaped detection in program {index}, channel {channel}, words {words}")
+        batch.flush()
         assert all(separated), (index, separated)
 
 

@@ -6,13 +6,14 @@ converter imported and DXC loaded (pso_cache.Translator) and translates one shad
 d3d12_xs.dll starts a few of these (src/d3d12_xs_translator.cpp) and talks to each over its stdin and stdout. Every
 message is a frame: u32 payload length, then the payload. Integers are little-endian u32, strings are a u32 length and
 UTF-8 bytes.
-    ready (service -> shim, once, after start-up):  "X2WT", version 1, compiler (0 library, 1 dxc.exe), why (string)
+    ready (service -> shim, once, after start-up):  "X2WT", version 2, compiler (0 library, 1 dxc.exe), why (string)
     request (shim -> service):   stage (0 vertex, 1 pixel), flags (1: return the HLSL), roles (string), code (string;
                                  with flag 2, instruction text, one per line, in place of code: checks only)
     response (service -> shim):  status (0 translated, 1 refused, 2 tool failure), instruction count, message (string;
-                                 the refusal reason or the failure), DXIL (string), HLSL (string, empty unless asked)
+                                 the refusal reason or the failure), DXIL (string), HLSL (string, empty unless asked),
+                                 bindings (string: the sidecar text of pso_translate.py --bindings)
 The service exits when stdin closes. Nothing but frames is written to stdout: anything the converter prints goes to
-stderr. The translation and the DXIL are those of tools/pso_translate.py for the same input, byte for byte.
+stderr. The translation, the DXIL and the bindings are those of tools/pso_translate.py for the same input, byte for byte.
 """
 import argparse
 import os
@@ -24,7 +25,7 @@ import traceback
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 MAGIC = b"X2WT"
-VERSION = 1
+VERSION = 2
 FLAG_HLSL, FLAG_TEXT = 1, 2
 STAGE_NAMES = ("vertex", "pixel")
 
@@ -89,13 +90,13 @@ def serve(translator, inp, out):
         code = request.bytes()
         instructions = code.decode("utf-8").splitlines() if flags & FLAG_TEXT else None
         try:
-            status, message, dxil, hlsl, count = translator.translate(STAGE_NAMES[stage], None if instructions is not None else code,
+            status, message, dxil, hlsl, count, bindings = translator.translate(STAGE_NAMES[stage], None if instructions is not None else code,
                                                                       roles, instructions)
         except Exception:  # noqa: BLE001 - an unexpected converter error refuses this shader, as a crash of
             # pso_translate.py does (exit status 1, the reason its output's tail); the service goes on.
-            status, message, dxil, hlsl, count = 1, traceback.format_exc()[-400:].strip(), b"", "", 0
+            status, message, dxil, hlsl, count, bindings = 1, traceback.format_exc()[-400:].strip(), b"", "", 0, ""
         write_frame(out, [u32(status), u32(count), string(message), string(dxil),
-                          string(source_bytes(hlsl) if flags & FLAG_HLSL else b"")])
+                          string(source_bytes(hlsl) if flags & FLAG_HLSL else b""), string(bindings.encode("ascii"))])
 
 
 def main():

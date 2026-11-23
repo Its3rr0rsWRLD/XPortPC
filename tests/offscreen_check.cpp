@@ -377,7 +377,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3) return 2;
     const std::string_view operation = argv[2];
-    if (operation == "--check-pixel-batch") {
+    if (operation == "--check-pixel-batch" || operation == "--check-pixel-batch-f64") {
         if (argc < 5) return 2;
     } else if (operation == "--compute-to-pixel") {
         if (argc != 6 && argc != 7) return 2;
@@ -447,7 +447,8 @@ int main(int argc, char** argv)
             std::puts("driver=unavailable via DXGI");
         }
         if (debug) check(device.As(&messages), "Read debug queue");
-        if (operation == "--check-pixel-batch") {
+        if (operation == "--check-pixel-batch" || operation == "--check-pixel-batch-f64") {
+            if (operation == "--check-pixel-batch-f64" && !supports_doubles(device.Get())) return 77;
             bool failed = false;
             for (int i = 4; i < argc; ++i) {
                 const char* status = "pass";

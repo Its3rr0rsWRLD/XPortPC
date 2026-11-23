@@ -3,7 +3,7 @@ import math
 import struct
 import subprocess
 
-from .common import M32, RAMP, f32, half_rtz, move, must_reject, translate, ubyte, with_constants
+from .common import M32, RAMP, DrawBatch, f32, half_rtz, move, must_reject, translate, ubyte, with_constants
 
 
 # MIMG loads, level queries and gathers on the 8x8 R8G8B8A8 fixture texture, whose texel (x, y) is (RAMP[x], RAMP[y], 128, 255)
@@ -473,25 +473,20 @@ def check_mip_controls():
 
 
 def check_image_draws(directory, compiler, renderer, backend):
-    case = directory / "image.case"
     for name, body, words, reference, bugs in IMAGE_PROGRAMS:
         source = directory / f"image_{name}.hlsl"
         shader = directory / f"image_{name}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
         constants = bytearray(256)
         struct.pack_into("<4I", constants, 12, *words)
         for x in reference:
             assert half_rtz(x) == x, x
-        case.write_bytes(constants + struct.pack("<4f", *reference) * 64)
-        subprocess.run(draw, check=True)
-        for wrong in bugs:
-            assert wrong != reference and all(half_rtz(x) == x for x in wrong), (name, wrong)
-            case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                raise AssertionError(f"A wrong image result escaped detection in {name}: {wrong}")
+        with DrawBatch(directory, renderer, backend, shader, "image") as batch:
+            batch.add(constants + struct.pack("<4f", *reference) * 64, "pass", f"The image program {name} gives a result other than {reference}")
+            for wrong in bugs:
+                assert wrong != reference and all(half_rtz(x) == x for x in wrong), (name, wrong)
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch", f"A wrong image result escaped detection in {name}: {wrong}")
 
 
 def check_image_controls():

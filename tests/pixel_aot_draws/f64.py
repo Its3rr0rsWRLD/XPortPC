@@ -444,26 +444,49 @@ def f64_constants(inputs, widths, select):
     return constants
 
 
-def f64_run(draw, case, constants, word):
-    case.write_bytes(constants + struct.pack("<4f", *[float((word >> (8 * n)) & 0xff) for n in range(4)]) * 64)
-    return subprocess.run(draw, capture_output=True, text=True)
+def f64_case(path, constants, word):
+    """Write a renderer case: the constant words, then the four bytes of word as the expected float4 of every texel."""
+    path.write_bytes(constants + struct.pack("<4f", *[float((word >> (8 * n)) & 0xff) for n in range(4)]) * 64)
+    return path
+
+
+F64_BATCH = 100  # cases per renderer launch; a Windows command line holds about 32 000 characters
+
+
+def f64_batch(renderer, backend, shader, cases):
+    """One launch for a list of (path, expected status, label) cases; returns 77 when the adapter lacks doubles."""
+    command = [renderer, backend, "--check-pixel-batch-f64", shader, *(path for path, _, _ in cases)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode == 77:
+        return 77
+    actual = [line for line in result.stdout.splitlines() if line.startswith("case=")]
+    expected = [f"case={i} status={status}" for i, (_, status, _) in enumerate(cases)]
+    if actual != expected:
+        bad = [cases[i][2] for i, (want, got) in enumerate(zip(expected, actual)) if want != got] or ["case list"]
+        raise AssertionError(f"f64 batch: unexpected status for {bad[:3]}\n{result.stdout}\n{result.stderr}")
+    return 0
 
 
 def check_f64_draws(directory, compiler, renderer, backend):
-    """Draws every binary64 program. Returns 77 (CTest skip), having drawn nothing more, when the adapter lacks doubles."""
-    case = directory / "f64.case"
+    """Draws every binary64 program. Returns 77 (CTest skip), having drawn nothing more, when the adapter lacks doubles.
+
+    Every (inputs, result, half) word is one case, and each program's cases go to the renderer in batches of F64_BATCH
+    per launch. For each listed lowering bug the first case where its wrong word differs from the right one is added
+    with the status mismatch, so a bug that escaped detection shows as a status of pass.
+    """
     for name, body, widths, ref, sets, bugs in F64_PROGRAMS:
         source, shader = directory / f"f64_{name}.hlsl", directory / f"f64_{name}.cso"
         source.write_text(translate(f64_program(name, body, widths)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case-f64", shader, case]
         # The capability skip, forced: the harness reports it as exit 77 whatever the adapter supports.
         if name == "add":
+            draw = [renderer, backend, "--check-pixel-case-f64", shader, f64_case(directory / "f64_forced.case", bytes(256), 0)]
             forced = subprocess.run(draw, capture_output=True, text=True, env={**os.environ, "XBOX2WINDOWS_TEST_NO_DOUBLES": "1"})
             if forced.returncode == 77 and not forced.stdout:  # no adapter at all: a skip, reported by pixel_aot_check.py
                 raise subprocess.CalledProcessError(77, draw, forced.stdout, forced.stderr)
             assert forced.returncode == 77 and "forced_off" in forced.stdout, (forced.returncode, forced.stdout, forced.stderr)
         todo = {bug: False for bug in (*bugs, "halves")}
+        cases = []
         for inputs in sets:
             results = ref(*inputs, None)
             assert len(results) == len(widths), name
@@ -475,12 +498,8 @@ def check_f64_draws(directory, compiler, renderer, backend):
                         continue
                     value, select_mask = expected
                     constants = f64_constants(inputs, widths, ((k, half), select_mask))
-                    result = f64_run(draw, case, constants, value & select_mask)
-                    if result.returncode == 77:
-                        print("pixel_aot f64: skipped, the adapter lacks DoublePrecisionFloatShaderOps")
-                        return 77
-                    if result.returncode:
-                        raise AssertionError(f"f64 {name}: result {k} half {half} for inputs {inputs}: {result.stdout} {result.stderr}")
+                    label = f"{name} result {k} half {half} inputs {inputs}"
+                    cases.append((f64_case(directory / f"f64_{name}_{len(cases)}.case", constants, value & select_mask), "pass", label))
                     candidates = {bug: f64_wrong_word(wrong[bug][k], width, half) for bug in bugs}
                     if width == 2:
                         candidates["halves"] = f64_wrong_word(results[k], width, 1 - half)
@@ -490,11 +509,14 @@ def check_f64_draws(directory, compiler, renderer, backend):
                         if todo[bug] or word is None or word & select_mask == value & select_mask:
                             continue
                         todo[bug] = True
-                        mismatch = f64_run(draw, case, constants, word & select_mask)
-                        if mismatch.returncode != 1 or "pixel_mismatch" not in mismatch.stderr:
-                            raise AssertionError(f"f64 {name}: lowering bug {bug} escaped detection (result {k}, half {half}, inputs {inputs})")
+                        cases.append((f64_case(directory / f"f64_{name}_{len(cases)}.case", constants, word & select_mask),
+                                      "mismatch", f"{name} lowering bug {bug} (result {k}, half {half}, inputs {inputs})"))
         missing = [bug for bug, drawn in todo.items() if not drawn and not (bug == "halves" and name in ("to_f32", "to_int"))]
         assert not missing, (name, missing)
+        for start in range(0, len(cases), F64_BATCH):
+            if f64_batch(renderer, backend, shader, cases[start:start + F64_BATCH]) == 77:
+                print("pixel_aot f64: skipped, the adapter lacks DoublePrecisionFloatShaderOps")
+                return 77
     return 0
 
 

@@ -6,8 +6,8 @@
 d3d12_xs.dll records every console shader it sees in the title's cache directory (tools/pso_cache.py: manifest.txt and
 inputs\\), and its translator configuration in translator.json. This tool reads them, recomputes each shader's key with
 the converter's current fingerprint (so a converter or DXC update is handled by running it again), and translates every
-shader whose <key>.dxil is missing, one process per core, each with the converter imported once and DXC loaded in
-process. The DXIL is what the shim would write itself, byte for byte. Refused shaders are listed; they are refused at
+shader whose <key>.dxil or <key>.bind is missing, one process per core, each with the converter imported once and DXC loaded in
+process. The DXIL and bindings are what the shim would write itself, byte for byte. Refused shaders are listed; they are refused at
 pipeline creation too.
 
 <title> is the title's cache directory name (X2W_TITLE, by default the executable's base name) under
@@ -38,8 +38,10 @@ def _translate(task):
     """One task: (key, stage, code, roles, instructions or None, output directory, keep HLSL)."""
     key, stage, code, roles, instructions, directory, keep_hlsl = task
     started = time.perf_counter()
-    status, message, dxil, hlsl, _ = _translator.translate(stage, code, roles, instructions)
+    status, message, dxil, hlsl, _, bindings = _translator.translate(stage, code, roles, instructions)
     if status == 0:
+        # The sidecar first, as the shim stores it: a DXIL file in the cache always has its bindings.
+        pso_cache.store(Path(directory) / f"{key}.bind", bindings.encode("ascii"))
         pso_cache.store(Path(directory) / f"{key}.dxil", dxil)
         if keep_hlsl:
             pso_cache.store(Path(directory) / f"{key}.hlsl", pso_cache.pso_translate.source_bytes(hlsl))
@@ -98,7 +100,7 @@ def main(argv=None):
             missing += 1
             continue
         key = pso_cache.shader_key(fingerprint, stage, roles, code)
-        if (cache / f"{key}.dxil").exists():
+        if (cache / f"{key}.dxil").exists() and (cache / f"{key}.bind").exists():
             cached += 1
             continue
         tasks.append((key, stage, code, roles, None, str(cache), args.keep_hlsl))

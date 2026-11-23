@@ -18,7 +18,7 @@ without a GPU that every wrong reference differs from the right one on some cons
 import struct
 import subprocess
 
-from .common import M32, byte, must_reject, signed, translate, with_constants
+from .common import M32, DrawBatch, byte, must_reject, signed, translate, with_constants
 
 YES, NO = 0xa5, 0x3c
 
@@ -575,30 +575,28 @@ ALL_PROGRAMS = SALU_REST_PROGRAMS + SOPK_PROGRAMS + SOPK_MOVE_PROGRAMS
 
 
 def check_draws(directory, compiler, renderer, backend):
-    case = directory / "salu_rest.case"
     for index, (body, reference, sets, bugs) in enumerate(ALL_PROGRAMS):
         source = directory / f"salu_rest_{index}.hlsl"
         shader = directory / f"salu_rest_{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "salu_rest")
         for words in sets:
             constants = bytearray(256)
             struct.pack_into("<4I", constants, 12, *words)
             expected = [float(v) for v in reference(*words)]
-            case.write_bytes(constants + struct.pack("<4f", *expected) * 64)
-            subprocess.run(draw, check=True)
+            batch.add(constants + struct.pack("<4f", *expected) * 64, "pass",
+                      f"A scalar result differs in program {index}, words {[hex(v) for v in words]}")
             for channel, buggy in bugs:
                 value = float(buggy(*words))
                 if value == expected[channel]:
                     continue
                 wrong = list(expected)
                 wrong[channel] = value
-                case.write_bytes(constants + struct.pack("<4f", *wrong) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"A wrong scalar result escaped detection in program {index}, channel "
-                                         f"{channel}, words {[hex(v) for v in words]}")
+                batch.add(constants + struct.pack("<4f", *wrong) * 64, "mismatch",
+                          f"A wrong scalar result escaped detection in program {index}, channel "
+                          f"{channel}, words {[hex(v) for v in words]}")
+        batch.flush()
 
 
 def separation(programs=ALL_PROGRAMS):

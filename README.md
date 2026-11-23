@@ -16,7 +16,7 @@ Live status: <https://xportpc.3rr0r.cc>
 
 | Part | State |
 |---|---|
-| Native launcher | `x2w_launch.exe` maps a program with `pe_map` and resolves each import from a shim directory, a DLL beside the program, Windows, or a generated stub that logs its first call. Tested with source-built programs. |
+| Native launcher | `x2w_launch.exe` maps a program with `pe_map` and resolves each import from a shim directory, a DLL beside the program, Windows, or a generated stub that logs its first call. `--log` records startup milestones and the first crash, Zen 2 instructions the host CPU lacks (SHA-NI, SSE4a, CLZERO, RDPID, RDPRU, MONITORX/MWAITX, CLWB) are performed by a #UD handler and counted, and `tools/x2w_report.py` classifies a title's imports without running it. Tested with source-built programs. |
 | Console library shims | Desktop `xmem.dll` (graphics and heap memory). |
 | Shader converter | Texture sampling, constants, binary32 arithmetic and comparisons, SDWA selections, 32-bit integer bitwise ops, shifts and byte converts, and scalar ALU. Coverage is in the badge above. |
 | GPU memory | Pixel draws can bind title memory: 64-bit title addresses resolve at runtime to desktop buffers. Buffer and global loads are in progress. |
@@ -76,6 +76,30 @@ ctest --preset dev --no-tests=error -R '^pixel_' -V
 The shader-draw checks are one CTest test per draw family and adapter, `pixel_aot_<family>_hardware` and `pixel_aot_<family>_warp`, plus `pixel_aot_controls`. `python tests/pixel_aot_check.py --list-families` prints the families; each family is a module of `tests/pixel_aot_draws/`, found by listing that directory, and CMake picks a new one up when it next configures (see [docs/design/module-layout.md](docs/design/module-layout.md)).
 
 Do not add game files, dumps, distribution links or credentials to the repository, issues or pull requests.
+
+## Reporting a title
+
+To report what one of your own Xbox Series X|S titles still needs, run these on the PC where you build XPortPC, from the repository root in PowerShell. Replace the path in the first line with your title's main executable. Outputs go to `out\x2w-report`.
+
+```powershell
+$title = "D:\Titles\Example\Example.exe"
+$x2w = "$PWD\out\build\dev"
+$out = "$PWD\out\x2w-report"
+cmake --build --preset dev --target x2w_launch x2w_shims
+.\out\pe-env\Scripts\python.exe -B tools\x2w_report.py $title --shims "$x2w\shims" --out $out
+```
+
+This writes `report.md` and `report.json` without running the title. Each imported function is listed as `implemented` (a desktop shim exports it), `package` (one of the title's own DLLs exports it), `windows`, `stub` (the DLL exists but lacks the function) or `missing` (nothing provides the DLL). The report also lists the PE sections, TLS callbacks, relocations and entry point, and the `pe_map` requirements the image fails. If you have shaders extracted with the existing tools, add `--shaders <folder>` for an unsupported-instruction histogram.
+
+The second step runs the title's own code natively in `x2w_launch` and records how far startup gets, so it can do anything the title does at startup. It is expected to stop early. `--timeout` ends the run after 120 seconds.
+
+```powershell
+Push-Location (Split-Path $title)
+& "$x2w\x2w_launch.exe" --shims "$x2w\shims" --log "$out\run.log" --timeout 120 $title 2> "$out\launch-stderr.txt"
+Pop-Location
+```
+
+Paste back the full contents of `$out\report.md` and `$out\run.log`, with the commit (`git rev-parse --short HEAD`) and your Windows build (`winver`). Both files contain only DLL and function names, section names, counts and module+RVA addresses. Read them before you post. Never attach the executable, DLLs, dumps, shaders or any other file from the title.
 
 ## Hardware reports
 

@@ -1,0 +1,7 @@
+; Import library for the rung 1 title: x2w_missing.dll exists nowhere. X2wMissingOrdinal is imported by
+; ordinal 7 only, so the report and the run log show an ordinal as "#7".
+LIBRARY x2w_missing
+EXPORTS
+    X2wMissingFirst
+    X2wMissingSecond
+    X2wMissingOrdinal @7 NONAME

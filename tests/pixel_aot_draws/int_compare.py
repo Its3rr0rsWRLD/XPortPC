@@ -14,7 +14,7 @@ for at least one set of words.
 import struct
 import subprocess
 
-from .common import M32, byte, must_reject, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, byte, must_reject, signed, translate, ubyte, with_constants
 from .int_convert import readback, run_word_programs
 
 RELATIONS = {"eq": lambda a, b: a == b, "ne": lambda a, b: a != b, "lt": lambda a, b: a < b,
@@ -292,33 +292,26 @@ def run_channel_programs(directory, compiler, renderer, backend):
     """Each program is (body, reference(x, y, z, w) -> four exact channel values, sets, {bug: wrong(...)}). Every set
     is drawn against the reference; every bug is drawn, and must be reported as a pixel_mismatch, for the first set
     where it differs."""
-    case = directory / "intcmp.case"
     for index, (body, reference, sets, bugs) in enumerate(CHANNEL_PROGRAMS):
         source = directory / f"intcmp{index}.hlsl"
         shader = directory / f"intcmp{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, "intcmp")
         pending = dict(bugs)
         for words in sets:
             constants = words_constants(words)
             expected = reference(*words)
-            case.write_bytes(constants + struct.pack("<4f", *map(float, expected)) * 64)
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode == 77:  # no adapter: a skip, reported by pixel_aot_check.py
-                raise subprocess.CalledProcessError(77, draw, result.stdout, result.stderr)
-            if result.returncode:
-                raise AssertionError(f"int_compare program {index}, words {[hex(w) for w in words]}: expected "
-                                     f"{expected} on {backend}: {result.stdout}{result.stderr}")
+            batch.add(constants + struct.pack("<4f", *map(float, expected)) * 64, "pass",
+                      f"int_compare program {index}, words {[hex(w) for w in words]}: expected {expected} on {backend}")
             for bug, wrong in list(pending.items()):
                 bad = wrong(*words)
                 if bad == expected:
                     continue
                 del pending[bug]
-                case.write_bytes(constants + struct.pack("<4f", *map(float, bad)) * 64)
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"Wrong reference {bug} escaped detection in int_compare program {index}")
+                batch.add(constants + struct.pack("<4f", *map(float, bad)) * 64, "mismatch",
+                          f"Wrong reference {bug} escaped detection in int_compare program {index}")
+        batch.flush()
         assert not pending, (index, sorted(pending))
 
 

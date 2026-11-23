@@ -1,0 +1,8 @@
+; Import library for the rung 1 title: three names the desktop xmem.dll exports and X2wNotInShim, a test
+; name that it does not, so the report and the run log show a DLL that exists without the function.
+LIBRARY xmem
+EXPORTS
+    XMemAlloc
+    XMemFree
+    XMemVirtualQuery
+    X2wNotInShim

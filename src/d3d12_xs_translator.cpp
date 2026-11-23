@@ -13,7 +13,7 @@ namespace translator {
 namespace {
 
 constexpr std::uint32_t ready_magic = 0x54573258u;  // "X2WT"
-constexpr std::uint32_t protocol_version = 1;
+constexpr std::uint32_t protocol_version = 2;
 constexpr DWORD wait_limit_ms = 300000;  // as the per-process path's limit
 constexpr unsigned spawn_failures_to_give_up = 2;
 
@@ -205,6 +205,7 @@ bool exchange(const Service& service, Job& job)
     in.bytes(job.result.message);
     in.bytes(job.result.dxil);
     in.bytes(job.result.hlsl);
+    in.bytes(job.result.bindings);
     if (!in.good || status > tool_failure) return false;
     job.result.status = static_cast<int>(status);
     return true;

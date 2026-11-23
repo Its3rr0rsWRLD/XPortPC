@@ -20,7 +20,7 @@ import math
 import struct
 import subprocess
 
-from .common import M32, byte, must_reject, signed, translate, ubyte, with_constants
+from .common import M32, DrawBatch, byte, must_reject, signed, translate, ubyte, with_constants
 
 SIGN = 0x80000000
 
@@ -195,59 +195,49 @@ def constants_of(word):
     return constants
 
 
-def expect(case, constants, channels):
-    case.write_bytes(constants + struct.pack("<4f", *(float(c) for c in channels)) * 64)
+def expect(constants, channels):
+    return constants + struct.pack("<4f", *(float(c) for c in channels)) * 64
 
 
 def run_word_programs(directory, compiler, renderer, backend, prefix, programs, constants_of=constants_of):
     """Each program is (name, body, model(input) -> result word, inputs, {bug: wrong(input) -> word}); the body
     leaves the four bytes of the result in v12..v15. Every input is drawn against the model; every bug is drawn,
     and must be reported as a pixel_mismatch, for the first input where it gives another word."""
-    case = directory / f"{prefix}.case"
     for index, (name, body, model, inputs, bugs) in enumerate(programs):
         source = directory / f"{prefix}{index}.hlsl"
         shader = directory / f"{prefix}{index}.cso"
         source.write_text(translate(with_constants(body)), encoding="ascii")
         subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-        draw = [renderer, backend, "--check-pixel-case", shader, case]
+        batch = DrawBatch(directory, renderer, backend, shader, prefix)
         pending = dict(bugs)
         for value in inputs:
             constants = constants_of(value)
             word = model(value)
-            expect(case, constants, [byte(word, n) for n in range(4)])
-            result = subprocess.run(draw, capture_output=True, text=True)
-            if result.returncode == 77:  # no adapter: a skip, reported by pixel_aot_check.py
-                raise subprocess.CalledProcessError(77, draw, result.stdout, result.stderr)
-            if result.returncode:
-                raise AssertionError(f"{name}: input {value} gives a result other than {word:#010x} on {backend}: "
-                                     f"{result.stdout}{result.stderr}")
+            batch.add(expect(constants, [byte(word, n) for n in range(4)]), "pass",
+                      f"{name}: input {value} gives a result other than {word:#010x} on {backend}")
             for bug, wrong in list(pending.items()):
                 bad = wrong(value)
                 if bad == word:
                     continue
                 del pending[bug]
-                expect(case, constants, [byte(bad, n) for n in range(4)])
-                result = subprocess.run(draw, capture_output=True, text=True)
-                if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-                    raise AssertionError(f"Wrong reference {bug} escaped detection in {name}, input {value}")
+                batch.add(expect(constants, [byte(bad, n) for n in range(4)]), "mismatch",
+                          f"Wrong reference {bug} escaped detection in {name}, input {value}")
+        batch.flush()
         assert not pending, (name, sorted(pending))
 
 
 def check_int_convert_draws(directory, compiler, renderer, backend):
     run_word_programs(directory, compiler, renderer, backend, "cvt", CONVERT_PROGRAMS)
     body, channels, bugs = CONSTANT_PROGRAM
-    source, shader, case = directory / "cvtk.hlsl", directory / "cvtk.cso", directory / "cvtk.case"
+    source, shader = directory / "cvtk.hlsl", directory / "cvtk.cso"
     source.write_text(translate(with_constants(body)), encoding="ascii")
     subprocess.run([compiler, "-Gis", "-T", "ps_6_0", "-E", "main", "-Fo", shader, source], check=True)
-    draw = [renderer, backend, "--check-pixel-case", shader, case]
-    expect(case, constants_of(0), channels)
-    subprocess.run(draw, check=True)
-    for bug, (channel, wrong) in bugs.items():
-        assert wrong != channels[channel], bug
-        expect(case, constants_of(0), [wrong if n == channel else c for n, c in enumerate(channels)])
-        result = subprocess.run(draw, capture_output=True, text=True)
-        if result.returncode != 1 or "pixel_mismatch" not in result.stderr:
-            raise AssertionError(f"Wrong reference {bug} escaped detection in the constant conversions")
+    with DrawBatch(directory, renderer, backend, shader, "cvtk") as batch:
+        batch.add(expect(constants_of(0), channels), "pass", "The constant conversions give a result other than the reference")
+        for bug, (channel, wrong) in bugs.items():
+            assert wrong != channels[channel], bug
+            batch.add(expect(constants_of(0), [wrong if n == channel else c for n, c in enumerate(channels)]), "mismatch",
+                      f"Wrong reference {bug} escaped detection in the constant conversions")
 
 
 def check_references():

@@ -24,6 +24,29 @@ SET_STRIDE = 0x100000
 RADV_DESCRIPTOR_HIGH = 0xffff8000
 TEXTURE_SLOTS, SAMPLER_SLOTS, CONSTANT_SLOTS = 8, 4, 4
 
+# Texture dimensions a T# may declare, with the HLSL type each is bound as (docs/design/pixel-bindings.md): a cube is
+# bound as a Texture2DArray view of its six faces (slices 0..5 = +X, -X, +Y, -Y, +Z, -Z), sampled at the face
+# coordinates the program computes, not at a direction.
+DIMENSIONS = {"2d": "Texture2D<float4>", "2d_array": "Texture2DArray<float4>", "cube": "Texture2DArray<float4>",
+              "3d": "Texture3D<float4>"}
+# The dim: field of a MIMG instruction (gfx10 SQ_RSRC_IMG_*) for each dimension.
+INSTRUCTION_DIMS = {"SQ_RSRC_IMG_2D": "2d", "SQ_RSRC_IMG_2D_ARRAY": "2d_array", "SQ_RSRC_IMG_CUBE": "cube",
+                    "SQ_RSRC_IMG_3D": "3d"}
+# The TYPE field of a gfx10 image T# (word 3, bits 28..31; AMD's SQ_RSRC_IMG_* encoding, Mesa sid.h V_008F1C_*):
+# 8 1D, 9 2D, 10 3D, 11 cube, 12 1D array, 13 2D array, 14 2D MSAA, 15 2D MSAA array. Only these four are bound.
+TYPE_DIMS = {9: "2d", 10: "3d", 11: "cube", 13: "2d_array"}
+
+
+def type_dimension(words):
+    """The dimension the TYPE field of a T#'s eight words names, or a ValueError for one this stage does not bind."""
+    if not (isinstance(words, tuple) and len(words) == 8 and all(isinstance(w, int) and 0 <= w <= 0xffffffff
+                                                                 for w in words)):
+        raise ValueError("A texture dimension is a name or the eight words of the T#")
+    kind = words[3] >> 28
+    if kind not in TYPE_DIMS:
+        raise ValueError(f"Unsupported T# type {kind} (word 3 bits 28..31)")
+    return TYPE_DIMS[kind]
+
 
 def valid_key(key, size):
     """A descriptor key (set * SET_STRIDE + byte offset) of a descriptor of `size` bytes in one of sets 0 to 7."""
@@ -96,7 +119,9 @@ class PixelBindings:
     constant_buffers: {key of a constant-buffer V#: constant slot 0..3}. push_constants: the constant slot that holds
         the push words, or None. buffers: {key of a buffer V#: index of its first word in params (slot 0)}.
     storage_images: {key of a storage-image T#: (slot 0..3, format)} (forms/image_writes.py).
-    descriptor_high: the high word the program completes a descriptor-set pointer with."""
+    descriptor_high: the high word the program completes a descriptor-set pointer with.
+    dimensions: {texture slot: "2d", "2d_array", "cube" or "3d", or the T#'s eight words when they are known, whose
+        TYPE field (type_dimension) gives it}; a slot not listed is 2D."""
     sgprs: dict
     textures: dict = field(default_factory=dict)
     samplers: dict = field(default_factory=dict)
@@ -105,6 +130,12 @@ class PixelBindings:
     buffers: dict = field(default_factory=dict)
     storage_images: dict = field(default_factory=dict)
     descriptor_high: int = RADV_DESCRIPTOR_HIGH
+    dimensions: dict = field(default_factory=dict)
+
+    def dimension(self, slot):
+        """The dimension of texture slot `slot`: the declared name, the TYPE field of declared T# words, else 2D."""
+        source = self.dimensions.get(slot, "2d")
+        return source if isinstance(source, str) else type_dimension(source)
 
     def check(self):
         """Refuse a description that is malformed or names one binding twice."""
@@ -119,6 +150,9 @@ class PixelBindings:
                 raise ValueError("A push-constant SGPR needs a push-constant slot")
             if roles.count(role) > 1:
                 raise ValueError(f"Entry SGPR role {role} is given twice")
+        for slot, source in self.dimensions.items():
+            if slot not in self.textures.values() or not (source in DIMENSIONS or not isinstance(source, str) and type_dimension(source)):
+                raise ValueError("A texture dimension needs a declared texture slot and a known dimension")
         if not isinstance(self.descriptor_high, int) or not 0 <= self.descriptor_high <= 0xffffffff:
             raise ValueError("Invalid descriptor high word")
         slots = list(self.textures.values())
@@ -160,7 +194,8 @@ class PixelBindings:
     def names(self):
         """One line per binding, in a fixed order: what each entry SGPR and each declared descriptor is bound to."""
         out = [f"{reg}: {role}" for reg, role in sorted(self.sgprs.items(), key=lambda kv: int(kv[0][1:]))]
-        out += [f"{describe_key(k)}: T# {texture_name(s)} (t{texture_register(s)})" for k, s in sorted(self.textures.items())]
+        out += [f"{describe_key(k)}: T# {texture_name(s)} (t{texture_register(s)})"
+                + ("" if self.dimension(s) == "2d" else f" {self.dimension(s)}") for k, s in sorted(self.textures.items())]
         for s, source in sorted(self.samplers.items()):
             where = describe_key(source) if isinstance(source, int) else "words " + " ".join(f"{w:#x}" for w in source)
             out.append(f"{where}: S# {sampler_name(s)} (s{s})")
@@ -178,11 +213,13 @@ def declarations(b):
     """The HLSL declarations of a description, top to bottom, and whether texture 0 and sampler 0 are both declared
     (then the pixel PREAMBLE declares them, exactly as for the fixed contract)."""
     textures, samplers = set(b.textures.values()), set(b.samplers)
-    sampled = 0 in textures and 0 in samplers
+    # The PREAMBLE declares tex as a Texture2D, so a texture 0 of another dimension is declared here instead.
+    sampled = 0 in textures and 0 in samplers and b.dimension(0) == "2d"
     lines = []
     if 0 in textures and not sampled:
-        lines.append("Texture2D<float4> tex : register(t0);")
-    lines += [f"Texture2D<float4> {texture_name(k)} : register(t{texture_register(k)});" for k in sorted(textures - {0})]
+        lines.append(f"{DIMENSIONS[b.dimension(0)]} tex : register(t0);")
+    lines += [f"{DIMENSIONS[b.dimension(k)]} {texture_name(k)} : register(t{texture_register(k)});"
+              for k in sorted(textures - {0})]
     if 0 in samplers and not sampled:
         lines.append("SamplerState samp : register(s0);")
     lines += [f"SamplerState {sampler_name(k)} : register(s{k});" for k in sorted(samplers - {0})]

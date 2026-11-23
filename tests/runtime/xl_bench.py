@@ -6,7 +6,7 @@ section 3).
 
 `run` translates the runtime rung R3 programs (tests/runtime/r3_programs.h) and the batch in xl_batch.json (200
 distinct pixel programs of the pixel_aot draw checks) four ways, and requires every shader's status, HLSL and DXIL to
-be byte-identical across them:
+be byte-identical across them (and the .bind sidecar of tools/pso_translate.py --bindings):
     process    one `python -B tools/pso_translate.py` (and dxc.exe) per shader, one after another: the shim's
                per-process path, and its only path before the translator service
     service    one tools/pso_service.py, shaders sent one after another (start-up reported apart, without and with
@@ -115,7 +115,7 @@ def corpus(path):
         roles = json.dumps({"sgprs": {m0[0]: "interp"}})
         for candidate in (program, rewritten):
             try:
-                source, _, _ = pso_translate.translate("pixel", None, json.loads(roles), instructions=candidate)
+                source = pso_translate.translate("pixel", None, json.loads(roles), instructions=candidate)[0]
             except (ValueError, KeyError):
                 continue
             if source not in sources:
@@ -163,18 +163,19 @@ def by_process(dxc, items, work):
             source.write_bytes(s.code)
         else:
             source.write_text(s.text + "\n", encoding="utf-8")
-        output, hlsl = base.with_suffix(".dxil"), base.with_suffix(".hlsl")
-        for stale in (output, hlsl):
+        output, hlsl, bind = base.with_suffix(".dxil"), base.with_suffix(".hlsl"), base.with_suffix(".bind")
+        for stale in (output, hlsl, bind):
             stale.unlink(missing_ok=True)
         command = [sys.executable, "-B", str(TOOLS / "pso_translate.py"), "--stage", s.stage,
                    "--text" if s.text is not None else "--code", str(source), "--roles",
-                   str(base.with_suffix(".roles.json")), "--dxc", dxc, "--output", str(output), "--hlsl", str(hlsl)]
+                   str(base.with_suffix(".roles.json")), "--dxc", dxc, "--output", str(output), "--hlsl", str(hlsl),
+                   "--bindings", str(bind)]
         started = time.perf_counter()
         run = subprocess.run(command, capture_output=True, text=True)
         seconds.append(time.perf_counter() - started)
         status = run.returncode if run.returncode in (0, 1) else 2
         results.append((status, "", output.read_bytes() if status == 0 else b"",
-                        hlsl.read_bytes() if status == 0 else b""))
+                        hlsl.read_bytes() if status == 0 else b"", bind.read_bytes() if status == 0 else b""))
     return results, seconds
 
 
@@ -214,12 +215,12 @@ class Service:
         self.process.stdin.flush()
         data, at, fields = self.frame(), 8, []
         status, _ = struct.unpack_from("<II", data, 0)
-        for _ in range(3):
+        for _ in range(4):
             size, = struct.unpack_from("<I", data, at)
             fields.append(data[at + 4:at + 4 + size])
             at += 4 + size
-        message, dxil, hlsl = fields
-        return status, message.decode("utf-8", "replace"), dxil, hlsl
+        message, dxil, hlsl, bindings = fields
+        return status, message.decode("utf-8", "replace"), dxil, hlsl, bindings
 
     def close(self):
         self.process.stdin.close()
@@ -274,9 +275,9 @@ def by_precompile(dxc, items, count, work):
     seconds = time.perf_counter() - started
     results = []
     for key, status, message, _, _ in done:
-        dxil, hlsl = work / f"{key}.dxil", work / f"{key}.hlsl"
+        dxil, hlsl, bind = work / f"{key}.dxil", work / f"{key}.hlsl", work / f"{key}.bind"
         results.append((status, message, dxil.read_bytes() if status == 0 else b"",
-                        hlsl.read_bytes() if status == 0 else b""))
+                        hlsl.read_bytes() if status == 0 else b"", bind.read_bytes() if status == 0 else b""))
     return results, seconds, sorted({d[4] for d in done})
 
 
@@ -306,6 +307,8 @@ def run(dxc, work, processes):
                 failures.append(f"{s.name}: {path} DXIL differs ({len(got[2])} bytes, process {len(reference[2])})")
             elif got[3] != reference[3]:
                 failures.append(f"{s.name}: {path} HLSL differs")
+            elif got[4] != reference[4]:
+                failures.append(f"{s.name}: {path} bindings sidecar differs")
     statuses = [r[0] for r in process_results]
     print(f"statuses (process path): {statuses.count(0)} translated, {statuses.count(1)} refused, "
           f"{statuses.count(2)} tool failures")
@@ -334,7 +337,7 @@ def run(dxc, work, processes):
         failures.append("the service is not faster per shader than the process path")
     for failure in failures[:20]:
         print(f"FAIL {failure}")
-    print("identical: " + ("yes, every status, HLSL and DXIL" if not failures else f"no ({len(failures)} problems)"))
+    print("identical: " + ("yes, every status, HLSL, DXIL and bindings sidecar" if not failures else f"no ({len(failures)} problems)"))
     return 1 if failures else 0
 
 

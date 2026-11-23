@@ -40,6 +40,7 @@ struct Result {
     int status = unavailable;
     std::string message;  // refusal reason, failure, or why the service was unavailable
     std::vector<std::uint8_t> dxil, hlsl;
+    std::string bindings;  // the descriptor-table reads, as pso_translate.py --bindings writes them
 };
 
 // Once, before any other call. Takes a copy.

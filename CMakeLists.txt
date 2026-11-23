@@ -93,7 +93,7 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_pipeline.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -122,6 +122,13 @@ add_executable(r3_triangle tests/runtime/r3_triangle.cpp)
 target_include_directories(r3_triangle PRIVATE src)
 target_compile_features(r3_triangle PRIVATE cxx_std_17)
 target_link_libraries(r3_triangle PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
+
+# Runtime ladder R4: a textured, constant-buffered, depth-tested scene of three draws (tests/runtime/r4_scene.cpp,
+# r4_*.s, r4_programs.h) through title descriptor heaps, translated and cached like R3.
+add_executable(r4_scene tests/runtime/r4_scene.cpp)
+target_include_directories(r4_scene PRIVATE src)
+target_compile_features(r4_scene PRIVATE cxx_std_17)
+target_link_libraries(r4_scene PRIVATE d3d12_xs_shim xmem_shim dxgi dxguid user32)
 
 find_program(DXC_EXECUTABLE dxc REQUIRED)
 get_filename_component(DXC_BIN_DIR "${DXC_EXECUTABLE}" DIRECTORY)
@@ -2673,6 +2680,28 @@ if(EXISTS "${INTAKE_PYTHON}")
             runtime_r3_wrong_reference_${adapter} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
             ENVIRONMENT "${r3_environment}" RUN_SERIAL TRUE)
     endforeach()
+    # Runtime ladder R4 (tests/runtime/r4_scene.cpp): cold run first (empties the cache), then warm and the controls.
+    add_test(NAME runtime_r4_programs COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/r4_programs_check.py" check)
+    foreach(adapter IN ITEMS warp hardware)
+        set(r4_environment "X2W_PYTHON=${INTAKE_PYTHON}" "X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools"
+            "X2W_DXC=${DXC_EXECUTABLE}" "X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r4_cache_${adapter}")
+        set(r4_after_cold)
+        foreach(mode IN ITEMS cold warm wrong_reference missing_view missing_memory)
+            set(r4_name runtime_r4_scene_${mode}_${adapter})
+            if(mode STREQUAL "wrong_reference" OR mode MATCHES "^missing_")
+                set(r4_name runtime_r4_${mode}_${adapter})
+            endif()
+            add_test(NAME ${r4_name} COMMAND r4_scene ${adapter} ${mode})
+            set_tests_properties(${r4_name} PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 ENVIRONMENT "${r4_environment}"
+                RUN_SERIAL TRUE)
+            if(mode STREQUAL "cold")
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_SETUP r4_cache_${adapter})
+            else()
+                set_tests_properties(${r4_name} PROPERTIES FIXTURES_REQUIRED r4_cache_${adapter})
+            endif()
+        endforeach()
+    endforeach()
     add_test(NAME runtime_r3_refused_warp COMMAND r3_triangle warp refused)
     set_tests_properties(runtime_r3_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r3_cache_refused")
@@ -2681,8 +2710,8 @@ if(EXISTS "${INTAKE_PYTHON}")
     # the R3 programs and 200 draw-check programs (tests/runtime/xl_bench.py; serial: it measures time).
     add_test(NAME runtime_r3_translator_paths_warp COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/runtime/xl_check.py" shim "$<TARGET_FILE:r3_triangle>" "${DXC_EXECUTABLE}"
-        "${CMAKE_BINARY_DIR}/r3_translator_paths")
-    set_tests_properties(runtime_r3_translator_paths_warp PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+        "${CMAKE_BINARY_DIR}/r3_translator_paths" "$<TARGET_FILE:r4_scene>")
+    set_tests_properties(runtime_r3_translator_paths_warp PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
     add_test(NAME runtime_r3_translator_bench COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/runtime/xl_bench.py" run "${DXC_EXECUTABLE}" "${CMAKE_BINARY_DIR}/r3_translator_bench")
     set_tests_properties(runtime_r3_translator_bench PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
@@ -2949,5 +2978,58 @@ if(TARGET pe_map AND TARGET xmem_shim)
         "${CMAKE_SOURCE_DIR}/tests/native/launch_check.py" "$<TARGET_FILE:x2w_launch>"
         "$<TARGET_FILE:x2w_fake_title>" "$<TARGET_FILE_DIR:xmem_shim>")
     set_tests_properties(native_launch_fake_title PROPERTIES TIMEOUT 60)
+
+    # The #UD handler for Zen 2 instructions the host lacks (tools/x2w_cpu_trap.h): a CRT-free program runs
+    # each one and compares with software references, naturally and with --force-cpu-traps.
+    add_executable(x2w_cpu_trap_title tests/native/cpu_trap_title.cpp tests/native/cpu_trap_ops.asm)
+    target_compile_options(x2w_cpu_trap_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
+    target_link_options(x2w_cpu_trap_title PRIVATE /ENTRY:cpu_trap_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+        /DYNAMICBASE /INCREMENTAL:NO /EXPORT:x2w_cpu_trap_sites,DATA)
+    set_target_properties(x2w_cpu_trap_title PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(x2w_cpu_trap_title PRIVATE kernel32)
+    add_test(NAME native_cpu_traps COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/cpu_trap_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_cpu_trap_title>")
+    set_tests_properties(native_cpu_traps PROPERTIES TIMEOUT 120)
+
+    # Rung 1 of the runtime ladder and the title report. x2w_shims collects the built desktop shims in
+    # shims/, the directory to pass to x2w_launch and tools/x2w_report.py as --shims (README.md, "Reporting a
+    # title"). The rung 1 title imports names the shims export, one the xmem shim does not, kernel32 and
+    # x2w_missing.dll (also by ordinal), and has a TLS callback and a worker thread.
+    if(TARGET d3d12_xs_shim)
+        set(x2w_shim_dir "${CMAKE_CURRENT_BINARY_DIR}/shims")
+        add_custom_target(x2w_shims ALL
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${x2w_shim_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:xmem_shim>" "$<TARGET_FILE:d3d12_xs_shim>"
+                "${x2w_shim_dir}"
+            DEPENDS xmem_shim d3d12_xs_shim VERBATIM)
+        add_dependencies(x2w_launch x2w_shims)
+        foreach(rung1_def IN ITEMS xmem missing)
+            set(rung1_${rung1_def}_lib "${CMAKE_CURRENT_BINARY_DIR}/rung1_${rung1_def}.lib")
+            add_custom_command(OUTPUT "${rung1_${rung1_def}_lib}"
+                COMMAND "${CMAKE_AR}" /NOLOGO /MACHINE:X64
+                    "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/tests/native/rung1_${rung1_def}.def"
+                    "/OUT:${rung1_${rung1_def}_lib}"
+                DEPENDS tests/native/rung1_${rung1_def}.def VERBATIM)
+        endforeach()
+        add_custom_target(x2w_rung1_imports DEPENDS "${rung1_xmem_lib}" "${rung1_missing_lib}")
+        add_executable(x2w_rung1_title tests/native/rung1_title.cpp)
+        add_dependencies(x2w_rung1_title x2w_rung1_imports x2w_shims)
+        target_compile_options(x2w_rung1_title PRIVATE /GS- /Zl)
+        target_link_options(x2w_rung1_title PRIVATE /ENTRY:rung1_entry /NODEFAULTLIB /SUBSYSTEM:CONSOLE
+            /DYNAMICBASE /INCREMENTAL:NO)
+        target_link_libraries(x2w_rung1_title PRIVATE kernel32 "${rung1_xmem_lib}" d3d12_xs_shim
+            "${rung1_missing_lib}")
+        add_test(NAME native_report_rung1 COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/report_check.py" --title "$<TARGET_FILE:x2w_rung1_title>"
+            --shims "${x2w_shim_dir}")
+        add_test(NAME native_report_synthetic COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/report_check.py")
+        add_test(NAME native_run_log_rung1 COMMAND "${INTAKE_PYTHON}" -B
+            "${CMAKE_SOURCE_DIR}/tests/native/run_log_check.py" "$<TARGET_FILE:x2w_launch>"
+            "$<TARGET_FILE:x2w_rung1_title>" "${x2w_shim_dir}")
+        set_tests_properties(native_report_rung1 native_report_synthetic native_run_log_rung1
+            PROPERTIES TIMEOUT 180)
+    endif()
 endif()
 

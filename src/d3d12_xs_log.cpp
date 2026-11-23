@@ -4,6 +4,7 @@
 // keeps an empty TLS template and loads the same through LoadLibrary and pe_map.
 #include "d3d12_xs_wrap.h"
 #include "d3d12_xs_api.h"
+#include "d3d12_xs_pipeline.h"
 
 #include <atomic>
 #include <cstdio>
@@ -26,7 +27,9 @@ constexpr unsigned prefix_slots = 2;
 
 void* g_tables[kind_count][prefix_slots + vtable_slots];
 INIT_ONCE g_table_once[kind_count] = {INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
-                                      INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT};
+                                      INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT, INIT_ONCE_STATIC_INIT,
+                                      INIT_ONCE_STATIC_INIT};
+static_assert(kind_count == 7, "one INIT_ONCE per wrapper kind");
 std::atomic<bool> g_slot_seen[kind_count][vtable_slots];
 
 struct SeenIid {
@@ -53,6 +56,7 @@ std::atomic<std::uint32_t> g_shaders_translated;
 std::atomic<std::uint32_t> g_shaders_cached;
 std::atomic<std::uint32_t> g_pipelines_refused;
 std::atomic<std::uint32_t> g_draws_refused;
+std::atomic<std::uint64_t> g_texture_misses;
 
 using Thunk = std::uintptr_t(STDMETHODCALLTYPE*)(void*, std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
@@ -143,6 +147,7 @@ const char* interface_name(Kind kind)
     case Kind::list: return "ID3D12GraphicsCommandList";
     case Kind::fence: return "ID3D12Fence1";
     case Kind::swap_chain: return "IDXGISwapChain3";
+    case Kind::descriptor_heap: return "ID3D12DescriptorHeap";
     default: return "unknown";
     }
 }
@@ -233,6 +238,8 @@ void log_refused(const char* symbol, const char* detail, bool draw)
     emit(event);
 }
 
+void count_texture_miss() { g_texture_misses.fetch_add(1); }
+
 void count_shader(bool cached) { (cached ? g_shaders_cached : g_shaders_translated).fetch_add(1); }
 
 std::uintptr_t log_unknown_slot(void* self, unsigned slot, const void* caller, std::uintptr_t a1, std::uintptr_t a2,
@@ -306,5 +313,7 @@ extern "C" X2W_GFX_API BOOL WINAPI X2WGfxGetCounters(X2WGfxCounters* counters)
     counters->shaders_cached = g_shaders_cached.load();
     counters->pipelines_refused = g_pipelines_refused.load();
     counters->draws_refused = g_draws_refused.load();
+    counters->title_lookup_misses = pipeline::title_lookup_misses();
+    counters->texture_lookup_misses = g_texture_misses.load();
     return TRUE;
 }

@@ -84,6 +84,7 @@ List the registered tests with `ctest --preset dev -N`. Use
 | D3D12 and ray tracing | `ctest --preset dev -R '^bvh_(differential\|wave64)_hardware$' -V` |
 | Windows runtime | `ctest --preset dev -R 'era_heap\|desktop_memory_query'` |
 | PE tooling | `ctest --preset dev -R 'static_exe_intake\|conditional_import_paths'` |
+| Title report and launcher | `ctest --preset dev --no-tests=error -R '^native_' -V` |
 
 Tests ending in `_warp` use Microsoft WARP. Tests ending in `_hardware` use a
 physical GPU and may return 77 (capability skip). A skip is not a pass and not a
@@ -117,6 +118,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/rdna2_tools_check.py
 ./out/pe-env/bin/python -B tests/pso_readiness_check.py
 ./out/pe-env/bin/python -B tests/xmem_attribute_scan_check.py
+./out/pe-env/bin/python -B tests/native/report_check.py
 ./out/pe-env/bin/python -B tests/docs_links_check.py
 ./out/pe-env/bin/python -B tests/bidi_controls_check.py
 ```
