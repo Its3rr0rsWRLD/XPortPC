@@ -6,6 +6,7 @@
 // beyond the interface. Methods forward to the desktop object and log their first use.
 #include "d3d12_xs_wrap.h"
 #include "d3d12_xs_api.h"
+#include "d3d12_xs_descriptors.h"
 #include "d3d12_xs_pipeline.h"
 
 #include <d3d12sdklayers.h>
@@ -227,6 +228,79 @@ public:
     }
 };
 
+// A title CBV/SRV/UAV or sampler heap (d3d12_xs_descriptors.h): title handles over a desktop shadow heap that is
+// never shader visible. real_ is the shadow heap.
+class DescriptorHeap final : public Wrapper<DescriptorHeap, ID3D12DescriptorHeap, Kind::descriptor_heap>, DeviceRef {
+public:
+    DescriptorHeap(ID3D12DescriptorHeap* shadow, Device* device) : Wrapper(shadow), DeviceRef(device) { install(); }
+    ~DescriptorHeap() { descriptors::destroy(state_); }
+    static bool implements(REFIID riid)
+    {
+        return is_pageable_iid(riid) || IsEqualIID(riid, __uuidof(ID3D12DescriptorHeap));
+    }
+    bool init(ID3D12Device* desktop, const D3D12_DESCRIPTOR_HEAP_DESC& desc)
+    {
+        return descriptors::create(state_, desktop, desc, real_);
+    }
+    const descriptors::Heap& state() const { return state_; }
+
+    X2W_D3D12_OBJECT_METHODS
+    X2W_DEVICE_CHILD_METHODS
+#ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
+    D3D12_DESCRIPTOR_HEAP_DESC* STDMETHODCALLTYPE GetDesc(D3D12_DESCRIPTOR_HEAP_DESC* ret) override
+    {
+        X2W_USE();
+        *ret = state_.desc;
+        return ret;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE* STDMETHODCALLTYPE GetCPUDescriptorHandleForHeapStart(D3D12_CPU_DESCRIPTOR_HANDLE* ret) override
+    {
+        X2W_USE();
+        ret->ptr = reinterpret_cast<SIZE_T>(state_.base);
+        return ret;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE* STDMETHODCALLTYPE GetGPUDescriptorHandleForHeapStart(D3D12_GPU_DESCRIPTOR_HANDLE* ret) override
+    {
+        X2W_USE();
+        ret->ptr = gpu_start();
+        return ret;
+    }
+#else
+    D3D12_DESCRIPTOR_HEAP_DESC STDMETHODCALLTYPE GetDesc() override
+    {
+        X2W_USE();
+        return state_.desc;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetCPUDescriptorHandleForHeapStart() override
+    {
+        X2W_USE();
+        return {reinterpret_cast<SIZE_T>(state_.base)};
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE STDMETHODCALLTYPE GetGPUDescriptorHandleForHeapStart() override
+    {
+        X2W_USE();
+        return {gpu_start()};
+    }
+#endif
+
+private:
+    // One address space: a shader-visible heap's GPU handles are its CPU handles. As on desktop, a heap that is not
+    // shader visible has no GPU handles.
+    UINT64 gpu_start() const
+    {
+        return state_.desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE ? reinterpret_cast<UINT64>(state_.base) : 0;
+    }
+    descriptors::Heap state_;
+};
+
+// The title heap behind a wrapper, or null for a desktop heap.
+const descriptors::Heap* title_heap(ID3D12DescriptorHeap* heap)
+{
+    Kind kind;
+    if (!wrapper_kind(heap, &kind) || kind != Kind::descriptor_heap) return nullptr;
+    return &static_cast<DescriptorHeap*>(heap)->state();
+}
+
 class List final : public Wrapper<List, ID3D12GraphicsCommandList, Kind::list>, DeviceRef {
 public:
     List(ID3D12GraphicsCommandList* real, Device* device) : Wrapper(real), DeviceRef(device), args_(new (std::nothrow) pipeline::RootArgs())
@@ -250,7 +324,7 @@ public:
     {
         has_root_ = false;
         set_pipeline(state);
-        title_heap_ = nullptr;
+        heaps_ = {};
         ours_bound_ = false;
         if (args_) args_->clear();
         compute_.reset();
@@ -270,16 +344,20 @@ public:
         std::memcpy(&args_->constants[index][offset], data, count * 4);
     }
     // Before a draw: the converter parameters of a translated pipeline. False skips the draw (logged).
-    bool bind_draw()
+    bool bind_draw(std::uint32_t base_vertex, std::uint32_t start_instance)
     {
-        if (!translated_) return true;
+        if (!translated_) {
+            if (has_root_) pipeline::set_placeholders(real_, root_);
+            return true;
+        }
         if (!has_root_ || !args_) {
             log_refused("d3d12_xs!ID3D12GraphicsCommandList::Draw",
                         "draw skipped: a translated pipeline drawn without a root signature created through the shim",
                         true);
             return false;
         }
-        return pipeline::bind_for_draw(device_views(device_), real_, root_, pso_, *args_, title_heap_, &ours_bound_);
+        return pipeline::bind_for_draw(device_views(device_), real_, root_, pso_, *args_, heaps_,
+                                       {base_vertex, start_instance}, &ours_bound_);
     }
 
     X2W_D3D12_OBJECT_METHODS
@@ -306,21 +384,27 @@ public:
         reset_state(state);
         real_->ClearState(state);
     }
+    // A translated vertex program receives the base vertex and start instance in user SGPRs (bind_for_draw) and adds
+    // them itself, as on the console: the desktop draw starts both its vertex and instance ids at 0.
     void STDMETHODCALLTYPE DrawInstanced(UINT vertices, UINT instances, UINT first_vertex, UINT first_instance) override
     {
         X2W_USE();
-        if (bind_draw()) real_->DrawInstanced(vertices, instances, first_vertex, first_instance);
+        if (!bind_draw(first_vertex, first_instance)) return;
+        if (translated_) real_->DrawInstanced(vertices, instances, 0, 0);
+        else real_->DrawInstanced(vertices, instances, first_vertex, first_instance);
     }
     void STDMETHODCALLTYPE DrawIndexedInstanced(UINT indices, UINT instances, UINT first_index, INT base_vertex,
                                                 UINT first_instance) override
     {
         X2W_USE();
-        if (bind_draw()) real_->DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance);
+        if (!bind_draw(static_cast<std::uint32_t>(base_vertex), first_instance)) return;
+        if (translated_) real_->DrawIndexedInstanced(indices, instances, first_index, 0, 0);
+        else real_->DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance);
     }
     void STDMETHODCALLTYPE Dispatch(UINT x, UINT y, UINT z) override
     {
         X2W_USE();
-        if (compute_.bind(device_views(device_), real_, title_heap_, &ours_bound_)) real_->Dispatch(x, y, z);
+        if (compute_.bind(device_views(device_), real_, heaps_, &ours_bound_)) real_->Dispatch(x, y, z);
     }
     void STDMETHODCALLTYPE CopyBufferRegion(ID3D12Resource* dst, UINT64 dst_offset, ID3D12Resource* src,
                                             UINT64 src_offset, UINT64 bytes) override
@@ -393,15 +477,26 @@ public:
         X2W_USE();
         real_->ExecuteBundle(unwrap(bundle));
     }
+    // Title heaps are recorded, not bound: desktop D3D12 sees the shim's heaps, bound before a translated draw. A
+    // desktop heap (one the shim did not create) is bound as given, and translated draws are then refused.
     void STDMETHODCALLTYPE SetDescriptorHeaps(UINT count, ID3D12DescriptorHeap* const* heaps) override
     {
         X2W_USE();
-        title_heap_ = nullptr;
-        ours_bound_ = false;
+        heaps_ = {};
+        std::vector<ID3D12DescriptorHeap*> desktop;
         for (UINT i = 0; heaps && i < count; ++i) {
-            if (heaps[i] && heaps[i]->GetDesc().Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) title_heap_ = heaps[i];
+            if (!heaps[i]) continue;
+            if (const descriptors::Heap* heap = title_heap(heaps[i])) {
+                (heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? heaps_.samplers : heaps_.views) = heap->serial;
+            } else {
+                desktop.push_back(heaps[i]);
+            }
         }
-        real_->SetDescriptorHeaps(count, heaps);
+        if (!desktop.empty()) {
+            heaps_.foreign = true;
+            ours_bound_ = false;
+            real_->SetDescriptorHeaps(static_cast<UINT>(desktop.size()), desktop.data());
+        }
     }
     void STDMETHODCALLTYPE SetComputeRootSignature(ID3D12RootSignature* root) override
     {
@@ -419,11 +514,28 @@ public:
     void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE base) override
     {
         X2W_USE();
+        if (descriptors::is_title_handle(base.ptr)) {
+            log_refused("d3d12_xs!ID3D12GraphicsCommandList::SetComputeRootDescriptorTable",
+                        "a compute table in a title heap is not translated (console compute comes with R5); not set",
+                        true);
+            return;
+        }
         real_->SetComputeRootDescriptorTable(index, base);
     }
+    // A table of a title root signature is recorded (its parameter is a placeholder on desktop); bind_for_draw
+    // resolves what translated shaders read from it.
     void STDMETHODCALLTYPE SetGraphicsRootDescriptorTable(UINT index, D3D12_GPU_DESCRIPTOR_HANDLE base) override
     {
         X2W_USE();
+        if (has_root_ && index < root_.title_params && root_.types[index] == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            record_address(index, base.ptr);
+            return;
+        }
+        if (descriptors::is_title_handle(base.ptr)) {
+            log_refused("d3d12_xs!ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable",
+                        "a title-heap table for a root signature not created through the shim; not set", true);
+            return;
+        }
         real_->SetGraphicsRootDescriptorTable(index, base);
     }
     void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT index, UINT data, UINT offset) override
@@ -542,6 +654,7 @@ public:
                                                         const D3D12_RECT* rects) override
     {
         X2W_USE();
+        if (title_uav_clear(gpu, cpu)) return;
         real_->ClearUnorderedAccessViewUint(gpu, cpu, resource, values, count, rects);
     }
     void STDMETHODCALLTYPE ClearUnorderedAccessViewFloat(D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
@@ -549,7 +662,16 @@ public:
                                                          const D3D12_RECT* rects) override
     {
         X2W_USE();
+        if (title_uav_clear(gpu, cpu)) return;
         real_->ClearUnorderedAccessViewFloat(gpu, cpu, resource, values, count, rects);
+    }
+    // A UAV clear through title-heap handles needs a shader-visible desktop copy of the view; not translated yet.
+    bool title_uav_clear(D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu)
+    {
+        if (!descriptors::is_title_handle(gpu.ptr) && !descriptors::is_title_handle(cpu.ptr)) return false;
+        log_refused("d3d12_xs!ID3D12GraphicsCommandList::ClearUnorderedAccessView",
+                    "a UAV clear through title-heap descriptors is not translated; not cleared", true);
+        return true;
     }
     void STDMETHODCALLTYPE DiscardResource(ID3D12Resource* resource, const D3D12_DISCARD_REGION* region) override
     {
@@ -606,8 +728,7 @@ private:
     bool has_root_ = false;
     bool translated_ = false;
     bool ours_bound_ = false;
-    ID3D12DescriptorHeap* title_heap_ = nullptr;
-
+    pipeline::BoundHeaps heaps_;
     // Compute state (runtime rung R5): the compute root signature and arguments are separate from the graphics
     // ones in D3D12; the pipeline and the descriptor heaps are shared.
     struct ComputeState {
@@ -636,10 +757,13 @@ private:
             std::memcpy(&args->constants[index][offset], data, count * 4);
         }
         // Before a dispatch: the converter parameters of a translated pipeline. False skips it (logged).
-        bool bind(pipeline::TitleViews* views, ID3D12GraphicsCommandList* list, ID3D12DescriptorHeap* title_heap,
+        bool bind(pipeline::TitleViews* views, ID3D12GraphicsCommandList* list, const pipeline::BoundHeaps& heaps,
                   bool* ours_bound)
         {
-            if (!translated) return true;
+            if (!translated) {
+                if (has_root) pipeline::set_compute_placeholders(list, root);
+                return true;
+            }
             if (!has_root || !args) {
                 log_refused("d3d12_xs!ID3D12GraphicsCommandList::Dispatch",
                             "dispatch skipped: a translated pipeline dispatched without a compute root signature "
@@ -647,7 +771,7 @@ private:
                             true);
                 return false;
             }
-            return pipeline::bind_for_dispatch(views, list, root, pso, *args, title_heap, ours_bound);
+            return pipeline::bind_for_dispatch(views, list, root, pso, *args, heaps, ours_bound);
         }
     } compute_;
 };
@@ -861,15 +985,30 @@ public:
         X2W_USE();
         return real_->CheckFeatureSupport(feature, data, size);
     }
+    // CBV/SRV/UAV and sampler heaps are title heaps (d3d12_xs_descriptors.h) over a desktop shadow heap that is not
+    // shader visible; RTV and DSV heaps are desktop heaps.
     HRESULT STDMETHODCALLTYPE CreateDescriptorHeap(const D3D12_DESCRIPTOR_HEAP_DESC* desc, REFIID riid,
                                                    void** out) override
     {
         X2W_USE();
-        return real_->CreateDescriptorHeap(desc, riid, out);
+        if (!desc || !out || !descriptors::title_increment(desc->Type)) return real_->CreateDescriptorHeap(desc, riid, out);
+        *out = nullptr;
+        D3D12_DESCRIPTOR_HEAP_DESC shadow_desc = *desc;
+        shadow_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        ID3D12DescriptorHeap* shadow = nullptr;
+        const HRESULT hr = real_->CreateDescriptorHeap(&shadow_desc, IID_PPV_ARGS(&shadow));
+        if (FAILED(hr)) return hr;
+        auto* heap = new (std::nothrow) DescriptorHeap(shadow, this);
+        if (heap && !heap->init(real_, *desc)) {
+            heap->Release();
+            return E_OUTOFMEMORY;
+        }
+        return hand_out(heap, shadow, riid, out, X2W_RETURN_ADDRESS());
     }
     UINT STDMETHODCALLTYPE GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE type) override
     {
         X2W_USE();
+        if (const UINT title = descriptors::title_increment(type)) return title;
         return real_->GetDescriptorHandleIncrementSize(type);
     }
     HRESULT STDMETHODCALLTYPE CreateRootSignature(UINT node_mask, const void* blob, SIZE_T size, REFIID riid,
@@ -878,16 +1017,25 @@ public:
         X2W_USE();
         return pipeline::create_root_signature(real_, node_mask, blob, size, riid, out);
     }
+    // Views in title heaps go to the shadow heap and are recorded (d3d12_xs_descriptors.h); a CBV's title GPU address
+    // becomes its alias in the desktop view and stays recorded as the title passed it.
     void STDMETHODCALLTYPE CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC* desc,
                                                     D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
-        real_->CreateConstantBufferView(desc, descriptor);
+        D3D12_CONSTANT_BUFFER_VIEW_DESC desktop{};
+        if (desc) {
+            desktop = *desc;
+            desktop.BufferLocation = pipeline::translate_address(desc->BufferLocation, desc->SizeInBytes);
+        }
+        if (descriptors::write_cbv(descriptor.ptr, desc, desc ? &desktop : nullptr)) return;
+        real_->CreateConstantBufferView(desc ? &desktop : nullptr, descriptor);
     }
     void STDMETHODCALLTYPE CreateShaderResourceView(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
                                                     D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
+        if (descriptors::write_srv(descriptor.ptr, resource, desc)) return;
         real_->CreateShaderResourceView(resource, desc, descriptor);
     }
     void STDMETHODCALLTYPE CreateUnorderedAccessView(ID3D12Resource* resource, ID3D12Resource* counter,
@@ -895,6 +1043,7 @@ public:
                                                      D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
+        if (descriptors::write_uav(descriptor.ptr, resource, counter, desc)) return;
         real_->CreateUnorderedAccessView(resource, counter, desc, descriptor);
     }
     void STDMETHODCALLTYPE CreateRenderTargetView(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC* desc,
@@ -912,20 +1061,42 @@ public:
     void STDMETHODCALLTYPE CreateSampler(const D3D12_SAMPLER_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE descriptor) override
     {
         X2W_USE();
+        if (descriptors::write_sampler(descriptor.ptr, desc)) return;
         real_->CreateSampler(desc, descriptor);
     }
+    // Copies between title heaps copy the shadow descriptors and their records; copies between desktop heaps are
+    // forwarded. Ranges are walked descriptor by descriptor, as the desktop runtime pairs them.
     void STDMETHODCALLTYPE CopyDescriptors(UINT dst_count, const D3D12_CPU_DESCRIPTOR_HANDLE* dst_starts,
                                            const UINT* dst_sizes, UINT src_count,
                                            const D3D12_CPU_DESCRIPTOR_HANDLE* src_starts, const UINT* src_sizes,
                                            D3D12_DESCRIPTOR_HEAP_TYPE type) override
     {
         X2W_USE();
-        real_->CopyDescriptors(dst_count, dst_starts, dst_sizes, src_count, src_starts, src_sizes, type);
+        bool title = false;
+        for (UINT i = 0; dst_starts && i < dst_count; ++i) title = title || descriptors::is_title_handle(dst_starts[i].ptr);
+        for (UINT i = 0; src_starts && i < src_count; ++i) title = title || descriptors::is_title_handle(src_starts[i].ptr);
+        if (!title || !descriptors::title_increment(type)) {
+            real_->CopyDescriptors(dst_count, dst_starts, dst_sizes, src_count, src_starts, src_sizes, type);
+            return;
+        }
+        const UINT increment = descriptors::title_increment(type);
+        UINT d = 0, s = 0, d_at = 0, s_at = 0;
+        while (d < dst_count && s < src_count) {
+            const UINT d_size = dst_sizes ? dst_sizes[d] : 1, s_size = src_sizes ? src_sizes[s] : 1;
+            if (d_at == d_size) { ++d; d_at = 0; continue; }
+            if (s_at == s_size) { ++s; s_at = 0; continue; }
+            const UINT n = (d_size - d_at) < (s_size - s_at) ? d_size - d_at : s_size - s_at;
+            descriptors::copy(n, dst_starts[d].ptr + std::uint64_t(d_at) * increment,
+                              src_starts[s].ptr + std::uint64_t(s_at) * increment, type);
+            d_at += n;
+            s_at += n;
+        }
     }
     void STDMETHODCALLTYPE CopyDescriptorsSimple(UINT count, D3D12_CPU_DESCRIPTOR_HANDLE dst,
                                                  D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE type) override
     {
         X2W_USE();
+        if (descriptors::title_increment(type) && descriptors::copy(count, dst.ptr, src.ptr, type)) return;
         real_->CopyDescriptorsSimple(count, dst, src, type);
     }
 #ifdef WIDL_EXPLICIT_AGGREGATE_RETURNS
@@ -1305,7 +1476,8 @@ private:
 };
 
 static_assert(std::is_final_v<Device> && std::is_final_v<Queue> && std::is_final_v<Allocator> &&
-              std::is_final_v<List> && std::is_final_v<Fence> && std::is_final_v<SwapChain>);
+              std::is_final_v<List> && std::is_final_v<Fence> && std::is_final_v<SwapChain> &&
+              std::is_final_v<DescriptorHeap>);
 
 IUnknown* real_of(const void* object)
 {
@@ -1320,6 +1492,8 @@ IUnknown* real_of(const void* object)
     case Kind::list: return static_cast<List*>(static_cast<ID3D12GraphicsCommandList*>(base))->real();
     case Kind::fence: return static_cast<Fence*>(static_cast<ID3D12Fence1*>(base))->real();
     case Kind::swap_chain: return static_cast<SwapChain*>(static_cast<IDXGISwapChain3*>(base))->real();
+    case Kind::descriptor_heap:
+        return static_cast<DescriptorHeap*>(static_cast<ID3D12DescriptorHeap*>(base))->real();
     default: return nullptr;
     }
 }

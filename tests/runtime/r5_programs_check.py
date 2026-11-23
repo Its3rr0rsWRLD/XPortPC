@@ -71,8 +71,9 @@ def check(assembler=None, objcopy=None):
             raise AssertionError(f"{name}: gfx_text.py decodes\n" + "\n".join(decoded))
         program = pixel_aot.name_branch_targets(gfx_text.decode(code), len(code))
         try:
-            source, _ = pso_translate.lower("compute", program, CS_ROLES)
-            source = pso_translate.place_in_runtime_spaces(source)
+            source, layout, refs = pso_translate.lower("compute", program, CS_ROLES)
+            source = pso_translate.place_in_runtime_spaces(source, "compute", layout)
+            assert refs == [], refs
         except ValueError as error:
             if name != "r5_refused_cs" or "s_barrier is card C-6" not in str(error):
                 raise
@@ -82,7 +83,7 @@ def check(assembler=None, objcopy=None):
             raise AssertionError("r5_refused_cs was translated")
         registers = sorted(set(re.findall(r"register\([^)]*\)", source)))
         expected = ["register(b1, space1000)", "register(b3, space1000)", "register(t2, space1000)",
-                    "register(u0, space1001)"]
+                    "register(u0, space1000)", "register(u0, space1001)"]
         if registers != expected or "RootSignature" in source or "[numthreads(4, 1, 1)]" not in source:
             raise AssertionError(f"{name}: unexpected bindings {registers}")
         print(f"{name}: {len(program)} instructions decode to the source text and translate; bindings {registers}")

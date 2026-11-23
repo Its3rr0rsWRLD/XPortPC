@@ -572,8 +572,12 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
             if (f == 100) loop.at_100 = process_use();
             if (f == frames - 1) loop.at_599 = process_use();
         }
-        gpu.fence_value = frames;
-        good = good && wait_fence(gpu.fence.Get(), frames, gpu.event) && ok(device->GetDeviceRemovedReason(), "device");
+        // Drain both queues, the presents included, before anything is released.
+        gpu.fence_value = frames + 1;
+        good = good && ok(gpu.queue->Signal(gpu.fence.Get(), frames + 1), "direct queue Signal") &&
+               ok(cqueue->Signal(cfence.Get(), frames + 1), "compute queue Signal") &&
+               wait_fence(gpu.fence.Get(), frames + 1, gpu.event) && wait_fence(cfence.Get(), frames + 1, gpu.event) &&
+               ok(device->GetDeviceRemovedReason(), "device");
         if (good) {
             for (UINT s = 0; s < sample_count; ++s) {
                 unsigned first_at = 0;
@@ -585,10 +589,15 @@ bool run_frames(Gpu& gpu, ID3D12RootSignature* groot, ID3D12PipelineState* gpso,
             }
         }
         loop.api_good = good;
+        std::puts("loop: releasing");
+        for (auto& b : back) b.Reset();
         chain.Reset();
+        std::puts("loop: swap chain released");
     }
+    std::puts("loop: objects released");
     DestroyWindow(window);
     pump_messages();
+    std::puts("loop: window destroyed");
     return good;
 }
 
@@ -715,12 +724,14 @@ int frames_check(bool warp, std::string_view mode)
         const unsigned loop_shaders = (after_loop.shaders_translated - before_loop.shaders_translated) +
                                       (after_loop.shaders_cached - before_loop.shaders_cached);
         const unsigned files = cached_files(cache);
+        const unsigned long long title_misses = end.title_lookup_misses - start.title_lookup_misses;
         std::printf("shaders_translated=%u shaders_cached=%u loop_shader_loads=%u cache_files=%u refused=%u "
-                    "draws_refused=%u debug_errors=%u unknown_slots=%llu unknown_iids=%llu\n",
-                    translated, cached, loop_shaders, files, recorded.refused, end.draws_refused, debug_errors,
+                    "draws_refused=%u title_lookup_misses=%llu debug_errors=%u unknown_slots=%llu unknown_iids=%llu\n",
+                    translated, cached, loop_shaders, files, recorded.refused, end.draws_refused, title_misses,
+                    debug_errors,
                     static_cast<unsigned long long>(end.unknown_slot_calls),
                     static_cast<unsigned long long>(end.unknown_iid_calls));
-        good = good && loop.api_good && debug_errors == 0 && recorded.refused == 0 && end.draws_refused == 0 &&
+        good = good && loop.api_good && debug_errors == 0 && title_misses == 0 && recorded.refused == 0 && end.draws_refused == 0 &&
                end.unknown_slot_calls == 0 && end.unknown_iid_calls == 0 && files == 3 && loop_shaders == 0 &&
                states_ok && vertices_ok && handle_growth <= 16 && private_growth < 8 * 1024 * 1024 &&
                loop.frame_ms.size() == frames;

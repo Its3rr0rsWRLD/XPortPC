@@ -68,6 +68,12 @@ typedef struct X2WGfxCounters {
     uint32_t shaders_cached;      // console shaders whose translation came from the on-disk cache
     uint32_t pipelines_refused;   // pipeline creations failed with a logged REFUSED event
     uint32_t draws_refused;       // draws not recorded because their bindings cannot be supplied (logged)
+    // Lookup misses (runtime rung R4). TitleLookup: loads of translated shaders from a title GPU address that no
+    // title memory range holds (they read zero), counted on the GPU; the count covers GPU work that has completed.
+    // TextureLookup: descriptors a translated draw reads from a title descriptor table (T#, S#, constant-buffer V#)
+    // where the table's heap holds no view of that kind (the draw reads a null view, a point sampler or zeros).
+    uint64_t title_lookup_misses;
+    uint64_t texture_lookup_misses;
 } X2WGfxCounters;
 
 typedef enum X2WGfxTitleGpuState {
@@ -97,8 +103,11 @@ X2W_GFX_API HRESULT WINAPI X2WGfxCreateSwapChainForHwnd(IUnknown* queue, HWND wi
 //   raw gfx1013 code (code_bytes, a multiple of 4, ending in s_endpgm) at code_offset. Little-endian.
 // A binding names an entry SGPR and where its value comes from: one 32-bit word of a root parameter of
 // the pipeline's root signature (a root CBV/SRV/UAV's title GPU address: word 0 low, 1 high; a root
-// constant: its index), or the pixel stage's interpolation base. Bytecode without the magic is desktop
-// bytecode and is passed to desktop D3D12 unchanged.
+// constant: its index), the low 32 bits of a descriptor table's address (a descriptor-table root parameter;
+// the program completes the pair with a constant high word and loads T#, S# and V# words through it at byte
+// offsets: 32 bytes per CBV/SRV/UAV descriptor, 16 per sampler, the increments GetDescriptorHandleIncrementSize
+// reports for title heaps), the draw's base vertex or start instance (vertex stage), or the pixel stage's
+// interpolation base. Bytecode without the magic is desktop bytecode and is passed to desktop D3D12 unchanged.
 // Compute containers (runtime rung R5) also carry an X2WShaderComputeInfo record at stage_info_offset (the workgroup
 // size and wave size a title's compute pipeline state gives the console GPU); the other stages have none and leave
 // stage_info_offset 0. A compute binding is a root-parameter word (an inline user-data word of the program) or a
@@ -114,6 +123,10 @@ typedef enum X2WShaderStage {
 typedef enum X2WShaderBindingKind {
     X2W_SHADER_BINDING_ROOT_WORD = 1,  // root_parameter, word
     X2W_SHADER_BINDING_INTERP = 2,     // pixel stage: the SGPR copied into m0 for v_interp_*
+    X2W_SHADER_BINDING_TABLE = 3,      // root_parameter (a descriptor table): low word of the table's address
+    X2W_SHADER_BINDING_BASE_VERTEX = 4,    // vertex stage: the draw's base vertex (StartVertexLocation or
+                                           // BaseVertexLocation); the hardware vertex id starts at 0
+    X2W_SHADER_BINDING_START_INSTANCE = 5, // vertex stage: the draw's start instance; the instance id starts at 0
     X2W_SHADER_BINDING_GROUP_ID = 16   // compute stage: workgroup id component `word` (0 x, 1 y, 2 z)
 } X2WShaderBindingKind;
 
@@ -137,8 +150,8 @@ typedef struct X2WShaderComputeInfo {
 typedef struct X2WShaderBinding {
     uint32_t sgpr;            // entry SGPR number, 0..105
     uint32_t kind;            // X2WShaderBindingKind
-    uint32_t root_parameter;  // ROOT_WORD: root parameter index in the pipeline's root signature
-    uint32_t word;            // ROOT_WORD: 32-bit word of that parameter
+    uint32_t root_parameter;  // ROOT_WORD, TABLE: root parameter index in the pipeline's root signature
+    uint32_t word;            // ROOT_WORD: 32-bit word of that parameter; TABLE: 0
 } X2WShaderBinding;
 
 #ifdef __cplusplus
