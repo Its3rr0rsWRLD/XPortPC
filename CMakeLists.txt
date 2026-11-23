@@ -3321,6 +3321,24 @@ if(TARGET pe_map AND TARGET xmem_shim)
     target_compile_options(x2w_throw_title PRIVATE /EHsc)
     set_target_properties(x2w_throw_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
     target_link_options(x2w_throw_title PRIVATE /DYNAMICBASE /INCREMENTAL:NO)
+    # Thread starts under x2w_launch (tests/native/thread_stress_check.py): a /GL + /LTCG title with thread_local data
+    # reached through TLS slot 0 and its own TLS callback, and a package DLL with its own TLS and DllMain, start 64
+    # threads; every one must find both images' TLS blocks from its first notification on. 20 runs.
+    add_library(x2w_thread_stress_pkg SHARED tests/native/thread_stress_pkg.cpp)
+    target_compile_features(x2w_thread_stress_pkg PRIVATE cxx_std_17)
+    target_compile_options(x2w_thread_stress_pkg PRIVATE /EHsc /GL)
+    set_target_properties(x2w_thread_stress_pkg PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_thread_stress_pkg PRIVATE /LTCG /DYNAMICBASE /INCREMENTAL:NO)
+    add_executable(x2w_thread_stress_title tests/native/thread_stress_title.cpp)
+    target_compile_features(x2w_thread_stress_title PRIVATE cxx_std_17)
+    target_compile_options(x2w_thread_stress_title PRIVATE /EHsc /GL)
+    set_target_properties(x2w_thread_stress_title PROPERTIES MSVC_RUNTIME_LIBRARY MultiThreaded)
+    target_link_options(x2w_thread_stress_title PRIVATE /LTCG /DYNAMICBASE /INCREMENTAL:NO)
+    target_link_libraries(x2w_thread_stress_title PRIVATE x2w_thread_stress_pkg)
+    add_test(NAME native_launch_thread_stress COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/native/thread_stress_check.py" "$<TARGET_FILE:x2w_launch>"
+        "$<TARGET_FILE:x2w_thread_stress_title>" "$<TARGET_FILE:x2w_thread_stress_pkg>")
+    set_tests_properties(native_launch_thread_stress PROPERTIES TIMEOUT 300)
     enable_language(RC)
     add_executable(x2w_identity_title tests/native/identity_title.cpp tests/native/identity_title.rc)
     target_compile_options(x2w_identity_title PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GS- /Zl>)
