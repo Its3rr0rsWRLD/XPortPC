@@ -177,7 +177,12 @@ bool CopyFootprints(const Config& config, const Surface& s, std::uint8_t* tiled,
             return false;
         }
         const std::uint64_t slice_pitch = static_cast<std::uint64_t>(f.row_pitch) * rows;
-        if (f.offset + slice_pitch * depth > upload_size)
+        // As D3D12 sizes a footprint (GetCopyableFootprints' total bytes): the last row of the last slice ends at
+        // its last element, not at the row pitch.
+        const std::uint64_t row_bytes = static_cast<std::uint64_t>(cols) * s.element_bytes;
+        const std::uint64_t extent =
+            rows == 0 || depth == 0 ? 0 : slice_pitch * (depth - 1) + std::uint64_t(f.row_pitch) * (rows - 1) + row_bytes;
+        if (f.row_pitch < row_bytes || f.offset > upload_size || extent > upload_size - f.offset)
         {
             *error = where + ": footprint outside the upload buffer";
             return false;

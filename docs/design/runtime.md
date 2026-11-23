@@ -267,7 +267,9 @@ bool x2w::gfx10::DetileToFootprints(const Config& config, const Surface& surface
   then the call fills every footprint, and the shim issues one `CopyTextureRegion` per subresource (or passes the
   same data to `UpdateSubresources`).
 - It returns false, with a reason, for a surface addrlib rejects or this port does not cover, `tiled_size` smaller
-  than the surface (addrlib's `surfSize`), or a footprint that does not match. It never reads outside `tiled`.
+  than the surface (addrlib's `surfSize`), a footprint that does not match, or a footprint that does not fit in `upload_size` (sized as
+  `GetCopyableFootprints` sizes it: the last row of a subresource ends at its last element, not at the row pitch).
+  It never reads outside `tiled` or writes outside `upload`.
 
 Modes covered: `SW_LINEAR`, `SW_256B_S/D`, `SW_4KB_S/D`, `SW_4KB_S_X/D_X`, `SW_64KB_S/D`, `SW_64KB_S_T/D_T`,
 `SW_64KB_Z_X/S_X/D_X/R_X`, and on GFX10.3 `SW_VAR_Z_X/R_X`: every mode addrlib has a swizzle pattern for on these

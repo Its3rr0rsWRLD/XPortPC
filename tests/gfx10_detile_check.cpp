@@ -43,7 +43,7 @@ const SwizzleMode kModes[] = {
 std::uint64_t Align(std::uint64_t v, std::uint64_t a) { return (v + a - 1) / a * a; }
 
 // D3D12 GetCopyableFootprints shape: width/height in pixels (BC: rounded up to 4), 256-byte row pitch, 512-byte
-// placement alignment.
+// placement alignment, total bytes ending at the last element of the last row.
 std::vector<Footprint> Footprints(const Surface& s, std::uint64_t* total)
 {
     std::vector<Footprint> out;
@@ -61,7 +61,9 @@ std::vector<Footprint> Footprints(const Surface& s, std::uint64_t* total)
         f.row_pitch = static_cast<std::uint32_t>(Align(f.width / s.element_width * s.element_bytes, 256));
         offset = Align(offset, 512);
         f.offset = offset;
-        offset += static_cast<std::uint64_t>(f.row_pitch) * (f.height / s.element_height) * f.depth;
+        // As D3D12 sizes it: the last row ends at its last element, not at the row pitch.
+        offset += static_cast<std::uint64_t>(f.row_pitch) * ((f.height / s.element_height) * f.depth - 1) +
+                  static_cast<std::uint64_t>(f.width / s.element_width) * s.element_bytes;
         out.push_back(f);
     }
     *total = offset;
@@ -163,6 +165,8 @@ void Controls(const Config& cfg)
     fp[2].width -= 1;
     expect_refusal("short tiled buffer", DetileToFootprints(cfg, s, tiled.data(), tiled.size() - 1, upload.data(),
                                                             upload.size(), fp.data(), 4, &error));
+    expect_refusal("upload buffer one byte short", DetileToFootprints(cfg, s, tiled.data(), tiled.size(), upload.data(),
+                                                                      upload.size() - 1, fp.data(), 4, &error));
     expect_refusal("missing footprint", DetileToFootprints(cfg, s, tiled.data(), tiled.size(), upload.data(),
                                                            upload.size(), fp.data(), 3, &error));
     Surface r = s;
