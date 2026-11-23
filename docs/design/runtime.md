@@ -300,6 +300,13 @@ descriptor resolution (design choices and tests in
 criteria pass on WARP and hardware except "textures created from tiled bytes": the console's texture upload path is
 not public, so the scene uploads linear rows; detiling moves to R5 once an owner log shows the upload calls.
 
+R5 program: `tests/runtime/r5_frames.cpp`: a compute queue moves particles in title memory with a translated gfx1013
+compute program (`r5_cs.s`) and the direct queue draws them with the R3 programs, with cross-queue fences, for 600
+frames (design choices, tests and frame times in
+[experiments.md](../experiments.md#compute-and-a-frame-loop-runtime-rung-r5)). Its exit criteria pass on WARP and
+hardware. The shim's descriptor blocks are recycled once the GPU is done with them, so a long run no longer exhausts
+them.
+
 R3 program: `tests/runtime/r3_triangle.cpp`, with pipeline-time translation and the cache in
 `src/d3d12_xs_pipeline.h` (work item 3; design choices and tests in
 [experiments.md](../experiments.md#pipeline-time-translation-runtime-rung-r3)). Its shaders come in a console

@@ -39,6 +39,9 @@ struct BadCase : std::runtime_error { using std::runtime_error::runtime_error; }
 struct PixelMismatch : std::runtime_error {
     PixelMismatch() : std::runtime_error("AOT color export differs from CPU reference") {}
 };
+// A translated dispatch whose memory or storage images differ from the reference (--check-compute-batch reports it
+// as status=mismatch; the single-case path exits 1 as for any failure).
+struct ComputeMismatch : std::runtime_error { using std::runtime_error::runtime_error; };
 
 void check_translated_pixel(ID3D12Device* device, const char* path, bool swapRB, const char* reference = nullptr,
                             UINT8 writeMask = D3D12_COLOR_WRITE_ENABLE_ALL);

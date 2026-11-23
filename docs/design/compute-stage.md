@@ -1,14 +1,16 @@
 # Compute stage: design
 
-Status: C-1 to C-4 and the first part of C-7 are implemented (`tools/compute_aot.py`, checked by
-`tests/compute_aot_check.py` and `tests/compute_aot_render.cpp`); C-5, C-6, C-8 and the rest of C-7 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
+Status: C-1 to C-4, C-6 and the first part of C-7 are implemented (`tools/compute_aot.py`, checked by
+`tests/compute_aot_check.py` and `tests/compute_aot_render.cpp`); C-5, C-8 and the rest of C-7 are proposed. The structure follows [vertex-stage.md](vertex-stage.md):
 the instruction lowerings stay in `tools/pixel_aot_ops/forms/` and are shared, and the compute stage adds only its entry
 contract, its terminator, its refusals and its test harness. With C-4, 12 of the 27 corpus compute shaders translate
 (see [Where C-2 to C-4 stand](#where-c-2-to-c-4-stand)); the projection below was 18. C-7's lane reads add headless
 (see [C-7: wave-uniform lane reads](#c-7-wave-uniform-lane-reads)) and descriptor words as data add
 game_of_life_update (see [Descriptor words as data](#descriptor-words-as-data)): 14 of 27. Scalar constant loads at a
 run-time offset, carried around loops, add 16bit_arithmetic/compute_buffer (see
-[Dynamic scalar constant loads](#dynamic-scalar-constant-loads)): 15 of 27.
+[Dynamic scalar constant loads](#dynamic-scalar-constant-loads)): 15 of 27. LDS and barriers (C-6) add the three
+particle_calculate shaders, the Sascha Willems one with its wave-uniform LDS reads (see
+[groupshared and barriers](#groupshared-and-barriers-c-6)): 18 of 27.
 
 ## What the corpus shows
 The corpus has 27 compute shaders (10 from Sascha Willems' Vulkan samples, 17 from Khronos Vulkan-Samples; licenses in
@@ -147,19 +149,97 @@ wave64 waves) are disabled at entry on the console and absent on desktop, which 
   C-4 checks whether a NaN result keeps its payload on both backends, as the pixel stage did for exports.
 
 ### groupshared and barriers (C-6)
-- LDS becomes `groupshared uint lds[LDS_SIZE / 4]`, the size from COMPUTE_PGM_RSRC2.LDS_SIZE (a title's shader
-  metadata; RADV's comes from the shader info). `ds_read_b32..b128` and `ds_write_b32..b128` with their offset fields
-  index it by byte address / 4. An address that is not a multiple of the access size, or past the allocation, is
-  refused when it is a translation-time constant and checked at run time otherwise (reads 0, write dropped, the RDNA
-  out-of-range rule, to be confirmed by a draw).
-- `s_barrier` becomes `GroupMemoryBarrierWithGroupSync()`. HLSL requires it in uniform control flow, so it is accepted
-  only where the CF-1 walk shows every lane of the workgroup reaches it (`st.ex == "true"` and no divergent branch
-  around it); otherwise it is refused.
-- **LDS without a barrier.** A compiler may drop `s_barrier` when the workgroup fits one wave, because the lanes of a
-  wave run in lockstep. On desktop a workgroup can span several waves (WARP and other adapters report other lane
-  counts), so the translation cannot rely on lockstep. Such a program is accepted only when its workgroup has one
-  thread (the two Vulkan-Samples particle_calculate shaders) and refused otherwise; inserting barriers is a later
-  option with its own evidence.
+Implemented in `tools/pixel_aot_ops/forms/lds.py` (compute stage only; the pixel and vertex stages refuse every DS
+form and `s_barrier`), with the barrier and wait checks in `tools/compute_aot.py` and the epoch joins in
+`control_flow.program`.
+
+- **Model.** LDS is `groupshared uint lds[lds_size / 4]`. `lds_size` is a contract field (`lower_compute(lds_size=...)`):
+  the program's LDS allocation in bytes, COMPUTE_PGM_RSRC2.LDS_SIZE times its granule in a title's shader metadata
+  (RADV's comes from the shader's shared-variable size; the corpus dumps do not print it, so the corpus run takes it
+  from the sample sources: 8 KiB for the Sascha Willems shader, 16 KiB for the two Vulkan-Samples ones). It must be a
+  multiple of 16 and at most 32 KiB, D3D12's groupshared limit (gfx10 allows 64 KiB; a larger program is refused).
+  A DS form in a program without an allocation is refused.
+- **Addresses** are bytes (RDNA 2 ISA guide, 10.4.3 and the DS opcode table in 12.13): ADDR = VGPR + the 16-bit offset
+  `{offset1, offset0}`; ds_read2/ds_write2 address their two elements at ADDR + OFFSETn times 4 (b32) or 8 (b64), times
+  64 more for the st64 forms. The forms: `ds_read_{b32,b64,b96,b128,u8,i8,u16,i16}`, `ds_write_{b8,b16,b32,b64,b96,b128}`,
+  `ds_read2{,st64}_{b32,b64}`, `ds_write2{,st64}_{b32,b64}` (element 0 written first, so with equal offsets element 1
+  stays) and the atomics without return `ds_{add,sub}_u32`, `ds_{min,max}_{u32,i32}`, `ds_{and,or,xor}_b32`
+  (`InterlockedAdd`, `InterlockedMin` and so on on the groupshared word; the signed min and max as a compare-exchange
+  loop, since the array is unsigned). Sub-dword writes are an `InterlockedAnd`/`InterlockedOr` pair on their dword, so
+  threads writing other bytes of it keep theirs.
+- **Alignment.** Every access must be naturally aligned (2 for a half, 4 for a dword, 8 for b64, 16 for b96 and b128),
+  provably at translation time from the address expression (the known trailing zero bits of shifts, products,
+  constants and of join variables whose every assignment has them, plus the offset field). An unaligned LDS access
+  faults or not, and reads which bytes, by SH_MEM_CONFIG's alignment mode, which a program cannot see: it is refused.
+- **Range.** The guide (3.6.1) has an out-of-range LDS access discard its write and read zero; it states the bound as
+  "addr > MIN(lds_size, m0)", while 10.4 says M0 is not used by the indexed LDS forms on RDNA 2, so the bound is the
+  allocation. Each dword is checked (`lds_load32`, `lds_store32`): with natural alignment and an allocation that is a
+  multiple of 16, an element is wholly inside or wholly outside, so the guide's per-access rule and a per-dword check
+  agree, and an address equal to the allocation's size is outside it (`addr >= lds_size`; the guide's `>` cannot mean
+  that the dword after the allocation is readable). An access at a translation-time constant address outside the
+  allocation is refused. An address sum that wraps 32 bits is treated as outside; the guide does not say what the
+  hardware does there (its "addr < 0" suggests a signed check) and no draw relies on it.
+- **Ordering between threads.** A console workgroup that fits one wave runs in lockstep and its compiler may drop
+  barriers (the Vulkan-Samples shaders with one-thread workgroups have none); a desktop workgroup may span several
+  waves. The walk keeps, on every path, the LDS accesses since the last barrier (`st.lds_epoch`): an if joins its arms'
+  sets, a skipped region joins the set before it, and a loop's header holds the entry's set and every back edge's (one
+  dry run reaches that set, since a path's accesses after the header do not depend on it). An access that may conflict
+  with one of them, or with itself in another thread, is refused. Two accesses do not conflict when both read, both
+  are the same atomic operation, or both are private: the address is S times the flattened local id plus a constant,
+  and the windows of the pair at that stride never meet for two different threads of the group. A one-thread group has
+  nothing to conflict with.
+- **Inactive lanes.** A write or atomic while the lane may be inactive is emitted under `if (ex)`. A read is emitted at
+  the address an active lane computes (`lanes.active_value`), so an inactive thread reads where the active ones do and
+  its result is masked as any VGPR write is.
+- **Wait counts.** A ds_read result is outstanding until `s_waitcnt lgkmcnt(0)` (in `st.pending` beside the scalar
+  loads; a nonzero lgkmcnt completes nothing); any instruction that names the register before that wait is refused.
+- **Uniform LDS reads.** A read at an address that the uniformity lattice shows workgroup-uniform is shared, so no write
+  is in its epoch and every thread reads the same word, which is everything written before the barrier that opened the
+  epoch. Its result is a root of the lattice (`compute_aot.uniform_roots`, repeated while a read word feeds another
+  read's address), so `v_readfirstlane_b32` of it is lowered (C-7): the Sascha Willems particle_calculate.
+- **`s_barrier`** becomes `GroupMemoryBarrierWithGroupSync()`, which every thread of the group must reach: each
+  enclosing if's condition and each break condition of an enclosing loop must be in the lattice
+  (`compute_aot.check_barriers`; a loop with a lane-local exit is refused). A wave whose lanes are all inactive in a
+  region (`s_cbranch_execz`) skips it and so its barriers, while every desktop thread runs them; the other waves'
+  barriers still pair as on desktop when that region holds every barrier of the program and is in no loop
+  (`compute_aot.check_barrier_skips`), which the Sascha Willems shader's early return is. An `s_barrier` with partial
+  EXEC is a whole-wave barrier on the console (a scalar instruction), as on desktop.
+- **Loads around the n-body loops** (compute stage only): a loop end whose outstanding vector loads are some of the
+  entry's loads (same register values, none of the body's own) may come around the back edge or leave, the header
+  keeping the entry's set (a superset of the loads in flight, in issue order); and the arms of a uniform branch that
+  leave different loads outstanding join with every load outstanding on either path counted as the newest. A
+  `s_cbranch_vccz` in a one-thread group branches on its own compare (a wave of one lane), so the compare need not be
+  in the lattice.
+- **Refused:** GDS, `ds_swizzle_b32`, `ds_permute_b32` and `ds_bpermute_b32` (they read other lanes), `ds_append`,
+  `ds_consume`, `ds_ordered_count` and the GWS forms, the returning atomics and every other DS form.
+
+Draw family `lds` (`tests/compute_aot_check.py`), dispatched through `offscreen_check --check-compute-batch` (one
+renderer launch per program, each case and wrong reference reported as `case=N status=pass|mismatch|error`, as
+`--check-pixel-batch` does). Program A: 256 threads (four wave64 waves, several desktop waves on every adapter), two
+groups; each thread writes its word to A[t] and a marker to B[t] at computed addresses, a barrier, B[t] rewritten through
+the offset field, a barrier, and the partner t' = 255 - t's B[t'] and A[t'] read, with A[t' + 1] and A[t' + 64] by
+ds_read2_b32. Wrong references: the second barrier removed (the partner's old B word), the offset field ignored, the
+read2 element stride 8 or 1 bytes in place of 4. Program B: 64x2 threads (local ids x and y), private initial words,
+then nine barrier-separated epochs of one atomic each (add, sub, min and max unsigned and signed, and, or, xor) on eight
+shared words per operation, with signed and unsigned extremes among the data; each thread reads its own word back.
+Wrong references: the last barrier removed, the offsets ignored, the signed operations unsigned, sub as add. Program C:
+16 one-thread groups (no barrier needed): every ds_write and ds_read width, ds_write_b8/b16 into a written dword and
+ds_read_u8/i8/u16/i16 back, ds_write2_b32, ds_write2st64_b64, ds_read2_b64, ds_read2st64_b32 and ds_read2_b32, at
+run-time addresses from 0 to past the 1 KiB allocation, at its last dwords and far outside it. Wrong references: the
+offset fields ignored, the read2/write2 stride of the other width, st64 ignored, out-of-range addresses wrapped, the
+byte written as a dword, no sign extension. Program D: the Sascha Willems n-body shape with integers: a region that
+waves with no particle skip, a uniform loop over chunks that fills LDS under a nested mask with a zero-filling else arm,
+a barrier, a uniform inner loop reading LDS at a uniform address into SGPRs by v_readfirstlane_b32, a second barrier;
+three groups of 128 threads with 300 and 200 particles, so whole waves and part of one are inactive. Wrong references:
+the else arm's zeros missing, one chunk only, the inner mask ignored, the position or the second word ignored.
+`controls` checks the refusals above (contracts, the pixel stage, each alignment, a constant address outside the
+allocation, each race, a barrier on one path of a uniform branch, a barrier in a loop with a lane-local exit and in a
+skipped region inside a loop or with a barrier after it, reads before the wait, readfirstlane of a per-thread LDS word,
+and the refused DS forms), and that A without its first barrier (private words only) is accepted.
+
+Corpus effect: compute 15 to 18 of 27 (sascha computenbody/particle_calculate, vks compute_nbody and
+synchronization_2 particle_calculate); the HLSL of the 15 others, and of every pixel and vertex corpus shader, is
+unchanged.
 
 ## Refused: cross-lane and wave-size dependent
 A desktop wave has a different size (WARP, NVIDIA 32, AMD 32 or 64) and a different lane order, so anything that
@@ -202,7 +282,7 @@ title memory after the dispatch:
    to stores.
 4. **Wrong references.** Each family has plausible wrong lowerings that must make the same dispatch report a mismatch.
    `controls` first checks without a GPU that each one differs from the right reference in some case.
-5. **Refusals** (`compute_aot_controls`): each must raise. LDS, barriers, lane reads, lane counts of EXEC, `v_mbcnt`,
+5. **Refusals** (`compute_aot_controls`): each must raise. LDS without an allocation, lane reads, lane counts of EXEC, `v_mbcnt`,
    permutations, atomics, images, global and flat stores, sub-dword and typed stores, labels and branches,
    `s_getpc_b64`, messages, whole-quad mode, DPP, interpolation and export in the compute stage; store modifiers and
    operands (tfe, lds, `offset:4096`, a missing or doubled address mode, misaligned or untracked V# registers, data
@@ -315,7 +395,8 @@ Not uniform, and refused: anything that reads `local_id`, a masked write whose b
 console wave at once, but the desktop threads of one console wave can sit in different desktop waves, and another
 thread's store to that address may land between their loads; the corpus's shader of this kind (headless) has
 one-thread workgroups and takes the first case. The Sascha Willems particle_calculate
-reads LDS words at a uniform address after a barrier, which is C-6 plus a lattice root for LDS after a barrier.
+reads LDS words at a uniform address after a barrier, which is C-6 plus a lattice root for LDS after a barrier (now
+lowered, see [groupshared and barriers](#groupshared-and-barriers-c-6)).
 
 Corpus: headless translates. generate_shading_rate lowers its two `v_readfirstlane_b32` (masked writes of values built
 from constant words, under the execz region) and then stops at `s_buffer_load_dwordx2 s[4:5], s[8:11], s1`, a constant
@@ -465,9 +546,10 @@ cumulative over the 27.
   `v_add_co_ci_u32`, `v_lshlrev_b64`, `v_sin_f32` and `v_cos_f32` (forms whose exactness must be measured: `v_sin_f32`
   is an approximation on RDNA 2, so its reference is the hardware's, not libm's). Unlocks both update_vbo shaders and
   multi_draw_indirect/cull_address.
-- **C-6: LDS and barriers (+2, total 23).** groupshared, `ds_read/write_b32..b128`, `s_barrier` in uniform flow, the
-  one-thread rule for LDS without a barrier, and a draw with several desktop waves per workgroup. Unlocks the two
-  Vulkan-Samples particle_calculate shaders.
+- **C-6: LDS and barriers (+2, total 23; implemented).** groupshared, the DS reads, writes, read2/write2 and atomics
+  above, `s_barrier` in workgroup-uniform flow, the race rule for LDS without a barrier, and a draw with several
+  desktop waves per workgroup. Unlocks the two Vulkan-Samples particle_calculate shaders, and with C-7's LDS root the
+  Sascha Willems one.
 - **C-7: wave-uniform lane reads (+3, total 26).** `v_readfirstlane_b32` of a provably uniform value. Unlocks headless,
   sascha computenbody/particle_calculate and generate_shading_rate.
 - **C-8: atomics and the wave-aggregated idiom (+1, total 27).** `buffer_atomic_add` with and without return, the

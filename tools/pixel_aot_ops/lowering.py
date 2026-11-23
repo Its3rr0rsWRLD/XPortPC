@@ -108,6 +108,13 @@ class Lowering:
         # VGPR and instruction index. The packed pair is not masked (it is no word); the export it feeds must run under
         # a bit that implies each of them, so that a lane that exports holds the new pair.
         self.pack_ex = {}
+        # C-6 (forms/lds.py, compute stage): the LDS allocation in bytes (0: none), the workgroup size, the LDS
+        # accesses since the last s_barrier on this path (joined by control_flow.program) and the name of each LDS
+        # read word with the address it was read at (roots of the uniformity lattice when the address is uniform).
+        self.lds_size = 0
+        self.numthreads = (1, 1, 1)
+        self.lds_epoch = frozenset()
+        self.lds_reads = {}
 
     @property
     def sample_pending(self):

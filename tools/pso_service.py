@@ -7,7 +7,7 @@ d3d12_xs.dll starts a few of these (src/d3d12_xs_translator.cpp) and talks to ea
 message is a frame: u32 payload length, then the payload. Integers are little-endian u32, strings are a u32 length and
 UTF-8 bytes.
     ready (service -> shim, once, after start-up):  "X2WT", version 2, compiler (0 library, 1 dxc.exe), why (string)
-    request (shim -> service):   stage (0 vertex, 1 pixel), flags (1: return the HLSL), roles (string), code (string;
+    request (shim -> service):   stage (0 vertex, 1 pixel, 2 compute), flags (1: return the HLSL), roles (string), code (string;
                                  with flag 2, instruction text, one per line, in place of code: checks only)
     response (service -> shim):  status (0 translated, 1 refused, 2 tool failure), instruction count, message (string;
                                  the refusal reason or the failure), DXIL (string), HLSL (string, empty unless asked),
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 MAGIC = b"X2WT"
 VERSION = 2
 FLAG_HLSL, FLAG_TEXT = 1, 2
-STAGE_NAMES = ("vertex", "pixel")
+STAGE_NAMES = ("vertex", "pixel", "compute")
 
 
 def read_exact(stream, count):

@@ -209,7 +209,7 @@ class Service:
     def translate(self, s):
         roles, payload = s.roles.encode("utf-8"), s.payload
         flags = 1 | (2 if s.text is not None else 0)
-        body = struct.pack("<III", ("vertex", "pixel").index(s.stage), flags, len(roles)) + roles + \
+        body = struct.pack("<III", ("vertex", "pixel", "compute").index(s.stage), flags, len(roles)) + roles + \
             struct.pack("<I", len(payload)) + payload
         self.process.stdin.write(struct.pack("<I", len(body)) + body)
         self.process.stdin.flush()

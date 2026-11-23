@@ -30,6 +30,7 @@ namespace {
 
 constexpr std::uint32_t root_magic = 0x52573258u;  // "X2WR"
 constexpr std::uint32_t pso_magic = 0x50573258u;   // "X2WP"
+constexpr std::uint32_t compute_pso_magic = 0x43573258u;  // "X2WC": a translated compute pipeline
 // {6b1a3c52-0f6e-4f0e-9a5d-58325752e001} and ...02: private-data keys of RootInfo and PsoInfo.
 constexpr GUID root_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x01}};
 constexpr GUID pso_info_guid = {0x6b1a3c52, 0x0f6e, 0x4f0e, {0x9a, 0x5d, 0x58, 0x32, 0x57, 0x52, 0xe0, 0x02}};
@@ -312,6 +313,7 @@ struct Program {
     const std::uint8_t* code = nullptr;
     std::uint32_t code_bytes = 0;
     std::vector<X2WShaderBinding> bindings;
+    X2WShaderComputeInfo compute{};  // compute stage only
 };
 
 enum class Parsed { desktop, container, malformed };
@@ -344,12 +346,17 @@ Parsed parse_container(const void* data, SIZE_T size, Program& out, std::string&
     const std::uint64_t binding_end =
         std::uint64_t(header.binding_offset) + std::uint64_t(header.binding_count) * sizeof(X2WShaderBinding);
     const std::uint64_t code_end = std::uint64_t(header.code_offset) + header.code_bytes;
-    if (header.version != X2W_SHADER_CONTAINER_VERSION || header.reserved ||
-        header.stage > X2W_SHADER_STAGE_PIXEL || header.binding_count > 32 || binding_end > size ||
+    const bool compute = header.stage == X2W_SHADER_STAGE_COMPUTE;
+    const std::uint64_t info_end = std::uint64_t(header.stage_info_offset) + sizeof(X2WShaderComputeInfo);
+    if (header.version != X2W_SHADER_CONTAINER_VERSION || header.stage > X2W_SHADER_STAGE_COMPUTE ||
+        (compute ? !header.stage_info_offset || header.stage_info_offset % 4 || info_end > size
+                 : header.stage_info_offset != 0) ||
+        header.binding_count > 32 || binding_end > size ||
         header.code_offset % 4 || header.code_bytes % 4 || !header.code_bytes || code_end > size) {
         why = "malformed container header";
         return Parsed::malformed;
     }
+    if (compute) std::memcpy(&out.compute, bytes + header.stage_info_offset, sizeof(out.compute));
     out.stage = header.stage;
     out.code = bytes + header.code_offset;
     out.code_bytes = header.code_bytes;
@@ -458,7 +465,10 @@ int run_translator(const Config& c, const char* stage, const std::wstring& base,
     return result;
 }
 
-const char* stage_name(std::uint32_t stage) { return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : "pixel"; }
+const char* stage_name(std::uint32_t stage)
+{
+    return stage == X2W_SHADER_STAGE_VERTEX ? "vertex" : stage == X2W_SHADER_STAGE_COMPUTE ? "compute" : "pixel";
+}
 
 // --- the pipeline manifest (tools/pso_cache.py) -----------------------------------------------------------------
 
@@ -730,7 +740,9 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
             params[i].Constants = {i, placeholder_space, 1};
         }
     }
-    D3D12_DESCRIPTOR_RANGE1 memory[2]{};
+    // The title-memory table: SRVs t0..t7 space1001 (vertex and pixel translations), the miss counter, then UAVs
+    // u0..u7 space1001 of the same ranges (the compute translation, R5).
+    D3D12_DESCRIPTOR_RANGE1 memory[3]{};
     memory[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     memory[0].NumDescriptors = title_memory_slots;
     memory[0].RegisterSpace = runtime_memory_space;
@@ -740,6 +752,9 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
     memory[1].RegisterSpace = runtime_space;
     memory[1].Flags = memory[0].Flags;
     memory[1].OffsetInDescriptorsFromTableStart = title_memory_slots;
+    memory[2] = memory[0];
+    memory[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    memory[2].OffsetInDescriptorsFromTableStart = title_memory_slots + 1;
     D3D12_DESCRIPTOR_RANGE1 textures{};
     textures.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     textures.NumDescriptors = texture_table;
@@ -757,7 +772,7 @@ HRESULT create_root_signature(ID3D12Device* device, UINT node_mask, const void* 
     extra[param_ranges].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     extra[param_ranges].Descriptor = {2, runtime_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     extra[param_memory].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    extra[param_memory].DescriptorTable = {2, memory};
+    extra[param_memory].DescriptorTable = {3, memory};
     extra[param_push_words].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     extra[param_push_words].Constants = {3, runtime_space, push_word_count};
     extra[param_vertex_root].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1050,19 +1065,107 @@ HRESULT create_graphics_pipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPE
     return state->QueryInterface(riid, out);
 }
 
+// Compute (runtime rung R5). The entry contract: each root-word SGPR becomes the next push word, which the program
+// reads as its inline user-data word of that index (tools/compute_aot.py's user:N role, from push_words); a
+// workgroup-id binding is SV_GroupID's component. The workgroup and wave size come from the container's
+// X2WShaderComputeInfo and are part of the key.
 HRESULT create_compute_pipeline(ID3D12Device* device, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid,
                                 void** out)
 {
+    const char* symbol = "d3d12_xs!ID3D12Device::CreateComputePipelineState";
+    const auto refuse_cs = [symbol](const std::string& key, const std::string& why) {
+        std::string detail = "compute shader";
+        if (!key.empty()) detail += " " + key.substr(0, 16);
+        detail += " refused: " + why + " -> E_NOTIMPL";
+        log_refused(symbol, detail.c_str(), false);
+        return E_NOTIMPL;
+    };
+    if (!desc || !desc->CS.BytecodeLength) return device->CreateComputePipelineState(desc, riid, out);
     Program cs;
     std::string why;
-    if (desc && desc->CS.BytecodeLength &&
-        parse_container(desc->CS.pShaderBytecode, desc->CS.BytecodeLength, cs, why) != Parsed::desktop) {
-        if (why.empty()) why = "console compute shaders are translated from rung R5";
-        log_refused("d3d12_xs!ID3D12Device::CreateComputePipelineState", ("compute shader refused: " + why).c_str(),
-                    false);
-        return E_NOTIMPL;
+    const Parsed kind = parse_container(desc->CS.pShaderBytecode, desc->CS.BytecodeLength, cs, why);
+    if (kind == Parsed::desktop) return device->CreateComputePipelineState(desc, riid, out);
+    if (kind == Parsed::malformed) return refuse_cs("", why);
+    if (cs.stage != X2W_SHADER_STAGE_COMPUTE)
+        return refuse_cs("", "a container's stage does not match the pipeline stage it is bound to");
+    RootInfo root{};
+    if (!root_info(desc->pRootSignature, &root))
+        return refuse_cs("", "the root signature was not created through the shim, so it has no converter parameters");
+
+    PsoInfo info{};
+    info.magic = compute_pso_magic;
+    std::string roles = "{\"sgprs\": {";
+    bool used[106] = {}, group[3] = {}, first = true;
+    for (const X2WShaderBinding& b : cs.bindings) {
+        if (b.sgpr > 105 || used[b.sgpr]) return refuse_cs("", "an entry SGPR is out of range or bound twice");
+        used[b.sgpr] = true;
+        char entry[64];
+        if (b.kind == X2W_SHADER_BINDING_GROUP_ID) {
+            if (b.word > 2 || group[b.word]) return refuse_cs("", "a workgroup id component is out of range or bound twice");
+            group[b.word] = true;
+            std::snprintf(entry, sizeof(entry), "%s\"s%u\": \"group_id.%c\"", first ? "" : ", ", b.sgpr,
+                          "xyz"[b.word]);
+            roles += entry;
+            first = false;
+            continue;
+        }
+        if (b.kind != X2W_SHADER_BINDING_ROOT_WORD)
+            return refuse_cs("", "a compute binding other than a root-parameter word or a workgroup id");
+        if (b.root_parameter >= root.title_params)
+            return refuse_cs("", "a binding names a root parameter the root signature does not have");
+        const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[b.root_parameter]);
+        const bool address = type == D3D12_ROOT_PARAMETER_TYPE_CBV || type == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+                             type == D3D12_ROOT_PARAMETER_TYPE_UAV;
+        if (type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE ||
+            (address ? b.word > 1 : b.word >= root.constants[b.root_parameter])) {
+            return refuse_cs("", type == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE
+                                     ? "a binding reads a descriptor table parameter (descriptor heaps come with R4)"
+                                     : "a binding reads past its root parameter");
+        }
+        if (info.push_count == push_word_count) return refuse_cs("", "more than 32 root-word bindings");
+        std::snprintf(entry, sizeof(entry), "%s\"s%u\": \"user:%u\"", first ? "" : ", ", b.sgpr,
+                      info.push_count);
+        roles += entry;
+        first = false;
+        info.push[info.push_count++] = {static_cast<std::uint8_t>(b.root_parameter), static_cast<std::uint8_t>(b.word)};
     }
-    return device->CreateComputePipelineState(desc, riid, out);
+    char tail[160];
+    std::snprintf(tail, sizeof(tail), "}, \"numthreads\": [%u, %u, %u], \"wave\": %u, \"local_ids\": %u}",
+                  cs.compute.numthreads[0], cs.compute.numthreads[1], cs.compute.numthreads[2], cs.compute.wave,
+                  cs.compute.local_ids);
+    roles += tail;
+
+    const Config* c = config();
+    if (!c) return refuse_cs("", "out of memory");
+    Shader shader;
+    shader.program = &cs;
+    shader.roles = roles;
+    look_up(*c, shader);
+    if (translate_misses(*c, &shader, 1) == 0) return refuse_cs(shader.key, shader.why);
+    const std::string& key = shader.key;
+    const std::vector<std::uint8_t>& dxil = shader.dxil;
+    if (shader.bindings != "x2w-bindings 1\n")
+        return refuse_cs(key, "the translation reads descriptor tables, which compute pipelines do not bind yet");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC copy = *desc;
+    copy.CS = {dxil.data(), dxil.size()};
+    ComPtr<ID3D12PipelineState> state;
+    const HRESULT hr = device->CreateComputePipelineState(&copy, IID_PPV_ARGS(&state));
+    if (FAILED(hr)) {
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "desktop CreateComputePipelineState of the translation -> 0x%08lx",
+                      static_cast<unsigned long>(hr));
+        log_refused(symbol, detail, false);
+        return hr;
+    }
+    state->SetPrivateData(pso_info_guid, sizeof(info), &info);
+    return state->QueryInterface(riid, out);
+}
+
+bool compute_pso_info(ID3D12PipelineState* state, PsoInfo* info)
+{
+    UINT size = sizeof(*info);
+    return state && SUCCEEDED(state->GetPrivateData(pso_info_guid, &size, info)) && size == sizeof(*info) &&
+           info->magic == compute_pso_magic;
 }
 
 void prestart_translator()
@@ -1131,13 +1234,15 @@ public:
 
     // The shim's heaps, the table of title-memory SRVs and the miss counter, and the ranges buffer for the current
     // xmem.dll view.
-    bool current(D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges, UINT* count, std::string& why)
+    bool current(D3D12_GPU_DESCRIPTOR_HANDLE* table, D3D12_GPU_VIRTUAL_ADDRESS* ranges, UINT* count, BlockUse* use,
+                 std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         const bool good = ensure(why) && refresh(why);
         if (good) {
+            hold(use, kind_view, block_);
             *table = views_gpu(block_ * memory_block);
-            *ranges = ranges_.back()->GetGPUVirtualAddress();
+            *ranges = ranges_all_->GetGPUVirtualAddress() + static_cast<UINT64>(block_) * ranges_slice;
             *count = static_cast<UINT>(last_.size());
         }
         ReleaseSRWLockExclusive(&lock_);
@@ -1151,17 +1256,21 @@ public:
     // a point sampler). Blocks are cached by the identity of their descriptors, so a draw never changes a block an
     // earlier draw reads.
     bool texture_block(const BlockKey<texture_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[texture_table],
-                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, BlockUse* use, std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         bool good = true;
         auto it = texture_blocks_.find(key);
         if (it == texture_blocks_.end()) {
-            if (texture_blocks_.size() == texture_block_count) {
-                why = "more than 4096 distinct texture tables on one device (blocks are not recycled yet)";
+            const int found = texture_next_ < texture_block_count ? static_cast<int>(texture_next_++)
+                                                                   : free_block(kind_texture, texture_block_count, ~0u);
+            if (found < 0) {
+                why = "all 4096 texture-table blocks are held by recorded lists or unfinished GPU work";
                 good = false;
             } else {
-                const UINT block = static_cast<UINT>(texture_blocks_.size());
+                const UINT block = static_cast<UINT>(found);
+                if (texture_keys_.size() <= block) texture_keys_.resize(block + 1);
+                if (texture_keys_[block].second) texture_blocks_.erase(texture_keys_[block].first);
                 const UINT first = texture_first + block * texture_table;
                 for (UINT i = 0; i < texture_table; ++i) {
                     if (sources[i].ptr) {
@@ -1177,25 +1286,33 @@ public:
                     }
                 }
                 it = texture_blocks_.emplace(key, block).first;
+                texture_keys_[block] = {key, true};
             }
         }
-        if (good) *out = views_gpu(texture_first + it->second * texture_table);
+        if (good) {
+            hold(use, kind_texture, it->second);
+            *out = views_gpu(texture_first + it->second * texture_table);
+        }
         ReleaseSRWLockExclusive(&lock_);
         return good;
     }
 
     bool sampler_block(const BlockKey<sampler_table>& key, const D3D12_CPU_DESCRIPTOR_HANDLE (&sources)[sampler_table],
-                       D3D12_GPU_DESCRIPTOR_HANDLE* out, std::string& why)
+                       D3D12_GPU_DESCRIPTOR_HANDLE* out, BlockUse* use, std::string& why)
     {
         AcquireSRWLockExclusive(&lock_);
         bool good = true;
         auto it = sampler_blocks_.find(key);
         if (it == sampler_blocks_.end()) {
-            if (sampler_blocks_.size() == sampler_block_count) {
-                why = "more than 512 distinct sampler tables on one device (blocks are not recycled yet)";
+            const int found = sampler_next_ < sampler_block_count ? static_cast<int>(sampler_next_++)
+                                                                   : free_block(kind_sampler, sampler_block_count, ~0u);
+            if (found < 0) {
+                why = "all 512 sampler-table blocks are held by recorded lists or unfinished GPU work";
                 good = false;
             } else {
-                const UINT block = static_cast<UINT>(sampler_blocks_.size());
+                const UINT block = static_cast<UINT>(found);
+                if (sampler_keys_.size() <= block) sampler_keys_.resize(block + 1);
+                if (sampler_keys_[block].second) sampler_blocks_.erase(sampler_keys_[block].first);
                 for (UINT i = 0; i < sampler_table; ++i) {
                     D3D12_CPU_DESCRIPTOR_HANDLE dst = samplers_->GetCPUDescriptorHandleForHeapStart();
                     dst.ptr += static_cast<SIZE_T>(block * sampler_table + i) * sampler_increment_;
@@ -1210,14 +1327,57 @@ public:
                     }
                 }
                 it = sampler_blocks_.emplace(key, block).first;
+                sampler_keys_[block] = {key, true};
             }
         }
         if (good) {
+            hold(use, kind_sampler, it->second);
             *out = samplers_->GetGPUDescriptorHandleForHeapStart();
             out->ptr += static_cast<UINT64>(it->second * sampler_table) * sampler_increment_;
         }
         ReleaseSRWLockExclusive(&lock_);
         return good;
+    }
+
+    // Block recycling (R5). A list holds every block a draw or dispatch it recorded reads until it is reset or
+    // destroyed; each submission stamps the blocks of its lists with the next value of a fence the shim signals on
+    // that queue right after it. A block is reused only when no list holds it and every stamp has completed.
+    void release(BlockUse& use)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        for (std::uint32_t code : use.blocks) {
+            BlockState& b = state(code >> 24, code & 0xffffff);
+            if (b.holders) --b.holders;
+        }
+        use.blocks.clear();
+        ReleaseSRWLockExclusive(&lock_);
+    }
+    void submitted(ID3D12CommandQueue* queue, BlockUse* const* uses, UINT count)
+    {
+        AcquireSRWLockExclusive(&lock_);
+        UINT slot = 0;
+        while (slot < queue_count_ && queue_ids_[slot] != queue) ++slot;
+        if (slot == queue_count_ && queue_count_ < max_queues &&
+            SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fences_[slot])))) {
+            queue_ids_[slot] = queue;
+            ++queue_count_;
+        }
+        if (slot < queue_count_) {
+            const std::uint64_t value = ++fence_values_[slot];
+            for (UINT i = 0; i < count; ++i)
+                for (std::uint32_t code : uses[i]->blocks) state(code >> 24, code & 0xffffff).stamp[slot] = value;
+            queue->Signal(fences_[slot].Get(), value);
+        } else {
+            // More queues than the shim tracks: their blocks stay held for the device's lifetime.
+            for (UINT i = 0; i < count; ++i)
+                for (std::uint32_t code : uses[i]->blocks) ++state(code >> 24, code & 0xffffff).holders;
+            if (!queue_overflow_noted_) {
+                queue_overflow_noted_ = true;
+                log_note("d3d12_xs!ID3D12CommandQueue::ExecuteCommandLists",
+                         "more than 16 queues submit translated work; their descriptor blocks are not recycled", nullptr);
+            }
+        }
+        ReleaseSRWLockExclusive(&lock_);
     }
 
     // Whether a miss at (serial, index) is the first of its kind on this device (it is logged then).
@@ -1236,6 +1396,47 @@ private:
     static constexpr UINT texture_block_count = 4096;
     static constexpr UINT sampler_block_count = 512;  // 2048 samplers, the desktop limit of a shader-visible heap
     static constexpr UINT texture_first = blocks * memory_block;
+    static constexpr UINT max_queues = 16;
+    enum : UINT { kind_view = 0, kind_texture = 1, kind_sampler = 2 };
+    struct BlockState {
+        std::uint32_t holders = 0;
+        std::uint64_t stamp[max_queues] = {};
+    };
+    BlockState& state(UINT kind, UINT index)
+    {
+        std::vector<BlockState>& all = states_[kind];
+        if (all.size() <= index) all.resize(index + 1);
+        return all[index];
+    }
+    void hold(BlockUse* use, UINT kind, UINT index)
+    {
+        if (!use) return;
+        const std::uint32_t code = kind << 24 | index;
+        for (std::uint32_t held : use->blocks)
+            if (held == code) return;
+        use->blocks.push_back(code);
+        ++state(kind, index).holders;
+    }
+    // A block of `kind` below `limit` that no list holds and no unfinished submission reads, other than `except`;
+    // -1 when there is none.
+    int free_block(UINT kind, UINT limit, UINT except)
+    {
+        std::uint64_t completed[max_queues];
+        for (UINT q = 0; q < queue_count_; ++q) completed[q] = fences_[q]->GetCompletedValue();
+        for (UINT n = 0; n < limit; ++n) {
+            // Start after the last block handed out, so recently used blocks are reused last.
+            const UINT index = (cursor_[kind] + 1 + n) % limit;
+            if (index == except) continue;
+            const BlockState& b = state(kind, index);
+            bool done = b.holders == 0;
+            for (UINT q = 0; done && q < queue_count_; ++q) done = b.stamp[q] <= completed[q];
+            if (done) {
+                cursor_[kind] = index;
+                return static_cast<int>(index);
+            }
+        }
+        return -1;
+    }
 
     D3D12_CPU_DESCRIPTOR_HANDLE views_cpu(UINT index) const
     {
@@ -1348,19 +1549,22 @@ private:
             why = "more than 8 title memory ranges; the converter's title_memory table has 8 slots";
             return false;
         }
-        if (!ranges_.empty() && ranges.size() == last_.size() && resources == last_resources_ &&
+        if (have_view_ && ranges.size() == last_.size() && resources == last_resources_ &&
             (ranges.empty() || std::memcmp(ranges.data(), last_.data(), ranges.size() * sizeof(ranges[0])) == 0)) {
             release();
             return true;
         }
-        // A new block per view, so descriptors that recorded draws still read stay unchanged until the heap wraps.
-        if (++used_ > blocks) {
+        // A new block per view, so descriptors that recorded draws still read stay unchanged: a block is written
+        // again only when no list holds it and the GPU has finished every submission that read it.
+        const int next = have_view_ ? free_block(kind_view, blocks, block_) : 0;
+        if (next < 0) {
             release();
-            why = "the title memory view changed more than 256 times on one device";
+            why = "all 256 title-memory view blocks are held by recorded lists or unfinished GPU work";
             return false;
         }
-        block_ = (block_ + 1) % blocks;
+        block_ = static_cast<UINT>(next);
         D3D12_CPU_DESCRIPTOR_HANDLE handle = views_cpu(block_ * memory_block);
+        D3D12_CPU_DESCRIPTOR_HANDLE uav_handle = views_cpu(block_ * memory_block + title_memory_slots + 1);
         for (UINT i = 0; i < title_memory_slots; ++i) {
             D3D12_SHADER_RESOURCE_VIEW_DESC raw{};
             raw.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -1378,6 +1582,13 @@ private:
             }
             device_->CreateShaderResourceView(resource, &raw, handle);
             handle.ptr += increment_;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC raw_uav{};
+            raw_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+            raw_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            raw_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            raw_uav.Buffer.NumElements = raw.Buffer.NumElements;
+            device_->CreateUnorderedAccessView(resource, nullptr, &raw_uav, uav_handle);
+            uav_handle.ptr += increment_;
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC misses{};
         misses.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -1385,30 +1596,36 @@ private:
         misses.Buffer.NumElements = 64;
         misses.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
         device_->CreateUnorderedAccessView(counter_.Get(), nullptr, &misses, handle);
-        // The ranges as TitleLookup reads them (stride 24), in an upload buffer kept for the device's lifetime.
-        D3D12_HEAP_PROPERTIES upload{};
-        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = (ranges.empty() ? 1 : ranges.size()) * sizeof(X2WTitleGpuRange);
-        desc.Height = 1;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        ComPtr<ID3D12Resource> buffer;
-        void* mapped = nullptr;
-        if (FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &desc,
-                                                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer))) ||
-            FAILED(buffer->Map(0, nullptr, &mapped))) {
-            release();
-            why = "cannot create the title ranges buffer";
-            return false;
+        // The ranges as TitleLookup reads them (stride 24): one 256-byte slice per view block of a persistently
+        // mapped upload buffer, rewritten only with its block (see free_block).
+        if (!ranges_all_) {
+            D3D12_HEAP_PROPERTIES upload{};
+            upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = static_cast<UINT64>(blocks) * ranges_slice;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            void* mapped = nullptr;
+            if (FAILED(device_->CreateCommittedResource(&upload, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&ranges_all_))) ||
+                FAILED(ranges_all_->Map(0, nullptr, &mapped))) {
+                ranges_all_.Reset();
+                release();
+                why = "cannot create the title ranges buffer";
+                return false;
+            }
+            ranges_mapped_ = static_cast<std::uint8_t*>(mapped);
         }
-        std::memset(mapped, 0, static_cast<std::size_t>(desc.Width));
-        if (!ranges.empty()) std::memcpy(mapped, ranges.data(), ranges.size() * sizeof(ranges[0]));
-        buffer->Unmap(0, nullptr);
-        ranges_.push_back(buffer);
+        static_assert(title_memory_slots * sizeof(X2WTitleGpuRange) <= ranges_slice, "ranges slice too small");
+        std::uint8_t* slice = ranges_mapped_ + static_cast<std::size_t>(block_) * ranges_slice;
+        std::memset(slice, 0, ranges_slice);
+        if (!ranges.empty()) std::memcpy(slice, ranges.data(), ranges.size() * sizeof(ranges[0]));
+        have_view_ = true;
         release();
         last_ = ranges;
         last_resources_ = resources;
@@ -1422,8 +1639,20 @@ private:
     volatile std::uint32_t* counter_word_ = nullptr;
     UINT increment_ = 0, sampler_increment_ = 0;
     UINT block_ = 0;
-    UINT used_ = 0;
-    std::vector<ComPtr<ID3D12Resource>> ranges_;
+    bool have_view_ = false;
+    static constexpr UINT ranges_slice = 256;
+    ComPtr<ID3D12Resource> ranges_all_;  // the ranges of every title-memory view block, one slice each
+    std::uint8_t* ranges_mapped_ = nullptr;
+    std::vector<BlockState> states_[3];
+    UINT cursor_[3] = {};
+    UINT texture_next_ = 0, sampler_next_ = 0;  // blocks never handed out start here
+    std::vector<std::pair<BlockKey<texture_table>, bool>> texture_keys_;  // the key each block holds, if any
+    std::vector<std::pair<BlockKey<sampler_table>, bool>> sampler_keys_;
+    ComPtr<ID3D12Fence> fences_[max_queues];
+    std::uint64_t fence_values_[max_queues] = {};
+    const void* queue_ids_[max_queues] = {};
+    UINT queue_count_ = 0;
+    bool queue_overflow_noted_ = false;
     std::vector<X2WTitleGpuRange> last_;
     std::vector<void*> last_resources_;  // identity only; not referenced
     std::map<BlockKey<texture_table>, UINT> texture_blocks_;
@@ -1432,6 +1661,16 @@ private:
 };
 
 TitleViews* create_title_views(ID3D12Device* device) { return new (std::nothrow) TitleViews(device); }
+void release_blocks(TitleViews* views, BlockUse& use)
+{
+    if (views && !use.blocks.empty()) views->release(use);
+}
+void submitted_blocks(TitleViews* views, ID3D12CommandQueue* queue, BlockUse* const* uses, unsigned count)
+{
+    bool any = false;
+    for (unsigned i = 0; i < count; ++i) any = any || !uses[i]->blocks.empty();
+    if (views && any) views->submitted(queue, uses, count);
+}
 void destroy_title_views(TitleViews* views) { delete views; }
 
 void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
@@ -1441,7 +1680,7 @@ void set_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
 }
 
 bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
-                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound)
+                   const RootArgs& args, const BoundHeaps& heaps, DrawBases bases, bool* ours_bound, BlockUse* use)
 {
     const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Draw";
     std::string why;
@@ -1455,7 +1694,7 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
                     true);
         return false;
     }
-    if (!views || !views->current(&table, &ranges, &count, why)) {
+    if (!views || !views->current(&table, &ranges, &count, use, why)) {
         log_refused(symbol, ("draw skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(), true);
         return false;
     }
@@ -1511,8 +1750,8 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
         }
     }
     D3D12_GPU_DESCRIPTOR_HANDLE texture_table_at{}, sampler_table_at{};
-    if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, why)) ||
-        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, why))) {
+    if ((any_texture && !views->texture_block(texture_key, texture_src, &texture_table_at, use, why)) ||
+        (any_sampler && !views->sampler_block(sampler_key, sampler_src, &sampler_table_at, use, why))) {
         log_refused(symbol, ("draw skipped: " + why).c_str(), true);
         return false;
     }
@@ -1542,6 +1781,56 @@ bool bind_for_draw(TitleViews* views, ID3D12GraphicsCommandList* list, const Roo
         if (any_constants[1 + k]) list->SetGraphicsRootConstantBufferView(base + param_pixel_constants + k, constants[1 + k]);
     if (any_texture) list->SetGraphicsRootDescriptorTable(base + param_textures, texture_table_at);
     if (any_sampler) list->SetGraphicsRootDescriptorTable(base + param_samplers, sampler_table_at);
+    return true;
+}
+
+void set_compute_placeholders(ID3D12GraphicsCommandList* list, const RootInfo& root)
+{
+    for (UINT i = 0; i < root.title_params; ++i)
+        if (root.types[i] == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) list->SetComputeRoot32BitConstant(i, 0, 0);
+}
+
+// The compute counterpart of bind_for_draw (R5): title memory, its ranges and the push words through the compute
+// root arguments. A translated compute pipeline reads no descriptor table (create_compute_pipeline refuses one).
+bool bind_for_dispatch(TitleViews* views, ID3D12GraphicsCommandList* list, const RootInfo& root, const PsoInfo& pso,
+                       const RootArgs& args, const BoundHeaps& heaps, bool* ours_bound, BlockUse* use)
+{
+    const char* symbol = "d3d12_xs!ID3D12GraphicsCommandList::Dispatch";
+    std::string why;
+    D3D12_GPU_DESCRIPTOR_HANDLE table{};
+    D3D12_GPU_VIRTUAL_ADDRESS ranges = 0;
+    UINT count = 0;
+    if (heaps.foreign) {
+        log_refused(symbol,
+                    "dispatch skipped: the title bound a shader-visible heap the shim did not create; translated "
+                    "shaders read descriptors from title heaps only",
+                    true);
+        return false;
+    }
+    if (!views || !views->current(&table, &ranges, &count, use, why)) {
+        log_refused(symbol, ("dispatch skipped: " + (why.empty() ? std::string("no title memory view") : why)).c_str(),
+                    true);
+        return false;
+    }
+    if (!*ours_bound) {
+        ID3D12DescriptorHeap* ours[2] = {views->view_heap(), views->sampler_heap()};
+        list->SetDescriptorHeaps(2, ours);
+        *ours_bound = true;
+    }
+    set_compute_placeholders(list, root);
+    std::uint32_t words[push_word_count] = {};
+    for (std::uint32_t i = 0; i < pso.push_count; ++i) {
+        const PushSource s = pso.push[i];
+        const auto type = static_cast<D3D12_ROOT_PARAMETER_TYPE>(root.types[s.parameter]);
+        words[i] = type == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                       ? args.constants[s.parameter][s.word]
+                       : static_cast<std::uint32_t>(args.address[s.parameter] >> (32 * s.word));
+    }
+    const UINT base = root.title_params;
+    list->SetComputeRoot32BitConstant(base + param_range_count, count, 0);
+    list->SetComputeRootShaderResourceView(base + param_ranges, ranges);
+    list->SetComputeRootDescriptorTable(base + param_memory, table);
+    list->SetComputeRoot32BitConstants(base + param_push_words, push_word_count, words, 0);
     return true;
 }
 

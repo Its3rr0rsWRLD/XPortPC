@@ -1,16 +1,17 @@
 """The graphics shim's translation paths give the same cache files (docs/design/runtime.md, section 3).
 
-    xl_check.py shim <r3_triangle> <dxc> <work-dir> [<r4_scene>]
+    xl_check.py shim <r3_triangle> <dxc> <work-dir> [<r4_scene> [<r5_frames>]]
 
-Runs tests/runtime/r3_triangle.cpp (and r4_scene.cpp, whose shaders read descriptor tables) on WARP with each path
+Runs tests/runtime/r3_triangle.cpp (and r4_scene.cpp, whose shaders read descriptor tables, and r5_frames.cpp, whose
+pipelines include a compute shader) on WARP with each path
 of d3d12_xs.dll and compares the cache files byte for byte (<key>.dxil, its <key>.bind sidecar, and <key>.hlsl kept
 with X2W_KEEP_HLSL=1):
     process     X2W_TRANSLATE=process: one tools/pso_translate.py per shader (the path before the service), cold
     service     the default: the translator service pool (tools/pso_service.py), cold, warm (all cache hits), and
                 cold again (the services' Python bytecode now cached)
     fallback    X2W_TRANSLATOR_SERVICES=0: the service unavailable, so the shim falls back to the process path, cold
-    precompile  X2W_TRANSLATE=defer records both shaders and fails the pipeline without translating; then
-                tools/precompile_cache.py translates the manifest, and a warm run finds both in the cache
+    precompile  X2W_TRANSLATE=defer records every shader and fails the pipeline without translating; then
+                tools/precompile_cache.py translates the manifest, and a warm run finds all in the cache
 It also checks the manifest (one line per shader, inputs beside it) and that tools/pso_cache.py computes the shim's
 converter fingerprint and keys. Prints each run's pipeline-creation time.
 """
@@ -40,22 +41,24 @@ def r3(exe, dxc, cache, mode, **extra):
     environment.update(extra)
     run = subprocess.run([exe, "warp", mode], capture_output=True, text=True, env=environment, timeout=300)
     output = run.stdout + run.stderr
-    timing = re.search(r"pso_create_ms=([\d.]+)", output)
-    return run.returncode, output, float(timing[1]) if timing else None
+    # r3_triangle and r4_scene print pso_create_ms, r5_frames compute_pso_ms and graphics_pso_ms: their sum.
+    timings = re.findall(r"\bpso_create_ms=([\d.]+)|\b(?:compute|graphics)_pso_ms=([\d.]+)", output)
+    return run.returncode, output, sum(float(a or b) for a, b in timings) if timings else None
 
 
 def files(directory):
     return {p.name: p.read_bytes() for p in Path(directory).glob("*") if p.suffix in (".dxil", ".hlsl", ".bind")}
 
 
-def check_program(exe, title, dxc, work, expect):
-    """Every path for one program (r3_triangle or r4_scene, cache directory `title`); returns the pipeline times."""
+def check_program(exe, title, dxc, work, expect, shaders=2):
+    """Every path for one program (r3_triangle, r4_scene or r5_frames, cache directory `title`, `shaders` console
+    shaders); prints the pipeline times."""
     paths = {name: work / name for name in ("process", "service", "fallback", "precompile")}
     rc, out, process_ms = r3(exe, dxc, paths["process"], "cold", X2W_TRANSLATE="process")
     expect(rc == 0 and SERVICE_NOTE not in out, f"{title} process path: cold run", out)
     reference = files(paths["process"] / title)
-    expect(sorted(p[-4:] for p in reference) == ["bind", "bind", "dxil", "dxil", "hlsl", "hlsl"],
-           f"{title} process path: 2 DXIL, 2 HLSL and 2 bindings sidecars")
+    expect(sorted(p[-4:] for p in reference) == sorted(["bind", "dxil", "hlsl"] * shaders),
+           f"{title} process path: {shaders} DXIL, HLSL and bindings sidecars")
 
     rc, out, service_ms = r3(exe, dxc, paths["service"], "cold")
     expect(rc == 0 and SERVICE_NOTE in out and FALLBACK_NOTE not in out, f"{title} service path: cold run", out)
@@ -82,21 +85,21 @@ def check_program(exe, title, dxc, work, expect):
         code, roles = pso_cache.read_input(directory, ident)
         expect(pso_cache.input_id(stage, roles, code) == ident, f"{title} input {ident[:16]}: id")
         keys.add(pso_cache.shader_key(fingerprint, stage, roles, code))
-    expect(len(entries) == 2 and {f"{k}.dxil" for k in keys} == {n for n in reference if n.endswith(".dxil")},
-           f"{title} manifest: 2 shaders whose recomputed keys name the cache files ({len(entries)} entries)")
+    expect(len(entries) == shaders and {f"{k}.dxil" for k in keys} == {n for n in reference if n.endswith(".dxil")},
+           f"{title} manifest: {shaders} shaders whose recomputed keys name the cache files ({len(entries)} entries)")
 
     rc, out, _ = r3(exe, dxc, paths["precompile"], "cold", X2W_TRANSLATE="defer")
     directory = paths["precompile"] / title
     expect(rc != 0 and "deferred to tools/precompile_cache.py" in out and not list(directory.glob("*.dxil")),
            f"{title} defer: the pipeline is refused untranslated", out)
-    expect(len(pso_cache.read_manifest(directory)) == 2, f"{title} defer: both shaders recorded")
+    expect(len(pso_cache.read_manifest(directory)) == shaders, f"{title} defer: every shader recorded")
     run = subprocess.run([sys.executable, "-B", str(TOOLS / "precompile_cache.py"), "--cache", str(directory),
                           "--keep-hlsl"], capture_output=True, text=True, timeout=300)
     print(f"{title}: {run.stdout.strip()}")
-    expect(run.returncode == 0 and " 2 translated" in run.stdout, f"{title} precompile: both shaders translated",
+    expect(run.returncode == 0 and f" {shaders} translated" in run.stdout, f"{title} precompile: every shader translated",
            run.stdout + run.stderr)
     rc, out, precompiled_ms = r3(exe, dxc, paths["precompile"], "warm")
-    expect(rc == 0, f"{title} precompile: the next launch finds both shaders in the cache", out)
+    expect(rc == 0, f"{title} precompile: the next launch finds every shader in the cache", out)
     expect(files(directory) == reference, f"{title} precompile: cache files equal the process path's")
     binds = [v for n, v in reference.items() if n.endswith(".bind")]
     print(f"{title}: bindings sidecars of {', '.join(str(len(b.splitlines()) - 1) for b in binds)} reads")
@@ -104,17 +107,18 @@ def check_program(exe, title, dxc, work, expect):
     def shown(ms):
         return "-" if ms is None else f"{ms:.1f}"
 
-    print(f"{title} pso_create_ms (2 shaders): process cold {shown(process_ms)}, service cold {shown(service_ms)} "
+    print(f"{title} pipeline creation ms ({shaders} shaders): process cold {shown(process_ms)}, service cold {shown(service_ms)} "
           f"(first start, no bytecode cached) and {shown(again_ms)} (bytecode cached), "
           f"fallback cold {shown(fallback_ms)}, warm {shown(warm_ms)}, after precompile {shown(precompiled_ms)}")
 
 
 def main(argv):
-    if len(argv) not in (5, 6) or argv[1] != "shim":
+    if len(argv) not in (5, 6, 7) or argv[1] != "shim":
         print(__doc__, file=sys.stderr)
         return 2
     dxc, work = argv[3], Path(argv[4])
-    programs = [(argv[2], "r3_triangle")] + ([(argv[5], "r4_scene")] if len(argv) == 6 else [])
+    programs = [(argv[2], "r3_triangle", 2)] + [(exe, title, count) for exe, title, count in
+                                                 zip(argv[5:], ("r4_scene", "r5_frames"), (2, 3))]
     if work.exists():
         shutil.rmtree(work)
     failures = []
@@ -124,8 +128,8 @@ def main(argv):
             failures.append(text)
             print(f"FAIL {text}\n{output[-3000:]}")
 
-    for exe, title in programs:
-        check_program(exe, title, dxc, work / title, expect)
+    for exe, title, count in programs:
+        check_program(exe, title, dxc, work / title, expect, count)
     print("paths: " + ("identical" if not failures else f"{len(failures)} failures"))
     return 1 if failures else 0
 

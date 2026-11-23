@@ -4,7 +4,7 @@ translator that tools/pso_service.py and tools/precompile_cache.py share.
 Layout of one title's cache directory (%LOCALAPPDATA%\\XPortPC\\cache\\<title>, or X2W_CACHE_DIR\\<title>):
     <key>.bind                its descriptor-table reads (pso_translate.bindings_text), stored before the DXIL
     <key>.dxil                the translated shader (raw DXIL container), as the shim reads it
-    manifest.txt              one line "<input> <stage>" per console shader the shim has seen (hex SHA-256, vertex|pixel)
+    manifest.txt              one line "<input> <stage>" per console shader the shim has seen (hex SHA-256, vertex|pixel|compute)
     inputs\\<input>.code       the shader's raw gfx1013 code, as the container held it
     inputs\\<input>.roles.json the entry contract the shim derived from the container and the pipeline
     translator.json           the shim's translator configuration: tools, dxc, llvm, fingerprint (hex)
@@ -30,7 +30,7 @@ TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
 import pso_translate  # noqa: E402
 
-STAGES = {"vertex": 0, "pixel": 1}
+STAGES = {"vertex": 0, "pixel": 1, "compute": 2}
 FILETIME_EPOCH = 116444736000000000  # 1601-01-01 to 1970-01-01 in 100 ns units
 
 
