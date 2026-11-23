@@ -1460,9 +1460,9 @@ LDS_C = [
     "s_waitcnt lgkmcnt(0)",
     "buffer_store_dwordx4 v[8:11], off, s[8:11], s4 offset:1024",
     "buffer_store_dwordx3 v[12:14], off, s[8:11], s4 offset:1040",
-    "buffer_store_dwordx4 v[16:19], off, s[8:11], s4 offset:1056",
-    "buffer_store_dwordx4 v[20:23], off, s[8:11], s4 offset:1072",
-    "buffer_store_dwordx4 v[24:27], off, s[8:11], s4 offset:1088",
+    "buffer_store_dwordx4 v[16:19], off, s[8:11], s4 offset:1052",
+    "buffer_store_dwordx4 v[20:23], off, s[8:11], s4 offset:1068",
+    "buffer_store_dwordx4 v[24:27], off, s[8:11], s4 offset:1084",
     "s_endpgm",
 ]
 LDS_C_CONTRACT = {**LDS_GROUPS_CONTRACT, "wave": 32, "numthreads": (1, 1, 1), "local_ids": 1, "lds_size": 1024}
