@@ -881,17 +881,17 @@ bool readable(const void* address, std::size_t size) {
 }
 
 std::string thrown_type(const EXCEPTION_RECORD* record) {
-    if (record->NumberParameters < 4) return "unknown";
+    if (record->NumberParameters < 4) return "unknown_parameters";
     const ULONG_PTR magic = record->ExceptionInformation[0];
-    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown";
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown_magic";
     const auto base = static_cast<std::uintptr_t>(record->ExceptionInformation[3]);
     const auto* throw_info = reinterpret_cast<const std::int32_t*>(record->ExceptionInformation[2]);
     if (!throw_info) return "rethrow";  // "throw;": the runtime takes the type from the exception in flight
-    if (!readable(throw_info, 16)) return "unknown";
+    if (!readable(throw_info, 16)) return "unknown_throw_info";
     const auto* types = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(throw_info[3]));
-    if (!readable(types, 8) || types[0] < 1) return "unknown";
+    if (!readable(types, 8) || types[0] < 1) return "unknown_type_array";
     const auto* catchable = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(types[1]));
-    if (!readable(catchable, 8)) return "unknown";
+    if (!readable(catchable, 8)) return "unknown_catchable_type";
     const char* name = reinterpret_cast<const char*>(base + static_cast<std::uint32_t>(catchable[1]) + 16);
     std::string out;
     for (std::size_t i = 0; i < 160 && readable(name + i, 1) && name[i]; ++i) {
@@ -900,7 +900,7 @@ std::string thrown_type(const EXCEPTION_RECORD* record) {
                         c == '.' || c == '?' || c == '@' || c == '$';
         out += ok ? c : '_';
     }
-    return out.empty() ? "unknown" : out;
+    return out.empty() ? "unknown_name" : out;
 }
 
 // The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
@@ -945,17 +945,28 @@ void log_cpp_throw(EXCEPTION_POINTERS* info) {
 }
 
 // The runtime's _CxxThrowException fills ExceptionInformation[3] with RtlPcToFileHeader(ThrowInfo), which
-// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped; the frame
-// handlers would then read every catchable type at its bare RVA and crash. Before any frame handler runs,
-// this handler sets the base of the mapped image that holds the ThrowInfo (whichever C runtime threw it).
-// It is registered whether or not there is a run log.
+// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped. With no base
+// it also changes the magic number to the /clr:pure one (0x01994000), which native catch blocks ignore, so
+// the throw would go unhandled. Before any frame handler runs, this handler gives a throw whose ThrowInfo lies
+// in a mapped image that image's base and, unless the ThrowInfo itself is marked pure (TI_IsPure, 0x8), the
+// native magic number back (whichever C runtime threw it). It is registered whether or not there is a run log.
 LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
     EXCEPTION_RECORD* record = info->ExceptionRecord;
     if (record->ExceptionCode != cpp_exception || record->NumberParameters < 4) return EXCEPTION_CONTINUE_SEARCH;
     const ULONG_PTR magic = record->ExceptionInformation[0];
-    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return EXCEPTION_CONTINUE_SEARCH;
-    if (const Region* region = region_at(static_cast<std::uintptr_t>(record->ExceptionInformation[2])))
-        record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
+    const bool native = magic == 0x19930520 || magic == 0x19930521 || magic == 0x19930522;
+    if (!native && magic != 0x01994000) return EXCEPTION_CONTINUE_SEARCH;
+    const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[2]);
+    const Region* region = region_at(address);
+    if (!region || record->ExceptionInformation[3] == region->base) return EXCEPTION_CONTINUE_SEARCH;
+    if (!native) {
+        // Pure magic with no base is the runtime's fallback; a real pure throw has TI_IsPure set.
+        if (record->ExceptionInformation[3] != 0 || !readable(reinterpret_cast<const void*>(address), 4) ||
+            (*reinterpret_cast<const std::uint32_t*>(address) & 0x8))
+            return EXCEPTION_CONTINUE_SEARCH;
+        record->ExceptionInformation[0] = 0x19930520;
+    }
+    record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
