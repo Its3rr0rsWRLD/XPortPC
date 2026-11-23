@@ -626,7 +626,14 @@ HRESULT WINAPI UninitializeApiImpl(void)
 HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
 {
     void* caller = _ReturnAddress();
-    heap_milestone("xgr-query %s", label(clsid, iid).c_str());
+    {
+        // Before any lookup (the first 512 calls), so a crash inside the lookup still names the query.
+        static volatile long entered = 0;
+        if (InterlockedIncrement(&entered) <= 512)
+            emit("xgr-query-enter", guid_text(clsid),
+                 format("clsid=%s iid=%s caller=%s", guid_text(clsid).c_str(), guid_text(iid).c_str(), where(caller).c_str()));
+    }
+    heap_milestone("xgr-query %s", guid_text(clsid).c_str());
     if (!out) return E_POINTER;
     *out = nullptr;
     HRESULT hr = S_OK;
@@ -659,6 +666,7 @@ HRESULT WINAPI QueryApiImpl(REFCLSID clsid, REFIID iid, void** out)
     emit_once("xgr-query", label(clsid, iid),
               format("clsid=%s iid=%s -> 0x%08lx caller=%s", guid_text(clsid).c_str(), guid_text(iid).c_str(), hr,
                      where(caller).c_str()));
+    heap_milestone("xgr-query-exit %s", label(clsid, iid).c_str());
     return hr;
 }
 

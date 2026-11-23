@@ -13,7 +13,7 @@ if(NOT x2w_xgr_status EQUAL 0)
 endif()
 message(STATUS "${x2w_xgr_output}")
 
-add_library(x2w_xgr SHARED src/xgr/xgr_gateway.cpp src/xgr/xgr_extra.cpp src/xgr/xgr_thunks.asm
+add_library(x2w_xgr SHARED src/xgr/xgr_gateway.cpp src/xgr/xgr_extra.cpp src/xgr/xgr_heap.cpp src/xgr/xgr_thunks.asm
     src/xgr/xgr_gateway.def)
 target_include_directories(x2w_xgr PRIVATE "${CMAKE_BINARY_DIR}/xgr")
 target_compile_features(x2w_xgr PRIVATE cxx_std_17)
