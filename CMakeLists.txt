@@ -93,7 +93,7 @@ set_tests_properties(xmem_gpu_cross_dll_warp PROPERTIES TIMEOUT 30)
 # device creation with wrapped device/queue/allocator/list/fence/swap chain (src/d3d12_xs_wrap.h).
 # DXGI is delay-loaded: only the shim's present path needs it.
 add_library(d3d12_xs_shim SHARED src/d3d12_xs_shim.cpp src/d3d12_xs_wrap.cpp src/d3d12_xs_log.cpp
-    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_shim.def)
+    src/d3d12_xs_pipeline.cpp src/d3d12_xs_descriptors.cpp src/d3d12_xs_translator.cpp src/d3d12_xs_shim.def)
 set_target_properties(d3d12_xs_shim PROPERTIES OUTPUT_NAME d3d12_xs)
 target_compile_features(d3d12_xs_shim PRIVATE cxx_std_17)
 target_compile_definitions(d3d12_xs_shim PRIVATE X2W_GFX_EXPORTS)
@@ -2732,6 +2732,17 @@ if(EXISTS "${INTAKE_PYTHON}")
     add_test(NAME runtime_r5_refused_warp COMMAND r5_frames warp refused)
     set_tests_properties(runtime_r5_refused_warp PROPERTIES TIMEOUT 120 ENVIRONMENT
         "X2W_PYTHON=${INTAKE_PYTHON};X2W_TOOLS=${CMAKE_SOURCE_DIR}/tools;X2W_DXC=${DXC_EXECUTABLE};X2W_CACHE_DIR=${CMAKE_BINARY_DIR}/r5_cache_refused")
+    # The shim's translation paths (translator service, per-process fallback, ahead of time through
+    # tools/precompile_cache.py) write byte-identical cache files (tests/runtime/xl_check.py), and their throughput on
+    # the R3 programs and 200 draw-check programs (tests/runtime/xl_bench.py; serial: it measures time).
+    add_test(NAME runtime_r3_translator_paths_warp COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/xl_check.py" shim "$<TARGET_FILE:r3_triangle>" "${DXC_EXECUTABLE}"
+        "${CMAKE_BINARY_DIR}/r3_translator_paths" "$<TARGET_FILE:r4_scene>"
+        "$<TARGET_FILE:r5_frames>")
+    set_tests_properties(runtime_r3_translator_paths_warp PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+    add_test(NAME runtime_r3_translator_bench COMMAND "${INTAKE_PYTHON}" -B
+        "${CMAKE_SOURCE_DIR}/tests/runtime/xl_bench.py" run "${DXC_EXECUTABLE}" "${CMAKE_BINARY_DIR}/r3_translator_bench")
+    set_tests_properties(runtime_r3_translator_bench PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
     add_test(NAME pixel_aot_controls COMMAND "${INTAKE_PYTHON}" -B
         "${CMAKE_SOURCE_DIR}/tests/pixel_aot_check.py" controls)
     set_tests_properties(pixel_aot_controls PROPERTIES TIMEOUT 600

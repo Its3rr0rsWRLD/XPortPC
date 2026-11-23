@@ -2828,6 +2828,31 @@ PC results at the R3 tip (RTX 4070 Ti and WARP): all R2 and R3 cases, the `d3d12
 | WARP | 788.5 ms | 13.6, 13.3, 13.1 ms |
 | RTX 4070 Ti | 779.0 ms | 10.9, 10.7, 10.8 ms |
 
+#### Translator service and ahead-of-time cache (runtime rung R3)
+
+Pipeline-time translation now avoids one Python and one `dxc.exe` start per shader ([runtime.md](design/runtime.md), section 3, "Performance, honestly").
+
+- **Service.** `tools/pso_service.py` keeps the converter imported and DXC's library loaded (`pso_translate.DxcLibrary`: `IDxcCompiler3` from the `dxcompiler.dll` beside `X2W_DXC`, with `dxil.dll` from the same directory loaded first, compiling with exactly the arguments `dxc.exe` gets). `src/d3d12_xs_translator.cpp` runs a pool of them: framed requests on each service's stdin/stdout, one shim thread per service on a shared queue, the first service started at device creation (when `X2W_TOOLS\pso_service.py` exists), more started while requests wait, at most `min(cores - 1, 8)` (`X2W_TRANSLATOR_SERVICES` overrides; 0 disables). Services inherit only their pipes and are in a kill-on-close job object. Python's bytecode is cached in `<cache root>\pycache` (`-X pycache_prefix`), never in the converter's directory. A pipeline submits its missing shaders together; as before, a shader after the first refusal is not stored. With no service, or a service failing mid-request, the shim logs one note and uses the per-process path (`tools/pso_translate.py`), which `X2W_TRANSLATE=process` also forces. `X2W_KEEP_HLSL=1` keeps `<key>.hlsl` beside the DXIL on every path.
+- **Ahead of time.** The shim records each console shader it sees once: `manifest.txt` (`<input id> <stage>`), `inputs\<id>.code` and `.roles.json`, and `translator.json` (tools, DXC, LLVM, fingerprint), all in the title's cache directory (`tools/pso_cache.py`). The input id is the key's hash without the fingerprint, so it survives converter updates. `tools/precompile_cache.py <title>` recomputes every key with the current fingerprint (`pso_cache.fingerprint` reproduces the shim's) and translates the missing ones on one process per core. `X2W_TRANSLATE=defer` records shaders and fails their pipelines without translating.
+- **Identity.** Keys and the cache format are unchanged. For every shader below, all paths give the same status and byte-identical DXIL, HLSL and R4 `.bind` sidecar (the service returns the sidecar text, and the shim and `precompile_cache.py` store it before the DXIL). `runtime_r3_translator_paths_warp` runs its comparison on `r4_scene` too, whose shaders read descriptor tables, and on `r5_frames`, whose compute shader (stage 2; its workgroup size, wave and local-id count from the container's `X2WShaderComputeInfo` are in the roles text, so in the key and the recorded inputs) goes through the same service, fallback and precompile paths.
+
+| CTest case | Inputs and checks |
+|---|---|
+| `runtime_r3_translator_paths_warp` | `tests/runtime/xl_check.py shim`: `r3_triangle warp` cold with `X2W_TRANSLATE=process`, then cold, warm and cold again with the service, cold with `X2W_TRANSLATOR_SERVICES=0` (fallback note required), and with `X2W_TRANSLATE=defer` (pipeline refused, nothing translated) followed by `precompile_cache.py` (2 translated) and a warm run (2 cached). Every path's `.dxil` and `.hlsl` files must equal the process path's. The manifest has 2 entries, input ids and recomputed keys match the cache file names, and `pso_cache.fingerprint` equals the shim's. |
+| `runtime_r3_translator_bench` | `tests/runtime/xl_bench.py run`: the 2 R3 programs and 200 distinct pixel programs (`xl_batch.json`, from the pixel_aot draw families' controls with descriptor loads and samples rewritten to register moves so the runtime's bindings suffice; given as instruction text because `gfx_text.py` decodes only the R3 mnemonics) through `pso_translate.py` per process, one service, a pool of services, and `precompile_cache.precompile`. Requires identical status, DXIL and HLSL everywhere, DXC's library in the services, and a faster service than process path. |
+
+PC results (RTX 4070 Ti PC, i7-9700F, 8 cores; `xl_bench.py`, 7 services or processes):
+
+| Path | Start-up | R3 ms/shader | Batch ms/shader | Batch shaders/s |
+|---|---|---|---|---|
+| Process per shader (before) | per shader | 414.8 | 297.1 | 3.4 |
+| One service, serial | 0.68 s first start (bytecode written), 0.21 s later (0.34 s with `-B`) | 23.9 | 8.7 | 114.9 |
+| Pool of 7 services (start-up included) | | | 4.0 (202 in 0.81 s) | 250 |
+| `precompile_cache` on 7 processes (start-up included) | | | 6.6 (202 in 1.34 s) | 151 |
+
+`r3_triangle` `pso_create_ms` for its one pipeline (2 shaders, cold): before, 788 ms WARP and 779 ms RTX 4070 Ti. With the service and its bytecode cached (every launch after the first): 292 ms WARP and 258 ms RTX 4070 Ti, i.e. about 0.13-0.15 s per shader, nearly all the service's start-up (0.21-0.24 s), which the short gap after device creation in this test does not hide. On a service's very first start (bytecode not yet cached) 914-1074 ms. Warm: 14-16 ms, also after `precompile_cache`. The R3 programs are the first a fresh service translates, so their 24-30 ms includes the converter's first-call costs; the batch's 8.7-9.7 ms is the steady state.
+
+
 The warm time includes the once-per-process converter fingerprint (a directory walk of `tools/`) and the desktop pipeline compile. The cold time is about 0.39 s per shader, almost all of it Python start-up and DXC. That is acceptable for R3-R5 test programs. It is not acceptable for titles, which is the case for the ahead-of-time pass in runtime.md, section 3.
 
 #### Title descriptor heaps, textures, constants and depth (runtime rung R4)
