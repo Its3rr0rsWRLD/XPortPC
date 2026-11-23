@@ -189,8 +189,10 @@ class DrawBatch:
     raises CalledProcessError(77), which pixel_aot_check.py reports as a skip. Only for families whose cases do not depend
     on one another's side effects: nothing is read back between cases."""
 
-    def __init__(self, directory, renderer, backend, shader, name="batch"):
+    def __init__(self, directory, renderer, backend, shader, name="batch", operation="--check-pixel-batch"):
+        # operation: the renderer's batch mode, --check-pixel-batch or (tests/compute_aot_check.py) --check-compute-batch.
         self.directory, self.renderer, self.backend, self.shader, self.name = directory, renderer, backend, shader, name
+        self.operation = operation
         self.cases = []
 
     def __enter__(self):
@@ -211,7 +213,7 @@ class DrawBatch:
         if not self.cases:
             return
         cases, self.cases = self.cases, []
-        command = [self.renderer, self.backend, "--check-pixel-batch", self.shader, *(path for path, _, _ in cases)]
+        command = [self.renderer, self.backend, self.operation, self.shader, *(path for path, _, _ in cases)]
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 77:
             raise subprocess.CalledProcessError(77, command, result.stdout, result.stderr)
