@@ -60,7 +60,7 @@ int main() {
     CHECK_EQ(X2WSysInit(title.c_str(), "Game", cfg.c_str()), 0);
     CHECK_EQ(chk::count("paths: rule G: -> "), 1);
     CHECK_EQ(chk::count("paths: rule P: -> "), 1);
-    CHECK_EQ(chk::count("paths: rule X:\\media -> "), 1);
+    CHECK_EQ(chk::count("paths: rule <path>\\media -> ")  /* console drive paths are redacted like host ones (x2w_redact.h) */, 1);
     CHECK_EQ(chk::count("bad map rule 'bogus rule'"), 1);
     CHECK_EQ(chk::count("threads: reporting 8 cores"), 1);
     CHECK_EQ(chk::count("QueryPerformanceFrequency reports 1000000000 Hz"), 1);

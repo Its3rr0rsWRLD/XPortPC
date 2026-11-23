@@ -201,7 +201,7 @@ int main() {
     // Each rule and each distinct path is logged once, however often it is used.
     CHECK_EQ(chk::count("path rule G:"), 1);
     CHECK_EQ(chk::count("path rule T:"), 1);
-    CHECK_EQ(chk::count("path remap G:\\data\\a.txt ->"), 1);
+    CHECK_EQ(chk::count("path remap <path>\\a.txt ->")  /* drive paths are redacted (x2w_redact.h) */, 1);
     CHECK(chk::count("read only") == 1 || chk::count("is read only") >= 1);
     CHECK(global_stats().remaps > 10);
     CHECK(global_stats().denied >= 2);

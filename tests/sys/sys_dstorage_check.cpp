@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
         // Control: the decoded bytes are not the raw ones.
         CHECK(region[100000] != pattern(100000));
         CHECK_EQ(chk::count("compression format 1 has no decoder"), 1);
-        CHECK_EQ(chk::count("path remap G:\\big.bin"), 1);
+        CHECK_EQ(chk::count("path remap <path>\\big.bin")  /* drive paths are redacted (x2w_redact.h) */, 1);
         CHECK_EQ(stats().requests, 7u);
         CHECK_EQ(stats().unsupported, 1u);
         CHECK_EQ(stats().bytes_out, 63000u);
