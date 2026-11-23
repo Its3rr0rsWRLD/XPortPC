@@ -107,6 +107,25 @@ weights are exactly 1 and 0. Wrong references (the slice truncated, a tie rounde
 opposite, a tie broken toward the other axis, r read as a slice index, the axis order ignored, a neighbouring texel
 for the bilinear reads) must each be reported as mismatches.
 
+### Cube arrays
+
+A gfx10 cube T# (TYPE 11) may hold several cubes (its array range); the program then passes the face word face + 8 *
+layer, as Mesa's `ac_prepare_cube_coords` writes it: a `v_cubeid` result plus 8.0 times an integral layer, through
+`v_madmk_f32`/`v_fmamk_f32 layer, 0x41000000, face` or `v_mad_f32`/`v_fma_f32`/`v_fmac_f32` with the 8.0 literal on
+one factor (`valu_f32.note_cube_layer`, `Lowering.cube_layers`; copies keep it). The layer must be an integer value
+(`Lowering.integral`, as an array slice: the corpus's two texturecubemaparray programs convert a push word with
+`v_cvt_f32_i32`, a GLSL float layer is `v_rndne`'d), with no negation, clamp or output modifier. The texture is bound
+as a `Texture2DArray` view of its 6 N faces, cube n at slices 6 n .. 6 n + 5 (harness 'X2WD' kind 4), and every form
+that samples a cube (image_sample, _b, _l, _lz; `forms/mimg.py`, `cube_face`) reads slice face + 6 * layer, with the
+layer first clamped to [0, N - 1] (N from `GetDimensions`): Vulkan clamps a cube array's layer, not the slice, and
+RADV emits no clamp, so the texture unit applies it; Direct3D's own slice clamp would send a layer past the end to the
+last face of the last cube. Face and layer are small integers, so face + 8 layer and the slice are exact. A dimension
+name `cube_array` is the same binding as `cube` (either takes `dim:SQ_RSRC_IMG_CUBE`, and a plain `v_cubeid` face reads
+cube 0). Not modelled: a NaN layer (only `v_rndne` and the other rounding results could give one; it reads layer 0
+here). The `cube_array` draw family checks the four forms on a three-cube, four-level 8x8 array at every face, every
+cube, layers past either end and rounded float layers, with wrong references for the layer ignored, the face word used
+as the slice, face and layer mixed up (layer + 6 face) and the slice clamped instead of the layer.
+
 ## Constant windows
 
 A constant slot binds 256 bytes (16 uint4) unless `constant_sizes` gives it a window, up to 65536 bytes (4096 uint4, a
@@ -190,3 +209,5 @@ Of the five shaders refused at "Constant read exceeds binding", the shadow-map q
 eleven refused at a read of v2 (an input VGPR), five translate (gl_FragCoord.z, .z / .w, .xy); the other six stop at the
 variable-rate shading input (ancillary, not lowered), a storage-image load, a binary16 literal of v_fma_mix (two), a
 masked write and an interpolation context.
+With cube arrays ("Cube arrays"), the two texturecubemaparray programs (skybox and reflect, `image_sample_l` of face +
+8 layer) translate: 191 of the 250 translate and compile with DXC (189 before; those keep byte-identical HLSL).

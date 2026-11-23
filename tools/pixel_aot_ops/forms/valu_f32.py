@@ -144,6 +144,25 @@ def cube(st, i, m):
     st.lines.append(f"    precise float alu{i} = {expression};")
 
 
+# 8.0, the factor of the cube-array layer in a cube face word (Mesa ac_prepare_cube_coords: face + 8 * layer).
+EIGHT = "0x41000000"
+
+
+def note_cube_layer(st, name, factors, addend, values):
+    """Record `name` as a cube-array face word (Lowering.cube_layers) when it is factors[0] * factors[1] + addend with
+    one factor the literal 8.0 and the other an integral value (an integral layer), and the addend a v_cubeid result:
+    then it is face + 8 * layer exactly (both small integers), the hardware's face coordinate of a cube array.
+    values: the HLSL expressions of factors[0], factors[1], addend."""
+    if EIGHT not in factors or factors[0] == factors[1]:
+        return
+    k = 1 - factors.index(EIGHT)
+    token = factors[k]
+    if not re.fullmatch(r"v\d+", token) or not re.fullmatch(r"v\d+", addend):
+        return
+    if _value_name(st.vector.get(token)) in st.integral and _value_name(st.vector.get(addend)) in st.cube_faces:
+        st.cube_layers[name] = (values[2], values[k])
+
+
 @form(r"v_(fmaak|fmamk|madak|madmk)_f32 (v\d+), ([^,]+), ([^,]+), ([^,]+)")
 def literal_fma(st, i, m):
     # *ak: S0 * S1 + K; *mk: S0 * K + S1, with K a 32-bit literal. v_fma*k is fused; v_mad*k is the legacy unfused,
@@ -165,6 +184,8 @@ def literal_fma(st, i, m):
             st.quad_values[f"alu{i}"] = any(varying)
     if f"alu{i}" not in st.quad_values and helper_defined(st, tokens):
         st.quad_defined.add(f"alu{i}")
+    if op.endswith("mk"):  # S0 * K + S1
+        note_cube_layer(st, f"alu{i}", [tokens[0], tokens[1]], tokens[2], values)
     st.vector[dst] = f"alu{i}"
     st.lines.append(f"    precise float alu{i} = {ALU[op[:3]][1].format(*values)};")
 
@@ -185,6 +206,8 @@ def move(st, i, m):
         st.integral.add(name)
     if source_name in st.cube_faces:
         st.cube_faces.add(name)
+    if source_name in st.cube_layers:
+        st.cube_layers[name] = st.cube_layers[source_name]
     if quad and source_name in st.quad_defined:
         st.quad_defined.add(name)
     if raw_source(src, st.scalar, st.vector):
@@ -249,6 +272,8 @@ def arithmetic(st, i, m):
         st.quad_defined.add(f"alu{i}")
     if op in ("rndne", "floor", "ceil", "trunc") and not omod:
         st.integral.add(f"alu{i}")
+    if op in ("fma", "fmac", "mad", "mac") and not omod and not clamp:
+        note_cube_layer(st, f"alu{i}", tokens[:2], tokens[2], values)
     expression = template.format(*values)
     if op == "med3":
         st.helpers.add("med3_f32")

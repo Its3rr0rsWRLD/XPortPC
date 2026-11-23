@@ -64,9 +64,12 @@ def input_vgprs(ena, addr=None):
 
 # Texture dimensions a T# may declare, with the HLSL type each is bound as (docs/design/pixel-bindings.md): a cube is
 # bound as a Texture2DArray view of its six faces (slices 0..5 = +X, -X, +Y, -Y, +Z, -Z), sampled at the face
-# coordinates the program computes, not at a direction.
+# coordinates the program computes, not at a direction. A cube array is a Texture2DArray view of its 6 N faces (cube n
+# at slices 6 n .. 6 n + 5); a gfx10 T# of TYPE cube may be one (its array range says how many cubes), so "cube" binds
+# the faces of every cube the view holds and "cube_array" is the same binding under the name that says so. Both take
+# dim:SQ_RSRC_IMG_CUBE, with the face word a v_cubeid result or face + 8 * layer (forms/mimg.py, cube_face).
 DIMENSIONS = {"2d": "Texture2D<float4>", "2d_array": "Texture2DArray<float4>", "cube": "Texture2DArray<float4>",
-              "3d": "Texture3D<float4>"}
+              "cube_array": "Texture2DArray<float4>", "3d": "Texture3D<float4>"}
 # The dim: field of a MIMG instruction (gfx10 SQ_RSRC_IMG_*) for each dimension.
 INSTRUCTION_DIMS = {"SQ_RSRC_IMG_2D": "2d", "SQ_RSRC_IMG_2D_ARRAY": "2d_array", "SQ_RSRC_IMG_CUBE": "cube",
                     "SQ_RSRC_IMG_3D": "3d"}
@@ -161,7 +164,7 @@ class PixelBindings:
         graphics shim's contract, tools/pso_translate.py), which needs no constant slot 0.
     storage_images: {key of a storage-image T#: (slot 0..3, format)} (forms/image_writes.py).
     descriptor_high: the high word the program completes a descriptor-set pointer with.
-    dimensions: {texture slot: "2d", "2d_array", "cube" or "3d", or the T#'s eight words when they are known, whose
+    dimensions: {texture slot: "2d", "2d_array", "cube", "cube_array" or "3d", or the T#'s eight words when they are known, whose
         TYPE field (type_dimension) gives it}; a slot not listed is 2D.
     constant_sizes: {constant slot: bytes of the window the runtime binds for that constant-buffer V#, a multiple of 16
         from 256 to 65536}; a slot not listed binds 256. A read past the window is refused; params<k>[] is declared

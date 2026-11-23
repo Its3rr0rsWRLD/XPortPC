@@ -41,6 +41,12 @@ def texture_dimension(st, texture):
     return st.texture_dims.get(texture, "2d")
 
 
+def instruction_dimension(st, texture):
+    """The dimension an image instruction must name for this texture: a cube array is sampled as dim:SQ_RSRC_IMG_CUBE."""
+    dim = texture_dimension(st, texture)
+    return "cube" if dim == "cube_array" else dim
+
+
 @form(r"image_sample (v\d+|v\[\d+:\d+\]), (v\[\d+:\d+\]|\[v\d+(?:, v\d+)+\]), s\[(\d+):(\d+)\], s\[(\d+):(\d+)\] "
       r"dmask:0x([0-9a-f]) dim:(SQ_RSRC_IMG_2D|SQ_RSRC_IMG_2D_ARRAY|SQ_RSRC_IMG_CUBE|SQ_RSRC_IMG_3D)( d16)?")
 def sample(st, i, m):
@@ -82,7 +88,7 @@ def sample(st, i, m):
             or texture is None
             or samp is None):
         raise ValueError("Unsupported image or sampler binding")
-    if texture_dimension(st, texture) != dim:
+    if instruction_dimension(st, texture) != dim:
         raise ValueError(f"Image dimension {dim_field} does not match the texture binding "
                          f"({texture_dimension(st, texture)})")
     if dim == "2d":
@@ -92,14 +98,14 @@ def sample(st, i, m):
             raise ValueError("Unsupported texture coordinate")
         st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, float2({', '.join(uv)}));")
     else:
-        st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, {dimensioned_coordinate(st, i, dim, coords)});")
+        st.lines.append(f"    float4 sample{i} = {texture}.Sample({samp}, {dimensioned_coordinate(st, i, dim, coords, texture)});")
     st.samples += 1
     names = [f"v{n}" for n in dest]
     store_results(st, i, names, [f"sample{i}.{'xyzw'[c]}" for c in channels], d16)
     st.vm_issue(names, "sample")
 
 
-def dimensioned_coordinate(st, i, dim, coords):
+def dimensioned_coordinate(st, i, dim, coords, texture):
     """The HLSL float3 location of an implicit-level sample of a 2D-array, cube or 3D texture
     (docs/design/pixel-bindings.md, "Texture dimensions"):
     - 3D: (s, t, r), all normalized, read as a Texture3D. All three enter the level, so each must be a helper-lane
@@ -116,7 +122,8 @@ def dimensioned_coordinate(st, i, dim, coords):
       projection of a direction. s - 1 and t - 1 are exact for s, t in [0.5, 2]. s and t are quotients, not affine in
       the interpolated coordinate, so they need only be helper-lane values (Lowering.quad_defined); how the adapter
       takes their derivatives (coarse or fine) is not proven. A coordinate outside [1, 2], which the hardware's
-      seamless addressing may read from the next face, reads the clamped edge of the face here (not modelled)."""
+      seamless addressing may read from the next face, reads the clamped edge of the face here (not modelled).
+      A cube array's face word is face + 8 * layer (cube_face)."""
     values = [st.vector[f"v{n}"] for n in coords]
     if dim == "3d":
         xyz = [quad_coordinate(st, v) for v in values]
@@ -134,14 +141,33 @@ def dimensioned_coordinate(st, i, dim, coords):
     st_values = [quad_coordinate(st, v, defined=True) for v in values[:2]]
     if None in st_values:
         raise ValueError("Unsupported texture coordinate")
-    if _name(values[2]) not in st.cube_faces:
-        raise ValueError("A cube face must be a v_cubeid result")
-    face = coordinate(st, f"v{coords[2]}")
+    face = cube_face(st, i, texture, f"v{coords[2]}")
     st.lines.append(f"    precise float3 face{i} = float3({st_values[0]} - 1.0f, {st_values[1]} - 1.0f, {face});")
     return f"face{i}"
 
 
-def explicit_coordinate(st, i, dim, coords):
+def cube_face(st, i, texture, register):
+    """The Texture2DArray slice of a cube sample's face word (docs/design/pixel-bindings.md, "Cube arrays"): a v_cubeid
+    result is the face of the one cube; face + 8 * layer (Lowering.cube_layers: a v_cubeid result plus 8.0 times an
+    integral value, as Mesa's ac_prepare_cube_coords writes a cube array's face word) is the face of cube `layer`, which
+    the 6 N faces of the array (slices 6 layer .. 6 layer + 5) hold at slice face + 6 * layer. The layer is clamped to
+    [0, N - 1] first, as Vulkan clamps a cube array's layer (RADV emits no clamp, so the texture unit applies it), not
+    the slice: Direct3D's own clamp of the slice would move a layer past the end to the last face of the last cube.
+    The face and layer are integers, so the slice is exact and Direct3D's rounded slice is it."""
+    value = st.vector[register]
+    name = _name(value)
+    if name in st.cube_faces:
+        return coordinate(st, register)
+    if name in st.cube_layers:
+        face, layer = st.cube_layers[name]
+        st.lines.append(f"    uint face{i}_w, face{i}_h, face{i}_n;")
+        st.lines.append(f"    {texture}.GetDimensions(face{i}_w, face{i}_h, face{i}_n);")
+        st.lines.append(f"    precise float face{i}_layer = clamp({layer}, 0.0f, float(face{i}_n / 6u) - 1.0f);")
+        return f"{face} + 6.0f * face{i}_layer"
+    raise ValueError("A cube face must be a v_cubeid result")
+
+
+def explicit_coordinate(st, i, dim, coords, texture):
     """The HLSL float3 location of an explicit-level sample (image_sample_lz and _l) of a 2D-array or cube texture: the
     location of dimensioned_coordinate, but its s and t are any value, since no derivative is taken: the same
     integral-slice rule for an array, and for a cube the v_cubeid face with s - 1 and t - 1 of the program's own
@@ -154,8 +180,7 @@ def explicit_coordinate(st, i, dim, coords):
             raise ValueError("An array slice must be an integer value (v_rndne, v_floor, v_ceil, v_trunc, v_cvt_f32 or "
                              "an integral constant): the texture unit's slice rounding is not modelled")
         return f"float3({xy[0]}, {xy[1]}, {third})"
-    if _name(value) not in st.cube_faces:
-        raise ValueError("A cube face must be a v_cubeid result")
+    third = cube_face(st, i, texture, f"v{coords[2]}")
     st.lines.append(f"    precise float3 face{i} = float3({xy[0]} - 1.0f, {xy[1]} - 1.0f, {third});")
     return f"face{i}"
 
@@ -326,7 +351,7 @@ def sample_level(st, i, m):
     if (texture is None or int(f0) % 4 or int(s0) % 4 or int(f1) > 105 or int(s1) > 105
             or any(r in st.pending for r in (*image, *state)) or (samp := sampler_of(st, state)) is None):
         raise ValueError("Unsupported image or sampler binding")
-    if texture_dimension(st, texture) != dim:
+    if instruction_dimension(st, texture) != dim:
         raise ValueError(f"Image dimension {dim_field} does not match the texture binding "
                          f"({texture_dimension(st, texture)})")
     if any(d in st.sample_dest for d in dests) or any(int(d[1:]) > 255 for d in (*dests, *addrs)):
@@ -338,9 +363,9 @@ def sample_level(st, i, m):
         coords = [int(r[1:]) for r in (addrs[1:] if op == "b" else addrs[:3])]
         if op == "b":
             bias = fp_operand(addrs[0], st.scalar, st.vector, st.pending, st.sample_pending)
-            call = f"{texture}.SampleBias({samp}, {dimensioned_coordinate(st, i, dim, coords)}, {bias})"
+            call = f"{texture}.SampleBias({samp}, {dimensioned_coordinate(st, i, dim, coords, texture)}, {bias})"
         else:
-            location = explicit_coordinate(st, i, dim, coords)
+            location = explicit_coordinate(st, i, dim, coords, texture)
             lod = coordinate(st, addrs[3]) if op == "l" else "0.0f"
             call = f"{texture}.SampleLevel({samp}, {location}, {lod})"
     elif op == "o":

@@ -72,6 +72,10 @@ class Lowering:
         # must be one (forms/mimg.py). cube_faces: v_cubeid results and copies, the face of a cube sample.
         self.integral = set()
         self.cube_faces = set()
+        # The face word of a cube-array sample: name -> (face, layer) HLSL expressions of a v_cubeid result plus 8 times
+        # an integral layer (v_madmk/v_fmamk_f32 layer, 0x41000000, face, or v_mad/v_fma_f32 with that literal;
+        # valu_f32.note_cube_layer), and copies of one. forms/mimg.py (cube_face) samples slice face + 6 * layer.
+        self.cube_layers = {}
         self.texture_dims = {}  # HLSL texture name -> "2d_array", "cube" or "3d" (bindings.PixelBindings); absent: 2D
         self.samples = 0  # samples taken on the path so far
         # VGPR -> (issue number, kind) of the outstanding sample or vector memory load that writes it. vmcnt(N) completes
