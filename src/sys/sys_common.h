@@ -19,6 +19,8 @@ using LogSink = void (*)(const char* line);
 
 // Null restores the default sink (stderr, plus OutputDebugString on Windows). Lines get a "[x2w] " prefix.
 void set_log_sink(LogSink sink);
+// The title folder: every log line shows it as "<game>".
+void set_hidden_dir(const std::string& dir);
 void log(const char* fmt, ...) X2W_SYS_PRINTF(1, 2);
 // Prints only the first time `key` is seen since reset_log_once(). Returns true when it printed.
 bool log_once(const std::string& key, const char* fmt, ...) X2W_SYS_PRINTF(2, 3);

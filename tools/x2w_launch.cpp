@@ -215,7 +215,27 @@ constexpr const char* kHiddenProgram = "title.exe";
 bool show_program_name = false;
 std::string real_program_name;  // lower-case file name of the program, set once before any log line names it
 
+std::string real_program_dir;  // lower-case folder of the program; never logged, shown as <game>
+
+// The program's folder, in either slash spelling, becomes "<game>" in every line (always; it is never logged).
+std::string scrub_program_dir(std::string text) {
+    if (real_program_dir.size() < 3) return text;
+    for (char slash : {'\\', '/'}) {
+        std::string needle = real_program_dir;
+        for (char& c : needle) if (c == '\\' || c == '/') c = slash;
+        const std::string folded = lower(text);
+        std::string out;
+        for (std::size_t at = 0; at < text.size();) {
+            if (folded.compare(at, needle.size(), needle) == 0) { out += "<game>"; at += needle.size(); }
+            else out += text[at++];
+        }
+        text = out;
+    }
+    return text;
+}
+
 std::string scrub_program_name(std::string text) {
+    text = scrub_program_dir(std::move(text));
     if (show_program_name || real_program_name.empty()) return text;
     const std::string folded = lower(text);
     std::string out;
@@ -1608,6 +1628,9 @@ int wmain(int argc, wchar_t** argv) {
     package_dir = directory_of(full);
     const std::string program_name = lower(narrow(file_of(full)));
     real_program_name = program_name;
+    real_program_dir = lower(narrow(package_dir));
+    while (real_program_dir.size() > 3 && (real_program_dir.back() == '\\' || real_program_dir.back() == '/'))
+        real_program_dir.pop_back();
     log_line("x2w-run-log 1");
     log_line("program %s", show_program_name ? program_name.c_str() : kHiddenProgram);
     if (xgr_gateway_on()) log_line("xgr %s", xgr_mode.c_str());

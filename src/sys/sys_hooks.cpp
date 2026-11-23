@@ -81,6 +81,7 @@ void clean_temp_folder() {
 }  // namespace x2w_sys
 
 X2W_SYS_API int __stdcall X2WSysInit(const char* title_dir, const char* title_name, const char* config_path) {
+    if (title_dir) set_hidden_dir(title_dir);
     using namespace x2w_sys;
     std::string cfg_file = config_path && *config_path ? config_path : get_env("X2W_SYS_CONFIG");
     if (cfg_file.empty() && title_dir && *title_dir) cfg_file = std::string(title_dir) + "\\x2w-sys.cfg";

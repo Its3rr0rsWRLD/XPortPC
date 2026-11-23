@@ -27,13 +27,32 @@ std::string vformat(const char* fmt, va_list args) {
     return out;
 }
 
+std::string g_hidden_dir;  // lower-case title folder; shown as <game>
+
+std::string hide_dir(const std::string& text) {
+    if (g_hidden_dir.size() < 3) return text;
+    std::string result = text;
+    for (char slash : {'\\', '/'}) {
+        std::string needle = g_hidden_dir;
+        for (char& c : needle) if (c == '\\' || c == '/') c = slash;
+        std::string folded = result, out;
+        for (char& c : folded) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (std::size_t at = 0; at < result.size();) {
+            if (folded.compare(at, needle.size(), needle) == 0) { out += "<game>"; at += needle.size(); }
+            else out += result[at++];
+        }
+        result = out;
+    }
+    return result;
+}
+
 void emit(const std::string& body) {
     LogSink sink;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         sink = g_sink;
     }
-    const std::string line = "[x2w] " + body;
+    const std::string line = "[x2w] " + hide_dir(body);
     if (sink) {
         sink(line.c_str());
         return;
@@ -43,6 +62,14 @@ void emit(const std::string& body) {
     OutputDebugStringA((line + "\n").c_str());
 }
 }  // namespace
+
+void set_hidden_dir(const std::string& dir) {
+    std::string d = dir;
+    for (char& c : d) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    while (d.size() > 3 && (d.back() == '\\' || d.back() == '/')) d.pop_back();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_hidden_dir = d;
+}
 
 void set_log_sink(LogSink sink) {
     std::lock_guard<std::mutex> lock(g_mutex);
