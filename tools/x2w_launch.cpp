@@ -18,7 +18,9 @@
 // first thread created, the first call into a d3d12* import), the first exception and the first unhandled
 // crash (code, module + RVA, last stub called) and the exit code. Each line is written with its own
 // WriteFile call, so the log survives a crash. Addresses are given as module+RVA. --timeout ends a run that
-// is still going after that many seconds with exit code 124, after logging how far it got.
+// is still going after that many seconds with exit code 124, after logging how far it got. Each distinct C++
+// throw (0xe06d7363) is logged as "cpp-throw TYPE at SITE from CALLER": the thrown type's decorated name from
+// the ThrowInfo (".?AVruntime_error@std@@") and the first two frames in mapped images, at most 16 lines.
 //
 // Dynamic loads. The program's imports of LoadLibraryA/W, LoadLibraryExA/W, GetModuleHandleA/W and
 // GetProcAddress (from kernel32, kernelbase or the libraryloader API set) bind to hooks here, because PC
@@ -757,10 +759,111 @@ void exception_text(const EXCEPTION_RECORD* record, char* out, std::size_t capac
     }
 }
 
+// ---------------------------------------------------------------- C++ exceptions (0xe06d7363)
+// An MSVC throw passes its ThrowInfo in the record: ExceptionInformation[0] is a magic number, [2] the
+// ThrowInfo address and [3] the image base its 32-bit RVAs are relative to. The first catchable type is the
+// thrown (most derived) type; its TypeDescriptor holds the decorated name (".?AVruntime_error@std@@").
+// A rethrow ("throw;") carries no ThrowInfo and is logged as "rethrow". Only that name and the throw site (the first frame in a mapped image, found by unwinding from the
+// RaiseException context) are logged, never the exception object.
+constexpr DWORD cpp_exception = 0xe06d7363;
+constexpr std::size_t kCppThrowLines = 16;
+volatile long cpp_throws;
+SRWLOCK cpp_lock = SRWLOCK_INIT;
+std::set<std::string> cpp_seen;
+
+bool readable(const void* address, std::size_t size) {
+    MEMORY_BASIC_INFORMATION info;
+    if (!address || !VirtualQuery(address, &info, sizeof info) || info.State != MEM_COMMIT) return false;
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    const auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    return reinterpret_cast<std::uintptr_t>(address) + size <= end;
+}
+
+std::string thrown_type(const EXCEPTION_RECORD* record) {
+    if (record->NumberParameters < 4) return "unknown";
+    const ULONG_PTR magic = record->ExceptionInformation[0];
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return "unknown";
+    const auto base = static_cast<std::uintptr_t>(record->ExceptionInformation[3]);
+    const auto* throw_info = reinterpret_cast<const std::int32_t*>(record->ExceptionInformation[2]);
+    if (!throw_info) return "rethrow";  // "throw;": the runtime takes the type from the exception in flight
+    if (!readable(throw_info, 16)) return "unknown";
+    const auto* types = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(throw_info[3]));
+    if (!readable(types, 8) || types[0] < 1) return "unknown";
+    const auto* catchable = reinterpret_cast<const std::int32_t*>(base + static_cast<std::uint32_t>(types[1]));
+    if (!readable(catchable, 8)) return "unknown";
+    const char* name = reinterpret_cast<const char*>(base + static_cast<std::uint32_t>(catchable[1]) + 16);
+    std::string out;
+    for (std::size_t i = 0; i < 160 && readable(name + i, 1) && name[i]; ++i) {
+        const char c = name[i];
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                        c == '.' || c == '?' || c == '@' || c == '$';
+        out += ok ? c : '_';
+    }
+    return out.empty() ? "unknown" : out;
+}
+
+// The first two frames in mapped images above RaiseException: "SITE" or "SITE from CALLER". With a static C
+// runtime the first is the title's own _CxxThrowException and the second the throwing function.
+std::string throw_site(const CONTEXT* start) {
+    CONTEXT context = *start;
+    std::string out;
+    int found = 0;
+    for (int depth = 0; depth < 32 && context.Rip && found < 2; ++depth) {
+        if (region_at(context.Rip)) {
+            char where[160];
+            describe(reinterpret_cast<void*>(context.Rip), where, sizeof where);
+            out += (found++ ? " from " : "") + std::string(where);
+        }
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &image, nullptr);
+        if (function) {
+            void* handler_data = nullptr;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, context.Rip, function, &context, &handler_data, &frame, nullptr);
+        } else {
+            if (!readable(reinterpret_cast<void*>(context.Rsp), 8)) break;
+            context.Rip = *reinterpret_cast<DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+        }
+    }
+    if (found) return out;
+    char where[160];
+    describe(reinterpret_cast<void*>(start->Rip), where, sizeof where);  // no mapped frame found
+    return where;
+}
+
+void log_cpp_throw(EXCEPTION_POINTERS* info) {
+    InterlockedIncrement(&cpp_throws);
+    const std::string line = "cpp-throw " + thrown_type(info->ExceptionRecord) + " at " + throw_site(info->ContextRecord);
+    AcquireSRWLockExclusive(&cpp_lock);
+    const bool first = cpp_seen.size() < kCppThrowLines && cpp_seen.insert(line).second;
+    ReleaseSRWLockExclusive(&cpp_lock);
+    if (!first) return;
+    std::fprintf(stderr, "[x2w] %s\n", line.c_str());
+    log_line("%s", line.c_str());
+}
+
+// The runtime's _CxxThrowException fills ExceptionInformation[3] with RtlPcToFileHeader(ThrowInfo), which
+// knows only the Windows loader's modules and gives 0 for a ThrowInfo in an image pe_map mapped; the frame
+// handlers would then read every catchable type at its bare RVA and crash. Before any frame handler runs,
+// this handler sets the base of the mapped image that holds the ThrowInfo (whichever C runtime threw it).
+// It is registered whether or not there is a run log.
+LONG CALLBACK cpp_throw_base(EXCEPTION_POINTERS* info) {
+    EXCEPTION_RECORD* record = info->ExceptionRecord;
+    if (record->ExceptionCode != cpp_exception || record->NumberParameters < 4) return EXCEPTION_CONTINUE_SEARCH;
+    const ULONG_PTR magic = record->ExceptionInformation[0];
+    if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522) return EXCEPTION_CONTINUE_SEARCH;
+    if (const Region* region = region_at(static_cast<std::uintptr_t>(record->ExceptionInformation[2])))
+        record->ExceptionInformation[3] = static_cast<ULONG_PTR>(region->base);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // The first error-severity exception the program raises, whether or not it handles it. Codes with the
-// customer bit (such as C++ exceptions, 0xe06d7363) are the program's own and are not logged.
+// customer bit are the program's own and are not logged as such; C++ exceptions (0xe06d7363) get their own
+// "cpp-throw TYPE at SITE" lines, once per distinct line and at most 16.
 LONG CALLBACK first_chance(EXCEPTION_POINTERS* info) {
     const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (armed && code == cpp_exception) log_cpp_throw(info);
     if (armed && (code & 0xc0000000u) == 0xc0000000u && !(code & 0x20000000u)
         && InterlockedExchange(&first_exception, 1) == 0) {
         char text[512];
@@ -953,6 +1056,8 @@ int wmain(int argc, wchar_t** argv) {
         AddVectoredExceptionHandler(1, first_chance);
         SetUnhandledExceptionFilter(unhandled);
     }
+    // After the logger, so the logger sees the corrected base.
+    AddVectoredExceptionHandler(1, cpp_throw_base);
     // Added last, so it runs before the first-chance logger and a performed instruction is not logged as one.
     AddVectoredExceptionHandler(1, cpu_trap);
     wchar_t self[MAX_PATH];

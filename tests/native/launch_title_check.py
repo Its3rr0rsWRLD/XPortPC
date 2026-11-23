@@ -1,6 +1,6 @@
 """Run source-built titles natively and through x2w_launch and compare what they observe.
 
-Usage: launch_title_check.py tls|tls-crt|identity x2w_launch.exe TITLE.exe
+Usage: launch_title_check.py tls|tls-crt|identity|throw x2w_launch.exe TITLE.exe
 
 tls       tests/native/tls_title.cpp: implicit TLS data (template, zero fill, a relocated pointer) read and
           written on the main thread and two workers, gs:[0x58][_tls_index], and the TLS callback on
@@ -16,8 +16,15 @@ identity  tests/native/identity_title.cpp: GetModuleHandle(NULL), GetModuleHandl
           under both loaders. Controls: x2w_launch --host-identity gives 0x180 (every identity answer names
           the launcher; only the short-buffer behavior still holds), and a renamed copy run natively gives
           0x1e3 (its name lookup and file-name checks fail).
+throw     tests/native/throw_title.cpp: C++ exceptions of three types thrown and caught in the mapped image (the
+          static runtime's _CxxThrowException finds no image base for a mapped ThrowInfo; x2w_launch supplies
+          it). Expected 0x107 and the same output under both loaders. With --log, exactly one
+          "cpp-throw TYPE at SITE from CALLER" line per type (.?AVruntime_error@std@@, .?AUbad_probe@probe@@,
+          .H) and one "cpp-throw rethrow" line, all at the same _CxxThrowException site, each CALLER inside the
+          throwing function's .pdata entry, and every log line within the run log grammar.
 """
 import ctypes
+import re
 import shutil
 import struct
 import subprocess
@@ -119,10 +126,65 @@ def check_identity(launcher, title):
     print("native_launch_identity: module handle, file name, PEB image base and resources name the title")
 
 
+def function_range(title, rva):
+    """The .pdata entry (begin, end) that starts at rva."""
+    with pefile.PE(str(title)) as pe:
+        for entry in pe.DIRECTORY_ENTRY_EXCEPTION:
+            if entry.struct.BeginAddress == rva:
+                return entry.struct.BeginAddress, entry.struct.EndAddress
+    raise AssertionError(f"no .pdata entry starts at {rva:#x}")
+
+
+def check_throw(launcher, title):
+    expected = "cpp-throw code=0x107 main=3/3/3 worker=3/3/3"
+    native_code, native_out, _ = run([title])
+    if native_code != 0x107 or not native_out.startswith(expected + "\n"):
+        raise AssertionError(f"native: exit {native_code:#x} stdout {native_out!r}")
+    compare(launcher, title, 0x107)
+    sites = dict(re.findall(r"(\w+)=0x([0-9a-f]+)", native_out.splitlines()[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from run_log_check import check_grammar  # noqa: E402
+
+    name = Path(title).name.lower()
+    with tempfile.TemporaryDirectory() as folder:
+        log = Path(folder) / "run.log"
+        code, out, err = run([launcher, "--log", log, "--timeout", "60", title])
+        lines = log.read_text(encoding="utf-8").splitlines()
+    print(f"--log: exit {code:#x}")
+    print("\n".join(line for line in lines if line.startswith("cpp-throw")))
+    if code != 0x107 or out != native_out:
+        raise AssertionError(f"--log: exit {code:#x} stdout {out!r}\n{err}")
+    check_grammar(lines, title)
+    where = rf"{re.escape(name)}\+0x([0-9a-f]+)"
+    found = {}
+    for line in lines:
+        match = re.fullmatch(rf"cpp-throw (\S+) at {where} from {where}", line)
+        if line.startswith("cpp-throw") and not match:
+            raise AssertionError(f"cpp-throw line without two title frames: {line!r}")
+        if match:
+            if match[1] in found:
+                raise AssertionError(f"{match[1]} logged twice:\n" + "\n".join(lines))
+            found[match[1]] = (int(match[2], 16), int(match[3], 16))
+    types = {".?AVruntime_error@std@@": "runtime", ".?AUbad_probe@probe@@": "probe", ".H": "int"}
+    if set(found) != set(types) | {"rethrow"}:
+        raise AssertionError(f"thrown types {sorted(found)} != {sorted(set(types) | {'rethrow'})}")
+    if len({site for site, _ in found.values()}) != 1:
+        raise AssertionError(f"throw sites differ: {found}")
+    for type_name, function in types.items():
+        begin, end = function_range(title, int(sites[function], 16))
+        caller = found[type_name][1]
+        if not begin < caller <= end:
+            raise AssertionError(f"{type_name}: caller {caller:#x} outside {function} [{begin:#x}, {end:#x}]")
+    for line in err.splitlines():
+        if line.startswith("[x2w] cpp-throw") and line[6:] not in lines:
+            raise AssertionError(f"stderr line not in the log: {line!r}")
+    print("native_launch_throw: C++ exceptions caught in the mapped image; types and throw sites logged")
+
+
 def main():
     mode, launcher, title = sys.argv[1:4]
     quiet_errors()
-    {"tls": check_tls, "tls-crt": check_tls_crt, "identity": check_identity}[mode](Path(launcher), Path(title))
+    {"tls": check_tls, "tls-crt": check_tls_crt, "identity": check_identity, "throw": check_throw}[mode](Path(launcher), Path(title))
     return 0
 
 
