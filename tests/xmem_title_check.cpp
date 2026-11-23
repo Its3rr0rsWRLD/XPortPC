@@ -40,7 +40,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <vector>
 
@@ -333,9 +335,9 @@ bool reserve()
            "non-GPU page-backed memory is carved in the system window");
     XMemFree(sys, word(8, 1, 0));
     // An arena too.
-    void* small = XMemAlloc(4096, word(1, 0, 0));
-    expect(small && in_window(small, w[0]) && describe(small).backing == X2W_XMEM_BACKING_ARENA, "an arena in the window");
-    XMemFree(small, word(1, 0, 0));
+    void* tiny = XMemAlloc(4096, word(1, 0, 0));
+    expect(tiny && in_window(tiny, w[0]) && describe(tiny).backing == X2W_XMEM_BACKING_ARENA, "an arena in the window");
+    XMemFree(tiny, word(1, 0, 0));
     expect(stats().window_misses == 0, "no window miss");
     return !failed;
 }
@@ -407,7 +409,10 @@ bool hooks()
     XMemFree(h, word(0, 0, 4));
     // A non-code first argument (a structure?) is refused; the routines stay.
     static std::uint64_t structure[4] = {1, 2, 3, 4};
-    XMemSetAllocationHooks(reinterpret_cast<PXMEMALLOC_ROUTINE>(structure), nullptr);
+    PXMEMALLOC_ROUTINE not_code = nullptr;
+    const void* data = structure;
+    std::memcpy(&not_code, &data, sizeof(not_code));
+    XMemSetAllocationHooks(not_code, nullptr);
     expect(logs.has("not executable code"), "a structure pointer is refused and logged");
     const unsigned before = hook.allocs;
     void* still = XMemAlloc(64, word(1, 0, 0));
@@ -526,8 +531,8 @@ bool write_watch()
     X2WXMemCollectWrites(collect, &seen, TRUE);
     for (const auto& [a, n] : seen.runs) std::printf("run 0x%llx +%llu\n", static_cast<unsigned long long>(a),
                                                     static_cast<unsigned long long>(n));
-    expect(seen.runs.size() == 2 && seen.runs[0] == std::make_pair<std::uint64_t, std::uint64_t>(addr(p), 4096) &&
-               seen.runs[1] == std::make_pair<std::uint64_t, std::uint64_t>(addr(p) + 5 * 4096, 2 * 4096),
+    using Run = std::pair<std::uint64_t, std::uint64_t>;
+    expect(seen.runs.size() == 2 && seen.runs[0] == Run{addr(p), 4096} && seen.runs[1] == Run{addr(p) + 5 * 4096, 2 * 4096},
            "exactly the written pages, coalesced");
     Runs after;
     X2WXMemCollectWrites(collect, &after, FALSE);
