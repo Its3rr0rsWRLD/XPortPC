@@ -42,6 +42,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <cstdlib>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -418,11 +419,44 @@ void summary()
 namespace {
 HRESULT fallback_no_default_user() noexcept { return static_cast<HRESULT>(0x89245106L); }  // E_GAMEUSER_NO_DEFAULT_USER
 
+HRESULT answer_s_ok() noexcept { return S_OK; }
+HRESULT answer_s_false() noexcept { return S_FALSE; }
+HRESULT answer_e_fail() noexcept { return E_FAIL; }
+HRESULT answer_e_pending() noexcept { return static_cast<HRESULT>(0x8000000AL); }  // E_PENDING
+
 void* fallback_function(long hr)
 {
-    if (static_cast<HRESULT>(hr) == static_cast<HRESULT>(0x89245106L))
-        return reinterpret_cast<void*>(&fallback_no_default_user);
-    return nullptr;
+    switch (static_cast<unsigned long>(hr)) {
+    case 0x89245106ul: return reinterpret_cast<void*>(&fallback_no_default_user);
+    case 0x00000000ul: return reinterpret_cast<void*>(&answer_s_ok);
+    case 0x00000001ul: return reinterpret_cast<void*>(&answer_s_false);
+    case 0x80004005ul: return reinterpret_cast<void*>(&answer_e_fail);
+    case 0x8000000Aul: return reinterpret_cast<void*>(&answer_e_pending);
+    default: return nullptr;  // E_NOTIMPL
+    }
+}
+
+// X2W_XGR_SLOT_ANSWER="NAME:SLOT=HR[;NAME:SLOT=HR]..." (e.g. IXNetworkingImpl_bf2346b2:15=0) makes an unknown slot
+// answer HR (0, 1, 0x80004005, 0x8000000a or the class fallback) without touching its arguments, so an owner can
+// try answers for an unidentified slot without a rebuild.
+bool slot_answer_override(const std::string& name, unsigned slot, long& hr)
+{
+    char buffer[2048];
+    const DWORD n = GetEnvironmentVariableA("X2W_XGR_SLOT_ANSWER", buffer, sizeof buffer);
+    if (!n || n >= sizeof buffer) return false;
+    const std::string spec(buffer, n), key = name + ":" + std::to_string(slot) + "=";
+    std::size_t at = 0;
+    while (at < spec.size()) {
+        std::size_t end = spec.find(';', at);
+        if (end == std::string::npos) end = spec.size();
+        const std::string item = spec.substr(at, end - at);
+        if (item.compare(0, key.size(), key) == 0) {
+            hr = static_cast<long>(std::strtoul(item.c_str() + key.size(), nullptr, 0));
+            return true;
+        }
+        at = end + 1;
+    }
+    return false;
 }
 }  // namespace
 
@@ -468,13 +502,18 @@ extern "C" void* xgr_slot_enter(Object* self, unsigned slot, void** args, void* 
     if (!known) {
         // Never read or write through the arguments of a slot we cannot name from facts: only their values are logged.
         const bool ours = current == Mode::ours;
+        long answer = self->fallback_hr;
+        const bool overridden = ours && slot_answer_override(self->name, slot, answer);
+        if (overridden)
+            emit_once("xgr-slot-answer", self->name, format("slot %u answers 0x%08lx (X2W_XGR_SLOT_ANSWER)", slot,
+                                                             static_cast<unsigned long>(answer)));
         emit_once("xgr-unknown-slot", self->name,
                   format("slot %u args 0x%llx 0x%llx 0x%llx 0x%llx -> 0x%08lx%s%s%s caller=%s", slot,
                          (unsigned long long)args[1], (unsigned long long)args[2], (unsigned long long)args[3],
-                         (unsigned long long)args[4], ours ? static_cast<unsigned long>(self->fallback_hr) : 0x80004001ul,
+                         (unsigned long long)args[4], ours ? static_cast<unsigned long>(answer) : 0x80004001ul,
                          guess ? " (inferred " : "", guess ? guess : "", guess ? ", not served)" : "",
                          where(caller).c_str()));
-        if (current == Mode::ours) return fallback_function(self->fallback_hr);  // null: E_NOTIMPL
+        if (current == Mode::ours) return fallback_function(answer);  // null: E_NOTIMPL
         if (current != Mode::record) return nullptr;
         // record: also an xgr-call line, so the argument shapes of every new slot are seen.
         emit("xgr-call", self->name,
