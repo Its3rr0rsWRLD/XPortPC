@@ -840,7 +840,7 @@ void trace_dump_main() {
 // calls, " file-offset N" (SetFilePointerEx FILE_CURRENT) and " file-size N" (GetFileSizeEx), "n/a" for a pipe, and
 // the buffer's " buffer 0xADDR State=.. Protect=0x.. Type=.." (VirtualQuery, which cannot block). Reported: the main
 // thread (any call; its stall is repeated every 10 s as "for Ns (still)", up to 10 times, without counting against the
-// cap) and any thread in a file/IO call. A non-main thread in a wait (INFINITE or over 10 s) is idle, not stalled, and
+// cap) and any thread in a file/IO call. A non-main thread in a wait (INFINITE or 1 s or more) is idle, not stalled, and
 // is neither reported nor listed unless --stall-all. "also-pending" lists at most 8 other
 // pending calls, only the main thread's and file/IO calls. At most 64 other stall lines.
 using SysDescribe = int(__stdcall*)(void* handle, char* out, unsigned capacity);
@@ -1093,7 +1093,7 @@ bool stall_idle_wait(const char* symbol, const std::uint64_t* args) {
         if (std::strcmp(symbol, wait.name) != 0) continue;
         if (wait.timeout_arg < 0 || wait.timeout_arg > 3) return true;
         const std::uint32_t ms = static_cast<std::uint32_t>(args[wait.timeout_arg]);
-        return ms == 0xFFFFFFFFu || ms > 10000;
+        return ms == 0xFFFFFFFFu || ms >= 1000;  // any wait of a second or more is a thread idling, not stuck
     }
     return false;
 }
