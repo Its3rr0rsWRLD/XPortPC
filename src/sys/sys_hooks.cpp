@@ -20,8 +20,8 @@ namespace {
 // Hook groups answer X2WSysHookLookup only when they have something to do: path hooks when at least one rule is
 // active (the G:/T:/D: defaults count), threading/topology/timing hooks only when the config has a threads.* or
 // timing.* key. Without them the title's calls go straight to Windows.
-bool g_paths_on = false;
-bool g_threads_on = false;
+bool g_paths_on = true;   // X2WSysInit narrows both; the library used without it (tests) answers for everything
+bool g_threads_on = true;
 
 std::string lower_ascii(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
