@@ -613,10 +613,10 @@ HMODULE WINAPI hook_GetModuleHandleW(LPCWSTR request) {
         ReleaseSRWLockShared(&dynamic_lock);
         if (shim) return shim;
     }
-    return identity_GetModuleHandleW(request);
+    return keep_host_identity ? GetModuleHandleW(request) : identity_GetModuleHandleW(request);
 }
 HMODULE WINAPI hook_GetModuleHandleA(LPCSTR request) {
-    if (!request) return identity_GetModuleHandleA(request);
+    if (!request) return keep_host_identity ? GetModuleHandleA(request) : identity_GetModuleHandleA(request);
     return hook_GetModuleHandleW(from_ansi(request).c_str());
 }
 
