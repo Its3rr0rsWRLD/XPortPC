@@ -140,7 +140,6 @@ def check_throw(launcher, title):
     native_code, native_out, _ = run([title])
     if native_code != 0x107 or not native_out.startswith(expected + "\n"):
         raise AssertionError(f"native: exit {native_code:#x} stdout {native_out!r}")
-    compare(launcher, title, 0x107)
     sites = dict(re.findall(r"(\w+)=0x([0-9a-f]+)", native_out.splitlines()[1]))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from run_log_check import check_grammar  # noqa: E402
@@ -151,10 +150,12 @@ def check_throw(launcher, title):
         code, out, err = run([launcher, "--log", log, "--timeout", "60", title])
         lines = log.read_text(encoding="utf-8").splitlines()
     print(f"--log: exit {code:#x}")
-    print("\n".join(line for line in lines if line.startswith("cpp-throw")))
+    print("\n".join(line for line in err.splitlines() if "import " not in line))
+    print("\n".join(line for line in lines if not line.startswith("first-call")))
     if code != 0x107 or out != native_out:
         raise AssertionError(f"--log: exit {code:#x} stdout {out!r}\n{err}")
     check_grammar(lines, title)
+    compare(launcher, title, 0x107)
     where = rf"{re.escape(name)}\+0x([0-9a-f]+)"
     found = {}
     for line in lines:
