@@ -2,9 +2,9 @@
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/Cg4PEPRePy)
 
-**Based on Xbox2Windows**
+## Relationship to Xbox2Windows
 
-(This version is because I've got agents working on it fast, which does better alone)
+XPortPC leans heavily on [Xbox2Windows](https://github.com/R0Y00/Xbox2Windows). Most of its foundations, and much of its current progress, including the console Direct3D 12 stand-in layer and shader translation, come from Xbox2Windows and its contributors. Please check out and support Xbox2Windows, since that is the main project. I made XPortPC only so my own AI subagents can work together on one codebase directly instead of going through pull requests. It is not a competing project, and useful work is meant to flow back upstream.
 
 XPortPC converts Xbox Series X|S (Scarlett) programs to run on Windows PCs. Scarlett titles are already x64 code, so XPortPC loads them natively and replaces what only exists on the console: the system libraries, the GPU shaders and the GPU memory model. Only the CPU code that needs patching is translated.
 
