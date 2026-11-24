@@ -1,5 +1,7 @@
 # XPortPC
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/Cg4PEPRePy)
+
 **Based on Xbox2Windows**
 
 (This version is because I've got agents working on it fast, which does better alone)
